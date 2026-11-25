@@ -284,15 +284,15 @@ func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
 		{name: "authored shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, wantSecret: true},
 		{name: "legacy authored shared reference", secretName: mpiSSHTestSecretName, origin: "1.7.0", wantShared: true},
 		{name: "authored custom reference", secretName: "custom-ssh", origin: mpiSSHTestOriginVersion},
-		{name: "automatic snapshot retains shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{}, wantSecret: true, wantShared: true},
-		{name: "explicit snapshot uses no authored capture volume", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{CheckpointRef: new("existing")}, wantSecret: true},
+		{name: "automatic snapshot retains shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}, wantSecret: true, wantShared: true},
+		{name: "explicit snapshot uses no authored capture volume", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, CheckpointRef: new("existing")}, wantSecret: true},
 		{
 			name: "snapshot override needs shared reference", secretName: "custom-ssh", origin: mpiSSHTestOriginVersion, wantShared: true,
-			checkpoint: &v1beta1.ComponentCheckpointConfig{Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: mpiSSHTestSecretName}}}}}}},
+			checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: mpiSSHTestSecretName}}}}}}},
 		},
 		{
 			name: "snapshot override replaces shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, wantSecret: true,
-			checkpoint: &v1beta1.ComponentCheckpointConfig{Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: "custom-ssh"}}}}}}},
+			checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: "custom-ssh"}}}}}}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,7 +300,9 @@ func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
 			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", tc.origin)
 			component := &dgd.Spec.Components[0]
 			component.Multinode = nil
-			component.Checkpoint = tc.checkpoint
+			if tc.checkpoint != nil {
+				component.Experimental = &v1beta1.ExperimentalSpec{Checkpoint: tc.checkpoint}
+			}
 			component.PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "ssh", Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{Name: tc.secretName}}}}}}
 			reconciler := newMPISSHTestReconciler(t, dgd)
 
