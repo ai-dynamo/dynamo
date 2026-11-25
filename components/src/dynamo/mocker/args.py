@@ -22,6 +22,7 @@ from dynamo.common.configuration.utils import (
     ArgEnv,
     Deprecated,
     join_names,
+    normalize_plane,
     validate_request_plane,
 )
 from dynamo.common.utils.namespace import get_worker_namespace
@@ -795,7 +796,7 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         type=str,
         choices=["nats", "tcp", "velo"],
         default=environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp|velo]. velo requires --response-plane velo.",
+        help="Determines how requests are distributed from routers to workers. 'tcp' is the default [nats|tcp|velo]. velo requires --response-plane velo.",
     )
     parser.add_argument(
         "--response-plane",
@@ -867,6 +868,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
+    args.request_plane = normalize_plane(args.request_plane) or "tcp"
+    args.response_plane = normalize_plane(args.response_plane)
     try:
         validate_request_plane(args.request_plane, args.response_plane)
     except ValueError as e:

@@ -491,7 +491,10 @@ def test_deprecated_warn_stacklevel_counts_callers():
 def _clear_plane_env(monkeypatch):
     """Keep the process's plane and TCP TLS settings out of a test."""
     for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv records the original value even when the name is absent, so
+        # the delenv below restores it instead of leaving a later export behind.
+        monkeypatch.setenv(name, "unset")
+        monkeypatch.delenv(name)
     for name in list(os.environ):
         if name.startswith("DYN_TCP_TLS_"):
             monkeypatch.delenv(name)
@@ -540,3 +543,17 @@ class TestValidateRequestPlane:
         _clear_plane_env(monkeypatch)
 
         validate_request_plane(request_plane, "velo")
+
+    def test_plane_names_are_normalized_before_the_pair_check(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+
+        with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+            validate_request_plane(" VELO ", " tcp ")
+
+        validate_request_plane(" VELO ", " VELO ")
+
+    def test_uppercase_response_plane_from_environment_is_normalized(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+        monkeypatch.setenv("DYN_RESPONSE_PLANE", " VELO ")
+
+        validate_request_plane("velo", None)

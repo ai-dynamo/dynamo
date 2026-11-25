@@ -111,7 +111,10 @@ def test_response_plane_rejects_invalid_value():
 def _clear_plane_env(monkeypatch):
     """Keep the process's plane and TCP TLS settings out of a test."""
     for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv records the original value even when the name is absent, so
+        # the delenv below restores it instead of leaving a later export behind.
+        monkeypatch.setenv(name, "unset")
+        monkeypatch.delenv(name)
     for name in list(os.environ):
         if name.startswith("DYN_TCP_TLS_"):
             monkeypatch.delenv(name)
@@ -153,6 +156,26 @@ def test_non_velo_request_plane_accepts_velo_response(monkeypatch, request_plane
     )
 
     assert config.request_plane == request_plane
+
+
+def test_uppercase_request_plane_env_requires_velo_response(monkeypatch):
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_REQUEST_PLANE", "VELO")
+
+    with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+        _parse_runtime_args(["--response-plane", "tcp"])
+
+
+def test_plane_values_are_normalized(monkeypatch):
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_REQUEST_PLANE", " VELO ")
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", " VELO ")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.request_plane == "velo"
+    assert config.response_plane == "velo"
+    assert os.environ["DYN_RESPONSE_PLANE"] == "velo"
 
 
 def test_request_plane_help_documents_velo_requirement(monkeypatch):

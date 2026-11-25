@@ -100,14 +100,24 @@ def split_served_model_names(served_model_name: Any) -> list[str]:
     return names
 
 
+def normalize_plane(value: Optional[str]) -> Optional[str]:
+    """Return a plane name without surrounding whitespace and in lower case."""
+    return value.strip().lower() if value is not None else None
+
+
 def validate_request_plane(request_plane: str, response_plane: Optional[str]) -> None:
     """Reject a velo request plane whose effective response plane is not velo.
 
     The effective response plane is ``response_plane``, then
-    ``DYN_RESPONSE_PLANE``, then the runtime default ``tcp``.
+    ``DYN_RESPONSE_PLANE``, then the runtime default ``tcp``. Plane names are
+    normalized because argparse applies no choices check to an environment
+    default.
     """
+    request_plane = normalize_plane(request_plane) or ""
     effective_response_plane = (
-        response_plane or os.environ.get("DYN_RESPONSE_PLANE") or "tcp"
+        normalize_plane(response_plane)
+        or normalize_plane(os.environ.get("DYN_RESPONSE_PLANE"))
+        or "tcp"
     )
     if request_plane == "velo" and effective_response_plane != "velo":
         raise ValueError(

@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
+from dynamo.common.configuration.utils import normalize_plane, validate_request_plane
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -237,15 +238,26 @@ class Worker:
                 stacklevel=2,
             )
 
-        if self.config.response_plane is not None:
-            if self.config.response_plane not in {"tcp", "quic", "velo"}:
+        request_plane = normalize_plane(self.config.request_plane) or "tcp"
+        response_plane = (
+            normalize_plane(self.config.response_plane)
+            or normalize_plane(os.environ.get("DYN_RESPONSE_PLANE"))
+            or None
+        )
+        # Refuse an invalid pair before exporting anything: a direct Worker
+        # caller must not change the process environment on a configuration
+        # error.
+        validate_request_plane(request_plane, response_plane)
+        if response_plane is not None:
+            if response_plane not in {"tcp", "quic", "velo"}:
                 raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
-            os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
+            os.environ["DYN_RESPONSE_PLANE"] = response_plane
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,
-            request_plane=self.config.request_plane,
+            request_plane=request_plane,
             event_plane=self.config.event_plane,
+            response_plane=response_plane,
         )
         worker_cfg = _backend.WorkerConfig(
             namespace=self.config.namespace,

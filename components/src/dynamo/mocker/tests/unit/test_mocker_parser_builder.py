@@ -114,7 +114,10 @@ def test_conflicting_uses_are_an_error_of_the_given_parser():
 def _clear_plane_env(monkeypatch):
     """Keep the process's plane and TCP TLS settings out of a test."""
     for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv records the original value even when the name is absent, so
+        # the delenv below restores it instead of leaving a later export behind.
+        monkeypatch.setenv(name, "unset")
+        monkeypatch.delenv(name)
     for name in list(os.environ):
         if name.startswith("DYN_TCP_TLS_"):
             monkeypatch.delenv(name)
@@ -157,7 +160,30 @@ def test_non_velo_request_plane_accepts_velo_response(monkeypatch, request_plane
     assert args.request_plane == request_plane
 
 
+def test_uppercase_request_plane_env_requires_velo_response(monkeypatch, capsys):
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_REQUEST_PLANE", "VELO")
+
+    with pytest.raises(SystemExit) as error:
+        parse_args(["--response-plane", "tcp"])
+
+    assert error.value.code == 2
+    assert "DYN_RESPONSE_PLANE" in capsys.readouterr().err
+
+
+def test_plane_values_are_normalized(monkeypatch):
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_REQUEST_PLANE", " VELO ")
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", " VELO ")
+
+    args = parse_args([])
+
+    assert args.request_plane == "velo"
+    assert args.response_plane == "velo"
+
+
 def test_request_plane_help_documents_velo_requirement():
     help_text = " ".join(build_mocker_parser({}).format_help().split())
 
+    assert "'tcp' is the default" in help_text
     assert "velo requires --response-plane velo" in help_text

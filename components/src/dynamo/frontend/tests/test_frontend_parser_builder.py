@@ -110,7 +110,10 @@ def test_parses_without_notices_or_local_files(
 def _clear_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the process's plane and TCP TLS settings out of a test."""
     for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv records the original value even when the name is absent, so
+        # the delenv below restores it instead of leaving a later export behind.
+        monkeypatch.setenv(name, "unset")
+        monkeypatch.delenv(name)
     for name in list(os.environ):
         if name.startswith("DYN_TCP_TLS_"):
             monkeypatch.delenv(name)
@@ -155,6 +158,27 @@ def test_request_plane_velo_accepts_velo_response_from_env(
     assert config.response_plane is None
 
 
+def test_uppercase_request_plane_env_requires_velo_response() -> None:
+    parser, _ = build_frontend_parser(
+        {"DYN_REQUEST_PLANE": "VELO", "DYN_RESPONSE_PLANE": "tcp"}
+    )
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+
+    with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+        config.validate()
+
+
+def test_plane_values_are_normalized() -> None:
+    parser, _ = build_frontend_parser(
+        {"DYN_REQUEST_PLANE": " VELO ", "DYN_RESPONSE_PLANE": " VELO "}
+    )
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    assert config.request_plane == "velo"
+    assert config.response_plane == "velo"
+
+
 @pytest.mark.parametrize("request_plane", ["tcp", "nats"])
 def test_non_velo_request_plane_accepts_velo_response(
     monkeypatch: pytest.MonkeyPatch, request_plane: str
@@ -172,6 +196,6 @@ def test_non_velo_request_plane_accepts_velo_response(
 def test_request_plane_help_documents_velo_requirement() -> None:
     parser, _ = build_frontend_parser({})
 
-    assert "velo requires --response-plane velo" in " ".join(
-        parser.format_help().split()
-    )
+    help_text = " ".join(parser.format_help().split())
+    assert "'tcp' is the default" in help_text
+    assert "velo requires --response-plane velo" in help_text
