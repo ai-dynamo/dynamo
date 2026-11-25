@@ -19,8 +19,11 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -92,12 +95,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	return allErrs
 }
 
-// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version runtime fields on update.
+// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version component updates.
 // newSpec, oldSpec, and fldPath must not be nil.
+// newComponents and oldComponents contain the corresponding complete storage-version components.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdateV1alpha1(
 	newSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
+	newComponents, oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	servicesPath := fldPath.Child("services")
@@ -107,6 +112,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
+
+		// Freeze both complete typed views; neither API version represents every field.
+		if newService.IsLPX() && !features.MustGateFrom(v.ctx).Enabled(features.LPX) &&
+			(!apiequality.Semantic.DeepEqual(newService, oldService) ||
+				!apiequality.Semantic.DeepEqual(newComponents[serviceName], oldComponents[serviceName])) {
+			allErrs = append(allErrs, field.Forbidden(
+				servicesPath.Key(serviceName).Child("componentType"),
+				"LPX components require lpx.enabled=true",
+			))
+		}
+
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
 			newService,
 			oldService,

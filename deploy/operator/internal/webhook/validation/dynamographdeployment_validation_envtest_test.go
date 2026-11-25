@@ -4309,7 +4309,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests = append(tests, probeDGDAdmissionCases()...)
 
 	t.Log("Add the LPX scenarios to the same DGD admission table")
-	tests = append(tests, lpxDGDAdmissionCases()...)
+	tests = append(tests, lpxDGDAdmissionCases(t)...)
 
 	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
 	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {

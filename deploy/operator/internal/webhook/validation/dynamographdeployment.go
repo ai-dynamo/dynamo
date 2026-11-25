@@ -143,6 +143,8 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 			&newAlpha.Spec,
 			&oldAlpha.Spec,
 			field.NewPath("spec"),
+			componentsByName(newDGD.Spec.Components),
+			componentsByName(oldDGD.Spec.Components),
 		)...)
 	}
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)

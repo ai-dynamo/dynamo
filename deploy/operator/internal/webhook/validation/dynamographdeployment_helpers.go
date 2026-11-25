@@ -54,7 +54,7 @@ func lpxComponentGateErrors(
 	fldPath *field.Path,
 	source runtimeVersionValidationSource,
 ) field.ErrorList {
-	// Alpha updates compare the complete source spec, including source-only fields.
+	// Existing alpha components are frozen by the source-version update validator.
 	if source == runtimeVersionSourceV1Alpha1 && oldSpec != nil {
 		return nil
 	}

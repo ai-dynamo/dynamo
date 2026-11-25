@@ -4,6 +4,8 @@
 package validation_test
 
 import (
+	"testing"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -13,7 +15,8 @@ import (
 )
 
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
-func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
+func lpxDGDAdmissionCases(t *testing.T) []dgdAdmissionTestCase {
+	t.Helper()
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
 	const conductorRoleErr = `spec.components: Forbidden: LPX components must each declare a conductor role or an agent "runtime" sidecar, or form a shared draft and target pair`
 	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
@@ -26,6 +29,25 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	lpxReplicaEditOld := betaLPXDGDForAdmission(nil)
 	lpxReplicaEditNew := lpxReplicaEditOld.DeepCopy()
 	lpxReplicaEditNew.Spec.Components[0].Replicas = new(int32(2))
+
+	t.Log("Round-trip a beta-only frontend reference through the submitted alpha API")
+	lpxFrontend := betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{"example.com/team": "lpx"}
+		component := &dgd.Spec.Components[0]
+		component.FrontendSidecar = new("front")
+		for i := range component.Roles {
+			pod := &component.Roles[i].PodTemplate.Spec
+			pod.Containers = append(pod.Containers, corev1.Container{Name: "front", Image: "frontend"})
+		}
+	})
+	alphaLPXFrontend := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	if err := alphaLPXFrontend.ConvertFrom(lpxFrontend); err != nil {
+		t.Fatal(err)
+	}
+	alphaLPXFrontendRemoved := alphaLPXFrontend.DeepCopy()
+	alphaLPXFrontendRemoved.Annotations = map[string]string{"example.com/team": "lpx"}
+	alphaLPXFrontendUnchanged := alphaLPXFrontend.DeepCopy()
+	alphaLPXFrontendUnchanged.Labels = map[string]string{"updated": "true"}
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
@@ -314,6 +336,24 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{alphaLPXGateErr},
 		},
 		// Disabling LPX freezes each existing component, while unrelated updates remain available.
+		{
+			name:            "v1alpha1 LPX gate rejects beta-only frontend reference removal when disabled",
+			lpxDisabled:     true,
+			oldDeployment:   alphaLPXFrontend,
+			deployment:      alphaLPXFrontendRemoved,
+			wantWebhookErrs: []string{alphaLPXGateErr},
+		},
+		{
+			name:          "v1alpha1 LPX gate admits unchanged beta-only frontend reference when disabled",
+			lpxDisabled:   true,
+			oldDeployment: alphaLPXFrontend,
+			deployment:    alphaLPXFrontendUnchanged,
+		},
+		{
+			name:          "v1alpha1 LPX gate admits beta-only frontend reference removal when enabled",
+			oldDeployment: alphaLPXFrontend,
+			deployment:    alphaLPXFrontendRemoved,
+		},
 		{
 			name:            "LPX gate rejects replica updates when disabled",
 			lpxDisabled:     true,
