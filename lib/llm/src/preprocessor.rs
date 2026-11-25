@@ -8989,7 +8989,6 @@ impl
             .inner
             .normalize_custom_tools()
             .map_err(|error| invalid_argument_error(error.to_string()))?;
-        crate::protocols::openai::validate::normalize_empty_tools(&mut request.inner);
         request.normalize_responses_history_phases(tool_choice::uses_muse_spark_parser(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -9022,6 +9021,16 @@ impl
             payload_http_headers,
         );
 
+        // After the payload snapshot, so the trace keeps the client's fields. Beam
+        // promotion runs first: an explicit `tools: []` is only "no tools" when it
+        // stays empty, and the choice must be settled before thinking defaults read it.
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            &mut request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        crate::protocols::openai::validate::normalize_empty_tools(&mut request.inner);
+
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
         // always include usage statistics
@@ -9043,12 +9052,6 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
-        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
-
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());

@@ -4291,9 +4291,6 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // An explicit `tools: []` means "no tools", as in vLLM and the OpenAI API.
-    crate::protocols::openai::validate::normalize_empty_tools(&mut request.inner);
-
     // Retain API identity here while all engine/parser paths receive functions.
     let mut custom_tools =
         crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
@@ -4398,12 +4395,25 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    // An explicit `tools: []` means "no tools", as in vLLM and the OpenAI API. Parse
+    // with that view, after Beam promotion above, but forward the request unchanged:
+    // the preprocessor applies the same normalization after its payload trace snapshot.
+    let parsing_request =
+        if crate::protocols::openai::validate::needs_empty_tools_normalization(&request.inner) {
+            let mut normalized = (*request).clone();
+            crate::protocols::openai::validate::normalize_empty_tools(&mut normalized.inner);
+            std::borrow::Cow::Owned(normalized)
+        } else {
+            std::borrow::Cow::Borrowed(&*request)
+        };
+    let parsing_options =
+        apply_request_tool_call_parsing_options(parsing_options, &parsing_request).map_err(
+            |e| {
+                let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            },
+        )?;
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =

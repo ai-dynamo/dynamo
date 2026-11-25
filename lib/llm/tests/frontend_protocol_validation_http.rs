@@ -648,7 +648,7 @@ async fn beam_request_normalization_precedes_generic_validation() {
         card.runtime_config.tool_call_parser = Some("beam".to_string());
         card.runtime_config.reasoning_parser = Some("beam".to_string());
         let engine = Arc::new(ScriptedChatEngine::new(
-            std::iter::repeat_n(script, 2).map(Ok),
+            std::iter::repeat_n(script, 4).map(Ok),
         ));
         let svc = HarnessService::start_with_engine_and_card(engine, card).await;
         for stream in [false, true] {
@@ -662,21 +662,33 @@ async fn beam_request_normalization_precedes_generic_validation() {
             );
             assert!(svc.engine.take_requests().await.is_empty());
 
-            let mut body = legacy_builtin_required.clone();
-            body["stream"] = json!(stream);
-            let response = post_json(&svc, "/v1/chat/completions", body).await;
-            let status = response.status();
-            let text = bounded(response.text()).await.unwrap_or_default();
-            assert_eq!(
-                status,
-                reqwest::StatusCode::OK,
-                "legacy builtin_tools stream={stream}: {text}"
-            );
-            let requests = svc.engine.take_requests().await;
-            assert_eq!(requests.len(), 1, "stream={stream} dispatches once");
-            let tools = requests[0].inner.tools.as_ref().unwrap();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
+            // An explicit `tools: []` is filled by the promotion, so it is not treated
+            // as "no tools" and the required choice survives.
+            for empty_tools in [false, true] {
+                let mut body = legacy_builtin_required.clone();
+                body["stream"] = json!(stream);
+                if empty_tools {
+                    body["tools"] = json!([]);
+                }
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                let status = response.status();
+                let text = bounded(response.text()).await.unwrap_or_default();
+                assert_eq!(
+                    status,
+                    reqwest::StatusCode::OK,
+                    "legacy builtin_tools stream={stream} empty_tools={empty_tools}: {text}"
+                );
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1, "stream={stream} dispatches once");
+                let tools = requests[0].inner.tools.as_ref().unwrap();
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
+                assert_eq!(
+                    requests[0].inner.tool_choice,
+                    Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Required),
+                    "stream={stream} empty_tools={empty_tools}"
+                );
+            }
         }
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
@@ -1762,13 +1774,17 @@ async fn chat_completions_treat_empty_tools_as_omitted() {
                 "tool_choice={tool_choice:?}"
             );
 
+            // The handler forwards the client's fields; the preprocessor normalizes them
+            // after its request payload trace snapshot.
             let captured = svc.engine.take_requests().await;
             assert_eq!(captured.len(), 1);
             let forwarded = serde_json::to_value(&captured[0]).unwrap();
-            assert!(forwarded.get("tools").is_none_or(Value::is_null));
-            if tool_choice.is_some() {
-                assert_eq!(forwarded["tool_choice"], "none");
-            }
+            assert_eq!(forwarded["tools"], json!([]), "tool_choice={tool_choice:?}");
+            assert_eq!(
+                forwarded.get("tool_choice").cloned(),
+                tool_choice.map(|choice| json!(choice)),
+                "tool_choice={tool_choice:?}"
+            );
         }
 
         let body = json!({
