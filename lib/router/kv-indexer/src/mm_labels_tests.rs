@@ -82,7 +82,7 @@ struct WireStored {
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_salt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_cache_salt: Option<Option<String>>,
+    request_cache_salt: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     medium: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +141,7 @@ fn stored_on(parent: Option<u64>, blocks: &[Block], medium: Option<&'static str>
         block_size: BLOCK,
         lora_id: None,
         cache_salt: None,
-        user_cache_salt: None,
+        request_cache_salt: None,
         medium,
         mm_routing_spans: any_spans.then(|| {
             blocks
@@ -1180,12 +1180,12 @@ fn with_sglang_salts(wire: Wire, engine: Option<&str>, caller: Option<&str>) -> 
         unreachable!("salts belong to stores");
     };
     store.cache_salt = engine.map(str::to_owned);
-    store.user_cache_salt = Some(caller.map(str::to_owned));
+    store.request_cache_salt = Some(caller.map(str::to_owned));
     Wire::Stored(store)
 }
 
 #[tokio::test]
-async fn caller_namespace_text_prefix_aliases_survive_eviction_and_clear() {
+async fn request_namespace_text_prefix_aliases_survive_eviction_and_clear() {
     for caller in [None, Some("tenant-a")] {
         // A text node can be stored before its request's image node. Its native
         // id still includes the request's full internal multimodal salt.
@@ -1259,7 +1259,7 @@ async fn caller_namespace_text_prefix_aliases_survive_eviction_and_clear() {
 }
 
 #[tokio::test]
-async fn caller_namespace_image_aliases_route_and_evict_across_workers() {
+async fn request_namespace_image_aliases_route_and_evict_across_workers() {
     for caller in [None, Some("tenant-a")] {
         let mut normalizer = labeled_normalizer();
         let mut indexes = Indexes::new();

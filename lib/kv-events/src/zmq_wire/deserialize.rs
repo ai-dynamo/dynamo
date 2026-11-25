@@ -66,7 +66,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
         let mut cache_namespace: Option<Option<String>> = None;
-        let mut user_cache_salt: Option<Option<String>> = None;
+        let mut request_cache_salt: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut mm_routing_spans: Option<Option<Vec<Option<Vec<MmRoutingSpanWire>>>>> = None;
@@ -107,8 +107,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "cache_salt" => {
                     cache_namespace = Some(map.next_value()?);
                 }
-                "user_cache_salt" => {
-                    user_cache_salt = Some(map.next_value()?);
+                "request_cache_salt" => {
+                    request_cache_salt = Some(map.next_value()?);
                 }
                 "extra_keys" => {
                     extra_keys = Some(map.next_value()?);
@@ -189,7 +189,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium,
                     lora_name,
                     cache_namespace,
-                    user_cache_salt,
+                    request_cache_salt,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: metadata.group_idx,
@@ -294,7 +294,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium,
                     lora_name,
                     cache_namespace,
-                    user_cache_salt: None,
+                    request_cache_salt: None,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: parsed.metadata.group_idx,

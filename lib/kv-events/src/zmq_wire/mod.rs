@@ -450,11 +450,11 @@ impl ZmqEventNormalizer {
                 block_hashes,
                 parent_block_hash,
                 cache_namespace,
-                user_cache_salt,
+                request_cache_salt,
                 ..
             } => {
-                let explicit_namespace = user_cache_salt.is_some();
-                let cache_namespace = user_cache_salt.as_mut().unwrap_or(cache_namespace);
+                let explicit_namespace = request_cache_salt.is_some();
+                let cache_namespace = request_cache_salt.as_mut().unwrap_or(cache_namespace);
                 if cache_namespace.as_deref() == Some("") {
                     *cache_namespace = None;
                 }

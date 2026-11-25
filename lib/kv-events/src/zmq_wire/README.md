@@ -91,14 +91,14 @@ first four tokens of the second block. The field adds no positional slot.
 For sources flagged with `engine_owned_mm_identity`, events without usable
 labels retain multimodal exclusion.
 
-SGLang's `dynamo` format can also report `user_cache_salt`, the original caller
-namespace before SGLang mixes in media identities. Selection is by field
+SGLang's `dynamo` format can also report `request_cache_salt`, the request
+namespace supplied to the engine, including one set by a proxy. Selection is by field
 presence: a string selects that namespace, explicit `null` selects unsalted
 routing, and only an omitted field falls back to `cache_salt` and the legacy
 namespace rules. Empty strings are unsalted. LoRA identity remains independent.
-For example, `{"cache_salt": "sglang-mm-v1:...", "user_cache_salt": null}`
+For example, `{"cache_salt": "sglang-mm-v1:...", "request_cache_salt": null}`
 must hash routing tokens without the internal media salt. This adds no
-positional slot.
+positional slot. SGLang omits the field when it equals `cache_salt`.
 
 For `engine_owned_mm_identity` sources, all indexed blocks receive canonical
 routing IDs, including text-only requests and text before media. The internal

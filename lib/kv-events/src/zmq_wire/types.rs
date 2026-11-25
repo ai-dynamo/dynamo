@@ -125,10 +125,10 @@ pub enum RawKvEvent {
             skip_serializing_if = "Option::is_none"
         )]
         cache_namespace: Option<String>,
-        /// Original caller namespace on SGLang events. Some(None) explicitly
+        /// Supplied request namespace on SGLang events. Some(None) explicitly
         /// selects unsalted routing; None retains legacy namespace inference.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        user_cache_salt: Option<Option<String>>,
+        request_cache_salt: Option<Option<String>>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
