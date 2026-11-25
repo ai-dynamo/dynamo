@@ -200,6 +200,11 @@ mod tests {
             .expect("the sentinel request must round-trip through the broker");
         assert_eq!(reply.payload, Bytes::copy_from_slice(sentinel.as_bytes()));
 
+        // The sentinel orders only synchronously enqueued commands. A detached
+        // publish in the rejection branch could land after it, so allow a
+        // bounded grace before trusting the broker log.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         let commands = broker.commands();
         assert!(
             commands
