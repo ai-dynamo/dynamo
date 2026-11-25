@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::time::Instant;
+use tokio::{sync::TryAcquireError, time::Instant};
 
 use crate::{
     error::ErrorType,
@@ -28,6 +28,7 @@ use super::{
 const MAX_HEADER_VALUE: usize = 1024;
 // Velo reserves part of its 16 KiB header map for rendezvous metadata.
 const HEADER_BUDGET: usize = 16 * 1024 - 512;
+const MIN_STAGED_SEND_BUDGET: Duration = Duration::from_millis(10);
 
 pub(in crate::pipeline::network) struct VeloRequestClient {
     service: Arc<VeloResponseService>,
@@ -117,22 +118,36 @@ impl RequestPlaneClient for VeloRequestClient {
             deadline,
         )
         .await?;
-        // The window bounds the staged bytes one caller can have in flight at a
-        // worker. A request above it waits its turn: the worker is healthy, so
-        // only the request deadline ends the wait, and never as a worker fault.
-        let _staged = if payload.len() > self.service.velo.staging_threshold() {
-            let permit = by_deadline(deadline, peer.staged.acquire())
-                .await
-                .map_err(|_| {
-                    error(
-                        ErrorType::ResourceExhausted,
-                        "staged window to worker stayed full until the request deadline",
-                    )
-                })?
-                .map_err(|_| error(ErrorType::Internal, "staged window closed"))?;
-            Some(permit)
+        // The staged window bounds local capacity at each peer. Only requests
+        // that wait for a permit spend part of their ACK budget on this queue.
+        let (_staged, queued) = if payload.len() > self.service.velo.staging_threshold() {
+            match peer.staged.try_acquire() {
+                Ok(permit) => (Some(permit), false),
+                Err(TryAcquireError::Closed) => {
+                    return Err(error(ErrorType::Internal, "staged window closed").into());
+                }
+                Err(TryAcquireError::NoPermits) => {
+                    let permit = by_deadline(deadline, peer.staged.acquire())
+                        .await
+                        .map_err(|_| {
+                            error(
+                                ErrorType::ResourceExhausted,
+                                "staged window to worker stayed full until the request deadline",
+                            )
+                        })?
+                        .map_err(|_| error(ErrorType::Internal, "staged window closed"))?;
+                    if deadline.saturating_duration_since(Instant::now()) < MIN_STAGED_SEND_BUDGET {
+                        return Err(error(
+                            ErrorType::ResourceExhausted,
+                            "staged window wait left too little time to send the Velo request",
+                        )
+                        .into());
+                    }
+                    (Some(permit), true)
+                }
+            }
         } else {
-            None
+            (None, false)
         };
         let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
             error(
@@ -152,10 +167,22 @@ impl RequestPlaneClient for VeloRequestClient {
         })
         .await
         .and_then(|ack| ack.map_err(transport_error));
-        if ack.is_err() {
-            peer.route.invalidate(epoch);
+        match ack {
+            Ok(ack) => Ok(ack),
+            // The deadline includes time spent waiting for local capacity.
+            // A timeout with that reduced budget leaves the peer route valid.
+            Err(cause) if queued && cause.error_type() == ErrorType::ConnectionTimeout => {
+                Err(error(
+                    ErrorType::ResourceExhausted,
+                    "Velo request timed out after waiting for the staged window",
+                )
+                .into())
+            }
+            Err(cause) => {
+                peer.route.invalidate(epoch);
+                Err(cause.into())
+            }
         }
-        Ok(ack?)
     }
 
     fn transport_name(&self) -> &'static str {
@@ -201,16 +228,29 @@ fn check_headers(headers: &Headers) -> Result<()> {
 mod tests {
     use super::VeloRequestClient;
     use crate::{
+        DistributedRuntime, Runtime,
+        component::TransportType,
+        discovery::DiscoverySpec,
+        distributed::{DistributedConfig, RequestPlaneMode},
         error::{DynamoError, ErrorType},
-        pipeline::network::{
-            egress::unified_client::{Headers, RequestPlaneClient},
-            get_tcp_max_message_size,
-            velo_request::{
-                REQUEST_HANDLER, decode_address, peers::establish_route,
-                server::ENDPOINT_PATH_HEADER,
+        pipeline::{
+            SingleIn,
+            network::{
+                ResponsePlaneMode,
+                egress::{
+                    push_router::{PushRouter, RouterMode},
+                    tcp_client::TcpRequestConfig,
+                    unified_client::{Headers, RequestPlaneClient},
+                },
+                get_tcp_max_message_size,
+                velo_request::{
+                    REQUEST_HANDLER, STAGED_WINDOW, decode_address, peers::establish_route,
+                    server::ENDPOINT_PATH_HEADER,
+                },
+                velo_response::VeloResponseService,
             },
-            velo_response::VeloResponseService,
         },
+        protocols::annotated::Annotated,
     };
     use crate::{
         pipeline::network::velo_request::{ACK_SLOTS, encode_address, encode_worker_address},
@@ -220,10 +260,16 @@ mod tests {
     use anyhow::Result;
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::{sync::Arc, time::Duration};
+    use std::{future::Future, sync::Arc, task::Poll, time::Duration};
     use tokio::sync::Semaphore;
     use tokio::time::Instant;
     use velo::{Handler, PeerInfo};
+
+    async fn bounded<T>(future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("operation stalled")
+    }
 
     async fn service() -> Arc<VeloResponseService> {
         VeloResponseService::new_with_options(
@@ -616,13 +662,12 @@ mod tests {
         let reserved = peer.staged.try_acquire_many(4).unwrap();
 
         let start = Instant::now();
-        let result = client
-            .send_request(
-                target.clone(),
-                Bytes::from(vec![0; 300 * 1024]),
-                Headers::new(),
-            )
-            .await;
+        let result = bounded(client.send_request(
+            target.clone(),
+            Bytes::from(vec![0; 300 * 1024]),
+            Headers::new(),
+        ))
+        .await;
         assert!(start.elapsed() >= timeout);
         // The caller ran out of time. The worker saw nothing and keeps its route.
         assert_eq!(error_type(result), ErrorType::ResourceExhausted);
@@ -638,13 +683,117 @@ mod tests {
 
         drop(reserved);
         assert!(
-            client
-                .send_request(target, Bytes::from(vec![0; 300 * 1024]), Headers::new())
+            bounded(client.send_request(target, Bytes::from(vec![0; 300 * 1024]), Headers::new()))
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[rstest::rstest]
+    #[case::too_late_to_send(Duration::from_millis(1), false)]
+    #[case::ack_times_out(Duration::from_millis(100), true)]
+    #[tokio::test]
+    async fn staged_window_delay_leaves_the_worker_eligible(
+        #[case] remaining: Duration,
+        #[case] expect_send: bool,
+    ) {
+        let owner = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            owner.clone(),
+            DistributedConfig {
+                request_plane: RequestPlaneMode::Velo,
+                response_plane: Some(ResponsePlaneMode::Velo),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let frontend = drt.velo_response_service().await.unwrap();
+        let worker = service().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler_async(REQUEST_HANDLER, |ctx| async move {
+                    if ctx.payload.is_empty() {
+                        Ok(Some(Bytes::new()))
+                    } else {
+                        std::future::pending().await
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+        let endpoint = drt
+            .namespace(format!("staged_window_{}", remaining.as_millis()))
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let id = endpoint.id();
+        let discovery_id = drt.discovery().instance_id();
+        let worker_info = worker.velo.peer_info();
+        let target = encode_address(&worker_info, &id, discovery_id).unwrap();
+        drt.discovery()
+            .register(DiscoverySpec::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+                transport: TransportType::Velo(target.clone()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = endpoint
+            .client_with_inhibited_duration(Duration::from_secs(2))
+            .await
+            .unwrap();
+        bounded(client.wait_for_instances()).await.unwrap();
+        let router = PushRouter::<String, Annotated<String>>::from_client(
+            client.clone(),
+            RouterMode::Direct,
+        )
+        .await
+        .unwrap();
+        let probe = drt.network_manager().create_client().unwrap();
+        let send_probe = || probe.send_request(target.clone(), Bytes::new(), Headers::new());
+        assert!(bounded(send_probe()).await.unwrap().is_empty());
+        let peer_id = worker_info.instance_id();
+        let (peer, epoch) = frontend.confirmed_peer(peer_id).unwrap();
+        let reserved = peer.staged.try_acquire_many(STAGED_WINDOW as u32).unwrap();
+
+        tokio::time::pause();
+        let mut request =
+            std::pin::pin!(router.direct(SingleIn::new("x".repeat(300 * 1024)), discovery_id,));
+        assert!(futures::poll!(&mut request).is_pending());
+        assert_eq!(frontend.ack_slots.available_permits(), ACK_SLOTS);
+        let timeout = TcpRequestConfig::from_env().request_timeout;
+        tokio::time::advance(timeout - remaining).await;
+        drop(reserved);
+
+        let (sent, result) = match futures::poll!(&mut request) {
+            Poll::Ready(result) => (false, result),
+            Poll::Pending => {
+                assert_eq!(frontend.ack_slots.available_permits(), ACK_SLOTS - 1);
+                (true, bounded(request).await)
+            }
+        };
+        let err = result.expect_err("request must fail at the caller");
+        assert_eq!(
+            err.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::ResourceExhausted,
+            "{err:#}"
+        );
+        assert_eq!(sent, expect_send);
+        assert!(client.instance_ids_avail().contains(&discovery_id));
+        assert_eq!(frontend.confirmed_peer(peer_id).unwrap().1, epoch);
+        assert_eq!(frontend.ack_slots.available_permits(), ACK_SLOTS);
+
+        tokio::time::resume();
+        assert!(bounded(send_probe()).await.unwrap().is_empty());
+        owner.shutdown();
     }
 
     #[tokio::test]
@@ -679,7 +828,15 @@ mod tests {
         assert!(send().await.unwrap().is_empty());
         let id = worker.velo.instance_id();
         let before = frontend.confirmed_peer(id).unwrap().1;
-        assert_eq!(error_type(send().await), ErrorType::ConnectionTimeout);
+        let staged = client.send_request(
+            target.clone(),
+            Bytes::from(vec![0; 300 * 1024]),
+            Headers::new(),
+        );
+        assert_eq!(
+            error_type(bounded(staged).await),
+            ErrorType::ConnectionTimeout
+        );
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
         release.add_permits(1);
         assert!(frontend.confirmed_peer(id).is_none());
