@@ -58,6 +58,7 @@ from dynamo.llm.exceptions import InvalidArgument
 from .responses_history import responses_history_template, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
+    effective_tool_strict,
     guidance_tool_schema,
     should_attempt_structural_tag,
 )

@@ -7093,6 +7093,8 @@ class TestBufferedToolPathReasoningSplit:
 
         assert content == '{"city":"Paris"}'
         assert reasoning == "Reasoning here."
+
+
 @pytest.mark.parametrize(
     "backend",
     ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer", None, "future"],

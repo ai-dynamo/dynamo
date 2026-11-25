@@ -239,6 +239,8 @@ def guidance_tool_schema(
         construct,
     )
     return stripped, strict
+
+
 def runtime_structural_tag_backend(runtime_config: Any) -> str | None:
     """Absent, inconsistent, or unknown support stays unknown during rollout."""
     if not isinstance(runtime_config, dict):
