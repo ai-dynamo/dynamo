@@ -944,11 +944,6 @@ struct AdmissionLifecycleTransfer {
     state: Mutex<AdmissionLifecycleState>,
 }
 
-enum AdmissionLifecycleCleanup {
-    Pending { request_id: String },
-    Booking(SchedulerBookingDescriptor),
-}
-
 impl AdmissionLifecycleTransfer {
     fn new(request_id: String) -> Self {
         Self {
@@ -980,21 +975,9 @@ impl AdmissionLifecycleTransfer {
         *self.state.lock() = AdmissionLifecycleState::Disarmed;
     }
 
-    fn cleanup_target(&self) -> Option<AdmissionLifecycleCleanup> {
-        let mut state = self.state.lock();
-        let cleanup = match &*state {
-            AdmissionLifecycleState::Unarmed { .. } | AdmissionLifecycleState::Disarmed => None,
-            AdmissionLifecycleState::Pending { request_id } => {
-                Some(AdmissionLifecycleCleanup::Pending {
-                    request_id: request_id.clone(),
-                })
-            }
-            AdmissionLifecycleState::Booking(booking) => {
-                Some(AdmissionLifecycleCleanup::Booking(booking.clone()))
-            }
-        };
-        *state = AdmissionLifecycleState::Disarmed;
-        cleanup
+    /// Disarms the transfer and returns the state it held, which names what cleanup releases.
+    fn take_state(&self) -> AdmissionLifecycleState {
+        std::mem::replace(&mut *self.state.lock(), AdmissionLifecycleState::Disarmed)
     }
 
     fn is_armed(&self) -> bool {
@@ -1005,23 +988,19 @@ impl AdmissionLifecycleTransfer {
     }
 }
 
-struct AdmissionCleanupEntry {
-    target: SchedulerCleanupTarget,
-}
-
 #[derive(Default)]
 struct AdmissionCleanup {
-    dirty: SegQueue<AdmissionCleanupEntry>,
+    dirty: SegQueue<SchedulerCleanupTarget>,
     pending: AtomicBool,
 }
 
 impl AdmissionCleanup {
-    fn enqueue(&self, cleanup: AdmissionCleanupEntry) -> bool {
-        self.dirty.push(cleanup);
+    fn enqueue(&self, target: SchedulerCleanupTarget) -> bool {
+        self.dirty.push(target);
         !self.pending.swap(true, AtomicOrdering::AcqRel)
     }
 
-    fn drain(&self) -> Vec<AdmissionCleanupEntry> {
+    fn drain(&self) -> Vec<SchedulerCleanupTarget> {
         if !self.pending.load(AtomicOrdering::Acquire) {
             return Vec::new();
         }
@@ -1031,8 +1010,8 @@ impl AdmissionCleanup {
         // must preserve wake correctness and be benchmarked.
         let mut dirty = Vec::new();
         loop {
-            while let Some(cleanup) = self.dirty.pop() {
-                dirty.push(cleanup);
+            while let Some(target) = self.dirty.pop() {
+                dirty.push(target);
             }
             self.pending.store(false, AtomicOrdering::Release);
             if self.dirty.is_empty() {
@@ -1046,9 +1025,9 @@ impl AdmissionCleanup {
 fn enqueue_cleanup_entry(
     cleanup: &AdmissionCleanup,
     actor_tx: &mpsc::Sender<AdmissionCommand>,
-    entry: AdmissionCleanupEntry,
+    target: SchedulerCleanupTarget,
 ) {
-    if !cleanup.enqueue(entry) {
+    if !cleanup.enqueue(target) {
         return;
     }
     match actor_tx.try_send(AdmissionCommand::Cleanup) {
@@ -1092,20 +1071,16 @@ impl SchedulerCleanupAck {
 }
 
 impl SchedulerBookingCleanup {
-    fn enqueue_entry(&self, entry: AdmissionCleanupEntry) {
-        enqueue_cleanup_entry(&self.cleanup, &self.actor_tx, entry);
+    fn enqueue_entry(&self, target: SchedulerCleanupTarget) {
+        enqueue_cleanup_entry(&self.cleanup, &self.actor_tx, target);
     }
 
     pub fn enqueue(&self, booking: SchedulerBookingDescriptor) {
-        self.enqueue_entry(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::Booking(booking),
-        });
+        self.enqueue_entry(SchedulerCleanupTarget::Booking(booking));
     }
 
     pub fn enqueue_expired(&self, booking: SchedulerBookingDescriptor) {
-        self.enqueue_entry(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::ExpiredBooking(booking),
-        });
+        self.enqueue_entry(SchedulerCleanupTarget::ExpiredBooking(booking));
     }
 
     /// Apply explicit release now. The acknowledgement covers the mutation and
@@ -1223,9 +1198,7 @@ impl Drop for RequestLifecycleLease {
         enqueue_cleanup_entry(
             &self.cleanup,
             &self.actor_tx,
-            AdmissionCleanupEntry {
-                target: SchedulerCleanupTarget::AdmissionLifecycle(transfer),
-            },
+            SchedulerCleanupTarget::AdmissionLifecycle(transfer),
         );
     }
 }
@@ -2571,81 +2544,46 @@ impl<
         let mut made_ready = false;
         let mut removed_ready_head = false;
         let mut unmanaged_request_ids = HashSet::new();
-        for cleanup in dirty {
-            match cleanup.target {
+        for target in dirty {
+            // A lease dropped while its request waits names the queued entry to remove; one
+            // dropped after booking, like a handle, names the booking to release.
+            let (booking, expired) = match target {
                 SchedulerCleanupTarget::AdmissionLifecycle(transfer) => {
-                    let result = match transfer.cleanup_target() {
-                        Some(AdmissionLifecycleCleanup::Pending { request_id }) => {
+                    match transfer.take_state() {
+                        AdmissionLifecycleState::Pending { request_id } => {
                             unmanaged_request_ids.insert(request_id);
-                            Ok(())
+                            continue;
                         }
-                        Some(AdmissionLifecycleCleanup::Booking(booking)) => self
-                            .slots
-                            .free_if_booking(
-                                &booking.request_id,
-                                booking.worker,
-                                booking.attempt_id,
-                                Instant::now(),
-                            )
-                            .map(|outcome| {
-                                if outcome.is_applied() {
-                                    made_ready = true;
-                                }
-                            }),
-                        None => Ok(()),
-                    };
-                    if let Err(error) = result {
-                        tracing::error!(%error, "Failed to release scheduler admission lifecycle");
+                        AdmissionLifecycleState::Booking(booking) => (booking, false),
+                        _ => continue,
                     }
                 }
-                SchedulerCleanupTarget::Booking(booking) => {
-                    let result = self
-                        .slots
-                        .free_if_booking(
-                            &booking.request_id,
-                            booking.worker,
-                            booking.attempt_id,
-                            Instant::now(),
-                        )
-                        .map(|outcome| {
-                            if outcome.is_applied() {
-                                made_ready = true;
-                            }
-                        });
-                    if let Err(error) = result {
-                        tracing::error!(
-                            request_id = %booking.request_id,
-                            worker = ?booking.worker,
-                            attempt_id = %booking.attempt_id,
-                            %error,
-                            "Failed to release request-attempt scheduler booking"
-                        );
-                    }
-                }
-                SchedulerCleanupTarget::ExpiredBooking(booking) => {
-                    let result = self
-                        .slots
-                        .expire_if_booking(
-                            &booking.request_id,
-                            booking.worker,
-                            booking.attempt_id,
-                            Instant::now(),
-                        )
-                        .map(|outcome| {
-                            if outcome.is_applied() {
-                                made_ready = true;
-                            }
-                        });
-                    if let Err(error) = result {
-                        tracing::error!(
-                            request_id = %booking.request_id,
-                            worker = ?booking.worker,
-                            attempt_id = %booking.attempt_id,
-                            %error,
-                            "Failed to expire request-attempt scheduler booking"
-                        );
-                    }
-                }
+                SchedulerCleanupTarget::Booking(booking) => (booking, false),
+                SchedulerCleanupTarget::ExpiredBooking(booking) => (booking, true),
+            };
+            let SchedulerBookingDescriptor {
+                request_id,
+                worker,
+                attempt_id,
+            } = &booking;
+            let now = Instant::now();
+            let result = if expired {
+                self.slots
+                    .expire_if_booking(request_id, *worker, *attempt_id, now)
+            } else {
+                self.slots
+                    .free_if_booking(request_id, *worker, *attempt_id, now)
+            };
+            match result {
+                Ok(outcome) => made_ready |= outcome.is_applied(),
+                Err(error) => tracing::error!(
+                    %request_id,
+                    ?worker,
+                    %attempt_id,
+                    expired,
+                    %error,
+                    "Failed to release scheduler booking"
+                ),
             }
         }
         if !unmanaged_request_ids.is_empty() {
@@ -3713,8 +3651,8 @@ mod tests {
     type SchedulingResponseReceiver =
         tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
 
-    fn book_directly(
-        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+    fn book_directly<P: SequencePublisher + 'static>(
+        slots: &ActiveSequencesMultiWorker<P>,
         request_id: &str,
     ) -> SchedulerBookingDescriptor {
         let worker = WorkerWithDpRank::new(0, 0);
@@ -4720,7 +4658,7 @@ mod tests {
         };
         transfer.arm_booking(booking.clone());
 
-        let Some(AdmissionLifecycleCleanup::Booking(cleanup)) = transfer.cleanup_target() else {
+        let AdmissionLifecycleState::Booking(cleanup) = transfer.take_state() else {
             panic!("admitted cleanup must carry the exact booking");
         };
         assert_eq!(cleanup, booking);
@@ -5544,9 +5482,9 @@ mod tests {
         // Cancelling the head exposes `next`, which the gate now holds until a deadline.
         let until = Instant::now() + Duration::from_secs(5);
         *gate.0.lock() = Some(until);
-        actor.cleanup.enqueue(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::AdmissionLifecycle(head_transfer),
-        });
+        actor
+            .cleanup
+            .enqueue(SchedulerCleanupTarget::AdmissionLifecycle(head_transfer));
         assert!(!actor.drain_cleanup());
         assert_eq!(actor.gate_recheck_at, Some(until));
     }
@@ -5716,7 +5654,7 @@ mod tests {
             } else {
                 SchedulerCleanupTarget::Booking(held)
             };
-            actor.cleanup.enqueue(AdmissionCleanupEntry { target });
+            actor.cleanup.enqueue(target);
             actor.drain_cleanup();
 
             // The release makes worker 0 the least loaded again, though its load was read
@@ -6794,6 +6732,82 @@ mod tests {
 
         assert!(response_rx.lock().unwrap().is_none());
         slots.assert_completely_drained(decay_now());
+    }
+
+    /// Records the replica-sync events the tracker publishes.
+    #[derive(Clone, Default)]
+    struct RecordingPublisher(Arc<StdMutex<Vec<ActiveSequenceEvent>>>);
+
+    impl SequencePublisher for RecordingPublisher {
+        fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+
+        fn publish_scheduler_load(&self, _: dynamo_slot_tracker::SchedulerLoadSnapshot) {}
+
+        fn observe_load(
+            &self,
+            _: &WorkerWithDpRank,
+            _: &str,
+            _: dynamo_slot_tracker::LocalWorkerLoad,
+        ) {
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_frees_an_expired_booking_without_a_replica_free() {
+        for expired in [false, true] {
+            let publisher = RecordingPublisher::default();
+            let slots = Arc::new(ActiveSequencesMultiWorker::new(
+                publisher.clone(),
+                16,
+                HashMap::from([(0, (0, 1))]),
+                true,
+                0,
+                "test",
+            ));
+            let (_cfg_tx, cfg_rx) =
+                watch::channel(HashMap::from([(0, SimpleWorkerConfig::default())]));
+            let queue = SchedulerQueue::new(
+                Arc::clone(&slots),
+                cfg_rx,
+                PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+                16,
+                DefaultWorkerSelector::new(None, "test"),
+                None,
+                None::<Arc<NoopOverlapScoresRefresh>>,
+                None,
+                None,
+                None,
+            );
+            let booking = book_directly(&slots, "held");
+
+            let cleanup = queue.booking_cleanup();
+            if expired {
+                cleanup.enqueue_expired(booking.clone());
+            } else {
+                cleanup.enqueue(booking.clone());
+            }
+            // The actor handles the cleanup command before the barrier's.
+            queue.admission_barrier().await.unwrap();
+
+            assert!(!slots.has_booking(&booking), "expired: {expired}");
+            let frees = publisher
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.data,
+                        dynamo_slot_tracker::ActiveSequenceEventData::Free
+                    )
+                })
+                .count();
+            // The tracker applies an expiry locally and publishes no `Free` for it.
+            assert_eq!(frees, usize::from(!expired), "expired: {expired}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8871,9 +8885,9 @@ mod tests {
         assert_eq!(actor.class_timers.armed[0], at(100));
 
         // Cancelling the head moves the timer to its successor's due time.
-        actor.cleanup.enqueue(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::AdmissionLifecycle(head_transfer),
-        });
+        actor
+            .cleanup
+            .enqueue(SchedulerCleanupTarget::AdmissionLifecycle(head_transfer));
         actor.drain_cleanup();
         assert!(matches!(
             head_rx.try_recv(),
@@ -9832,9 +9846,9 @@ mod tests {
         // A class timer arms only at a due time that its class enforces.
         assert_eq!(actor.class_timers.armed, [at(100), at(150), at(200)]);
 
-        actor.cleanup.enqueue(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::AdmissionLifecycle(leaving_transfer),
-        });
+        actor
+            .cleanup
+            .enqueue(SchedulerCleanupTarget::AdmissionLifecycle(leaving_transfer));
         actor.drain_cleanup();
         assert!(matches!(
             leaving_rx.try_recv(),
@@ -10822,9 +10836,9 @@ mod tests {
             Some(Arc::clone(&transfer)),
             None
         ));
-        actor.cleanup.enqueue(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::AdmissionLifecycle(transfer),
-        });
+        actor
+            .cleanup
+            .enqueue(SchedulerCleanupTarget::AdmissionLifecycle(transfer));
         let (queued, mut live_queued_rx) =
             enqueue_into_actor(&queue, &mut actor, "live-queued", None);
         assert!(queued);
