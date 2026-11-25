@@ -23,6 +23,8 @@ use tokio::sync::{Notify, Semaphore};
 mod backend_failure;
 #[path = "tests/native_abort.rs"]
 mod native_abort;
+#[path = "tests/pooling.rs"]
+mod pooling;
 #[path = "tests/preflight.rs"]
 mod preflight;
 #[path = "tests/vllm.rs"]
@@ -738,9 +740,10 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     SystemOneExecutionSelection {
         backend: ScoringBackend::Sglang,
         canonical_model: "test-model".to_string(),
-        engine,
+        engine: crate::discovery::SystemOneEngine::Generate(engine),
         card,
         preprocessor,
+        pooling_config: None,
         admitted_ids: None,
         lifecycle_cancellation: None,
     }
@@ -814,6 +817,7 @@ async fn assert_bounded_fanout(backend: ScoringBackend) {
         .map(|index| match backend {
             ScoringBackend::Sglang => prepared_noul_branch(index),
             ScoringBackend::Vllm => vllm::prepared_branch(index),
+            ScoringBackend::VllmPooling => unreachable!("causal branch test"),
         })
         .collect();
     let parent = Context::new(()).context();

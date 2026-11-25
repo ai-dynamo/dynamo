@@ -76,6 +76,7 @@ from .capacity import (
 from .constants import MX_LOAD_FORMATS
 from .decision_execution import (
     publish_vllm_decision_capability,
+    publish_vllm_pooling_decision_capability,
     qualify_vllm_decision_runtime,
 )
 from .dp_topology import get_dp_range_for_worker
@@ -1010,6 +1011,14 @@ async def register_vllm_model(
         worker_type,
         config,
         native_generate_supported=native_generate_supported,
+        needs=needs,
+    )
+    publish_vllm_pooling_decision_capability(
+        runtime_config,
+        model_type,
+        worker_type,
+        config,
+        vllm_config,
         needs=needs,
     )
     if model_type != ModelType.Embedding:

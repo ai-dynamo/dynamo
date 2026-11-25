@@ -29,7 +29,7 @@ use super::{
     service_v2,
 };
 use crate::{
-    discovery::{SystemOneExecutionSelection, SystemOneSelectionError},
+    discovery::{SystemOneEngine, SystemOneExecutionSelection, SystemOneSelectionError},
     generate_format::{Bound, ClientRequest, GenerateExchange, Worker},
     protocols::{
         Annotated,
@@ -39,8 +39,12 @@ use crate::{
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
         systemone::{
-            ScoringBackend, VllmScoreCollector, build_native_score_request, causal_scoring_request,
-            parse_candidate_scores,
+            CHUNKED_CONTEXT_END_SENTINEL, CHUNKED_POOLING_SYSTEM_PROMPT, POOLING_SYSTEM_PROMPT,
+            PoolingDecisionConfig, ScoringBackend, VllmScoreCollector, build_native_score_request,
+            build_pooling_decision_request, build_pooling_last_classify_request,
+            causal_scoring_request, extract_marker_logits, format_chunked_question_text,
+            format_chunked_state_text, format_joint_user_prompt, parse_candidate_scores,
+            reduce_head_logits,
         },
     },
 };
@@ -82,6 +86,34 @@ struct PreparedBranch {
     prompt_ids: Vec<u32>,
     label_ids: Vec<u32>,
     native: Option<serde_json::Value>,
+}
+
+struct PreparedPoolingBatch {
+    question_indices: Vec<usize>,
+    token_ids: Vec<u32>,
+    markers: Vec<usize>,
+}
+
+enum PreparedExecution {
+    Causal(Vec<PreparedBranch>),
+    Pooling(Vec<PreparedPoolingBatch>),
+}
+
+impl PreparedExecution {
+    fn work_summary(&self) -> (usize, usize, usize) {
+        match self {
+            Self::Causal(branches) => (
+                branches.len(),
+                branches.iter().map(|b| b.prompt_ids.len()).sum(),
+                branches.iter().map(|b| b.label_ids.len()).sum(),
+            ),
+            Self::Pooling(batches) => (
+                batches.len(),
+                batches.iter().map(|b| b.token_ids.len()).sum(),
+                batches.iter().map(|b| b.markers.len()).sum(),
+            ),
+        }
+    }
 }
 
 struct StartedBranch {
@@ -304,15 +336,24 @@ async fn handle_request(
     let selection_for_preflight = selection.clone();
     let request = Arc::new(request);
     let preflight_request = request.clone();
-    let (branches, admission_permit) = match tokio::time::timeout_at(
+    let (prepared, admission_permit) = match tokio::time::timeout_at(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
-                &preflight_request,
-                &selection_for_preflight,
-                max_input_tokens,
-            )
+            match selection_for_preflight.backend {
+                ScoringBackend::VllmPooling => prepare_pooling_batches(
+                    &preflight_request,
+                    &selection_for_preflight,
+                    max_input_tokens,
+                )
+                .map(PreparedExecution::Pooling),
+                ScoringBackend::Sglang | ScoringBackend::Vllm => prepare_branches(
+                    &preflight_request,
+                    &selection_for_preflight,
+                    max_input_tokens,
+                )
+                .map(PreparedExecution::Causal),
+            }
         }),
     )
     .await
@@ -343,12 +384,8 @@ async fn handle_request(
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
-    );
+    let (work_batches, work_prompt_tokens, work_labels) = prepared.work_summary();
+    metrics.observe_systemone_work(metric_model, work_batches, work_prompt_tokens, work_labels);
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
@@ -366,15 +403,26 @@ async fn handle_request(
         cancellation_labels,
     )
     .await;
-    let task = tokio::spawn(dispatch(
-        selection,
-        branches,
-        request_id.clone(),
-        parent_context.clone(),
-        admission_permit,
-        metrics,
-        request,
-    ));
+    let task = match prepared {
+        PreparedExecution::Causal(branches) => tokio::spawn(dispatch(
+            selection,
+            branches,
+            request_id.clone(),
+            parent_context.clone(),
+            admission_permit,
+            metrics,
+            request,
+        )),
+        PreparedExecution::Pooling(batches) => tokio::spawn(dispatch_pooling(
+            selection,
+            batches,
+            request_id.clone(),
+            parent_context.clone(),
+            admission_permit,
+            metrics,
+            request,
+        )),
+    };
     let response = response::dispatch_with_deadline(task, deadline, parent_context, dialect).await;
     connection_handle.disarm();
     response
@@ -483,6 +531,9 @@ fn prepare_branches(
                 build_native_score_request(&prompt_ids, &label_ids, "validation")
             }
             ScoringBackend::Vllm => causal_scoring_request(&prompt_ids, &label_ids, "validation"),
+            ScoringBackend::VllmPooling => {
+                unreachable!("pooling decisions use prepare_pooling_batches")
+            }
         }
         .map_err(|cause| {
             tracing::error!(error = %cause, "failed to build System One native request");
@@ -688,7 +739,15 @@ async fn run_branch(
         branch_context.kill();
         return Err(DispatchError::cancelled());
     }
-    let stream = run_until_killed(parent_context.as_ref(), selection.engine.generate(context))
+    let generate_engine = match &selection.engine {
+        SystemOneEngine::Generate(engine) => engine,
+        SystemOneEngine::Pooling(_) => {
+            return Err(DispatchError::malformed(
+                "pooling engine cannot execute causal scoring branch",
+            ));
+        }
+    };
+    let stream = run_until_killed(parent_context.as_ref(), generate_engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
         .map_err(|cause| backend_error::classify(cause.as_ref()))?;
@@ -811,6 +870,9 @@ async fn finish_branch(
                 parent_context.clone(),
             )
             .await
+        }
+        ScoringBackend::VllmPooling => {
+            unreachable!("pooling decisions use dispatch_pooling")
         }
     };
     if parent_context.is_killed() {
@@ -960,6 +1022,466 @@ fn measured_cached_tokens(
         .filter(|value| *value <= input_tokens)
         .ok_or_else(|| DispatchError::malformed("invalid cache-read token count"))?;
     Ok(Some(count))
+}
+
+fn prepare_pooling_batches(
+    request: &CanonicalRequest,
+    selection: &SystemOneExecutionSelection,
+    max_input_tokens: usize,
+) -> Result<Vec<PreparedPoolingBatch>, (StatusCode, String)> {
+    let config = selection.pooling_config.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "missing pooling decision config for selected worker".to_string(),
+        )
+    })?;
+    let context_length = selection.card.effective_context_length() as usize;
+    let max_seq_len = match (context_length, config.max_length) {
+        (0, Some(limit)) => limit,
+        (0, None) => max_input_tokens,
+        (ctx, Some(limit)) => ctx.min(limit),
+        (ctx, None) => ctx,
+    };
+    let max_per_batch = config.max_questions.unwrap_or(usize::MAX);
+    let questions: Vec<&dynamo_decisions::CanonicalQuestion> = request.questions.iter().collect();
+    let mut batches = Vec::new();
+    let mut remaining_encoding_bytes = MAX_TOKENIZATION_TEXT_BYTES;
+    if config.is_chunked() {
+        prepare_chunked_pooling_batches(
+            request,
+            selection,
+            config,
+            &questions,
+            max_seq_len,
+            &mut remaining_encoding_bytes,
+            &mut batches,
+        )?;
+    } else {
+        bisect_pooling_questions(
+            request,
+            selection,
+            config,
+            &questions,
+            max_seq_len,
+            max_per_batch,
+            &mut remaining_encoding_bytes,
+            &mut batches,
+        )?;
+    }
+
+    let mut total_input_tokens = 0_usize;
+    for batch in &batches {
+        total_input_tokens =
+            add_input_tokens(total_input_tokens, batch.token_ids.len(), max_input_tokens)
+                .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
+    }
+    Ok(batches)
+}
+
+fn map_pooling_render_error(cause: anyhow::Error) -> (StatusCode, String) {
+    if let Some(oversized) = cause.downcast_ref::<crate::preprocessor::SystemOneEncodingTooLarge>()
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY, oversized.to_string());
+    }
+    if let Some(incompatible) =
+        cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY, incompatible.0.to_string());
+    }
+    if super::error::find_canonical_error_in_chain(cause.as_ref())
+        .is_some_and(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());
+    }
+    tracing::error!(error = %cause, "pooling decision prompt rendering failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal server error".to_string(),
+    )
+}
+
+fn prepare_chunked_pooling_batches(
+    request: &CanonicalRequest,
+    selection: &SystemOneExecutionSelection,
+    config: &PoolingDecisionConfig,
+    questions: &[&dynamo_decisions::CanonicalQuestion],
+    max_seq_len: usize,
+    remaining_encoding_bytes: &mut usize,
+    out: &mut Vec<PreparedPoolingBatch>,
+) -> Result<(), (StatusCode, String)> {
+    let separator = config.separator.as_deref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "chunked pooling decision config missing separator".to_string(),
+        )
+    })?;
+    let state_text = format_chunked_state_text(&request.input, config, selection.card.special_tokens());
+    let (context_ids, ctx_bytes) = selection
+        .preprocessor
+        .render_systemone_chunked_pooling_context(
+            &selection.canonical_model,
+            CHUNKED_POOLING_SYSTEM_PROMPT,
+            &state_text,
+            CHUNKED_CONTEXT_END_SENTINEL,
+            Some(&request.chat_template_kwargs),
+            separator,
+            *remaining_encoding_bytes,
+        )
+        .map_err(map_pooling_render_error)?;
+    *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(ctx_bytes);
+
+    out.reserve(questions.len());
+    for question in questions {
+        let question_text = format_chunked_question_text(
+            question,
+            request.dialect,
+            config,
+            selection.card.special_tokens(),
+        )
+        .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
+        let (q_ids, marker_id, q_bytes) = selection
+            .preprocessor
+            .encode_systemone_chunked_pooling_question(
+                &question_text,
+                &config.marker,
+                *remaining_encoding_bytes,
+            )
+            .map_err(map_pooling_render_error)?;
+        *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(q_bytes);
+
+        let mut token_ids = Vec::with_capacity(context_ids.len() + q_ids.len());
+        token_ids.extend_from_slice(&context_ids);
+        token_ids.extend_from_slice(&q_ids);
+
+        let marker_count = token_ids.iter().filter(|&&tok| tok == marker_id).count();
+        if marker_count != 1 || token_ids.last() != Some(&marker_id) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "readout markers ({marker_count}) did not match expected question after tokenization"
+                ),
+            ));
+        }
+        if token_ids.len() > max_seq_len {
+            let qid = question.id.as_deref().unwrap_or("unnamed");
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "question {qid:?} needs {} tokens with the state, exceeding the {max_seq_len}-token limit; inputs are never truncated",
+                    token_ids.len()
+                ),
+            ));
+        }
+        let marker_pos = token_ids.len() - 1;
+        out.push(PreparedPoolingBatch {
+            question_indices: vec![question.ordinal],
+            token_ids,
+            markers: vec![marker_pos],
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bisect_pooling_questions(
+    request: &CanonicalRequest,
+    selection: &SystemOneExecutionSelection,
+    config: &PoolingDecisionConfig,
+    questions: &[&dynamo_decisions::CanonicalQuestion],
+    max_seq_len: usize,
+    max_per_batch: usize,
+    remaining_encoding_bytes: &mut usize,
+    out: &mut Vec<PreparedPoolingBatch>,
+) -> Result<(), (StatusCode, String)> {
+    if questions.len() > max_per_batch {
+        let mid = questions.len() / 2;
+        bisect_pooling_questions(
+            request,
+            selection,
+            config,
+            &questions[..mid],
+            max_seq_len,
+            max_per_batch,
+            remaining_encoding_bytes,
+            out,
+        )?;
+        return bisect_pooling_questions(
+            request,
+            selection,
+            config,
+            &questions[mid..],
+            max_seq_len,
+            max_per_batch,
+            remaining_encoding_bytes,
+            out,
+        );
+    }
+
+    let user_content = format_joint_user_prompt(
+        &request.input,
+        questions,
+        request.dialect,
+        config,
+        selection.card.special_tokens(),
+    )
+    .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
+
+    let (token_ids, markers, encoding_bytes) = selection
+        .preprocessor
+        .render_systemone_pooling_prompt(
+            &selection.canonical_model,
+            POOLING_SYSTEM_PROMPT,
+            &user_content,
+            Some(&request.chat_template_kwargs),
+            &config.marker,
+            questions.len(),
+            *remaining_encoding_bytes,
+        )
+        .map_err(|cause| {
+            if let Some(oversized) =
+                cause.downcast_ref::<crate::preprocessor::SystemOneEncodingTooLarge>()
+            {
+                return (StatusCode::UNPROCESSABLE_ENTITY, oversized.to_string());
+            }
+            if let Some(incompatible) =
+                cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
+            {
+                return (StatusCode::UNPROCESSABLE_ENTITY, incompatible.0.to_string());
+            }
+            if super::error::find_canonical_error_in_chain(cause.as_ref())
+                .is_some_and(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
+            {
+                return (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());
+            }
+            tracing::error!(error = %cause, "pooling decision prompt rendering failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            )
+        })?;
+    *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(encoding_bytes);
+
+    if token_ids.len() <= max_seq_len {
+        out.push(PreparedPoolingBatch {
+            question_indices: questions.iter().map(|q| q.ordinal).collect(),
+            token_ids,
+            markers,
+        });
+        return Ok(());
+    }
+    if questions.len() == 1 {
+        let qid = questions[0].id.as_deref().unwrap_or("unnamed");
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "question {qid:?} needs {} tokens with the state, exceeding the {max_seq_len}-token limit; inputs are never truncated",
+                token_ids.len()
+            ),
+        ));
+    }
+    let mid = questions.len() / 2;
+    bisect_pooling_questions(
+        request,
+        selection,
+        config,
+        &questions[..mid],
+        max_seq_len,
+        max_per_batch,
+        remaining_encoding_bytes,
+        out,
+    )?;
+    bisect_pooling_questions(
+        request,
+        selection,
+        config,
+        &questions[mid..],
+        max_seq_len,
+        max_per_batch,
+        remaining_encoding_bytes,
+        out,
+    )
+}
+
+async fn dispatch_pooling(
+    selection: SystemOneExecutionSelection,
+    batches: Vec<PreparedPoolingBatch>,
+    request_id: String,
+    parent_context: Arc<dyn AsyncEngineContext>,
+    _admission_permit: OwnedSemaphorePermit,
+    metrics: Arc<Metrics>,
+    request: Arc<CanonicalRequest>,
+) -> Response {
+    let dialect = request.dialect;
+    let Some(config) = selection.pooling_config.clone() else {
+        return dispatch_error(
+            &request_id,
+            &parent_context,
+            DispatchError::malformed("missing pooling decision config"),
+            dialect,
+        );
+    };
+    let effective_temperature = config.temperature * request.temperature;
+    let fanout_started = Instant::now();
+
+    let mut futures_stream =
+        stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
+            run_pooling_batch(
+                selection.clone(),
+                config.clone(),
+                batch_idx,
+                batch,
+                request_id.clone(),
+                parent_context.clone(),
+                request.clone(),
+                effective_temperature,
+            )
+        }))
+        .buffer_unordered(MAX_CONCURRENT_SIBLINGS);
+
+    let mut per_question: Vec<(usize, QuestionOutcome)> =
+        Vec::with_capacity(request.questions.len());
+    let mut total_input_tokens: u64 = 0;
+    let mut failure = None;
+    while let Some(result) = futures_stream.next().await {
+        if failure.is_some() {
+            continue;
+        }
+        match result {
+            Ok((input_tokens, batch_outcomes)) => {
+                total_input_tokens += input_tokens as u64;
+                per_question.extend(batch_outcomes);
+            }
+            Err(cause) => {
+                parent_context.kill();
+                failure = Some(cause);
+            }
+        }
+    }
+    drop(futures_stream);
+    if let Some(cause) = failure {
+        return dispatch_error(&request_id, &parent_context, cause, dialect);
+    }
+
+    metrics.observe_systemone_phase(
+        &selection.canonical_model,
+        SystemOnePhase::Fanout,
+        fanout_started.elapsed().as_secs_f64(),
+    );
+
+    per_question.sort_by_key(|(ordinal, _)| *ordinal);
+    let outcomes: Vec<QuestionOutcome> = per_question.into_iter().map(|(_, o)| o).collect();
+    let usage = Usage {
+        input_tokens: total_input_tokens,
+        output_tokens: 0,
+        cached_tokens: Some(0),
+        reasoning_tokens: 0,
+    };
+    let mut response =
+        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
+            Ok(body) => Json(body).into_response(),
+            Err(cause) => decision_error(cause),
+        };
+    attach_request_ids(&mut response, &request_id);
+    response.headers_mut().insert(
+        HeaderName::from_static("x-dynamo-systemone-version"),
+        HeaderValue::from_static("1"),
+    );
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pooling_batch(
+    selection: SystemOneExecutionSelection,
+    config: PoolingDecisionConfig,
+    batch_idx: usize,
+    batch: PreparedPoolingBatch,
+    request_id: String,
+    parent_context: Arc<dyn AsyncEngineContext>,
+    request: Arc<CanonicalRequest>,
+    effective_temperature: f64,
+) -> Result<(usize, Vec<(usize, QuestionOutcome)>), DispatchError> {
+    selection.validate_dispatch(None).map_err(|_| {
+        DispatchError::unavailable("selected worker revision is no longer available")
+    })?;
+    let pooling_engine = match &selection.engine {
+        SystemOneEngine::Pooling(engine) => engine,
+        SystemOneEngine::Generate(_) => {
+            return Err(DispatchError::malformed(
+                "generate engine cannot execute pooling decision batch",
+            ));
+        }
+    };
+    let seq_len = batch.token_ids.len();
+    let pooling_req = if config.uses_last_classify() {
+        build_pooling_last_classify_request(&selection.canonical_model, batch.token_ids)
+    } else {
+        build_pooling_decision_request(&selection.canonical_model, batch.token_ids)
+    };
+    let branch_id = format!("{request_id}-p{batch_idx}");
+    let context = Context::with_id_and_metadata(pooling_req, branch_id, Default::default());
+    let branch_context = context.context();
+    parent_context.link_child(branch_context.clone());
+    if parent_context.is_killed() {
+        branch_context.kill();
+        return Err(DispatchError::cancelled());
+    }
+    let mut stream = run_until_killed(parent_context.as_ref(), pooling_engine.generate(context))
+        .await
+        .ok_or_else(DispatchError::cancelled)?
+        .map_err(|cause| backend_error::classify(cause.as_ref()))?;
+    let stream_context = stream.context();
+    parent_context.link_child(stream_context.clone());
+    if parent_context.is_killed() {
+        stream_context.kill();
+        return Err(DispatchError::cancelled());
+    }
+
+    let mut response = None;
+    loop {
+        let frame = run_until_killed(parent_context.as_ref(), stream.next())
+            .await
+            .ok_or_else(DispatchError::cancelled)?;
+        let Some(frame) = frame else { break };
+        if let Some(payload) = frame.into_data().map_err(stream_error)? {
+            if response.replace(payload).is_some() {
+                return Err(DispatchError::malformed(
+                    "pooling worker returned multiple payloads",
+                ));
+            }
+        }
+    }
+    if parent_context.is_killed() {
+        return Err(DispatchError::cancelled());
+    }
+    let response =
+        response.ok_or_else(|| DispatchError::malformed("pooling worker returned no payload"))?;
+
+    let rows = extract_marker_logits(
+        &response,
+        seq_len,
+        config.num_classes(),
+        &batch.markers,
+        config.readout_offset,
+    )
+    .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+
+    let mut outcomes = Vec::with_capacity(batch.question_indices.len());
+    for (&ordinal, row) in batch.question_indices.iter().zip(&rows) {
+        let question = request
+            .questions
+            .iter()
+            .find(|q| q.ordinal == ordinal)
+            .ok_or_else(|| DispatchError::malformed("unknown question ordinal in pooling batch"))?;
+        let distribution = reduce_head_logits(
+            row,
+            question.candidates.len(),
+            question.kind == dynamo_decisions::QuestionKind::Predicate,
+            effective_temperature,
+        )
+        .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+        outcomes.push((ordinal, QuestionOutcome::Answer(distribution)));
+    }
+    Ok((seq_len, outcomes))
 }
 
 #[cfg(test)]

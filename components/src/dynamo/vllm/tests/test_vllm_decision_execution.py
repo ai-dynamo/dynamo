@@ -4,6 +4,7 @@
 """Startup and installed-runtime contracts for causal decision execution."""
 
 import argparse
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -439,3 +440,269 @@ def test_cache_source_verifier_rejects_modified_and_missing_files(tmp_path, capl
     assert "cache source unavailable: vllm/outputs.py" in caplog.text
     assert "disabled" not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+def _write_pooling_metadata(
+    model_dir, *, temperature=1.38, codes=None, marker="<|fim_suffix|>"
+):
+    if codes is None:
+        codes = ["A", "B", "C", "D"]
+    (model_dir / "decision_config.json").write_text(
+        json.dumps(
+            {
+                "format_version": 2,
+                "attention_mode": "noncausal_full_attention",
+                "temperature": temperature,
+                "codes": codes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "joint_config.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "template": "joint-question-inline-readout-v1",
+                "marker": marker,
+                "readout_offset": 0,
+                "max_questions": None,
+                "max_length": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _mock_pooling_vllm_config(
+    *,
+    use_activation=False,
+    runner_type="pooling",
+    convert_type="classify",
+    dp_size=1,
+    lora_config=None,
+):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            runner_type=runner_type,
+            convert_type=convert_type,
+            pooler_config=SimpleNamespace(use_activation=use_activation),
+        ),
+        parallel_config=SimpleNamespace(data_parallel_size=dp_size),
+        lora_config=lora_config,
+    )
+
+
+def test_publish_vllm_pooling_decision_capability_publishes_valid_descriptor(tmp_path):
+    _write_pooling_metadata(tmp_path)
+    recorded = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda k, v: recorded.__setitem__(k, json.loads(v))
+    )
+    published = decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        _mock_pooling_vllm_config(use_activation=False),
+        needs=[],
+    )
+    assert published is True
+    descriptor = recorded[decisions.VLLM_POOLING_DECISION_CAPABILITY]
+    assert descriptor["template"] == "joint-question-inline-readout-v1"
+    assert descriptor["marker"] == "<|fim_suffix|>"
+    assert descriptor["codes"] == ["A", "B", "C", "D"]
+    assert descriptor["temperature"] == 1.38
+
+
+def test_publish_vllm_pooling_decision_capability_skips_ordinary_and_unqualified_workers(
+    tmp_path,
+):
+    recorded = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda k, v: recorded.__setitem__(k, v)
+    )
+    # No metadata files -> silent no-op for ordinary classify workers
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        _mock_pooling_vllm_config(use_activation=False),
+    )
+    assert not recorded
+
+    # Metadata present, but use_activation=True -> rejected
+    _write_pooling_metadata(tmp_path)
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        _mock_pooling_vllm_config(use_activation=True),
+    )
+    assert not recorded
+
+    # Invalid temperature -> rejected
+    _write_pooling_metadata(tmp_path, temperature=-1.0)
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        _mock_pooling_vllm_config(use_activation=False),
+    )
+    assert not recorded
+
+
+def test_publish_vllm_pooling_decision_capability_resolves_hf_cache_and_vllm_model_dir(
+    tmp_path, monkeypatch
+):
+    import huggingface_hub
+
+    _write_pooling_metadata(tmp_path)
+    calls = []
+
+    def fake_try_to_load_from_cache(*, repo_id, filename, revision=None):
+        calls.append((repo_id, filename, revision))
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(
+        huggingface_hub, "try_to_load_from_cache", fake_try_to_load_from_cache
+    )
+    recorded = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda k, v: recorded.__setitem__(k, json.loads(v))
+    )
+    vllm_cfg = _mock_pooling_vllm_config(use_activation=False)
+    vllm_cfg.model_config.model = "org/custom-pooling-decider"
+    vllm_cfg.model_config.revision = "rev-123"
+    published = decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model="org/custom-pooling-decider"),
+        vllm_cfg,
+        needs=[],
+    )
+    assert published is True
+    assert calls == [
+        ("org/custom-pooling-decider", "decision_config.json", "rev-123"),
+        ("org/custom-pooling-decider", "joint_config.json", "rev-123"),
+    ]
+    assert recorded[decisions.VLLM_POOLING_DECISION_CAPABILITY]["codes"] == [
+        "A",
+        "B",
+        "C",
+        "D",
+    ]
+
+    # Remote URI case: config.model is not a local dir, but vllm_config.model_config.model is
+    recorded.clear()
+    calls.clear()
+    vllm_cfg.model_config.model = str(tmp_path)
+    published_local = decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model="s3://bucket/decider"),
+        vllm_cfg,
+        needs=[],
+    )
+    assert published_local is True
+    assert calls == []
+
+    # Fallback to config.engine_args.model when vllm_config.model_config.model is unset
+    recorded.clear()
+    vllm_cfg.model_config.model = None
+    published_engine_args = decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(
+            classify_worker=True,
+            model="s3://bucket/decider",
+            engine_args=SimpleNamespace(model=str(tmp_path)),
+        ),
+        vllm_cfg,
+        needs=[],
+    )
+    assert published_engine_args is True
+    assert calls == []
+
+    # Non-pooling ModelType is rejected cleanly via supports_pooling()
+    recorded.clear()
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Chat,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        vllm_cfg,
+        needs=[],
+    )
+    assert not recorded
+
+    # Out-of-range i32 readout_offset is rejected
+    (tmp_path / "joint_config.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "template": "joint-question-inline-readout-v1",
+                "marker": "<|fim_suffix|>",
+                "readout_offset": 2**31,
+                "max_questions": None,
+                "max_length": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        _mock_pooling_vllm_config(use_activation=False),
+        needs=[],
+    )
+    assert not recorded
+
+    # Chunked v4 protocol (joint-chunked-readout-v1) publishes with separator
+    (tmp_path / "joint_config.json").write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "template": "joint-chunked-readout-v1",
+                "marker": "<|fim_suffix|>",
+                "separator": "<|fim_middle|>",
+                "readout_offset": 0,
+                "max_questions": None,
+                "max_length": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    v4_cfg = _mock_pooling_vllm_config(use_activation=False)
+    v4_cfg.model_config.pooler_config.pooling_type = "LAST"
+    assert decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        v4_cfg,
+        needs=[],
+    )
+    v4_desc = recorded[decisions.VLLM_POOLING_DECISION_CAPABILITY]
+    assert v4_desc["template"] == "joint-chunked-readout-v1"
+    assert v4_desc["separator"] == "<|fim_middle|>"
+
+    # Chunked v4 with non-LAST pooling_type is rejected when readout_offset == 0
+    recorded.clear()
+    v4_cfg.model_config.pooler_config.pooling_type = "MEAN"
+    assert not decisions.publish_vllm_pooling_decision_capability(
+        runtime_config,
+        decisions.ModelType.Classify | decisions.ModelType.Pooling,
+        decisions.WorkerType.Aggregated,
+        SimpleNamespace(classify_worker=True, model=str(tmp_path)),
+        v4_cfg,
+        needs=[],
+    )
+    assert not recorded

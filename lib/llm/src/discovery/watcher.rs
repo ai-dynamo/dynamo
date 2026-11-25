@@ -940,6 +940,35 @@ impl ModelWatcher {
                 )
                 .await?;
                 worker_set.pooling_engine = Some(Arc::new(push_router));
+
+                if self.systemone_enabled
+                    && card.systemone_backend()
+                        == Some(crate::protocols::systemone::ScoringBackend::VllmPooling)
+                {
+                    if card.has_tokenizer() {
+                        match tokenizer
+                            .clone()
+                            .map_or_else(|| card.tokenizer(), Ok)
+                            .and_then(|tk| worker_set_chat_preprocessor(card, tk, &cancellation))
+                        {
+                            Ok(preprocessor) => {
+                                worker_set.systemone_preprocessor = Some(preprocessor);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    model = card.name(),
+                                    error = %format!("{error:#}"),
+                                    "Pooling decision preprocessor is unavailable; keeping pooling surface active"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            model = card.name(),
+                            "Pooling decision preprocessor is unavailable: model has no supported Rust tokenizer"
+                        );
+                    }
+                }
             }
 
             if card.model_type.supports_rerank() {
