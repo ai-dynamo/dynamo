@@ -30,7 +30,7 @@ ModelExpress startup loading and live RL refit have different interfaces. vLLM 0
 | ModelExpress trainer source | Trainer publication plus receiver-driven NIXL staging and engine apply | Experimental. Prove source ownership, layout conversion, installation, and safe-point orchestration for the exact framework/backend pair. |
 | ModelExpress inference peer | An already-updated, rank-compatible inference worker republishes the version for P2P staging | Experimental. Source selection is a transfer optimization, not proof that the source or target may serve. |
 | ModelExpress S3 artifact | Canonical full checkpoint or exact-base XOR delta is prepared locally and applied by the engine adapter | Experimental and S3-specific. The required base and artifact identity must match. |
-| verl | Recipe-owned Ray/ZMQ control and colocated CUDA IPC | Follow the recipe's trainer/rollout rank mapping. |
+| verl | Recipe-owned node-local CUDA IPC; separate pools receive weights through verl's checkpoint engine first | Follow the recipe's trainer/rollout rank mapping. |
 | NeMo RL | Framework-owned NCCL sender and fixed worker URLs | Managed Slurm/Ray vLLM path only. |
 | Dynamo vLLM from disk | `update_weights_from_disk` through each worker's `system_url` | Per-worker pause, apply, cache reset, and version; no fleet transaction. |
 | Dynamo vLLM distributed | Group lifecycle plus `update_weights_from_distributed` | Request body, rank map, and transport remain integration-specific. |
@@ -126,11 +126,11 @@ Repeat this sequence across the framework-selected worker set under one barrier.
 
 The built-in disk update can flush SGLang's local cache. Validate any additional host, disk, or shared cache tier separately. Distributed, tensor, and IPC update routes use the request schemas of the installed SGLang version; the [SGLang engine-route reference](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md#engine-routes) documents the fixed routes and explicit method allowlist.
 
-## verl Colocated Update
+## verl Update
 
-The public verl recipe sends generation through Dynamo but keeps sleep, wake, and weight transfer in recipe-owned Ray actors and a ZMQ/CUDA IPC bridge. Do not replace this path with public worker discovery unless the integration itself changes.
+The public verl recipe sends generation through Dynamo but keeps sleep, wake, and weight transfer in recipe-owned Ray actors and node-local CUDA IPC. A separate rollout pool first receives weights through verl's checkpoint engine. Do not replace this path with public worker discovery unless the integration itself changes.
 
-Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [verl Integration](verl.md#verify-the-run).
+Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [verl Integration](verl.md).
 
 ## NeMo RL Managed Update
 
