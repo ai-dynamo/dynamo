@@ -1682,6 +1682,14 @@ pub trait Discovery: Send + Sync {
         anyhow::bail!("model taint updates are not supported by this discovery backend")
     }
 
+    /// Set or clear the hold on every endpoint instance this discovery client registered, and
+    /// return how many records changed. Each record keeps its lease and its other fields, and
+    /// watchers see the change as an in-place update.
+    async fn set_endpoint_hold(&self, held: bool) -> Result<usize> {
+        let _ = held;
+        anyhow::bail!("a worker hold is not supported by this discovery backend")
+    }
+
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
 

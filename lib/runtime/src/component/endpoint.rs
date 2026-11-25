@@ -242,17 +242,23 @@ impl EndpointConfigBuilder {
         // consistent registration/discovery across the system.
         let discovery = endpoint.drt().discovery();
 
-        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-            transport,
-            device_type: endpoint_device_type(),
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-            held: false,
+        let registered = {
+            // Kept until the record is written, so a release of the worker's hold cannot
+            // miss it.
+            let registration = endpoint.drt().routing_hold().registration().await;
+            let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                transport,
+                device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+                held: registration.held(),
+            };
+            discovery.register(discovery_spec).await
         };
 
-        let discovery_instance = match discovery.register(discovery_spec).await {
+        let discovery_instance = match registered {
             Ok(instance) => instance,
             Err(e) => {
                 tracing::error!(
@@ -448,18 +454,23 @@ impl Endpoint {
         // Get the transport type for the endpoint
         let transport = build_transport_type(self, &endpoint_id, instance_id).await?;
 
-        let spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace,
-            component: endpoint_id.component,
-            endpoint: endpoint_id.name,
-            transport,
-            device_type: endpoint_device_type(),
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-            held: false,
-        };
-
         let discovery = drt.discovery();
-        if let Err(e) = discovery.register(spec).await {
+        let registered = {
+            // Kept until the record is written, so a release of the worker's hold cannot
+            // miss it.
+            let registration = drt.routing_hold().registration().await;
+            let spec = crate::discovery::DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                transport,
+                device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+                held: registration.held(),
+            };
+            discovery.register(spec).await
+        };
+        if let Err(e) = registered {
             let endpoint_id = self.id();
             tracing::error!(
                 %endpoint_id,

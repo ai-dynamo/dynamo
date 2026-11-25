@@ -268,6 +268,25 @@ impl Discovery for MockDiscovery {
         Ok(())
     }
 
+    async fn set_endpoint_hold(&self, held: bool) -> Result<usize> {
+        let instance_id = self.instance_id();
+        let mut state = self.registry.state.lock().unwrap();
+        let mut changed = 0;
+        for instance in state.instances.iter_mut() {
+            if let DiscoveryInstance::Endpoint(endpoint) = instance
+                && endpoint.instance_id == instance_id
+                && endpoint.held != held
+            {
+                endpoint.held = held;
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            state.publish();
+        }
+        Ok(changed)
+    }
+
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let target_id = instance.id();
 

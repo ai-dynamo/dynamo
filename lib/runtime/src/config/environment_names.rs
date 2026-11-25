@@ -1047,6 +1047,12 @@ pub mod discovery {
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
+    /// Start this worker held out of automatic routing (set to "1" or "true"). Its endpoint
+    /// instances are discovered, and only a request that names the worker reaches it, until a
+    /// controller releases the hold through `POST /v1/hold/release` on the system status
+    /// server. Needs a key-value discovery backend (etcd) and the system status server.
+    pub const DYN_START_HELD: &str = "DYN_START_HELD";
+
     /// Discover worker Pods that wait on the frontend readiness gate, as held instances
     /// (set to "1" or "true"). For frontends and routers: they prepare a held worker's
     /// pipeline and keep it out of automatic routing until its Pod is Ready. In pod mode this

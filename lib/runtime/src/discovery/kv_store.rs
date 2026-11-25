@@ -62,6 +62,48 @@ async fn update_model_taints_in_bucket(
     Err(kv::StoreError::Retry.into())
 }
 
+/// Set the hold of one endpoint record, leaving every other field as stored. Returns whether
+/// the record changed.
+async fn set_endpoint_hold_in_bucket(
+    bucket: &dyn kv::Bucket,
+    key: &kv::Key,
+    instance_id: u64,
+    held: bool,
+) -> Result<bool> {
+    for _ in 0..UPDATE_MODEL_TAINTS_MAX_ATTEMPTS {
+        // The endpoint was unregistered since it was listed: nothing to hold.
+        let Some(existing_json) = bucket.get(key).await? else {
+            return Ok(false);
+        };
+        let mut candidate: DiscoveryInstance = serde_json::from_slice(&existing_json)?;
+        let DiscoveryInstance::Endpoint(endpoint) = &mut candidate else {
+            anyhow::bail!("discovery record {key} is not an endpoint")
+        };
+        if endpoint.instance_id != instance_id {
+            anyhow::bail!(
+                "endpoint discovery record {key} belongs to instance {}, not {instance_id}",
+                endpoint.instance_id
+            )
+        }
+        if endpoint.held == held {
+            return Ok(false);
+        }
+        endpoint.held = held;
+
+        let candidate_json = serde_json::to_vec(&candidate)?.into();
+        match bucket
+            .compare_and_replace(key, existing_json, candidate_json)
+            .await
+        {
+            Ok(_) => return Ok(true),
+            Err(kv::StoreError::Retry) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(kv::StoreError::Retry.into())
+}
+
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
@@ -582,6 +624,27 @@ impl Discovery for KVStoreDiscovery {
         let target_id = DiscoveryInstanceId::Model(id);
 
         update_model_taints_in_bucket(bucket.as_ref(), &key, &target_id, &taints).await
+    }
+
+    async fn set_endpoint_hold(&self, held: bool) -> Result<usize> {
+        let Some(bucket) = self.store.get_bucket(INSTANCES_BUCKET).await? else {
+            return Ok(0);
+        };
+        let instance_id = self.instance_id();
+        let mut changed = 0;
+        for instance in self.list(DiscoveryQuery::AllEndpoints).await? {
+            let DiscoveryInstance::Endpoint(endpoint) = &instance else {
+                continue;
+            };
+            if endpoint.instance_id != instance_id {
+                continue;
+            }
+            let key = kv::Key::new(Self::endpoint_key(endpoint));
+            if set_endpoint_hold_in_bucket(bucket.as_ref(), &key, instance_id, held).await? {
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -1314,6 +1377,73 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    /// Releasing a worker's hold rewrites its own endpoint records in place: a watcher sees
+    /// one update per endpoint and no removal, every other field is kept, and another
+    /// worker's records are left alone.
+    #[tokio::test]
+    async fn releasing_the_hold_updates_only_this_instances_endpoints_in_place() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let own = client.instance_id();
+        let other = own.wrapping_add(1);
+        let endpoint = |instance_id: u64, endpoint: &str, held: bool| {
+            DiscoveryInstance::Endpoint(crate::component::Instance {
+                namespace: "ns".to_string(),
+                component: "component".to_string(),
+                endpoint: endpoint.to_string(),
+                instance_id,
+                transport: TransportType::Nats(format!("nats://127.0.0.1:4222/{endpoint}")),
+                device_type: None,
+                request_plane_codec: None,
+                held,
+            })
+        };
+        for instance in [
+            endpoint(own, "generate", true),
+            endpoint(own, "clear_kv_blocks", true),
+            endpoint(other, "generate", true),
+        ] {
+            client.register_instance(instance).await.unwrap();
+        }
+
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        // The initial state: three additions and their resync.
+        for _ in 0..4 {
+            stream.next().await.unwrap().unwrap();
+        }
+
+        assert_eq!(client.set_endpoint_hold(false).await.unwrap(), 2);
+        let mut updates = HashSet::new();
+        for _ in 0..2 {
+            let DiscoveryEvent::Added(instance) = stream.next().await.unwrap().unwrap() else {
+                panic!("a release must update the endpoint in place");
+            };
+            updates.insert(instance.id());
+        }
+        assert_eq!(
+            updates,
+            HashSet::from([
+                endpoint(own, "generate", false).id(),
+                endpoint(own, "clear_kv_blocks", false).id(),
+            ])
+        );
+
+        let listed = client.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        for expected in [
+            endpoint(own, "generate", false),
+            endpoint(own, "clear_kv_blocks", false),
+            endpoint(other, "generate", true),
+        ] {
+            assert!(listed.contains(&expected), "{expected:?} not in {listed:?}");
+        }
+
+        // A repeated release has nothing to change.
+        assert_eq!(client.set_endpoint_hold(false).await.unwrap(), 0);
     }
 
     #[tokio::test]

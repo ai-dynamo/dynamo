@@ -182,6 +182,9 @@ pub struct DistributedRuntime {
     discovery_client: Arc<dyn discovery::Discovery>,
     endpoint_registrations: Arc<EndpointRegistrationManager>,
 
+    // Whether this worker's endpoint instances are held out of automatic routing.
+    routing_hold: Arc<crate::routing_hold::RoutingHold>,
+
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
     discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
@@ -299,6 +302,10 @@ impl DistributedRuntime {
             discovery_backend,
             DiscoveryBackend::KvStore(kv::Selector::Memory)
         );
+        let routing_hold = Arc::new(crate::routing_hold::RoutingHold::from_env(
+            matches!(discovery_backend, DiscoveryBackend::Kubernetes),
+            config.system_server_enabled(),
+        )?);
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
             DiscoveryBackend::Kubernetes => {
@@ -373,6 +380,7 @@ impl DistributedRuntime {
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             endpoint_registrations,
+            routing_hold,
             discovery_metadata,
             process_local_discovery,
             component_registry,
@@ -521,8 +529,12 @@ impl DistributedRuntime {
                         .expect("System status server info should only be set once");
                     tracing::info!(%address, ?policy, "System HTTP listener started");
                 }
-                // Preserve ordinary workers' optional-HTTP failure behavior.
-                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
+                // Preserve ordinary workers' optional-HTTP failure behavior. A held worker
+                // is the exception: without the server nothing could release it.
+                Err(error)
+                    if policy == system_status_server::SystemProbePolicy::Worker
+                        && !distributed_runtime.is_routing_held() =>
+                {
                     tracing::error!(%error, "System status server startup failed");
                 }
                 Err(error) => return Err(error),
@@ -592,6 +604,50 @@ impl DistributedRuntime {
     /// receive distinct connection IDs.
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
+    }
+
+    /// Whether this worker's endpoint instances are held out of automatic routing.
+    /// See [`crate::routing_hold`].
+    pub fn is_routing_held(&self) -> bool {
+        self.routing_hold.is_held()
+    }
+
+    /// Start this worker's routing hold, as `DYN_START_HELD` does at startup. Call it before
+    /// the worker registers its endpoints.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hold_routing_for_test(&self) {
+        self.routing_hold.set(true);
+    }
+
+    /// Release this worker's routing hold, on behalf of a controller that checked instance
+    /// `instance_id`.
+    ///
+    /// The worker clears the hold on its own discovery records, so they keep their lease and
+    /// their other fields. A request for another instance changes nothing: it was meant for the
+    /// worker this process replaced. Releasing a worker that is not held is a no-op, and a
+    /// release that failed part-way is completed by repeating it.
+    pub async fn release_routing_hold(
+        &self,
+        instance_id: u64,
+    ) -> Result<crate::routing_hold::HoldRelease, crate::routing_hold::HoldReleaseError> {
+        use crate::routing_hold::HoldReleaseError;
+
+        let current = self.connection_id();
+        if instance_id != current {
+            return Err(HoldReleaseError::StaleInstance {
+                requested: instance_id,
+                current,
+            });
+        }
+        self.routing_hold
+            .release(self.discovery_client.set_endpoint_hold(false))
+            .await
+    }
+
+    /// This worker's routing hold. An endpoint registers under
+    /// [`crate::routing_hold::RoutingHold::registration`].
+    pub(crate) fn routing_hold(&self) -> &crate::routing_hold::RoutingHold {
+        &self.routing_hold
     }
 
     pub fn shutdown(&self) {

@@ -261,14 +261,14 @@ fn build_system_status_router(
                 &health_path,
                 get({
                     let state = Arc::clone(&server_state);
-                    move || health_handler(state)
+                    move || health_handler(state, Probe::Readiness)
                 }),
             )
             .route(
                 &live_path,
                 get({
                     let state = Arc::clone(&server_state);
-                    move || health_handler(state)
+                    move || health_handler(state, Probe::Liveness)
                 }),
             ),
         SystemProbePolicy::RuntimeOnly => Router::new()
@@ -305,6 +305,20 @@ fn build_system_status_router(
             any({
                 let state = Arc::clone(&server_state);
                 move |path, method, body| engine_route_handler(state, path, method, body)
+            }),
+        )
+        .route(
+            HOLD_PATH,
+            get({
+                let state = Arc::clone(&server_state);
+                move || hold_status_handler(state)
+            }),
+        )
+        .route(
+            HOLD_RELEASE_PATH,
+            post({
+                let state = Arc::clone(&server_state);
+                move |body| hold_release_handler(state, body)
             }),
         );
 
@@ -490,9 +504,19 @@ fn is_resource_exhaustion_error(error: &io::Error) -> bool {
     false
 }
 
+/// Which probe a health route answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// Not ready while the worker is held: it takes no ordinary traffic yet, so nothing that
+    /// waits on its readiness, such as a rollout, should move on.
+    Readiness,
+    /// Unaffected by the hold. A held worker is alive and must not be restarted for it.
+    Liveness,
+}
+
 /// Health handler with optional active health checking
 #[tracing::instrument(skip_all, level = "trace")]
-async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+async fn health_handler(state: Arc<SystemStatusState>, probe: Probe) -> impl IntoResponse {
     // Get basic health status
     let system_health = state.drt().system_health();
     let system_health_lock = system_health.lock();
@@ -500,6 +524,8 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let uptime = Some(system_health_lock.uptime());
     drop(system_health_lock);
 
+    let held = probe == Probe::Readiness && state.drt().is_routing_held();
+    let healthy = healthy && !held;
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
         StatusCode::OK
@@ -507,11 +533,14 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
-    let response = json!({
+    let mut response = json!({
         "status": healthy_string,
         "uptime": uptime,
         "endpoints": endpoints,
     });
+    if held {
+        response["held"] = json!(true);
+    }
 
     tracing::trace!("Response {}", response.to_string());
 
@@ -520,16 +549,120 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 
 /// Sidecar readiness is independent of engine health and model registration.
 async fn runtime_health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    let ready = matches!(
-        tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
-        Ok(Ok(()))
-    );
+    let held = state.drt().is_routing_held();
+    let ready = !held
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
+            Ok(Ok(()))
+        );
     let (code, status) = if ready {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "notready")
     };
-    (code, Json(json!({ "status": status })))
+    let mut response = json!({ "status": status });
+    if held {
+        response["held"] = json!(true);
+    }
+    (code, Json(response))
+}
+
+/// Reports whether this worker is held out of automatic routing, and for which instance.
+const HOLD_PATH: &str = "/v1/hold";
+/// Releases this worker's hold. See [`hold_release_handler`].
+const HOLD_RELEASE_PATH: &str = "/v1/hold/release";
+
+/// A worker instance ID in a request body. IDs can exceed the integers a JSON number carries
+/// exactly in some clients, so a decimal string is accepted too.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum InstanceIdField {
+    Number(u64),
+    Text(String),
+}
+
+#[derive(serde::Deserialize)]
+struct HoldReleaseRequest {
+    instance_id: InstanceIdField,
+}
+
+fn hold_status(drt: &crate::DistributedRuntime) -> serde_json::Value {
+    json!({
+        "instance_id": drt.connection_id(),
+        "held": drt.is_routing_held(),
+    })
+}
+
+/// `GET /v1/hold`: the hold of the worker instance that runs in this process. A controller
+/// reads the instance ID here to tell this worker from an older one at the same address.
+async fn hold_status_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    Json(hold_status(state.drt()))
+}
+
+/// `POST /v1/hold/release` with `{"instance_id": <id>}`: release the hold of that instance.
+///
+/// - `200`: the worker is released. `released` is false when it already was, so a retry is safe.
+/// - `400`: the body names no instance.
+/// - `409`: the body names another instance. This worker keeps its hold.
+/// - `500`: the discovery records could not all be updated. The worker is still held, and
+///   repeating the release completes it.
+async fn hold_release_handler(state: Arc<SystemStatusState>, body: Bytes) -> Response {
+    use crate::routing_hold::{HoldRelease, HoldReleaseError};
+
+    let drt = state.drt();
+    let rejected = |code: StatusCode, error: String| {
+        let mut response = hold_status(drt);
+        response["error"] = json!(error);
+        (code, Json(response)).into_response()
+    };
+
+    let instance_id = match serde_json::from_slice::<HoldReleaseRequest>(&body) {
+        Ok(HoldReleaseRequest {
+            instance_id: InstanceIdField::Number(instance_id),
+        }) => Some(instance_id),
+        Ok(HoldReleaseRequest {
+            instance_id: InstanceIdField::Text(instance_id),
+        }) => instance_id.parse::<u64>().ok(),
+        Err(_) => None,
+    };
+    let Some(instance_id) = instance_id else {
+        return rejected(
+            StatusCode::BAD_REQUEST,
+            "the request body must be a JSON object with the worker's instance_id".to_string(),
+        );
+    };
+
+    // The release runs in its own task. A caller that hangs up must not stop it between
+    // writing the discovery records and clearing the hold: that would leave a worker that
+    // reports held while routers already send it ordinary traffic.
+    let release = {
+        let drt = drt.clone();
+        tokio::spawn(async move { drt.release_routing_hold(instance_id).await })
+    };
+    let outcome = match release.await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(%error, "the worker routing hold release did not finish");
+            return rejected(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the release did not finish".to_string(),
+            );
+        }
+    };
+    match outcome {
+        Ok(outcome) => {
+            let mut response = hold_status(drt);
+            response["released"] = json!(outcome == HoldRelease::Released);
+            Json(response).into_response()
+        }
+        Err(error @ HoldReleaseError::StaleInstance { .. }) => {
+            rejected(StatusCode::CONFLICT, error.to_string())
+        }
+        Err(error @ HoldReleaseError::Discovery(_)) => {
+            tracing::error!(%error, "failed to release the worker routing hold");
+            rejected(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+    }
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -1011,6 +1144,205 @@ mod tests {
     }
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
+    async fn status_and_body(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
+        let response = response.into_response();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// A worker that starts held is discovered as held and not ready, and stays alive. Only a
+    /// release for its own instance clears the hold, in place, and a repeat is a no-op.
+    #[tokio::test]
+    async fn held_worker_reports_its_hold_and_releases_it_for_its_own_instance() {
+        let runtime = crate::Runtime::from_current().unwrap();
+        let drt = Arc::new(
+            crate::DistributedRuntime::new(
+                runtime.clone(),
+                crate::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap(),
+        );
+        let state = Arc::new(SystemStatusState::new(drt.clone(), None).unwrap());
+        let (ready_code, _) =
+            status_and_body(health_handler(state.clone(), Probe::Readiness).await).await;
+        let (live_code, _) =
+            status_and_body(health_handler(state.clone(), Probe::Liveness).await).await;
+
+        drt.hold_routing_for_test();
+        let endpoint = drt
+            .namespace("held-worker".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        endpoint.register_endpoint_instance().await.unwrap();
+        let client = endpoint.client().await.unwrap();
+        let registered = client.wait_for_instances().await.unwrap();
+        assert!(registered[0].held);
+        let instance_id = drt.connection_id();
+        // A router sees the worker and keeps it out of automatic routing.
+        let mut dispatchable = client.instance_dispatch_watcher();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatchable.wait_for(|instances| instances.is_held(instance_id)),
+        )
+        .await
+        .expect("the held worker was not discovered")
+        .unwrap();
+        let mut routable = client.instance_avail_watcher();
+        assert!(routable.borrow_and_update().is_empty());
+
+        // Status names the instance. Readiness fails for the hold; liveness does not move.
+        let (code, body) = status_and_body(hold_status_handler(state.clone()).await).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, json!({"instance_id": instance_id, "held": true}));
+        let (code, body) =
+            status_and_body(health_handler(state.clone(), Probe::Readiness).await).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "notready");
+        assert_eq!(body["held"], true);
+        let (code, body) =
+            status_and_body(health_handler(state.clone(), Probe::Liveness).await).await;
+        assert_eq!(code, live_code);
+        assert!(body.get("held").is_none());
+        let (code, body) = status_and_body(runtime_health_handler(state.clone()).await).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["held"], true);
+
+        let release = |body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                status_and_body(
+                    hold_release_handler(state, Bytes::from(serde_json::to_vec(&body).unwrap()))
+                        .await,
+                )
+                .await
+            }
+        };
+
+        // A body that names no instance, and a release meant for another instance, leave
+        // the worker held.
+        let (code, body) = release(json!({})).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["held"], true);
+        let (code, body) = release(json!({"instance_id": instance_id.wrapping_add(1)})).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["instance_id"], instance_id);
+        assert_eq!(body["held"], true);
+        assert!(drt.is_routing_held());
+
+        // The release, with the instance ID as a decimal string.
+        let (code, body) = release(json!({"instance_id": instance_id.to_string()})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"instance_id": instance_id, "held": false, "released": true})
+        );
+        // The discovery record changed in place: same instance, hold cleared.
+        let mut instances = client.instance_source.as_ref().clone();
+        let released = tokio::time::timeout(
+            Duration::from_secs(1),
+            instances.wait_for(|instances| instances.iter().all(|instance| !instance.held)),
+        )
+        .await
+        .expect("the endpoint record kept its hold")
+        .unwrap()
+        .clone();
+        assert_eq!(
+            released,
+            vec![crate::component::Instance {
+                held: false,
+                ..registered[0].clone()
+            }]
+        );
+        // The router that watched the record now routes to the worker.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            routable.wait_for(|instance_ids| instance_ids == &[instance_id]),
+        )
+        .await
+        .expect("the released worker did not become routable")
+        .unwrap();
+        assert!(!client.is_instance_held(instance_id));
+
+        // A retry is safe, and the worker is ready again.
+        let (code, body) = release(json!({"instance_id": instance_id})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["released"], false);
+        let (code, body) =
+            status_and_body(health_handler(state.clone(), Probe::Readiness).await).await;
+        assert_eq!(code, ready_code);
+        assert!(body.get("held").is_none());
+        // An endpoint that registers after the release is not held.
+        let late = drt
+            .namespace("held-worker".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap()
+            .endpoint("late".to_string());
+        late.register_endpoint_instance().await.unwrap();
+        let late_client = late.client().await.unwrap();
+        assert!(!late_client.wait_for_instances().await.unwrap()[0].held);
+
+        runtime.shutdown();
+    }
+
+    /// A controller that gives up closes its connection, which drops the handler. The release
+    /// it asked for must still finish, or the records and the worker would disagree.
+    #[tokio::test]
+    async fn a_release_finishes_after_its_caller_goes_away() {
+        let runtime = crate::Runtime::from_current().unwrap();
+        let drt = Arc::new(
+            crate::DistributedRuntime::new(
+                runtime.clone(),
+                crate::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap(),
+        );
+        let state = Arc::new(SystemStatusState::new(drt.clone(), None).unwrap());
+        drt.hold_routing_for_test();
+        let endpoint = drt
+            .namespace("held-worker-caller-gone".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        endpoint.register_endpoint_instance().await.unwrap();
+        let client = endpoint.client().await.unwrap();
+        assert!(client.wait_for_instances().await.unwrap()[0].held);
+
+        // An endpoint that is registering makes the release wait, so the caller leaves first.
+        let registration = drt.routing_hold().registration().await;
+        let body = serde_json::to_vec(&json!({"instance_id": drt.connection_id()})).unwrap();
+        let mut call = Box::pin(hold_release_handler(state.clone(), Bytes::from(body)));
+        assert!(futures::poll!(&mut call).is_pending());
+        drop(call);
+        drop(registration);
+
+        let mut instances = client.instance_source.as_ref().clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            instances.wait_for(|instances| instances.iter().all(|instance| !instance.held)),
+        )
+        .await
+        .expect("the release stopped when its caller went away")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while drt.is_routing_held() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the worker still reports held after its records were released");
+
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn test_http_server_lifecycle() {
         let cancel_token = CancellationToken::new();
