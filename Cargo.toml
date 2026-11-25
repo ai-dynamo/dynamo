@@ -11,6 +11,7 @@ members = [
     "lib/truthy",
     "lib/error",
     "lib/data-gen",
+    "lib/ft-controller",
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-events",
