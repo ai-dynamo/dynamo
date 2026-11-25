@@ -1213,7 +1213,7 @@ pub(crate) static MERGE_CONFLICTS_TOTAL: Lazy<prometheus::IntCounter> = Lazy::ne
     .expect("metrics merge conflicts counter")
 });
 
-/// Register [`MERGE_CONFLICTS_TOTAL`] on a DistributedRuntime's root registry,
+/// Register the process-wide merge-conflicts counter on a DistributedRuntime's root registry,
 /// so it is exported wherever that tree is: `/metrics` and OTLP.
 pub fn register_merge_conflicts_counter(registry: &MetricsRegistry) {
     registry.add_metric_or_warn(
