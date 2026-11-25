@@ -17,13 +17,13 @@ pub(super) fn classify(
     // Preserve vLLM's unary-fold policy: deadline and overload markers alone
     // were internal stream failures, unlike errors returned before dispatch.
     if matches!(phase, ErrorPhase::Stream { cancelled: true }) || request_was_cancelled(error) {
-        WorkerError::new(
+        WorkerError::new_static(
             ErrorType::Cancelled,
             StatusCode::from_u16(499).unwrap(),
             "request was cancelled",
         )
     } else if request_was_unavailable(error) {
-        WorkerError::new(
+        WorkerError::new_sanitized(
             ErrorType::Unavailable,
             StatusCode::SERVICE_UNAVAILABLE,
             SanitizedError::Unavailable,
@@ -31,7 +31,7 @@ pub(super) fn classify(
     } else if let Some(message) = invalid {
         WorkerError::new(ErrorType::Validation, StatusCode::BAD_REQUEST, message)
     } else {
-        WorkerError::new(
+        WorkerError::new_static(
             ErrorType::Internal,
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal server error",

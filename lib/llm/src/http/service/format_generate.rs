@@ -106,6 +106,7 @@ fn stream_error(
         kind: error_type,
         status,
         message,
+        ..
     } = worker_error(format, error, ErrorPhase::Stream { cancelled: false });
     (error_type, format.error_body(status, &message).to_string())
 }
@@ -513,6 +514,7 @@ impl Dispatch {
                     kind: mut error_type,
                     status,
                     message,
+                    ..
                 } = worker_error(&format, error.as_ref(), ErrorPhase::Dispatch);
                 if request_context.is_killed() || status == CANCELLED {
                     return cancelled(&mut inflight_guard);
@@ -561,6 +563,7 @@ impl Dispatch {
                         kind: error_type,
                         status,
                         message,
+                        ..
                     } = worker_error(
                         &format,
                         &error,

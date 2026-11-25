@@ -151,8 +151,9 @@ otherwise, a received backend explanation is forwarded by default. Private Dynam
 and transport wrappers are never used as the fallback explanation.
 
 A shared frontend blocklist masks media-fetch diagnostics, Dynamo connection and incomplete-stream
-failures, Python programming errors (`TypeError`, `AttributeError`, and `KeyError`), and known
-XGrammar compiler source locations. Masking removes the original message and structured details
+failures, Python programming errors (`TypeError`, `AttributeError`, and `KeyError`), known
+XGrammar compiler source locations, PIL image-decode messages that include a process memory address,
+and errors with invalid upstream metadata. Masking removes the original message and structured details
 from the response. Existing fixed media-recovery messages remain visible. Unrecognized engine
 error types are not masked solely because their classification is internal or unknown.
 

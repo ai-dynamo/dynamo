@@ -18,11 +18,27 @@ pub enum ErrorPhase {
     Stream { cancelled: bool },
 }
 
+/// Frontend-authored defaults kept separate from a format's mutable message.
+enum TrustedFallback {
+    Static(&'static str),
+    Sanitized(SanitizedError),
+}
+
+impl TrustedFallback {
+    fn message(&self) -> String {
+        match self {
+            Self::Static(message) => (*message).to_string(),
+            Self::Sanitized(error) => error.to_string(),
+        }
+    }
+}
+
 /// A format's public worker error and its request-metric category.
 pub struct WorkerError {
     pub kind: ErrorType,
     pub status: StatusCode,
     pub message: String,
+    fallback: Option<TrustedFallback>,
 }
 
 impl WorkerError {
@@ -31,6 +47,23 @@ impl WorkerError {
             kind,
             status,
             message: message.to_string(),
+            fallback: None,
+        }
+    }
+
+    /// Construct an error with an explicitly frontend-authored static fallback.
+    pub fn new_static(kind: ErrorType, status: StatusCode, message: &'static str) -> Self {
+        Self {
+            fallback: Some(TrustedFallback::Static(message)),
+            ..Self::new(kind, status, message)
+        }
+    }
+
+    /// Construct an error with an existing sanitized frontend fallback.
+    pub fn new_sanitized(kind: ErrorType, status: StatusCode, error: SanitizedError) -> Self {
+        Self {
+            fallback: Some(TrustedFallback::Sanitized(error)),
+            ..Self::new(kind, status, error)
         }
     }
 
@@ -41,6 +74,9 @@ impl WorkerError {
         if let Some(error) = first_dynamo_error(error) {
             let body = public_error_body(error, Protocol::OpenAi);
             self.message = body.message.filter(|_| !body.blocked).unwrap_or_else(|| {
+                if let Some(fallback) = &self.fallback {
+                    return fallback.message();
+                }
                 // Formats may select a different status from the source's class.
                 let class = if self.kind == ErrorType::Overload {
                     dynamo_runtime::error::ErrorClass::CapacityExhausted
@@ -85,25 +121,25 @@ impl WorkerError {
     /// Dispatch counts `Overload` as an unavailable request plus a rejection.
     pub fn dispatch(error: &(dyn std::error::Error + 'static), invalid: Option<String>) -> Self {
         if request_deadline_exceeded(error) {
-            Self::new(
+            Self::new_static(
                 ErrorType::Cancelled,
                 StatusCode::TOO_MANY_REQUESTS,
                 REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             )
         } else if request_was_cancelled(error) {
-            Self::new(
+            Self::new_static(
                 ErrorType::Cancelled,
                 StatusCode::from_u16(499).unwrap(),
                 "request was cancelled",
             )
         } else if request_was_rejected(error) {
-            Self::new(
+            Self::new_static(
                 ErrorType::Overload,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "engine rejected the request",
             )
         } else if request_was_unavailable(error) {
-            Self::new(
+            Self::new_sanitized(
                 ErrorType::Unavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
                 SanitizedError::Unavailable,
@@ -111,7 +147,7 @@ impl WorkerError {
         } else if let Some(message) = invalid {
             Self::new(ErrorType::Validation, StatusCode::BAD_REQUEST, message)
         } else {
-            Self::new(
+            Self::new_static(
                 ErrorType::Internal,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal server error",
@@ -157,6 +193,83 @@ mod tests {
         let selected = WorkerError::new(ErrorType::Validation, StatusCode::BAD_REQUEST, private)
             .with_client_policy(&legacy);
         assert_eq!(selected.message, "Invalid request");
+    }
+
+    #[test]
+    fn trusted_fallback_is_independent_of_replaced_messages() {
+        let private = "PRIVATE_PLUGIN_OR_MEDIA_DETAIL";
+        let absent = DynamoError::builder().diagnostic(private).build();
+        let blocked = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(UpstreamError::new(private).family("media_fetch"))
+            .public_message(private)
+            .build();
+        for source in [absent, blocked] {
+            for (mut selected, expected) in [
+                (
+                    WorkerError::new_static(
+                        ErrorType::Cancelled,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                    ),
+                    REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                ),
+                (
+                    WorkerError::new_sanitized(
+                        ErrorType::Unavailable,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        SanitizedError::Unavailable,
+                    ),
+                    "Service temporarily unavailable",
+                ),
+            ] {
+                let status = selected.status;
+                let kind = selected.kind.clone();
+                selected.message = private.to_string();
+                let selected = selected.with_client_policy(&source);
+                assert_eq!(selected.message, expected);
+                assert_eq!(selected.status, status);
+                assert_eq!(selected.kind, kind);
+            }
+        }
+    }
+
+    #[test]
+    fn approved_public_and_received_messages_precede_trusted_fallbacks() {
+        let received = "engine validation explanation";
+        for (source, expected) in [
+            (
+                DynamoError::builder()
+                    .upstream_error(UpstreamError::new(received))
+                    .build(),
+                received,
+            ),
+            (
+                DynamoError::builder()
+                    .upstream_error(UpstreamError::new(received))
+                    .public_message("authored public replacement")
+                    .build(),
+                "authored public replacement",
+            ),
+        ] {
+            for selected in [
+                WorkerError::new_static(
+                    ErrorType::Internal,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error",
+                ),
+                WorkerError::new_sanitized(
+                    ErrorType::Internal,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    SanitizedError::Internal,
+                ),
+            ] {
+                let selected = selected.with_client_policy(&source);
+                assert_eq!(selected.message, expected);
+                assert_eq!(selected.status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(selected.kind, ErrorType::Internal);
+            }
+        }
     }
 
     #[test]

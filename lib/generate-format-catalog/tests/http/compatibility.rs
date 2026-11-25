@@ -140,17 +140,13 @@ async fn formats_preserve_typed_validation_error_policy_before_and_after_dispatc
             Backend::Backend(BackendError::InvalidArgument),
             Backend::InvalidRequest,
         ] {
-            let is_private = kind == Backend::InvalidRequest;
+            let legacy_internal = is_sglang && kind == Backend::InvalidRequest;
             for after_dispatch in [false, true] {
-                let expected_message = if is_sglang {
-                    if is_private {
-                        if after_dispatch {
-                            "Internal server error"
-                        } else {
-                            "internal server error"
-                        }
+                let expected_message = if legacy_internal {
+                    if after_dispatch {
+                        "Internal server error"
                     } else {
-                        "private worker details"
+                        "internal server error"
                     }
                 } else {
                     "Invalid request"
@@ -182,7 +178,7 @@ async fn formats_preserve_typed_validation_error_policy_before_and_after_dispatc
                     let response = respond(state(), format, engine, body, HeaderMap::new()).await;
                     let expected_status = if streaming && after_dispatch {
                         StatusCode::OK
-                    } else if is_sglang && is_private {
+                    } else if legacy_internal {
                         StatusCode::INTERNAL_SERVER_ERROR
                     } else {
                         StatusCode::BAD_REQUEST
@@ -193,9 +189,7 @@ async fn formats_preserve_typed_validation_error_policy_before_and_after_dispatc
                         .unwrap();
                     let body = String::from_utf8(bytes.to_vec()).unwrap();
                     assert!(body.contains(expected_message), "{body}");
-                    if !is_sglang || is_private {
-                        assert!(!body.contains("private worker details"));
-                    }
+                    assert!(!body.contains("private worker details"), "{body}");
                 }
             }
         }

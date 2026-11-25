@@ -13,7 +13,7 @@ use dynamo_llm::protocols::{
     common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 use dynamo_runtime::engine::{AsyncEngine, ResponseStream};
-use dynamo_runtime::error::DynamoError;
+use dynamo_runtime::error::{DynamoError, UpstreamError};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Error, ManyOut, SingleIn};
 use futures::StreamExt;
 use serde_json::Value;
@@ -284,7 +284,13 @@ async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
     };
     let invalid = DynamoError::builder()
         .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
-        .message("bad sampling params")
+        .message("private sampling diagnostics")
+        .upstream_error(UpstreamError::new("bad sampling params"))
+        .build();
+    let public = DynamoError::builder()
+        .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+        .message("private sampling diagnostics")
+        .public_message("Public sampling explanation")
         .build();
     for (outputs, status, body) in [
         (
@@ -296,6 +302,11 @@ async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
             vec![chunk(serde_json::json!([5])), Annotated::from_err(invalid)],
             StatusCode::BAD_REQUEST,
             serde_json::json!({"error": {"message": "bad sampling params"}}),
+        ),
+        (
+            vec![Annotated::from_err(public)],
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": {"message": "Public sampling explanation"}}),
         ),
         (
             vec![Annotated::from_data(LLMEngineOutput::default())],
@@ -320,7 +331,9 @@ async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
         .await
         .expect("stream errors must fail before the worker stream ends");
         assert_eq!(response.status(), status);
-        assert_eq!(json(response).await, body);
+        let actual = json(response).await;
+        assert!(!actual.to_string().contains("private sampling diagnostics"));
+        assert_eq!(actual, body);
     }
 }
 

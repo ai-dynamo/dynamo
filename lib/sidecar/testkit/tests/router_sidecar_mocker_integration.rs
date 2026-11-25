@@ -299,7 +299,12 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
                 .collect();
             assert_eq!(errors.len(), 1, "{body}");
             assert_eq!(errors[0]["code"], 503, "{body}");
-            assert!(!body.contains("injected read failure"), "{body}");
+            if F::read_error() == BackendError::EngineShutdown {
+                // LPX treats a received UNAVAILABLE status as an engine shutdown.
+                assert_eq!(errors[0]["message"], "injected read failure", "{body}");
+            } else {
+                assert!(!body.contains("injected read failure"), "{body}");
+            }
             assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
             assert!(
                 events
@@ -315,7 +320,11 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
             assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
             let body: Value = response.json().await.unwrap();
             assert_eq!(body["code"], 400, "{body}");
-            assert_eq!(body["message"], "Invalid request", "{body}");
+            // A received native validation explanation forwards without its RPC wrapper.
+            assert_eq!(
+                body["message"], "injected native request rejection",
+                "{body}"
+            );
             assert!(
                 handle.reached(Event::Received),
                 "frontend rejected before native RPC"
