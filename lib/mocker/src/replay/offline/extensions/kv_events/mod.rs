@@ -383,7 +383,6 @@ mod tests {
                 ),
             ];
             for (event, expected_tier, expected_hashes, transition) in transitions {
-                // KVCR-owned memory and disk are the rank's cache owner's, not the worker's.
                 let expected_owner = (event.domain == KvEventDomain::CacheOwner)
                     .then(|| replay_cache_owner(WorkerWithDpRank::new(3, 0)));
                 let expected_session = match &event.data {
