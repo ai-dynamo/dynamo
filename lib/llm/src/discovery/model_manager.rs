@@ -2498,6 +2498,14 @@ impl ModelManager {
                         self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                     ))
                 }
+                // No client exists for a cache type this frontend does not know.
+                unknown => {
+                    tracing::warn!(
+                        shared_cache_type = %unknown,
+                        "Unknown shared KV cache type; routing without a shared cache"
+                    );
+                    None
+                }
             }
         } else {
             None

@@ -60,6 +60,7 @@ pub(crate) struct RequestClassifierRegistry {
 
 /// An error from classifier registration or startup resolution.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RequestClassifierRegistryError {
     #[error("request-classifier type must not be empty")]
     EmptyName,

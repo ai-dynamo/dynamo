@@ -105,6 +105,8 @@ impl Parameters {
                     match config.shared_cache_type() {
                         SharedCacheType::None => 0.0,
                         SharedCacheType::Hicache => 0.5,
+                        // A cache type this policy has no default for earns no credit.
+                        _ => 0.0,
                     },
                 ))
             }),

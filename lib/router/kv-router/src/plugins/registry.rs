@@ -124,6 +124,7 @@ pub struct RouterPluginRegistry {
 
 /// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WorkerSelectionPolicyRegistryError {
     #[error("worker-selection policy type must not be empty")]
     EmptyName,
