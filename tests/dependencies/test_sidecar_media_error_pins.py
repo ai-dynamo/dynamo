@@ -70,7 +70,7 @@ def _python_pin(extra: str, package: str) -> str:
 
 
 def test_vllm_media_error_version() -> None:
-    _reviewed(_python_pin("vllm", "vllm"), "==0.33.0")
+    _reviewed(_python_pin("vllm", "vllm"), "==0.34.0")
 
 
 def test_sglang_media_error_version() -> None:
@@ -78,7 +78,7 @@ def test_sglang_media_error_version() -> None:
 
 
 def test_trtllm_media_error_version() -> None:
-    _reviewed(_python_pin("trtllm", "tensorrt-llm"), "==1.4.0rc3")
+    _reviewed(_python_pin("trtllm", "tensorrt-llm"), "==1.4.0rc4")
 
 
 def test_stock_runtime_media_error_versions() -> None:
@@ -93,12 +93,12 @@ def test_stock_runtime_media_error_versions() -> None:
     _reviewed(
         actual,
         {
-            ("vllm", "cuda13.0", "vllm/vllm-openai", "v0.33.0"),
+            ("vllm", "cuda13.0", "vllm/vllm-openai", "v0.34.0"),
             ("vllm", "xpu", "vllm/vllm-openai-xpu", "v0.33.0"),
             ("vllm", "cpu", "vllm/vllm-openai-cpu", "v0.33.0"),
             ("sglang", "cuda13.0", "lmsysorg/sglang", "v0.5.23-cu130-runtime"),
             ("sglang", "xpu", "lmsysorg/sglang", "v0.5.23-xpu"),
-            ("trtllm", "cuda13.4", "nvcr.io/nvidia/tensorrt-llm/release", "1.4.0rc3"),
+            ("trtllm", "cuda13.4", "nvcr.io/nvidia/tensorrt-llm/release", "1.4.0rc4"),
         },
     )
 

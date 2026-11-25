@@ -4,9 +4,12 @@
 use axum::http::StatusCode;
 
 use dynamo_error::http::SanitizedError;
+use dynamo_http_server::metrics::{
+    ErrorType, REQUEST_DEADLINE_EXCEEDED_MESSAGE, request_deadline_exceeded, request_was_cancelled,
+    request_was_rejected, request_was_unavailable,
+};
 
 use crate::http::service::error::first_dynamo_error;
-use crate::http::service::metrics::*;
 
 /// Whether dispatch failed or a returned response stream failed.
 #[derive(Clone, Copy)]

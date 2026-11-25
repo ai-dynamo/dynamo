@@ -24,7 +24,7 @@ pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException)
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_admission::host::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
-    let attributes = Python::with_gil(|py| -> PyResult<()> {
+    let attributes = Python::attach(|py| -> PyResult<()> {
         let value = error.value(py);
         value.setattr("policy_class", &rejection.policy_class)?;
         value.setattr("limit_kind", rejection.limit_kind.to_string())?;
@@ -70,7 +70,7 @@ const RELAY_CONTENT_ATTR: &str = "_dynamo_relay_content";
 /// Mark serialized errors for full frontend restoration or content-only worker relaying.
 fn attach_error(error: &DynamoError, exception: PyErr, routed_engine: bool) -> PyErr {
     if let Ok(serialized) = serde_json::to_string(error) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let attribute = if routed_engine {
                 ROUTED_ENGINE_ERROR_ATTR
             } else {
@@ -173,7 +173,7 @@ fn is_media_fetch_error(value: &Bound<'_, PyAny>) -> bool {
     let Ok(mro) = value.get_type().getattr("__mro__") else {
         return false;
     };
-    let Ok(bases) = mro.downcast::<PyTuple>() else {
+    let Ok(bases) = mro.cast::<PyTuple>() else {
         return false;
     };
     let mut vllm_unprocessable = false;
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn dispatch_errors_keep_local_identity_and_private_provenance() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         for (typed, received) in [(true, true), (true, false), (false, false)] {
             let exception = _raise_dispatch_error(
                 "failed to connect to tcp://PRIVATE_DISPATCH_HOST:1234".into(),
@@ -960,7 +960,7 @@ mod tests {
                 received,
             )
             .unwrap_err();
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 assert!(exception.value(py).hasattr(RELAY_CONTENT_ATTR).unwrap());
                 assert!(
                     !exception
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn dispatch_content_keeps_source_facts_without_remote_health_identity() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         for class in [ErrorClass::InvalidRequest, ErrorClass::WorkerUnavailable] {
             let source = DynamoError::builder()
                 .class(class)
@@ -1032,7 +1032,7 @@ mod tests {
 
     #[test]
     fn unknown_python_failure_preserves_received_text_without_display_prefix() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let error = crate::engine::map_python_exception(pyo3::exceptions::PyRuntimeError::new_err(
             "engine rejected the request",
         ));
@@ -1045,8 +1045,8 @@ mod tests {
 
     #[test]
     fn python_exception_families_survive_subclasses_and_cause_wrapping() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1104,8 +1104,8 @@ def requests_wrapped():
 
     #[test]
     fn authored_invalid_arguments_preserve_distinct_programming_translations() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(r#"
@@ -1189,8 +1189,8 @@ def outer_bug(kind):
 
     #[test]
     fn suppressed_context_keeps_media_transport_and_relay_privacy() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1357,8 +1357,8 @@ def translated_relay(error, mode):
 
     #[test]
     fn media_family_uses_aiohttp_ancestry_and_vllm_input_provenance() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(r#"
@@ -1471,8 +1471,8 @@ def vllm_error(kind, parameter, value):
 
     #[test]
     fn cyclic_or_excessive_python_causes_retain_incomplete_provenance() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1509,7 +1509,7 @@ def excessive():
 
     #[test]
     fn worker_relay_projects_nested_content_without_health_identity_or_invalid_recovery() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let inner = DynamoError::builder()
             .error_type(dynamo_runtime::error::ErrorType::Backend(
                 BackendError::Disconnected,
@@ -1546,8 +1546,8 @@ def excessive():
 
     #[test]
     fn worker_relay_provenance_survives_a_new_python_exception() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1589,8 +1589,8 @@ def wrap(error):
 
     #[test]
     fn wrapped_legacy_relays_never_recapture_private_display_as_received_content() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             for routed in [false, true] {
                 for public in [
                     None,
@@ -1650,7 +1650,7 @@ def wrap(error):
 
     #[test]
     fn frontend_relay_keeps_worker_unavailable_selection_through_outer_context() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let worker = DynamoError::builder()
             .class(ErrorClass::WorkerUnavailable)
             .retry_hint(RetryHint::Draining)
@@ -1663,7 +1663,7 @@ def wrap(error):
                 .cause(worker.clone())
                 .build();
             let exception = routed_error_to_pyerr(anyhow::Error::new(outer));
-            Python::with_gil(|py| assert!(exception.is_instance_of::<WorkerDraining>(py)));
+            Python::attach(|py| assert!(exception.is_instance_of::<WorkerDraining>(py)));
             let mapped = crate::engine::map_python_exception(exception);
             assert_eq!(mapped.error_type(), ErrorClass::WorkerUnavailable);
             assert_eq!(mapped.retry_hint(), Some(RetryHint::Draining));
@@ -1686,7 +1686,7 @@ def wrap(error):
 
     #[test]
     fn frontend_invalid_argument_relay_preserves_structured_context_and_upstream() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let original = DynamoError::builder()
             .class(ErrorClass::InvalidRequest)
             .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
@@ -1698,7 +1698,7 @@ def wrap(error):
             .diagnostic("private wrapper")
             .build();
         let exception = routed_error_to_pyerr(anyhow::Error::new(original.clone()));
-        Python::with_gil(|py| assert!(exception.is_instance_of::<InvalidArgument>(py)));
+        Python::attach(|py| assert!(exception.is_instance_of::<InvalidArgument>(py)));
         let mapped = crate::engine::map_python_exception(exception);
         assert_eq!(mapped.class(), original.class());
         assert_eq!(mapped.reason(), original.reason());
@@ -1708,7 +1708,7 @@ def wrap(error):
 
     #[test]
     fn worker_relay_preserves_content_without_adopting_remote_health_identity() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let original = DynamoError::builder()
             .error_type(dynamo_runtime::error::ErrorType::Backend(
                 BackendError::Disconnected,
@@ -1869,8 +1869,8 @@ def wrap(error):
 
     #[test]
     fn explicit_http_status_survives_python_capture_and_serialization() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1923,8 +1923,8 @@ def fail(status):
 
     #[test]
     fn status_code_api_errors_capture_explicit_http_status_only_in_http_error_space() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(
@@ -1984,8 +1984,8 @@ def fail(status_code):
 
     #[test]
     fn native_numeric_codes_are_not_inferred_as_http_statuses() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let globals = pyo3::types::PyDict::new(py);
             globals
                 .set_item("DynamoException", py.get_type::<DynamoException>())
@@ -2034,7 +2034,7 @@ def fail(code):
 
     #[test]
     fn worker_relay_keeps_http_status_without_adopting_remote_class_or_retry() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let remote = build_http_like_error(503, "received HTTP explanation".into());
         let outer = DynamoError::builder()
             .class(ErrorClass::Internal)

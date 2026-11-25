@@ -165,7 +165,7 @@ impl HttpService {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct HttpAsyncEngine(pub PythonAsyncEngine);
 
@@ -190,7 +190,7 @@ impl HttpAsyncEngine {
     /// could accept a different type of request or return a different type of response
     /// and we would not know until runtime.
     #[new]
-    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+    pub fn new(generator: Py<PyAny>, event_loop: Py<PyAny>) -> PyResult<Self> {
         Ok(PythonAsyncEngine::new(generator, event_loop)?.into())
     }
 }
@@ -206,7 +206,7 @@ fn map_http_async_error(error: Error) -> Error {
     let Some(exception) = error.downcast_ref::<PyErr>() else {
         return error;
     };
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         if let Ok(HttpError { code, message }) = exception.value(py).extract() {
             let captured = crate::errors::preserve_python_error_content(
                 py,
@@ -245,8 +245,8 @@ mod tests {
 
     #[test]
     fn http_adapter_keeps_raw_status_separate_from_disclosure_context() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
                 c_str!(

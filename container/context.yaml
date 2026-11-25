@@ -21,11 +21,6 @@ dynamo:
     # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
     # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
     # shared multi-arch index digest).
-  frontend:
-    # The frontend installs NIXL from PyPI (the tag minus its leading "v")
-    # rather than building it in wheel_builder, so it moves independently of
-    # the framework-level ref the runtime target's nixl-sys links against.
-    nixl_ref: v1.5.0
   # Dynamo's native Rust EPP (deploy/inference-gateway/ext-proc). This is the
   # default value of the frontend's EPP_IMAGE build arg; the frontend copies
   # /epp out of it. CI overrides EPP_IMAGE with the per-commit image it just
@@ -68,16 +63,11 @@ dynamo:
   etcd_version: v3.5.35
   etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
-  nixl_ref: v1.3.2
+  # PyPI NIXL version for the frontend, runtime and dev images.
+  # Keep nixl-sys in lib/memory/Cargo.toml at the same version.
+  nixl_ref: v1.5.0
+  # UCX for the XPU and CPU NIXL source builds.
   nixl_ucx_ref: v1.22.0
-  nixl_gdrcopy_ref: v2.5.2
-  nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
-  # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
-  # efa_version (2.7.0 in EFA 1.51.0): the TRT-LLM EFA image runs NIXL against
-  # that copy, so a newer ref can link to symbols that copy lacks.
-  nixl_libfabric_ref: v2.6.0
-  # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
-  hwloc_version: 2.12.2
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   # Built from source in wheel_builder with a narrow codec allowlist and
@@ -97,11 +87,8 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.33.0
-    vllm_omni_ref: "v0.33.0rc1"
-    # Omni caps Transformers below 5.20; the vLLM 0.33 image ships 5.20.2.
-    transformers_version: "5.19.0"
-    tokenizers_version: "0.23.3"
+    runtime_image_tag: v0.34.0
+    vllm_omni_ref: "v0.34.0rc1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -122,6 +109,11 @@ vllm:
         runtime_image: nvcr.io/nvidia/vllm-base-enterprise-nightly
         runtime_image_tag: 20261110-90f0ff8
         baseline_sbom: vllm-base-enterprise-nightly@6622ab1d
+        # vLLM 0.33 base: Omni v0.33.0rc1 caps Transformers below 5.20. Remove
+        # these three once the base ships 0.34.
+        vllm_omni_ref: "v0.33.0rc1"
+        transformers_version: "5.19.0"
+        tokenizers_version: "0.23.3"
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -133,6 +125,7 @@ vllm:
     transformers_version: "5.19.0"
     tokenizers_version: "0.23.3"
     baseline_sbom: vllm-openai-xpu@be3a9aea
+    # NIXL for the XPU source build. CUDA uses upstream vLLM's NIXL.
     # vLLM 0.33's NIXL connector requires NIXL >= 1.5.0 (check_nixl_version).
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
@@ -146,16 +139,14 @@ vllm:
     transformers_version: "5.19.0"
     tokenizers_version: "0.23.3"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
+    # NIXL for the CPU source build.
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
   vllm_omni_ref: "v0.33.0rc1"
-  nixl_ref: v1.5.0
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
   modelexpress_version: "0.7.0"
-  # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
-  aws_sdk_cpp_version: "1.11.760"
 
 sglang:
   cuda13.0:
@@ -180,16 +171,9 @@ sglang:
     runtime_image: lmsysorg/sglang
     runtime_image_tag: v0.5.23-xpu
     baseline_sbom: sglang@f5627c5e
-    # The NIXL versions in the XPU and CUDA base images are sometimes out of sync,
-    # so Dynamo builds and installs its own at this ref, scoped here
-    # to avoid affecting sglang-cuda or other frameworks.
+    # NIXL for the SGLang XPU source build. CUDA uses upstream's NIXL.
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
-  # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
-  # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
-  # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
-  # build doesn't leak into the runtime image.
-  nixl_ref: v1.5.2
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
@@ -199,13 +183,11 @@ trtllm:
   cuda13.4:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
-    # Keep on the cuda-dl-base release whose CUDA matches the runtime image (13.4.1 in 1.4.0rc3).
+    # Keep on the cuda-dl-base release whose CUDA matches the runtime image (13.4.1 in 1.4.0rc4).
     base_image_tag: 26.09-cuda13.4-devel-ubuntu24.04
-    runtime_image_tag: 1.4.0rc3
+    runtime_image_tag: 1.4.0rc4
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@aa9c10c5
-  # EFA adds the API-compatible LIBFABRIC plugin, including its CUDA-context fix.
-  nixl_ref: v1.5.2
+    baseline_sbom: release@813f751b
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
 

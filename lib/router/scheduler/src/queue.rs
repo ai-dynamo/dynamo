@@ -203,12 +203,18 @@ struct PreparedAdmission {
     load: Option<PreparedLoad>,
 }
 
-/// Projected loads the caller read for its request. The actor re-reads the ranks it
-/// changed since, then selects with them instead of projecting every rank itself. Never
-/// prepared under reject thresholds: they decide eligibility, which must read every rank
-/// at selection.
+/// Projected loads the caller read for its request, with the ranks that pass found past
+/// the host's reject thresholds. The actor re-reads and judges again the ranks it wrote
+/// since, then selects with them instead of projecting every rank itself. A rank another
+/// task changed since (a release, a prefill mark, a replica's booking) keeps the pass's
+/// load, fullness and prefill decay for this selection. The commands ahead of the caller's
+/// (under `ADMISSION_CHANNEL_CAPACITY + ADMISSION_BATCH`) and what they drain lie between.
 struct PreparedLoad {
     loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// The ranks of `loads` past `limits`; empty without limits.
+    full_ranks: FullRankCounts,
+    /// The reject thresholds the pass judged, when any was configured.
+    limits: Option<BusyThresholds>,
     /// The actor's write count, loaded before the pass.
     actor_writes: u64,
     /// The load table's version, as the pass read it.
@@ -223,13 +229,20 @@ impl Drop for PreparedLoad {
     fn drop(&mut self) {
         // Back to the pool for the next preparation; a full pool drops it instead.
         if self.loads.capacity() > 0 {
-            let _ = self.pool.push(std::mem::take(&mut self.loads));
+            let _ = self.pool.push((
+                std::mem::take(&mut self.loads),
+                std::mem::take(&mut self.full_ranks),
+            ));
         }
     }
 }
 
-/// Reused projection maps, so a caller's pass refreshes one in place.
-type LoadMapPool = ArrayQueue<FxHashMap<WorkerWithDpRank, WorkerLoadProjection>>;
+/// Reused projection maps with their full-rank counts, so a caller's pass refreshes one
+/// in place.
+type LoadMapPool = ArrayQueue<(
+    FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    FullRankCounts,
+)>;
 const LOAD_MAPS: usize = 64;
 
 /// Ranks the actor counted every write of, by its own bookings and releases, so a prepared
@@ -1904,48 +1917,45 @@ impl<
             },
         )?;
         let load = self.prepare_load(request, preparer.inputs().contains(WorkerInputs::LOAD));
-        if let Some(load) = &load {
-            candidates.fill_loads(request, &load.loads);
-        }
+        candidates.fill_loads(request, &load.loads);
         Some(Box::new(PreparedAdmission {
             candidates,
             workers_generation,
             available_worker_ids,
             overloaded_worker_ids,
-            load,
+            load: Some(load),
         }))
     }
 
-    /// Project every rank's load for `request` on the caller task, as the actor would with
-    /// no writes of its own in between. None under reject thresholds.
-    fn prepare_load(&self, request: &SchedulingRequest, overlap: bool) -> Option<PreparedLoad> {
-        if self.reject_thresholds_configured() {
-            return None;
-        }
+    /// Project every rank's load for `request` on the caller task and judge it against the
+    /// host's reject thresholds, as the actor would with no writes of its own in between.
+    fn prepare_load(&self, request: &SchedulingRequest, overlap: bool) -> PreparedLoad {
+        let limits = self
+            .reject_thresholds
+            .as_ref()
+            .map(|provider| provider())
+            .filter(BusyThresholds::is_configured);
         // Before any rank is read: a write this count includes is visible to the pass.
         let actor_writes = self.actor_writes.load(AtomicOrdering::Acquire);
         let decay_now = Instant::now();
-        let mut loads = self.load_maps.pop().unwrap_or_default();
+        let (mut loads, mut full_ranks) = self.load_maps.pop().unwrap_or_default();
+        full_ranks.reset(limits.unwrap_or_default());
         let load_table_version = self.slots.project_worker_loads_into(
             request.token_seq.as_deref().filter(|_| overlap),
             decay_now,
             &mut loads,
-            None,
+            limits.is_some().then_some(&mut full_ranks),
         );
-        Some(PreparedLoad {
+        PreparedLoad {
             loads,
+            full_ranks,
+            limits,
             actor_writes,
             load_table_version,
             decay_now,
             overlap,
             pool: Arc::clone(&self.load_maps),
-        })
-    }
-
-    fn reject_thresholds_configured(&self) -> bool {
-        self.reject_thresholds
-            .as_ref()
-            .is_some_and(|provider| provider().is_configured())
+        }
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -2797,6 +2807,11 @@ impl<
                         stopping = matches!(end, RefreshEnd::Shutdown);
                     }
                 }
+                // This turn's request is not admitted yet: fullness its caller judged before
+                // the await is stale, so the actor judges again.
+                if let Some(prepared) = &mut self.turn_prepared {
+                    prepared.load.take_if(|load| load.limits.is_some());
+                }
             }
             let mut queued = candidate.into_payload();
             // The gate's `Go` target replaces the soft affinity target unless the caller
@@ -2972,12 +2987,13 @@ impl<
             .filter(BusyThresholds::is_configured);
         let project_overlap = self.projects_overlap();
         let mut adopted = prepared.as_deref_mut().and_then(|prepared| {
-            self.adopt_prepared_load(prepared, &request, project_overlap, limits.is_some())
+            self.adopt_prepared_load(prepared, &request, project_overlap, limits)
         });
         match &mut adopted {
             Some(load) => {
                 request.worker_loads = std::mem::take(&mut load.loads);
-                self.full_ranks.clear();
+                // The caller's counts are this selection's; the last pass's go to the pool.
+                std::mem::swap(&mut self.full_ranks, &mut load.full_ranks);
             }
             None => {
                 request.worker_loads = std::mem::take(&mut self.projected_loads);
@@ -3013,21 +3029,21 @@ impl<
     }
 
     /// The load the caller prepared with `prepared`'s rows, with every rank this actor
-    /// wrote since re-read at the caller's instant, and the rows told to keep their filled
-    /// loads but for those ranks. None, and the rows fill every load at selection, when it
-    /// no longer stands for the pass this actor would run: reject thresholds, which decide
-    /// eligibility from every rank at selection, other overlap, a rank added or removed,
-    /// or more writes than the log holds or than re-reading them beats projecting every
-    /// rank.
+    /// wrote since re-read at the caller's instant and judged again against `limits`, and
+    /// the rows told to keep their filled loads but for those ranks. None, and the rows
+    /// fill every load at selection, when it no longer stands for the pass this actor
+    /// would run: other reject thresholds or overlap, a rank added or removed or reporting
+    /// another capacity, or more writes than the log holds or than re-reading them beats
+    /// projecting every rank.
     fn adopt_prepared_load(
         &mut self,
         prepared: &mut PreparedAdmission,
         request: &SchedulingRequest,
         overlap: bool,
-        reject_thresholds: bool,
+        limits: Option<BusyThresholds>,
     ) -> Option<PreparedLoad> {
         let mut load = prepared.load.take()?;
-        if reject_thresholds || load.overlap != overlap {
+        if load.limits != limits || load.overlap != overlap {
             return None;
         }
         let ranks = self.write_log.written_since(load.actor_writes)?;
@@ -3045,6 +3061,7 @@ impl<
                 &self.reread_ranks,
                 load.load_table_version,
                 &mut load.loads,
+                limits.is_some().then_some(&mut load.full_ranks),
             )
             .then(|| {
                 prepared.candidates.keep_filled_loads(&self.reread_ranks);
@@ -5792,7 +5809,7 @@ mod tests {
         let overlap = actor.projects_overlap();
         assert!(
             actor
-                .adopt_prepared_load(&mut prepared, &last, overlap, false)
+                .adopt_prepared_load(&mut prepared, &last, overlap, None)
                 .is_some()
         );
     }
@@ -5873,6 +5890,48 @@ mod tests {
             Err(KvSchedulerError::AllEligibleWorkersOverloaded)
         ));
         assert_eq!(prepared_queue.prepared_selections(), 3);
+    }
+
+    #[tokio::test]
+    async fn prepared_full_ranks_count_a_rank_the_actor_filled_after_preparation() {
+        let prepared_queue = make_prepared_queue_with(32, 1, false, Box::new(LeastLoaded));
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        let mut actor = actor_with_selector_for_test(
+            &prepared_queue.queue,
+            &prepared_queue.slots,
+            counting_policy(&Arc::default(), false, Box::new(LeastLoaded)),
+        );
+        let admit = |actor: &mut SchedulerQueueActor<_, _, _, _>, request, prepared| {
+            let context = AdmissionContext::untracked(0, None);
+            actor.admit_one(context, request, Instant::now(), prepared)
+        };
+        // Fill a rank past its limit with a booking of this actor's.
+        let mut held = Vec::new();
+        let mut fill = |actor: &mut SchedulerQueueActor<_, _, _, _>, worker_id| {
+            let (mut request, rx) = make_request(&format!("held-{worker_id}"), 48);
+            request.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
+            assert_eq!(admit(actor, request, None), Admission::Booked);
+            held.push(rx);
+        };
+
+        // The caller's pass finds room on worker 0 alone; the actor fills it before it
+        // admits the request.
+        for worker_id in 1..32 {
+            fill(&mut actor, worker_id);
+        }
+        let (request, mut rx) = make_request("request", 16);
+        let prepared = prepared_queue.queue.prepare_candidates(&request);
+        fill(&mut actor, 0);
+
+        // The actor judges again the rank it wrote, in the caller's load: a pass of its
+        // own would have projected worker 0's new load.
+        let own_pass = actor.projected_loads.clone();
+        assert_eq!(admit(&mut actor, request, prepared), Admission::Refused);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        assert_eq!(actor.projected_loads, own_pass);
     }
 
     #[tokio::test]
@@ -9259,6 +9318,76 @@ mod tests {
         assert_eq!(prepared_selections.load(Ordering::Relaxed), 3);
         free_requests(&slots, &["stale", "first", "second"]);
         slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn an_overlap_refresh_drops_a_load_judged_against_reject_thresholds() {
+        // Sixteen ranks, so the one `stale` books does not by itself refuse `late`'s load.
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            (0..16).map(|id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "test",
+        ));
+        let configs = (0..16)
+            .map(|id| {
+                let config = SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                };
+                (id, config)
+            })
+            .collect();
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+        set_worker_capacities_from_configs(&slots, &cfg_rx.borrow());
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let reject: RejectThresholdsProvider = Arc::new(half_budget_reject);
+        let queue = SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            PolicyProfile::synthetic(Some(0.0), RouterQueuePolicy::Fcfs),
+            16,
+            counting_policy(&Arc::default(), false, Box::new(LeastLoaded)),
+            None,
+            Some(Arc::clone(&refresher)),
+            None,
+            None,
+            Some(reject),
+        );
+        // Every rank is past the queue and the reject threshold, so `stale` waits.
+        for id in 0..16 {
+            let (mut active, active_rx) = make_request(&format!("active-{id}"), 64);
+            active.pinned_worker = Some(WorkerWithDpRank::new(id, 0));
+            queue.enqueue(active).await;
+            active_rx.await.unwrap().unwrap();
+        }
+        let (stale, stale_rx) = make_request("stale", 64);
+        queue
+            .enqueue_with_block_hashes(stale, Some(vec![LocalBlockHash(1)]))
+            .await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        free_requests(&slots, &["active-0"]);
+
+        // `late` may run only on worker 1, which its caller finds full. Enqueuing it drains
+        // `stale` into an overlap refresh that stalls, and worker 1 frees meanwhile.
+        let (mut late, late_rx) = make_request("late", 64);
+        late.allowed_worker_ids = Some(HashSet::from([1]));
+        queue.enqueue(late).await;
+        refresher.wait_for_calls(1).await;
+        free_requests(&slots, &["active-1"]);
+        refresher.release_one();
+
+        // The actor judges worker 1 again after the refresh instead of rejecting `late`.
+        assert_eq!(
+            stale_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
+        assert_eq!(
+            late_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

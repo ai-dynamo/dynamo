@@ -77,7 +77,7 @@ impl MediaErrorContext {
 fn is_media_fetch_error(engine: EngineFlavor, message: &str) -> bool {
     match engine {
         EngineFlavor::Vllm => {
-            // vLLM 0.33 chat/error.rs wraps llm-multimodal connector reports.
+            // vLLM 0.33/0.34 chat/error.rs wraps the same llm-multimodal connector reports.
             let Some(detail) = message.strip_prefix("multimodal preprocessing error: ") else {
                 return false;
             };
@@ -96,7 +96,7 @@ fn is_media_fetch_error(engine: EngineFlavor, message: &str) -> bool {
                 || message.starts_with("media fetch: GET https://")
         }
         EngineFlavor::Trtllm => {
-            // TRT-LLM 1.4.0rc3 names the failing URL field, not inline media.
+            // TRT-LLM 1.4.0rc3/rc4 names the failing URL field, not inline media.
             let Some(rest) = message.strip_prefix("media[") else {
                 return false;
             };
