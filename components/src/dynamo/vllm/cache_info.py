@@ -20,6 +20,8 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
     "mla_attention",
     "sink_full_attention",
 }
+# Width of the per-checkpoint group mask in the Rust event normalizer.
+MAX_RECURRENT_KV_GROUPS = 32
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,13 @@ def recurrent_kv_layout(
     ]
     if not recurrent_groups:
         return None
+    # The publisher joins the groups into one event per complete checkpoint and
+    # tracks which groups are resident in a 32-bit mask per checkpoint and tier.
+    if len(recurrent_groups) > MAX_RECURRENT_KV_GROUPS:
+        raise ValueError(
+            f"Recurrent KV events support at most {MAX_RECURRENT_KV_GROUPS} "
+            f"recurrent cache groups; the engine has {len(recurrent_groups)}"
+        )
     if not any(group["kind"] in MAIN_ATTENTION_KV_CACHE_KINDS for group in metadata):
         raise ValueError("Recurrent KV events require a full-attention cache group")
 

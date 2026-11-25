@@ -1851,7 +1851,8 @@ fn normalize_raw_batch(
             Ok(raw_event) => raw_event,
             Err(
                 ZmqEventFilterReason::NonMainAttentionKind
-                | ZmqEventFilterReason::NonMainAttentionGroup,
+                | ZmqEventFilterReason::NonMainAttentionGroup
+                | ZmqEventFilterReason::CheckpointUnchanged,
             ) => continue,
             Err(reason) if ownership == KvEventOwnership::Kvcr => {
                 tracing::warn!(?reason, "KVCR event enrichment failed");

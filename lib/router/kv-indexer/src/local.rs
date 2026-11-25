@@ -314,15 +314,16 @@ impl LocalKvIndexer {
         }
     }
 
+    /// See [`KvCacheGroupResidency::declare_layout`].
     pub fn declare_recurrent_layout(
         &self,
         worker: WorkerWithDpRank,
-        groups: &[u32],
+        recurrent: bool,
         alignment_blocks: u32,
     ) {
         self.group_residency.declare_layout(
             ResidencyOwner::worker(worker),
-            groups,
+            recurrent,
             alignment_blocks,
         );
     }
@@ -823,22 +824,23 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn recurrent_dump_round_trip_preserves_empty_groups_and_owner_scoped_clear() {
+    async fn recurrent_dump_round_trip_preserves_checkpoints_and_owner_scoped_clear() {
         use crate::KvCacheGroupResidency;
         use crate::prelude::{KvCacheGroupKind, KvCacheGroupTag, ResidencyOwner};
         let worker = WorkerWithDpRank::new(7, 0);
+        let other = WorkerWithDpRank::new(8, 0);
         let local = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
             Arc::new(KvIndexerMetrics::new_unregistered()),
             16,
         );
-        local.declare_recurrent_layout(worker, &[0, 1], 1);
+        // A declared worker that holds no checkpoint must come back as hybrid.
+        local.declare_recurrent_layout(other, true, 1);
+        local.declare_recurrent_layout(worker, true, 1);
         let mut event = lower_tier_store_event(7, 0, 1, 0, 0, 333, StorageTier::HostPinned)
             .with_kv_cache_group(KvCacheGroupTag {
-                group_idx: 0,
-                kind: KvCacheGroupKind::Mamba,
-                expected_group_count: Some(2),
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
                 alignment_blocks: Some(1),
             });
         local.apply_event_with_buffer(event.clone()).await.unwrap();
@@ -851,15 +853,17 @@ mod tests {
         for event in local.dump_events().await.unwrap() {
             restored.apply(&event);
         }
-        assert_eq!(restored.groups_for(worker).len(), 2);
-        let mut view = restored.read_view();
-        let owner = ResidencyOwner::worker(worker);
-        view.track_owner(owner);
-        assert!(
+        assert!(restored.is_hybrid(other));
+        let worker_owner = ResidencyOwner::worker(worker);
+        let cache_owner = ResidencyOwner::cache_owner(cache_owner_id());
+        let owners = |table: &KvCacheGroupResidency| {
+            let mut view = table.read_view();
+            view.track_owner(worker_owner);
+            view.track_owner(cache_owner);
             view.owners_at(ExternalSequenceBlockHash(333), StorageTier::HostPinned)
-                .next()
-                .is_none()
-        );
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owners(&restored), vec![worker_owner, cache_owner]);
         let clear = RouterEvent::with_cache_owner(
             0,
             KvCacheEvent {
@@ -871,15 +875,8 @@ mod tests {
             cache_owner_id(),
         );
         restored.clear_event(&clear);
-        assert_eq!(restored.groups_for(worker).len(), 2);
-        let mut view = restored.read_view();
-        let owner = ResidencyOwner::cache_owner(cache_owner_id());
-        view.track_owner(owner);
-        assert!(
-            view.owners_at(ExternalSequenceBlockHash(333), StorageTier::HostPinned)
-                .next()
-                .is_none()
-        );
+        assert_eq!(owners(&restored), vec![worker_owner]);
+        assert!(restored.is_hybrid(other));
     }
 
     fn cache_owner_id() -> CacheOwnerId {
