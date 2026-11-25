@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
 pub enum SharedCacheType {
     /// No shared cache (default).
     #[default]

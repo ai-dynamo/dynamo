@@ -141,7 +141,6 @@ fn selection_weights(
             match kv_router_config.shared_cache_type() {
                 dynamo_worker_selection::SharedCacheType::None => 0.0,
                 dynamo_worker_selection::SharedCacheType::Hicache => 0.5,
-                _ => 0.0,
             },
         ),
     }
