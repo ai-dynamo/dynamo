@@ -59,9 +59,10 @@ impl DiscoveryPeers {
         refs.left_discovery = false;
     }
 
-    /// Drops one watch's reference. `left_discovery` says the watch saw the
-    /// peer deleted, as opposed to the watch itself ending. The peer is
-    /// retired with the last reference if any watch saw it deleted.
+    /// Drops one watch's reference. `left_discovery` says that watch saw the
+    /// peer's last endpoint deleted, as opposed to one of several endpoints
+    /// going away or the watch itself ending. The peer is retired with the
+    /// last reference if any watch saw it leave.
     fn release(&mut self, service: &VeloResponseService, peer: InstanceId, left_discovery: bool) {
         let Entry::Occupied(mut entry) = self.refs.entry(peer) else {
             return;
@@ -124,10 +125,7 @@ pub(in crate::pipeline::network) fn start(
     let guard = cancel.clone().drop_guard();
     let ready = Arc::new(DiscoveryReady::default());
     let signal = ready.clone();
-    let mut watch = PeerWatch {
-        service: Arc::downgrade(service),
-        endpoints: HashMap::new(),
-    };
+    let mut watch = PeerWatch::new(service);
     service.velo.runtime().spawn(async move {
         loop {
             match tokio::select! {
@@ -174,9 +172,20 @@ pub(in crate::pipeline::network) fn start(
 struct PeerWatch {
     service: Weak<VeloResponseService>,
     endpoints: HashMap<EndpointInstanceId, InstanceId>,
+    /// How many of this watch's endpoints each peer serves. A peer has left
+    /// discovery, as this watch sees it, when its last endpoint is deleted.
+    peers: HashMap<InstanceId, usize>,
 }
 
 impl PeerWatch {
+    fn new(service: &Arc<VeloResponseService>) -> Self {
+        Self {
+            service: Arc::downgrade(service),
+            endpoints: HashMap::new(),
+            peers: HashMap::new(),
+        }
+    }
+
     fn apply(&mut self, service: &VeloResponseService, event: DiscoveryEvent) {
         match event {
             DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
@@ -218,10 +227,10 @@ impl PeerWatch {
         }
         let mut refs = service.discovered_request_peers.lock();
         if let Some(peer) = next {
-            refs.add(service, peer);
+            self.add(&mut refs, service, peer);
         }
         if let Some(peer) = previous {
-            refs.release(service, peer, true);
+            self.delete(&mut refs, service, peer);
         }
     }
 
@@ -234,15 +243,38 @@ impl PeerWatch {
         // Apply additions first so a changed endpoint key can keep the same peer.
         for (endpoint, &peer) in &next {
             if self.endpoints.get(endpoint) != Some(&peer) {
-                refs.add(service, peer);
+                self.add(&mut refs, service, peer);
             }
         }
-        for (endpoint, &peer) in &self.endpoints {
-            if next.get(endpoint) != Some(&peer) {
-                refs.release(service, peer, true);
+        let previous = std::mem::replace(&mut self.endpoints, next);
+        for (endpoint, peer) in previous {
+            if self.endpoints.get(&endpoint) != Some(&peer) {
+                self.delete(&mut refs, service, peer);
             }
         }
-        self.endpoints = next;
+    }
+
+    fn add(&mut self, refs: &mut DiscoveryPeers, service: &VeloResponseService, peer: InstanceId) {
+        *self.peers.entry(peer).or_default() += 1;
+        refs.add(service, peer);
+    }
+
+    /// One of this watch's endpoints left discovery.
+    fn delete(
+        &mut self,
+        refs: &mut DiscoveryPeers,
+        service: &VeloResponseService,
+        peer: InstanceId,
+    ) {
+        let Entry::Occupied(mut listed) = self.peers.entry(peer) else {
+            return;
+        };
+        *listed.get_mut() -= 1;
+        let left_discovery = *listed.get() == 0;
+        if left_discovery {
+            listed.remove();
+        }
+        refs.release(service, peer, left_discovery);
     }
 }
 
@@ -298,10 +330,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let watch = || PeerWatch {
-            service: Arc::downgrade(&service),
-            endpoints: HashMap::new(),
-        };
+        let watch = || PeerWatch::new(&service);
         let mut live = watch();
         let mut closing = watch();
         let peer = InstanceId::new_v4();
@@ -346,10 +375,7 @@ mod tests {
                 "velo://{peer}/AA/1/ns/worker/generate"
             )))
         };
-        let mut watch = PeerWatch {
-            service: Arc::downgrade(&service),
-            endpoints: HashMap::new(),
-        };
+        let mut watch = PeerWatch::new(&service);
         let count = || service.discovered_request_peers.lock().count(peer);
 
         watch.apply(&service, velo());
@@ -376,5 +402,112 @@ mod tests {
         watch.apply(&service, velo());
         assert_eq!(count(), 1);
         assert!(service.reserve_request_peer(peer).is_ok());
+    }
+
+    #[tokio::test]
+    async fn closing_a_watch_after_one_sibling_leaves_preserves_the_serving_endpoint() {
+        use super::super::{REQUEST_HANDLER, client::VeloRequestClient, encode_address};
+        use crate::{
+            discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry, startup_contract},
+            pipeline::network::egress::unified_client::RequestPlaneClient,
+            protocols::EndpointId,
+        };
+        use bytes::Bytes;
+
+        let service = || {
+            VeloResponseService::new_with_options(
+                ResponseTransport::Tcp,
+                "127.0.0.1:0".parse().unwrap(),
+                VeloServiceOptions {
+                    request_plane_enabled: true,
+                    ..Default::default()
+                },
+            )
+        };
+        let frontend = service().await.unwrap();
+        let worker = service().await.unwrap();
+        worker
+            .velo
+            .register_handler(
+                velo::Handler::unary_handler(REQUEST_HANDLER, |_| {
+                    Ok(Some(Bytes::from_static(b"ack")))
+                })
+                .build(),
+            )
+            .unwrap();
+        let peer = worker.velo.peer_info();
+        let registry = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let mut closing = PeerWatch::new(&frontend);
+        let mut stream = registry
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        startup_contract::expect_empty_snapshot(&mut stream).await;
+        // Another owner's all-endpoints watch is established but has not seen
+        // the additions yet. Its per-endpoint lookup below already has generate.
+        let mut other_stream = registry
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        startup_contract::expect_empty_snapshot(&mut other_stream).await;
+        let ready = Arc::new(DiscoveryReady::default());
+        ready.mark_established();
+        let client =
+            VeloRequestClient::new(frontend.clone(), Duration::from_secs(2)).with_discovery(ready);
+        let spec = |name: &str| {
+            let endpoint = EndpointId {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                name: name.into(),
+            };
+            let address = encode_address(&peer, &endpoint, registry.instance_id()).unwrap();
+            DiscoverySpec::Endpoint {
+                namespace: endpoint.namespace,
+                component: endpoint.component,
+                endpoint: endpoint.name,
+                transport: TransportType::Velo(address),
+                device_type: None,
+                request_plane_codec: None,
+            }
+        };
+        let generate = registry.register(spec("generate")).await.unwrap();
+        let tokenize = registry.register(spec("tokenize")).await.unwrap();
+        closing.apply(&frontend, startup_contract::next(&mut stream).await);
+        closing.apply(&frontend, startup_contract::next(&mut stream).await);
+        registry.unregister(tokenize).await.unwrap();
+        closing.apply(&frontend, startup_contract::next(&mut stream).await);
+        assert_eq!(
+            frontend
+                .discovered_request_peers
+                .lock()
+                .count(peer.instance_id()),
+            1
+        );
+        let serving = registry
+            .list(DiscoveryQuery::Endpoint {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                endpoint: "generate".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(serving, vec![generate]);
+        let DiscoveryInstance::Endpoint(Instance {
+            transport: TransportType::Velo(address),
+            ..
+        }) = &serving[0]
+        else {
+            panic!("generate has no Velo address");
+        };
+        let send = || client.send_request(address.clone(), Bytes::new(), Default::default());
+        assert_eq!(send().await.unwrap(), "ack");
+        drop(stream);
+        drop(closing);
+        assert_eq!(
+            send()
+                .await
+                .expect("closing the watch retired the still-discovered generate endpoint"),
+            "ack"
+        );
     }
 }
