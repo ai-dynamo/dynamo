@@ -550,7 +550,7 @@ Replica information for a single component, keyed by component name in `status.c
 <ParamField path="retune" type="RetuneStatus">
   Operator-owned live Retune target acknowledgment for an enabled Planner component. See [RetuneStatus](#retunestatus). Omitted while required targets have not acknowledged lowering or when the feature is disabled. It describes the applied lowering at global `status.observedGeneration`, not runtime readiness. Generic role status is not required.
 
-  The Planner compares this hash with its immutable `DYN_PLANNER_RETUNE_CAPABILITY` launch contract and requires frontend runtime acknowledgment of compatible effective routers. New target status does not change an existing process's storage mount.
+  The Planner compares this hash with its immutable `DYN_PLANNER_RETUNE_CAPABILITY` launch contract. This is a target-lowering acknowledgment, not a frontend runtime compatibility check. New target status does not change an existing process's storage mount.
 </ParamField>
 
 ### RetuneStatus

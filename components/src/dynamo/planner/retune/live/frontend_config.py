@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Retune's semantic launch profile and public graph constraints.
+"""Retune's semantic launch settings and public graph constraints.
 
-The operator supplies the immutable process binding. Status acknowledges only
-its target hash; the frontend separately acknowledges compatible running routers.
-No function inspects Pod templates or reconstructs their launch semantics.
+The operator supplies an immutable process binding; status acknowledges its target
+hash. No function inspects Pod templates or reconstructs their launch semantics.
 """
 
 from __future__ import annotations
@@ -124,7 +123,7 @@ def resolve_startup(
     planner_mode: str,
     capability: Optional[RetuneCapability] = None,
 ) -> FrontendStartup | str:
-    """Resolve the shared runtime profile without interpreting a launch recipe."""
+    """Resolve operator-provided settings without interpreting a launch recipe."""
 
     try:
         name, spec = find_frontend(dgd)
@@ -132,17 +131,13 @@ def resolve_startup(
             raise ValueError("the semantic Retune launch binding is unavailable")
         if name != capability.frontend_component_name:
             raise ValueError("the Retune binding refers to a different frontend")
-        # Missing profile support in an older SDK makes this opt-in unavailable.
-        resolver = getattr(KvRouterConfig, "retune_profile", None)
-        if resolver is None:
-            raise ValueError("the runtime does not support the Retune launch profile")
-        config = resolver(
-            capability.profile,
-            capability.overlap_score_credit,
-            capability.prefill_load_scale,
-            capability.temperature,
+        config = KvRouterConfig(
+            overlap_score_credit=capability.overlap_score_credit,
+            prefill_load_scale=capability.prefill_load_scale,
+            router_temperature=capability.temperature,
+            router_replica_sync=True,
         )
-        router_config = dict(config.frontend_kwargs())
+        router_config = json.loads(config.to_json())
         maps = {
             worker_type: {
                 key: float(value)

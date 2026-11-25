@@ -2088,22 +2088,7 @@ class KvRouterConfig:
         ...
 
     @staticmethod
-    def retune_profile(
-        profile: str,
-        overlap_score_credit: float,
-        prefill_load_scale: float,
-        temperature: float,
-    ) -> "KvRouterConfig":
-        """Resolve the immutable, versioned Retune router profile."""
-        ...
-
-    def frontend_kwargs(self) -> Dict[str, Any]:
-        """Full startup settings for frontend/replay, including process-local values."""
-        ...
-
-    @staticmethod
     def from_json(config_json: str) -> "KvRouterConfig":
-        """Read wire JSON or full startup settings, preserving supplied local settings."""
         ...
 
     def copy(self) -> "KvRouterConfig": ...
@@ -3142,7 +3127,6 @@ class EntrypointArgs:
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
-        frontend_retune_capability: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.

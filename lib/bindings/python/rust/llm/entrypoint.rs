@@ -244,146 +244,10 @@ impl KvRouterConfig {
     }
 
     #[staticmethod]
-    fn retune_profile(
-        profile: &str,
-        overlap_score_credit: f64,
-        prefill_load_scale: f64,
-        temperature: f64,
-    ) -> PyResult<Self> {
-        Ok(Self {
-            inner: dynamo_llm::retune::profile_config(
-                profile,
-                overlap_score_credit,
-                prefill_load_scale,
-                temperature,
-            )
-            .map_err(|error| PyValueError::new_err(error.to_string()))?,
-        })
-    }
-
-    fn frontend_kwargs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let config = &self.inner;
-        let mut value = serde_json::to_value(config).map_err(to_pyerr)?;
-        let fields = value
-            .as_object_mut()
-            .ok_or_else(|| PyValueError::new_err("router config is not an object"))?;
-        fields.extend([
-            (
-                "decode_active_request_weight".into(),
-                serde_json::json!(config.decode_active_request_weight),
-            ),
-            (
-                "router_tracking_hash".into(),
-                serde_json::json!(config.router_tracking_hash),
-            ),
-            (
-                "router_tracking_key_file".into(),
-                serde_json::json!(config.router_tracking_key_file),
-            ),
-            (
-                "router_tracking_key_id".into(),
-                serde_json::json!(config.router_tracking_key_id),
-            ),
-            (
-                "router_approximate_cache_policy".into(),
-                serde_json::json!(config.router_approximate_cache_policy.to_string()),
-            ),
-            (
-                "router_prefill_policy".into(),
-                serde_json::json!(config.router_prefill_policy),
-            ),
-            (
-                "router_decode_policy".into(),
-                serde_json::json!(config.router_decode_policy),
-            ),
-            (
-                "enable_session_prefix_index".into(),
-                serde_json::json!(config.enable_session_prefix_index),
-            ),
-            (
-                "shared_cache_multiplier".into(),
-                serde_json::json!(config.shared_cache_multiplier),
-            ),
-            (
-                "conditional_disagg_enabled".into(),
-                serde_json::json!(config.conditional_disagg_enabled),
-            ),
-            (
-                "conditional_disagg_policy".into(),
-                serde_json::json!(config.conditional_disagg_policy),
-            ),
-            (
-                "conditional_disagg_eff_isl_threshold".into(),
-                serde_json::json!(config.conditional_disagg_eff_isl_threshold),
-            ),
-            (
-                "conditional_disagg_eff_isl_ratio_threshold".into(),
-                serde_json::json!(config.conditional_disagg_eff_isl_ratio_threshold),
-            ),
-            (
-                "conditional_disagg_prefill_busy_threshold".into(),
-                serde_json::json!(config.conditional_disagg_prefill_busy_threshold),
-            ),
-            (
-                "conditional_disagg_decode_busy_threshold".into(),
-                serde_json::json!(config.conditional_disagg_decode_busy_threshold),
-            ),
-        ]);
-        pythonize::pythonize(py, &value)
-            .map(Bound::unbind)
-            .map_err(to_pyerr)
-    }
-
-    #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let mut value: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
-        let fields = value
-            .as_object_mut()
-            .ok_or_else(|| PyValueError::new_err("KvRouterConfig JSON must be an object"))?;
-        let approximate = fields.remove("router_approximate_cache_policy");
-        let prefill = fields.remove("router_prefill_policy");
-        let decode = fields.remove("router_decode_policy");
-        let mut inner: RsKvRouterConfig = serde_json::from_value(value).map_err(|e| {
-            PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
-        })?;
-        if let Some(value) = approximate {
-            inner.router_approximate_cache_policy = value
-                .as_str()
-                .ok_or_else(|| {
-                    PyValueError::new_err("router_approximate_cache_policy must be a string")
-                })?
-                .parse()
-                .map_err(PyValueError::new_err)?;
-        }
-        for (name, supplied, target) in [
-            (
-                "router_prefill_policy",
-                prefill,
-                &mut inner.router_prefill_policy,
-            ),
-            (
-                "router_decode_policy",
-                decode,
-                &mut inner.router_decode_policy,
-            ),
-        ] {
-            if let Some(value) = supplied {
-                *target = if value.is_null() {
-                    None
-                } else {
-                    Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                PyValueError::new_err(format!("{name} must be a string or null"))
-                            })?
-                            .to_owned(),
-                    )
-                };
-            }
-        }
         inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
@@ -681,7 +545,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None, frontend_retune_capability=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -721,7 +585,6 @@ impl EntrypointArgs {
         reject_media: Option<bool>,
         reject_media_status_code: Option<u16>,
         default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
-        frontend_retune_capability: Option<&str>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -812,22 +675,6 @@ impl EntrypointArgs {
                 )
                 .map_err(|e| PyValueError::new_err(e.to_string()))?,
             );
-        }
-        if let Some(value) = frontend_retune_capability {
-            let contract = dynamo_llm::retune::RetuneContract::from_json(value)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            let routing: RsRouterConfig = router_config
-                .clone()
-                .ok_or_else(|| {
-                    PyValueError::new_err("Retune requires explicit router configuration")
-                })?
-                .into();
-            contract
-                .validate_frontend(&routing)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            frontend_api_config
-                .get_or_insert_with(FrontendApiConfig::default)
-                .set_retune(contract);
         }
 
         Ok(EntrypointArgs {

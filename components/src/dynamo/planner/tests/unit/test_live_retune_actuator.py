@@ -110,7 +110,6 @@ class FakeFrontend:
     get_failures: list[int] = field(default_factory=list)
     # Routers GET leaves out (their control call timed out).
     timed_out: set[str] = field(default_factory=set)
-    config_hash: Optional[str] = "retune-test-config"
 
     def add(self, router: FakeRouter) -> FakeRouter:
         self.routers[router.router_id] = router
@@ -143,7 +142,6 @@ class FakePolicyClient:
             return PolicyCallResult(status=frontend.get_failures.pop(0))
         return PolicyCallResult(
             status=200,
-            retune_config_hash=frontend.config_hash,
             routers=tuple(
                 router.info()
                 for router in frontend.routers.values()
@@ -258,7 +256,6 @@ def make_actuator(
         DGD,
         startup_maps or {"aggregated": dict(STARTUP)},
         metrics,
-        config_hash="retune-test-config",
     )
     return actuator, kube, client, metrics
 
@@ -297,35 +294,6 @@ async def test_observe_latches_initials_and_never_writes() -> None:
     )
     assert report.new_initials == {}
     assert report.converged
-
-
-@pytest.mark.parametrize("config_hash", [None, "different-target"])
-async def test_runtime_contract_gates_observation_and_apply_but_not_owned_rollback(
-    config_hash,
-):
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    frontend = client.frontend("fe-0")
-    frontend.config_hash = config_hash
-    router = frontend.add(FakeRouter("r1", STARTUP, revision=1, current=dict(CHOSEN)))
-    for target in (OBSERVE, apply(CHOSEN)):
-        report = await actuator.reconcile(
-            target, initials={"r1": STARTUP}, expected_frontends=1
-        )
-        assert not report.routers_present and not report.converged
-        assert report.errors == {"retune_contract": 1}
-        assert client.writes() == []
-    report = await actuator.reconcile(
-        ROLLBACK, initials={"r1": STARTUP}, expected_frontends=1
-    )
-    assert report.converged and router.current == STARTUP
-    assert not report.routers_present and report.parity_ok is None
-    assert client.writes() == [("reset", "fe-0", "r1", 1)]
-
-    frontend.config_hash = "retune-test-config"
-    report = await actuator.reconcile(
-        OBSERVE, initials={"r1": STARTUP}, expected_frontends=1
-    )
-    assert report.routers_present and report.converged
 
 
 async def test_missing_admin_binding_does_not_prove_router_reset() -> None:
@@ -852,7 +820,6 @@ class _FrontendApp:
         self.requests: list[tuple[str, Any]] = []
         self.patch_status = 200
         self.list_body: Any = {
-            "retune": {"configHash": "retune-test-config"},
             "routers": [
                 {
                     "router_id": "6f1c",
@@ -938,7 +905,6 @@ async def test_client_speaks_the_router_policy_wire_format(frontend_server) -> N
 
     result = await client.get(target)
     assert result.status == 200 and result.error is None
-    assert result.retune_config_hash == "retune-test-config"
     first, custom = result.routers
     assert first == RouterInfo(
         router_id="6f1c",

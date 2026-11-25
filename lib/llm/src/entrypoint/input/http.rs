@@ -81,16 +81,6 @@ impl HttpFrontend {
         {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
-        if engine_config
-            .local_model()
-            .frontend_api_config()
-            .retune()
-            .is_some()
-            && (self.plugins.has_custom_plugins()
-                || !matches!(&engine_config, EngineConfig::Dynamic { .. }))
-        {
-            anyhow::bail!("Retune kv-v1 does not support custom router plugins");
-        }
 
         // Hosts that pass no resolved plugins resolve the policy file later, so read its
         // selection from the config as well.
@@ -254,12 +244,6 @@ async fn run_with_router_plugins(
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
-            if let Some(contract) = model.frontend_api_config().retune() {
-                contract.validate_frontend(router_config)?;
-                http_service
-                    .model_manager()
-                    .configure_retune(contract.clone())?;
-            }
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service

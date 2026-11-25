@@ -8,7 +8,7 @@ package v1beta1
 type RetuneSpec struct {
 	// enabled configures the frontend selected by type in the same DGD and the
 	// Planner with shared trace storage, a reachable frontend admin listener, and
-	// a versioned KV-router profile validated against the effective runtime.
+	// KV routing with replica synchronization and the supplied startup values.
 	// It does not enable replica scaling or choose an optimization strategy.
 	// Omission or false leaves ordinary component rendering unchanged. Enabling,
 	// disabling, or changing semantic settings changes the affected Pod templates.
@@ -21,10 +21,10 @@ type RetuneSpec struct {
 	// +optional
 	TraceStorage *RetuneTraceStorageSpec `json:"traceStorage,omitempty"`
 
-	// router supplies startup values for the versioned kv-v1 Retune profile.
-	// These are initial serving values, not Planner search domains. The profile
-	// pins the remaining replay-relevant router settings. Conflicting explicit
-	// frontend settings fail runtime validation instead of being silently replaced.
+	// router supplies initial serving values, not Planner search domains. The
+	// operator injects these through existing frontend environment variables.
+	// Explicit CLI arguments and router-policy configuration retain their normal
+	// precedence; effective runtime validation is not provided by this setting.
 	// Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0.
 	// +optional
 	Router *RetuneRouterSpec `json:"router,omitempty"`
@@ -67,8 +67,8 @@ type RetuneStatus struct {
 	// configHash is the opaque binding of the operator-generated launch contract.
 	// Publication acknowledges that the frontend and Planner target lowerings
 	// have been applied, independently of readiness or optional role projections.
-	// The Planner must also match its immutable launch binding and obtain a
-	// compatible frontend runtime acknowledgment before starting tuning windows.
+	// The Planner also matches its immutable launch binding before starting
+	// tuning windows; this hash does not acknowledge effective runtime settings.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	ConfigHash string `json:"configHash"`

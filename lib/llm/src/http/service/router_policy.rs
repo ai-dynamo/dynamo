@@ -52,10 +52,8 @@ struct PolicyResponse {
 }
 
 #[derive(Serialize)]
-struct PolicyListResponse<'a> {
+struct PolicyListResponse {
     routers: Vec<PolicyResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    retune: Option<crate::retune::RetuneAcknowledgment<'a>>,
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {
@@ -128,8 +126,7 @@ async fn list(
             })
         })
         .collect();
-    let retune = manager.retune_acknowledgment(query.model.as_deref());
-    Json(PolicyListResponse { routers, retune }).into_response()
+    Json(PolicyListResponse { routers }).into_response()
 }
 
 async fn update(
@@ -189,22 +186,11 @@ mod tests {
     use tower::ServiceExt;
 
     async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
-        fixture_with_config(
-            manager,
+        let core = local_selection_core(
             KvRouterConfig {
                 use_kv_events: false,
                 ..Default::default()
             },
-        )
-        .await
-    }
-
-    async fn fixture_with_config(
-        manager: Arc<ModelManager>,
-        config: KvRouterConfig,
-    ) -> (Router, SelectionCore, Uuid, Uuid) {
-        let core = local_selection_core(
-            config.clone(),
             1,
             Default::default(),
             SelectionCacheConfig::default(),
@@ -235,46 +221,9 @@ mod tests {
                 },
                 WorkerType::Aggregated,
                 partition.scheduler().policy_control(),
-                Some(config.clone()),
             ));
         }
         (router_policy_router(manager).1, core, ids[0], ids[1])
-    }
-
-    #[tokio::test]
-    async fn retune_acknowledges_effective_router_configuration_not_just_launch_binding() {
-        let contract = || {
-            crate::retune::RetuneContract::from_json(&serde_json::json!({
-            "version": 1, "configHash": "a".repeat(64), "frontendComponentName": "gateway", "adminPort": 8002,
-            "traceStorage": {"claimName": "traces", "mountPath": "/trace", "segmentsDir": "segments", "windowsDir": "windows"},
-            "router": {"profile": "kv-v1", "overlapScoreCredit": 1.0, "prefillLoadScale": 1.0, "temperature": 0.0},
-        }).to_string()).unwrap()
-        };
-        let manager = Arc::new(ModelManager::new());
-        manager.configure_retune(contract()).unwrap();
-        let (app, _core, _, _) = fixture(manager).await;
-        let (_, response) = call(&app, Method::GET, "/router_policy", Value::Null).await;
-        assert!(
-            response.get("retune").is_none(),
-            "an incompatible effective router must not acknowledge the contract"
-        );
-
-        let manager = Arc::new(ModelManager::new());
-        manager.configure_retune(contract()).unwrap();
-        let config = crate::retune::profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
-        let (app, _core, router_id, _) = fixture_with_config(manager, config).await;
-        let (_, response) = call(&app, Method::GET, "/router_policy", Value::Null).await;
-        assert_eq!(response["retune"]["configHash"], "a".repeat(64));
-        let (status, _) = call(&app, Method::PATCH, "/router_policy", serde_json::json!({
-            "router_id": router_id, "expected_revision": 0, "parameters": {"overlap_score_credit": 2.0},
-        })).await;
-        assert_eq!(status, StatusCode::OK);
-        let (_, response) = call(&app, Method::GET, "/router_policy", Value::Null).await;
-        assert_eq!(
-            response["retune"]["configHash"],
-            "a".repeat(64),
-            "policy tuning does not change the immutable startup binding"
-        );
     }
 
     async fn call(app: &Router, method: Method, uri: &str, body: Value) -> (StatusCode, Value) {

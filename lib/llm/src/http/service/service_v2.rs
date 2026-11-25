@@ -1527,18 +1527,6 @@ impl HttpServiceConfigBuilder {
         // TODO: Add authentication to the admin listener.
         let admin_api_enabled =
             config.enable_admin_api || env_is_truthy(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
-        if let Some(retune) = config.frontend_api_config.retune() {
-            retune.validate_admin(
-                admin_api_enabled,
-                listen_socket_addr(&config.admin_host, config.admin_port)?,
-                config.enable_tls,
-            )?;
-            retune.validate_capture(crate::request_trace::policy())?;
-            anyhow::ensure!(
-                crate::request_trace::config::capture_enabled(),
-                "Retune trace capture failed to initialize"
-            );
-        }
         let admin = if admin_api_enabled {
             let mut admin_router = axum::Router::new();
             for (route_docs, route) in [

@@ -230,8 +230,8 @@ spec:
                               configHash is the opaque binding of the operator-generated launch contract.
                               Publication acknowledges that the frontend and Planner target lowerings
                               have been applied, independently of readiness or optional role projections.
-                              The Planner must also match its immutable launch binding and obtain a
-                              compatible frontend runtime acknowledgment before starting tuning windows.
+                              The Planner also matches its immutable launch binding before starting
+                              tuning windows; this hash does not acknowledge effective runtime settings.
                             minLength: 1
                             type: string
                         required:

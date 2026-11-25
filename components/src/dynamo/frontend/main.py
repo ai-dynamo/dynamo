@@ -508,8 +508,6 @@ async def async_main():
         "tokenizer_fallback": config.tokenizer_fallback,
         "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
-    if config.retune_capability is not None:
-        kwargs["frontend_retune_capability"] = config.retune_capability
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
 

@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, OnceLock, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -159,7 +159,6 @@ pub(crate) struct RemovedDiscoveryGroup {
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
     pub(crate) router_policies: super::router_policy::RouterPolicyRegistry,
-    retune: OnceLock<crate::retune::RetuneContract>,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -218,51 +217,6 @@ impl Default for ModelManager {
 }
 
 impl ModelManager {
-    pub(crate) fn configure_retune(
-        &self,
-        contract: crate::retune::RetuneContract,
-    ) -> anyhow::Result<()> {
-        self.retune
-            .set(contract)
-            .map_err(|_| anyhow::anyhow!("Retune is already configured"))
-    }
-
-    pub(crate) fn retune_acknowledgment(
-        &self,
-        model: Option<&str>,
-    ) -> Option<crate::retune::RetuneAcknowledgment<'_>> {
-        let contract = self.retune.get()?;
-
-        // Check selected committed advertisements, not rejected discovery cohorts or argv.
-        for group in self
-            .discovery_groups
-            .iter()
-            .filter(|group| model.is_none_or(|model| group.primary == model))
-        {
-            if group
-                .worker_set
-                .load_thresholds
-                .as_ref()
-                .is_some_and(|thresholds| thresholds.is_configured())
-                || group
-                    .representative
-                    .router_config
-                    .as_ref()
-                    .is_some_and(|routing| {
-                        !routing.router_mode.is_kv_routing()
-                            || routing.session_affinity_ttl_secs.is_some()
-                    })
-            {
-                return None;
-            }
-        }
-        self.router_policies
-            .matches_retune(contract, model)
-            .then_some(crate::retune::RetuneAcknowledgment {
-                config_hash: &contract.config_hash,
-            })
-    }
-
     pub(crate) fn publish_worker_group_observation(
         &self,
         group_id: String,
@@ -323,7 +277,6 @@ impl ModelManager {
     pub fn new() -> Self {
         Self {
             router_policies: Default::default(),
-            retune: OnceLock::new(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -2676,7 +2629,6 @@ impl ModelManager {
                 endpoint.id(),
                 worker_type,
                 chooser.policy_control(),
-                self.retune.get().map(|_| effective_kv_router_config),
             );
         }
         Ok(Arc::new(chooser))

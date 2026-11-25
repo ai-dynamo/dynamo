@@ -1120,27 +1120,6 @@ routes; `generate-frontend-openapi` does.
   frontend fails to start. A value that is not a valid port number falls back to `8002`.
 </ParamField>
 
-<ParamField path="DYN_FRONTEND_RETUNE_CAPABILITY" type="JSON object">
-  Operator-owned, versioned semantic launch contract for
-  [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md). Omitted by
-  default. Configure `retune` on the DGD's Planner component instead of authoring this binding.
-  It carries `version`, an opaque `configHash`, selected frontend identity, trace storage/layout,
-  admin port, and the `kv-v1` router profile with three typed startup values.
-
-  The profile supplies complete router startup settings, including replica synchronization,
-  through the runtime SDK. Equivalent explicit frontend settings are accepted; conflicting
-  parsed settings fail startup. Effective discovered routers, including worker-advertised
-  overrides, must also be compatible before the runtime acknowledges the contract. This opt-in
-  does not change ordinary frontend startup when absent.
-</ParamField>
-
-With a supported Retune contract, `GET /router_policy` adds a top-level
-`retune: {"configHash": "<binding>"}` acknowledgment only after validating compatible effective
-router configuration. Missing acknowledgment, including responses from older runtimes, is not
-permission to tune. The existing `routers` list and policy-update protocol remain unchanged.
-The Planner separately checks its immutable launch binding against the operator's target hash;
-runtime acknowledgment does not assert that a target rollout has completed.
-
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration

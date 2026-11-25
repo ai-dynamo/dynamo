@@ -265,16 +265,8 @@ def _parse_list(payload: Any) -> PolicyCallResult:
     routers = payload["routers"]
     if not isinstance(routers, list):
         raise TypeError("routers is not a list")
-    acknowledgment = payload.get("retune")
-    config_hash = (
-        acknowledgment.get("configHash") if isinstance(acknowledgment, dict) else None
-    )
     return PolicyCallResult(
-        status=200,
-        routers=tuple(_parse_router(item) for item in routers),
-        retune_config_hash=(
-            config_hash if isinstance(config_hash, str) and config_hash else None
-        ),
+        status=200, routers=tuple(_parse_router(item) for item in routers)
     )
 
 
@@ -319,7 +311,6 @@ class _PodOutcome:
     ok: bool  # the last GET of this pod succeeded
     get_status: Optional[int] = None
     routers: tuple[RouterInfo, ...] = ()  # in-scope routers, final state
-    contract_acknowledged: bool = False
 
 
 class RouterActuator:
@@ -346,7 +337,6 @@ class RouterActuator:
         list_timeout_s: float = 10.0,
         admin_disabled_rounds: int = ADMIN_API_DISABLED_ROUNDS,
         frontend_component_name: Optional[str] = None,
-        config_hash: Optional[str] = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -360,7 +350,6 @@ class RouterActuator:
         self._list_timeout_s = float(list_timeout_s)
         self._admin_disabled_rounds = int(admin_disabled_rounds)
         self._frontend_component_name = frontend_component_name
-        self._config_hash = config_hash
         # router_id -> initial configuration latched by this process.
         self._latched: dict[str, dict[str, float]] = {}
         # router_id -> the pod instances it may run on: the one it was last
@@ -583,7 +572,7 @@ class RouterActuator:
         for outcome in outcomes:
             if outcome.pod.name not in ready_names:
                 continue
-            if not outcome.ok or not outcome.contract_acknowledged:
+            if not outcome.ok:
                 return False
             covered = {
                 router.worker_type
@@ -626,8 +615,6 @@ class RouterActuator:
                 result.error,
             )
             return _PodOutcome(pod=pod, ok=False, get_status=result.status)
-        if not self._accepts_contract(result, state):
-            return _PodOutcome(pod=pod, ok=False, get_status=200)
         routers = self._in_scope(pod, result.routers, state)
         retried = False
         while True:
@@ -643,7 +630,6 @@ class RouterActuator:
                     ok=True,
                     get_status=200,
                     routers=tuple(final),
-                    contract_acknowledged=self._matches_contract(result),
                 )
             # 409, 503 or PATCH 404: re-read the pod once and retry.
             retried = True
@@ -651,24 +637,7 @@ class RouterActuator:
             if result.status != 200:
                 state.error(f"get:{_code(result.status)}")
                 return _PodOutcome(pod=pod, ok=False, get_status=result.status)
-            if not self._accepts_contract(result, state):
-                return _PodOutcome(pod=pod, ok=False, get_status=200)
             routers = self._in_scope(pod, result.routers, state)
-
-    def _accepts_contract(self, result: PolicyCallResult, state: _Round) -> bool:
-        # Cleanup uses historical ownership, not a potentially newer launch contract.
-        if state.target.mode == "rollback":
-            return True
-        if self._matches_contract(result):
-            return True
-        state.error("retune_contract")
-        return False
-
-    def _matches_contract(self, result: PolicyCallResult) -> bool:
-        return (
-            self._config_hash is not None
-            and result.retune_config_hash == self._config_hash
-        )
 
     def _in_scope(
         self, pod: PodInfo, routers: Sequence[RouterInfo], state: _Round
@@ -863,10 +832,6 @@ class RouterActuator:
         known = 0
         unknown = 0
         for outcome in outcomes:
-            # Historical cleanup is allowed without the current profile; it
-            # cannot establish that profile's serving parity.
-            if not outcome.contract_acknowledged:
-                continue
             for router in outcome.routers:
                 if (
                     router.namespace != self._dgd.dynamo_namespace

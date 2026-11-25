@@ -332,7 +332,6 @@ class FrontendPolicyClient:
         return PolicyCallResult(
             status=200,
             routers=routers,
-            retune_config_hash=PROCESS_CAPABILITY.config_hash,
         )
 
     async def patch(self, pod, router_id, expected_revision, parameters):
@@ -362,7 +361,6 @@ def real_actuators(world: World, writer: str, advisory: bool = False):
         dgd,
         maps,
         NullMetrics(),
-        config_hash=None if capability is None else capability.config_hash,
     )
 
 

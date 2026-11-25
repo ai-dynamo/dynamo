@@ -438,7 +438,6 @@ class FakeRouterPolicyClient:
         return PolicyCallResult(
             status=200,
             routers=tuple(router.info() for router in routers),
-            retune_config_hash="retune-test-config",
         )
 
     async def patch(
@@ -643,7 +642,6 @@ class Planner:
                 dgd,
                 maps,
                 self.metrics,
-                config_hash=capability.config_hash,
             ),
             reconciler=reconciler,
             context_factory=context_factory,
