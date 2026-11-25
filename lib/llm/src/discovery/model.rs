@@ -91,6 +91,8 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+    /// What the worker set advertises to its `/generate` format.
+    pub(crate) engine_info: serde_json::Value,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -803,6 +805,13 @@ impl Model {
                         .card()
                         .runtime_config
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+                    engine_info: ws
+                        .card()
+                        .runtime_config
+                        .runtime_data
+                        .get(crate::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))

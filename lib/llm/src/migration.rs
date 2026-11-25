@@ -84,6 +84,19 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+/// Rebuilds a request whose engine-native format owns state the canonical
+/// fields do not carry, such as a `/generate` body's own token budget.
+pub(crate) trait RequestContinuation: Send + Sync {
+    /// Update the engine-native body for the attempt after `delivered_tokens`
+    /// generated tokens, once the canonical fields have been rebased; `Err`
+    /// says why the request cannot continue.
+    fn next_attempt(
+        &self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<(), String>;
+}
+
 /// A classifier decision is terminal even when its client-visible error type
 /// would normally identify a retryable worker failure.
 #[derive(Debug, thiserror::Error)]
@@ -245,6 +258,8 @@ pub struct Migration {
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
+    /// A request migrates only when it carries a [`RequestContinuation`].
+    requires_continuation: bool,
 }
 
 impl Migration {
@@ -265,7 +280,35 @@ impl Migration {
             max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
+            requires_continuation: false,
         })
+    }
+
+    /// For a pipeline whose requests carry engine-native state that canonical
+    /// replay does not rebuild: a request migrates only when its format
+    /// supplies a [`RequestContinuation`].
+    pub fn requiring_continuation(
+        mdc: &ModelDeploymentCard,
+        migration_limit: u32,
+        max_seq_len: Option<u32>,
+        metrics: Arc<Metrics>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            migration_limit,
+            max_seq_len,
+            model_name: Arc::new(mdc.display_name.clone()),
+            metrics,
+            requires_continuation: true,
+        })
+    }
+
+    /// The retries `request` may make on this pipeline.
+    fn retry_limit(&self, request: &PreprocessedRequest) -> u32 {
+        if self.requires_continuation && request.continuation.is_none() {
+            0
+        } else {
+            self.migration_limit
+        }
     }
 
     pub fn from_mdc(
@@ -328,12 +371,13 @@ where
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(Error::msg)?
             .map(|session_id| session_id.as_ref().clone());
+        let retries = self.retry_limit(&preprocessed_request);
         let retry_manager = RetryManager::build(
             engine_ctx,
             context.metadata().clone(),
             preprocessed_request,
             next,
-            self.migration_limit,
+            retries,
             self.max_seq_len,
             self.model_name.clone(),
             self.metrics.clone(),
@@ -579,7 +623,9 @@ where
             replayed_tokens: 0,
         };
         slf.new_stream(None).await?;
-        slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
+        if slf.attempts.has_remaining() {
+            slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
+        }
         slf.release_replay_prompt_if_final();
         Ok(slf)
     }
@@ -702,6 +748,29 @@ where
             return Err(error);
         }
         while let Some(attempt) = self.attempts.take() {
+            // A cancelled request skips the hook and takes the cancel path below.
+            if attempt > 0
+                && !(self.context.is_stopped() || self.context.is_killed())
+                && let Some(continuation) = self.request.continuation.clone()
+                && let Err(reason) =
+                    continuation.next_attempt(self.completed_tokens, &mut self.request)
+            {
+                // Fail with the queued cause's type, as the client sees it.
+                let error_type = self
+                    .pending_migration
+                    .take()
+                    .map_or(ErrorType::Internal, |cause| cause.reason);
+                self.record_migration_outcome(
+                    migration_event.as_ref(),
+                    frontend_service::migration_outcome::FAILURE,
+                );
+                let error = DynamoError::builder()
+                    .error_type(error_type)
+                    .message(format!("request cannot migrate: {reason}"))
+                    .build();
+                self.abort_request_lifecycle(&error);
+                return Err(error.into());
+            }
             let migration = self.pending_migration.take();
             if let Some(cause) = migration {
                 self.metrics
@@ -1390,6 +1459,60 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    struct RefusingContinuation;
+
+    impl RequestContinuation for RefusingContinuation {
+        fn next_attempt(&self, _: usize, _: &mut PreprocessedRequest) -> Result<(), String> {
+            Err("the test format refuses".to_string())
+        }
+    }
+
+    #[test]
+    fn continuation_required_without_one_disables_migration() {
+        let migration = Migration {
+            migration_limit: 3,
+            max_seq_len: None,
+            model_name: Arc::new(TEST_MODEL.to_string()),
+            metrics: Arc::new(Metrics::new()),
+            requires_continuation: true,
+        };
+        let mut request = create_mock_request(1);
+        assert_eq!(migration.retry_limit(&request), 0);
+        request.continuation = Some(Arc::new(RefusingContinuation));
+        assert_eq!(migration.retry_limit(&request), 3);
+    }
+
+    #[tokio::test]
+    async fn refused_continuation_fails_with_the_queued_cause() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(1);
+        request.continuation = Some(Arc::new(RefusingContinuation));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> = Arc::new(
+            MockEngine::new(MockBehavior::FailThenSuccess, 1, 100, context_id.clone()),
+        );
+        let Err(error) = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        else {
+            panic!("a refused continuation must fail the request");
+        };
+        let error = error.downcast_ref::<DynamoError>().unwrap();
+        assert!(
+            error.to_string().contains("request cannot migrate"),
+            "{error}"
+        );
+        assert_ne!(error.error_type(), ErrorType::Internal);
     }
 
     #[tokio::test]

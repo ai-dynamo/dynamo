@@ -427,6 +427,13 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
+    /// Updates the engine-native body for a migration retry. On a pipeline
+    /// built with [`crate::migration::Migration::requiring_continuation`], a
+    /// request without one does not migrate. Frontend-only.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) continuation: Option<Arc<dyn crate::migration::RequestContinuation>>,
+
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even
     /// after the client disconnects.

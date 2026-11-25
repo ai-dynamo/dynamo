@@ -4,9 +4,9 @@
 //! Engine-native `/generate` formats.
 //!
 //! A [`GenerateFormat`] owns one `/generate` wire format end to end: it turns
-//! a client body into the routed request and assembles the worker's responses
-//! into unary or streamed client output. The frontend reads no request or
-//! response field.
+//! a client body into the routed request, joins the worker's responses into
+//! client responses, and continues migrated requests. The frontend reads no
+//! request or response field.
 //!
 //! Formats are statically linked plugins. A host builds a registry through its
 //! catalog and calls [`install`]; `DYN_GENERATE_FORMAT` selects
@@ -122,6 +122,10 @@ impl From<JsonRejection> for ClientError {
 /// The worker set chosen to serve a request.
 pub struct Worker<'a> {
     pub model: &'a str,
+    /// What it advertises under
+    /// [`crate::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY`];
+    /// `Null` when nothing.
+    pub engine_info: &'a Value,
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
     pub tower_connector_lora_enabled: bool,
@@ -148,7 +152,9 @@ pub struct Bound {
     pub exchange: Box<dyn GenerateExchange>,
 }
 
-/// One client request. Output callbacks run in stream order, never concurrently.
+/// One client request across every attempt. Dynamo calls these in stream
+/// order and never concurrently; [`Self::migrate`] runs only after every
+/// delivered output has passed through [`Self::chunk`].
 pub trait GenerateExchange: Send {
     /// One item of the worker stream; `prefill` marks prefill's final output
     /// in P/D. Streaming passes each client chunk to `emit`, which serializes
@@ -159,6 +165,33 @@ pub trait GenerateExchange: Send {
         prefill: bool,
         emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError>;
+
+    /// `Ok` when a failed attempt may continue on another worker; `Err` says
+    /// why not. Asked once, before dispatch. The default refuses.
+    ///
+    /// The migration guards in Dynamo read only canonical fields. A format
+    /// that keeps structured output or other engine state in its native body
+    /// must refuse those requests here.
+    fn migration(&self) -> Result<(), String> {
+        Err("this format does not migrate".to_string())
+    }
+
+    /// Continue after a failed attempt, atomically: update the engine-native
+    /// body of `request`, whose canonical prompt and budgets Dynamo has already
+    /// rebased onto the `delivered_tokens`, and rebase this exchange so later
+    /// outputs continue the earlier ones. Called only when [`Self::migration`]
+    /// is `Ok`.
+    ///
+    /// After a failed dispatch, Dynamo calls this again with the same
+    /// `delivered_tokens` on a `request` the previous call already updated. So
+    /// derive the native body from the original request, not from `request`.
+    fn migrate(
+        &mut self,
+        _delivered_tokens: usize,
+        _request: &mut PreprocessedRequest,
+    ) -> Result<(), String> {
+        Err("this format does not migrate".to_string())
+    }
 
     /// Unary: the client response. Streaming: an optional final chunk.
     fn finish(&mut self) -> Result<Option<Value>, DynamoError>;

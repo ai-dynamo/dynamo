@@ -4,7 +4,8 @@
 //! Engine-native `POST`/`PUT /generate`, in a pluggable [`GenerateFormat`].
 //!
 //! The format owns every request and response field: it builds the routed
-//! request and joins the worker's outputs into client responses. This adapter routes, dispatches, streams, and accounts.
+//! request, joins the worker's outputs into client responses, and continues
+//! migrated requests. This adapter routes, dispatches, streams, and accounts.
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use axum::{
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use futures::{Stream, StreamExt, pin_mut};
+use parking_lot::Mutex;
 use serde_json::Value;
 use tracing::Instrument;
 
@@ -34,6 +36,7 @@ use super::{RouteDoc, service_v2};
 use crate::generate_format::{
     Bound, ClientError, ClientRequest, ErrorPhase, GenerateExchange, Opened, SharedFormat, Worker,
 };
+use crate::migration::RequestContinuation;
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
@@ -45,6 +48,23 @@ use dynamo_http_server::metrics::{
 use dynamo_http_server::request::get_body_limit;
 
 pub(super) const DEFAULT_PATH: &str = "/generate";
+
+/// Shared with migration, which asks the exchange how to continue a request.
+/// `RequestContinuation` is `Sync` and `GenerateExchange` is only `Send`, so
+/// the exchange needs a lock. The lock is never contended: `RetryManager`
+/// runs inside the same `stream.next()` that `feed` follows, and nothing holds
+/// it across an `.await`.
+type SharedExchange = Arc<Mutex<Box<dyn GenerateExchange>>>;
+
+impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
+    fn next_attempt(
+        &self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<(), String> {
+        self.lock().migrate(delivered_tokens, request)
+    }
+}
 
 struct GenerateRoute {
     state: Arc<service_v2::State>,
@@ -197,15 +217,17 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // Ignore usage that does not match the client's prompt and let
-            // the RequestTracker fallback run on drop.
+            // RetryManager rebases usage onto the client's prompt. Ignore
+            // any usage that still doesn't match this logical
+            // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
             .and_then(|details| details.cached_tokens)
             .map(|tokens| tokens as usize);
         self.response.observe_cached_tokens(cached_tokens);
 
-        // Worker outputs contain newly generated token deltas.
+        // RetryManager appends delivered tokens to the retried request and only
+        // yields newly generated deltas, so this remains exact across migration.
         let chunk_tokens = output.token_ids.len();
         self.output_tokens += chunk_tokens;
         self.response.observe_current_osl(self.output_tokens);
@@ -354,6 +376,7 @@ async fn handler(
     };
     let worker = Worker {
         model: &model,
+        engine_info: &selection.engine_info,
         kv_cache_block_size: selection.kv_cache_block_size,
         lora_name: selection.lora_name.as_deref(),
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
@@ -366,6 +389,13 @@ async fn handler(
         Err(error) => return reject(client_error(format, error)),
     };
     request.tracker = Some(tracker.clone());
+    let migration = exchange.migration();
+    let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
+    match migration {
+        Ok(()) => request.continuation = Some(exchange.clone() as _),
+        Err(reason) => tracing::debug!(%reason, "generate request does not migrate"),
+    }
+
     let context: Context<PreprocessedRequest> =
         match preprocessed_context_from_headers(request, request_id.clone(), &headers) {
             Ok(context) => context,
@@ -415,13 +445,13 @@ async fn handler(
 
 /// Feed one worker item to the exchange.
 fn feed(
-    exchange: &mut dyn GenerateExchange,
+    exchange: &SharedExchange,
     delta: Annotated<LLMEngineOutput>,
     emit: &mut dyn FnMut(&Value),
 ) -> Result<(), DynamoError> {
     let prefill = delta.event.as_deref() == Some(PREFILL_OUTPUT_ANNOTATION);
     match delta.into_data()? {
-        Some(output) => exchange.chunk(output, prefill, emit),
+        Some(output) => exchange.lock().chunk(output, prefill, emit),
         None => Ok(()),
     }
 }
@@ -429,7 +459,7 @@ fn feed(
 /// Streaming: each client chunk as one SSE event.
 fn events(
     stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-    mut exchange: Box<dyn GenerateExchange>,
+    exchange: SharedExchange,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     async_stream::try_stream! {
         pin_mut!(stream);
@@ -442,14 +472,16 @@ fn events(
             Ok::<_, axum::Error>(Event::default().data(json))
         };
         while let Some(delta) = stream.next().await {
-            feed(exchange.as_mut(), delta, &mut |value| {
+            feed(&exchange, delta, &mut |value| {
                 out.push(render(value));
             }).map_err(axum::Error::new)?;
             for event in out.drain(..) {
                 yield event?;
             }
         }
-        if let Some(last) = exchange.finish().map_err(axum::Error::new)? {
+        // Release the lock before `?` or `yield` can suspend the stream.
+        let last = exchange.lock().finish();
+        if let Some(last) = last.map_err(axum::Error::new)? {
             yield render(&last)?;
         }
     }
@@ -463,7 +495,7 @@ struct Dispatch {
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
     streaming: bool,
-    exchange: Box<dyn GenerateExchange>,
+    exchange: SharedExchange,
     format: SharedFormat,
 }
 
@@ -481,7 +513,7 @@ impl Dispatch {
             state,
             stream_handle,
             streaming,
-            mut exchange,
+            exchange,
             format,
         } = self;
         let cancelled = |inflight_guard: &mut dynamo_http_server::metrics::InflightGuard| {
@@ -534,9 +566,9 @@ impl Dispatch {
             let fold = async {
                 pin_mut!(stream);
                 while let Some(delta) = stream.next().await {
-                    feed(exchange.as_mut(), delta, &mut |_| {})?;
+                    feed(&exchange, delta, &mut |_| {})?;
                 }
-                exchange.finish()?.ok_or_else(|| {
+                exchange.lock().finish()?.ok_or_else(|| {
                     DynamoError::msg("the generate format returned no unary response")
                 })
             };
