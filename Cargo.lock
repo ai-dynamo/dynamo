@@ -2792,7 +2792,6 @@ dependencies = [
  "prometheus",
  "rcgen",
  "rustls",
- "serde_json",
  "tokio",
  "tokio-rustls",
  "tokio-util",
