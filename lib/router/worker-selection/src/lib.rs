@@ -44,8 +44,6 @@ pub use conditional_disagg::{
 };
 pub use error::WorkerSelectionPolicyError;
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
-#[allow(deprecated)]
-pub use inputs::WorkerTransferInput;
 pub use inputs::{
     CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,

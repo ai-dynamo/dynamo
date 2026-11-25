@@ -111,13 +111,6 @@ impl<'a> WorkerCandidate<'a> {
         }
     }
 
-    /// Previous name of [`Self::kv_copy`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerCandidate::kv_copy`")]
-    pub fn kv_transfer(self) -> Option<WorkerCopyInput> {
-        self.kv_copy()
-    }
-
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
     /// None means no preference was supplied, access was not requested, or the host pinned the worker.
     #[inline]
@@ -418,11 +411,6 @@ pub struct WorkerCopyInput {
     /// was chosen for the rank.
     pub(crate) source_prefix_blocks: Option<u32>,
 }
-
-/// Previous name of [`WorkerCopyInput`].
-// TODO(v1.9): Remove this alias.
-#[deprecated(since = "1.7.0", note = "use `WorkerCopyInput`")]
-pub type WorkerTransferInput = WorkerCopyInput;
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 ///

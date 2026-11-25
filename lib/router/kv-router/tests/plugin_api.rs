@@ -170,10 +170,6 @@ impl WorkerPicker for ActiveRequestsPicker {
 
 #[test]
 fn active_requests_pickers_select_through_the_hosted_api() {
-    #[allow(deprecated)]
-    let alias = WorkerInputs::OCCUPANCY;
-    assert_eq!(alias, WorkerInputs::ACTIVE_REQUESTS);
-
     let Ok(picker) =
         WorkerSelectionPolicy::new("decode", Vec::new(), Box::new(ActiveRequestsPicker))
             .into_hosted_picker()
