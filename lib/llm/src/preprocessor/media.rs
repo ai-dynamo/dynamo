@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage;
 
 pub use common::EncodedMediaData;
-pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
-pub use loader::{MediaFetcher, MediaLoader, max_data_url_bytes};
+pub use decoders::Decoder;
+pub use loader::{MediaFetcherPolicy, MediaLoader, max_data_url_bytes};
 
 pub use rdma::{DecodedMediaData, RdmaMediaDataDescriptor, get_nixl_agent, get_nixl_metadata};
 

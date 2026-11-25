@@ -418,11 +418,10 @@ impl NvCreateChatCompletionRequest {
                 let native = serde_json::to_value(native)?;
                 // Match the production Rust preprocessor's Spark-only policy.
                 // Other families retain the full native catalog for named choices.
-                let render_named_tool_eagerly =
-                    super::super::chat_completions::unified_parser::configured_family(
-                        runtime_config.tool_call_parser.as_deref(),
-                        runtime_config.reasoning_parser.as_deref(),
-                    ) == Some("muse_spark");
+                let render_named_tool_eagerly = crate::parser_family::configured_family(
+                    runtime_config.tool_call_parser.as_deref(),
+                    runtime_config.reasoning_parser.as_deref(),
+                ) == Some("muse_spark");
                 value["responses_native_tools"] = serde_json::json!({
                     "render_named_tool_eagerly": render_named_tool_eagerly,
                     "template_tools": template_tools,

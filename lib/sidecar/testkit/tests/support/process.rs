@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use dynamo_backend_common::{DisaggregationMode, LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::discovery::ModelWatcher;
-use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::namespace::NamespaceFilter;
+use dynamo_llm::router_config::RouterConfig;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};

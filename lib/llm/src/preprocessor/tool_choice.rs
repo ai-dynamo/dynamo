@@ -11,8 +11,10 @@ use crate::preprocessor::structural_tag::{
     SelectedStructuralTagBuilder, requires_native_tool_call_format,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest, PromptReasoningPrefill};
+use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
-use crate::protocols::openai::chat_completions::{NvCreateChatCompletionRequest, unified_parser};
+#[cfg(test)]
+use crate::protocols::openai::chat_completions::unified_parser;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::protocols::openai::tools::{
     ToolChoiceGuidance, convert_tools, get_tool_choice_guidance_from_tools,
@@ -689,7 +691,7 @@ fn beam_turn_structural_tag(
         PromptChannel, StructuralTagContext, StructuralTagSchemaMode, StructuralTagToolChoice,
     };
     let builder = dynamo_parsers_v2::structural_tag_builder_for_family(
-        crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
+        crate::parser_family::BEAM_UNIFIED_FAMILY,
     )?;
     let v2_tools: Vec<dynamo_parsers_v2::Tool> = tools
         .iter()
@@ -932,7 +934,7 @@ fn forced_choice_keeps_native_format(
     requires_native_tool_call_format(tool_call_parser, tool_choice)
         || requires_native_tool_call_format(reasoning_parser, tool_choice)
         || (matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))
-            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY))
+            && unified_family == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY))
 }
 
 /// Whether either configured parser selects the Muse Spark native grammar.
@@ -940,10 +942,8 @@ pub(super) fn uses_muse_spark_parser(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> bool {
-    crate::protocols::openai::chat_completions::unified_parser::configured_family(
-        tool_call_parser,
-        reasoning_parser,
-    ) == Some("muse_spark")
+    crate::parser_family::configured_family(tool_call_parser, reasoning_parser)
+        == Some("muse_spark")
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.

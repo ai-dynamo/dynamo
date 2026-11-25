@@ -16,15 +16,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::common::checked_file::CheckedFile;
-use crate::entrypoint::RouterConfig;
+use crate::checked_file::CheckedFile;
+use crate::json::canonicalize_json_object_keys;
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
     SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
-use crate::protocols::tensor::TensorModelConfig;
-use crate::utils::json::canonicalize_json_object_keys;
+use crate::router_config::RouterConfig;
+use crate::tensor_model::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -32,14 +32,14 @@ use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
-use crate::protocols::TokenIdType;
+use crate::media_config::{MediaDecoder, MediaFetcher};
+use dynamo_tokenizers::TokenIdType;
 
 const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DEFAULT_TOKENIZER_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 // Cache RSS measures 1.3-3.3x the token-ID budget once per-entry metadata is included.
 const TOKENIZER_CACHE_MEMORY_FRACTION: u64 = 16;
-static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
+static TOKENIZER_CACHE: OnceLock<dynamo_tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
     bytes: &mut Vec<u8>,
@@ -177,7 +177,7 @@ fn tokenizer_cache_budget(
     }
 }
 
-fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
+fn shared_tokenizer_cache() -> &'static dynamo_tokenizers::SharedTokenizerCache {
     TOKENIZER_CACHE.get_or_init(|| {
         // Lossy conversion lets non-UTF-8 values reach the parse warning.
         let value = std::env::var_os("DYN_TOKENIZER_CACHE_BYTES")
@@ -193,7 +193,7 @@ fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache 
             memory_limit = ?memory_limit,
             "initializing process-wide tokenizer cache"
         );
-        crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
+        dynamo_tokenizers::SharedTokenizerCache::new(cache_bytes)
     })
 }
 
@@ -205,7 +205,7 @@ fn tokenizer_cache_namespace(checksum: &str, backend: &str) -> Vec<u8> {
     namespace
 }
 
-fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
+fn tokenizer_cache_token_observer(model: &str) -> dynamo_tokenizers::CacheTokenUsageFn {
     let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
         .with_label_values(&[model]);
     let uncached_tokens =
@@ -219,14 +219,14 @@ fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenU
 }
 
 fn instrumented_tokenizer_cache(
-    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    raw: Arc<dyn dynamo_tokenizers::traits::Tokenizer>,
     special_tokens: Vec<String>,
-    shared_cache: &crate::tokenizers::SharedTokenizerCache,
+    shared_cache: &dynamo_tokenizers::SharedTokenizerCache,
     cache_extend: bool,
     model: &str,
     namespace: &[u8],
-) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
-    let cached = crate::tokenizers::CachedTokenizer::new_with_cache(
+) -> Result<Arc<dyn dynamo_tokenizers::traits::Tokenizer>> {
+    let cached = dynamo_tokenizers::CachedTokenizer::new_with_cache(
         raw,
         special_tokens,
         shared_cache.clone(),
@@ -334,7 +334,7 @@ struct ArchMaxContextTextConfig {
 /// `config.json.text_config.max_position_embeddings`
 fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
     let tokenizer_context_length = || {
-        crate::file_json_field(
+        dynamo_tokenizers::file_json_field(
             &local_path.join("tokenizer_config.json"),
             "model_max_length",
         )
@@ -352,7 +352,11 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
     let Some(config_json) = config_json else {
         // Mistral-native checkpoints keep the context length in params.json.
         let params_context_length = || {
-            crate::file_json_field(&local_path.join("params.json"), "max_position_embeddings").ok()
+            dynamo_tokenizers::file_json_field(
+                &local_path.join("params.json"),
+                "max_position_embeddings",
+            )
+            .ok()
         };
         return Ok(params_context_length()
             .or_else(tokenizer_context_length)
@@ -446,7 +450,7 @@ impl TokenizerKind {
         }
     }
 
-    pub(crate) fn tekken_file(&self) -> Option<&CheckedFile> {
+    pub fn tekken_file(&self) -> Option<&CheckedFile> {
         match self {
             Self::TekkenJson(file) | Self::TekkenJsonWithHfFallback { tekken: file, .. } => {
                 Some(file)
@@ -477,7 +481,7 @@ impl TokenizerKind {
 
 /// The parts of a Mistral `tekken.json` the card needs without building the BPE.
 #[derive(Deserialize)]
-pub(crate) struct TekkenMetadata {
+pub struct TekkenMetadata {
     config: TekkenMetadataConfig,
     special_tokens: Vec<TekkenMetadataSpecialToken>,
     model_settings_builder: Option<serde_json::Value>,
@@ -497,14 +501,14 @@ struct TekkenMetadataSpecialToken {
 
 impl TekkenMetadata {
     /// Parse the tekken file behind a card's tokenizer slot.
-    pub(crate) fn from_checked_file(checked_file: &CheckedFile) -> Result<Self> {
+    pub fn from_checked_file(checked_file: &CheckedFile) -> Result<Self> {
         let Some(path) = checked_file.path() else {
             anyhow::bail!("tekken tokenizer is not a local path: {checked_file:?}");
         };
         Self::from_file(path)
     }
 
-    pub(crate) fn from_file(path: &Path) -> Result<Self> {
+    pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read(path)
             .with_context(|| format!("Failed to read tekken file {}", path.display()))?;
         serde_json::from_slice(&contents)
@@ -512,12 +516,12 @@ impl TekkenMetadata {
     }
 
     /// The tokenizer version number, such as `15` for `v15`.
-    pub(crate) fn version(&self) -> Option<u32> {
+    pub fn version(&self) -> Option<u32> {
         self.config.version.strip_prefix('v')?.parse().ok()
     }
 
     /// The `[MODEL_SETTINGS]` builder of v15 tokenizers.
-    pub(crate) fn model_settings_builder(&self) -> Option<&serde_json::Value> {
+    pub fn model_settings_builder(&self) -> Option<&serde_json::Value> {
         self.model_settings_builder.as_ref()
     }
 
@@ -1182,7 +1186,7 @@ pub struct ModelDeploymentCard {
     /// `#[serde(default)]` are kept so older cards still deserialize, but
     /// downstream readers treat them as not-ready.
     #[serde(default)]
-    pub worker_type: Option<crate::worker_type::WorkerType>,
+    pub worker_type: Option<dynamo_router_protocol::worker_type::WorkerType>,
 
     /// Peer worker types this worker requires to serve traffic, in DNF form.
     /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
@@ -1193,7 +1197,7 @@ pub struct ModelDeploymentCard {
     /// - Encode worker: `[[Prefill, Decode], [Aggregated]]` — needs either a
     ///   P+D pair or a single Aggregated peer.
     #[serde(default)]
-    pub needs: Vec<Vec<crate::worker_type::WorkerType>>,
+    pub needs: Vec<Vec<dynamo_router_protocol::worker_type::WorkerType>>,
 
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1251,7 +1255,39 @@ pub struct ModelDeploymentCard {
     tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
-pub use crate::lora::LoraInfo;
+pub use dynamo_lora::LoraInfo;
+
+/// The engine whose native scoring profile serves SystemOne decisions for a model, derived
+/// from the capabilities its workers advertise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoringBackend {
+    Sglang,
+    Vllm,
+}
+
+impl ScoringBackend {
+    pub fn format(self) -> &'static str {
+        match self {
+            Self::Sglang => "sglang",
+            Self::Vllm => "vllm",
+        }
+    }
+
+    pub fn output_tokens(self) -> usize {
+        match self {
+            Self::Sglang => 0,
+            Self::Vllm => 1,
+        }
+    }
+
+    pub fn max_candidates(self) -> usize {
+        match self {
+            Self::Sglang => 255,
+            // The qualified causal profile uses A-Z labels, not the engine's 128-ID limit.
+            Self::Vllm => 26,
+        }
+    }
+}
 
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
@@ -1267,20 +1303,20 @@ impl ModelDeploymentCard {
     ///
     /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
     /// worker was a full-request worker.
-    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+    pub fn effective_worker_type(&self) -> dynamo_router_protocol::worker_type::WorkerType {
         Self::resolve_worker_type(self.worker_type, self.model_type)
     }
 
     /// Resolve an explicit or legacy worker role without constructing a model card.
     pub fn resolve_worker_type(
-        worker_type: Option<crate::worker_type::WorkerType>,
+        worker_type: Option<dynamo_router_protocol::worker_type::WorkerType>,
         model_type: ModelType,
-    ) -> crate::worker_type::WorkerType {
+    ) -> dynamo_router_protocol::worker_type::WorkerType {
         worker_type.unwrap_or_else(|| {
             if model_type.supports_prefill() {
-                crate::worker_type::WorkerType::Prefill
+                dynamo_router_protocol::worker_type::WorkerType::Prefill
             } else {
-                crate::worker_type::WorkerType::Aggregated
+                dynamo_router_protocol::worker_type::WorkerType::Aggregated
             }
         })
     }
@@ -1302,14 +1338,14 @@ impl ModelDeploymentCard {
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(&file)?;
         Ok(serde_json::from_str(&contents).inspect_err(|err| {
-            crate::log_json_err(&file.as_ref().display().to_string(), &contents, err)
+            dynamo_tokenizers::log_json_err(&file.as_ref().display().to_string(), &contents, err)
         })?)
     }
 
     /// Load a model deployment card from a JSON string
     pub fn load_from_json_str(contents: &str) -> Result<Self, anyhow::Error> {
         Ok(serde_json::from_str(contents)
-            .inspect_err(|err| crate::log_json_err("unknown", contents, err))?)
+            .inspect_err(|err| dynamo_tokenizers::log_json_err("unknown", contents, err))?)
     }
 
     //
@@ -1361,15 +1397,14 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
-    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
+    pub fn is_systemone_serial_eligible(&self) -> bool {
         self.systemone_backend().is_some()
     }
 
-    pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
+    pub fn systemone_backend(&self) -> Option<ScoringBackend> {
         use crate::local_model::runtime_config::{
             VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         };
-        use crate::protocols::systemone::ScoringBackend;
         let sglang = self
             .runtime_config
             .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
@@ -1389,7 +1424,8 @@ impl ModelDeploymentCard {
         };
         (self.runtime_config.max_num_seqs == Some(1)
             && self.runtime_config.data_parallel_size == 1
-            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+            && self.worker_type
+                == Some(dynamo_router_protocol::worker_type::WorkerType::Aggregated)
             && self.needs.is_empty()
             && self.lora.is_none()
             && !self
@@ -1459,10 +1495,10 @@ impl ModelDeploymentCard {
                 // worker_type discriminator: 0 = None, then the variant ordinal.
                 match self.worker_type {
                     None => bytes_to_hash.push(0),
-                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
-                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
-                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
-                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                    Some(dynamo_router_protocol::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(dynamo_router_protocol::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(dynamo_router_protocol::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(dynamo_router_protocol::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
                 }
                 // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
                 bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
@@ -1470,10 +1506,10 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
                     for w in alt {
                         let v: u8 = match w {
-                            crate::worker_type::WorkerType::Prefill => 1,
-                            crate::worker_type::WorkerType::Decode => 2,
-                            crate::worker_type::WorkerType::Encode => 3,
-                            crate::worker_type::WorkerType::Aggregated => 4,
+                            dynamo_router_protocol::worker_type::WorkerType::Prefill => 1,
+                            dynamo_router_protocol::worker_type::WorkerType::Decode => 2,
+                            dynamo_router_protocol::worker_type::WorkerType::Encode => 3,
+                            dynamo_router_protocol::worker_type::WorkerType::Aggregated => 4,
                         };
                         bytes_to_hash.push(v);
                     }
@@ -1532,8 +1568,8 @@ impl ModelDeploymentCard {
                 // Preserve legacy checksums when serial scoring is unavailable.
                 if let Some(backend) = self.systemone_backend() {
                     match backend {
-                        crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
-                        crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
+                        ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
+                        ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
                     }
                 }
 
@@ -1576,7 +1612,7 @@ impl ModelDeploymentCard {
 
     /// Identify the Mistral parser format even when Rust cannot load the tokenizer.
     /// Downloaded artifacts take precedence over local-source fallbacks.
-    pub(crate) fn mistral_tokenizer_version(&self) -> Option<u32> {
+    pub fn mistral_tokenizer_version(&self) -> Option<u32> {
         #[derive(Deserialize)]
         struct Header {
             config: Version,
@@ -1704,28 +1740,28 @@ impl ModelDeploymentCard {
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
-    pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+    pub fn tokenizer(&self) -> anyhow::Result<dynamo_tokenizers::Tokenizer> {
         self.tokenizer_with_options(Default::default(), false)
     }
 
     /// `None` until this card loads its tokenizer, then `Some` of the
     /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
-    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+    pub fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
         self.tokenizer_id_bound.get().copied()
     }
 
-    pub(crate) fn embedding_tokenizer_with_options(
+    pub fn embedding_tokenizer_with_options(
         &self,
-        options: crate::tokenizers::TokenizerOptions,
-    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        options: dynamo_tokenizers::TokenizerOptions,
+    ) -> anyhow::Result<dynamo_tokenizers::Tokenizer> {
         self.tokenizer_with_options(options, options.add_special_tokens)
     }
 
     fn tokenizer_with_options(
         &self,
-        options: crate::tokenizers::TokenizerOptions,
+        options: dynamo_tokenizers::TokenizerOptions,
         force_hugging_face: bool,
-    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+    ) -> anyhow::Result<dynamo_tokenizers::Tokenizer> {
         let tokenizer_backend = if force_hugging_face {
             TokenizerBackend::Default
         } else {
@@ -1741,7 +1777,7 @@ impl ModelDeploymentCard {
             Some("0")
         );
 
-        let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
+        let inner: Arc<dyn dynamo_tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
@@ -1756,7 +1792,11 @@ impl ModelDeploymentCard {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
                             && let Ok(contents) = std::fs::read_to_string(p)
                         {
-                            crate::log_json_err(&p.display().to_string(), &contents, serde_err);
+                            dynamo_tokenizers::log_json_err(
+                                &p.display().to_string(),
+                                &contents,
+                                serde_err,
+                            );
                         }
                     })
                     .map_err(anyhow::Error::msg)
@@ -1769,7 +1809,7 @@ impl ModelDeploymentCard {
                 // but missing from the cache specials), letting chat prefixes
                 // straddle a special-token boundary and reducing hit rate.
                 if let Some(model_dir) = p.parent() {
-                    crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
+                    dynamo_tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
                 self.tokenizer_id_bound
                     .get_or_init(|| hf_token_id_bound(&hf));
@@ -1811,19 +1851,19 @@ impl ModelDeploymentCard {
                 // tokenizers use the HF post-processor to apply BOS/EOS when
                 // requested; normal tokenizers keep their existing defaults.
                 let wrap_hf = |hf: HfTokenizer| {
-                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
-                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                    let tokenizer = dynamo_tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                    dynamo_tokenizers::traits::Tokenizer::with_options(tokenizer, options)
                 };
 
                 // Pick the inner backend.
                 let (raw, cache_backend): (
-                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    Arc<dyn dynamo_tokenizers::traits::Tokenizer>,
                     TokenizerBackend,
                 ) = match tokenizer_backend {
                     TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
-                            match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                            match dynamo_tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
                                     (Arc::new(fast), TokenizerBackend::Fastokens)
@@ -1857,7 +1897,7 @@ impl ModelDeploymentCard {
                     }
                     TokenizerBackend::Basetenkenizer => {
                         if let Some(path_str) = p.to_str() {
-                            match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
+                            match dynamo_tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
                                     (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
@@ -1924,7 +1964,7 @@ impl ModelDeploymentCard {
                 let path_str = p.to_str().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
                 })?;
-                let tokenizer = crate::tokenizers::TikTokenTokenizer::from_file_auto(path_str)
+                let tokenizer = dynamo_tokenizers::TikTokenTokenizer::from_file_auto(path_str)
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
@@ -1932,7 +1972,7 @@ impl ModelDeploymentCard {
                 self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+                let raw: Arc<dyn dynamo_tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
                     let shared_cache = shared_tokenizer_cache();
                     let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
@@ -1967,12 +2007,12 @@ impl ModelDeploymentCard {
                 let path_str = p.to_str().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
                 })?;
-                let tokenizer = crate::tokenizers::TekkenTokenizer::from_file(path_str)
+                let tokenizer = dynamo_tokenizers::TekkenTokenizer::from_file(path_str)
                     .with_context(|| {
                         format!("Failed to load tekken tokenizer from {}", p.display())
                     })?;
                 self.tokenizer_id_bound
-                    .get_or_init(|| crate::tokenizers::traits::Tokenizer::vocab_size(&tokenizer));
+                    .get_or_init(|| dynamo_tokenizers::traits::Tokenizer::vocab_size(&tokenizer));
                 // Not wrapped in the L1 prefix cache: it splits text at special-token
                 // strings, which tekken encodes as ordinary text.
                 Arc::new(tokenizer)
@@ -1989,7 +2029,7 @@ impl ModelDeploymentCard {
             }
         };
 
-        Ok(crate::tokenizers::Tokenizer::from(inner))
+        Ok(dynamo_tokenizers::Tokenizer::from(inner))
     }
 
     pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {
@@ -2545,7 +2585,7 @@ impl HFConfig {
         // generation_config wins over config.json (HF convention); the tokenizer
         // rungs rescue models that ship the token only there, not in config.
         text_config.bos_token_id =
-            crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
+            dynamo_tokenizers::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
                 .ok()
                 .or(text_config.bos_token_id)
                 .or_else(|| resolve_token_id_from_tokenizer_files(model_dir, "bos_token"));
@@ -2553,7 +2593,7 @@ impl HFConfig {
         // Same chain as bos above, but eos may be a single id or a list.
         // TODO: refactor when we switch to per-architecture tokenization.
         let mut final_eos_token_ids: Vec<TokenIdType> = {
-                crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
+                dynamo_tokenizers::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::debug!(%err, "eos_token_id not found in generation_config.json, will fall back"),
                 )
@@ -3087,7 +3127,7 @@ mod tests {
         let before_a = (cached_a.get(), uncached_a.get());
         let before_b = (cached_b.get(), uncached_b.get());
 
-        super::tokenizer_cache_token_observer(model_a)(crate::tokenizers::CacheTokenUsage {
+        super::tokenizer_cache_token_observer(model_a)(dynamo_tokenizers::CacheTokenUsage {
             cached_tokens: 7,
             uncached_tokens: 5,
         });
@@ -3098,7 +3138,7 @@ mod tests {
         );
         assert_eq!((cached_b.get(), uncached_b.get()), before_b);
 
-        super::tokenizer_cache_token_observer(model_b)(crate::tokenizers::CacheTokenUsage {
+        super::tokenizer_cache_token_observer(model_b)(dynamo_tokenizers::CacheTokenUsage {
             cached_tokens: 3,
             uncached_tokens: 11,
         });
@@ -3979,7 +4019,7 @@ mod ownership_tests {
 
     #[test]
     fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
-        use crate::entrypoint::RouterConfig;
+        use crate::router_config::RouterConfig;
         use dynamo_runtime::pipeline::RouterMode;
         use dynamo_scheduler::host::RouterPrefillLoadModel;
 
@@ -4170,7 +4210,7 @@ mod ownership_tests {
 
         fn card(configure: impl FnOnce(&mut ModelDeploymentCard)) -> ModelDeploymentCard {
             let mut card = ModelDeploymentCard::with_name_only("model");
-            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.worker_type = Some(dynamo_router_protocol::worker_type::WorkerType::Aggregated);
             card.runtime_config.max_num_seqs = Some(1);
             card.runtime_config
                 .runtime_data
@@ -4200,8 +4240,14 @@ mod ownership_tests {
                     .runtime_data
                     .remove(SGLANG_GENERATE_CAPABILITY);
             },
-            |card| card.worker_type = Some(crate::worker_type::WorkerType::Prefill),
-            |card| card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]],
+            |card| {
+                card.worker_type = Some(dynamo_router_protocol::worker_type::WorkerType::Prefill)
+            },
+            |card| {
+                card.needs = vec![vec![
+                    dynamo_router_protocol::worker_type::WorkerType::Prefill,
+                ]]
+            },
             |card| {
                 card.lora = Some(LoraInfo {
                     name: "adapter".to_string(),
@@ -4231,7 +4277,7 @@ mod ownership_tests {
     #[test]
     fn vllm_causal_scoring_requires_native_serial_capability() {
         let mut card = ModelDeploymentCard::with_name_only("model");
-        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.worker_type = Some(dynamo_router_protocol::worker_type::WorkerType::Aggregated);
         card.runtime_config.max_num_seqs = Some(1);
         card.runtime_config
             .runtime_data
@@ -4430,7 +4476,7 @@ mod worker_type_tests {
     //! See `docs/proposals/health-disagg-readiness.md`.
 
     use super::*;
-    use crate::worker_type::WorkerType;
+    use dynamo_router_protocol::worker_type::WorkerType;
     use std::collections::BTreeMap;
 
     #[test]

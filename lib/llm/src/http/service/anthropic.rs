@@ -1380,7 +1380,7 @@ fn apply_anthropic_template_args(
     }
     // After the thinking decision, so the defaults' thinking keys yield to it, and
     // before the history fallback, so a default can still set that key.
-    chat_template_defaults.apply_to_request(request);
+    super::apply_chat_template_defaults(chat_template_defaults, request);
     if prompt_injected_reasoning {
         // Preserve reasoning from prior turns. Some templates (Nemotron)
         // strip historical <think> content by default to save context.

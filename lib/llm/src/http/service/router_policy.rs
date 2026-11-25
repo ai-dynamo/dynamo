@@ -246,7 +246,8 @@ mod tests {
 
     #[tokio::test]
     async fn busy_threshold_subresource_and_legacy_route_share_model_state() {
-        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle, WorkerSet};
+        use crate::discovery::{LoadThresholdHandle, WorkerSet};
+        use crate::router_config::LoadThresholdConfig;
 
         let manager = Arc::new(ModelManager::new());
         let mut first_handles = Vec::new();
@@ -354,7 +355,8 @@ mod tests {
     /// to the other WorkerSets and reports their thresholds.
     #[tokio::test]
     async fn busy_threshold_writes_skip_direct_routing_worker_sets() {
-        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle, WorkerSet};
+        use crate::discovery::{LoadThresholdHandle, WorkerSet};
+        use crate::router_config::LoadThresholdConfig;
 
         let manager = Arc::new(ModelManager::new());
         let add = |model: &str, namespace: &str, thresholds: LoadThresholdHandle| {

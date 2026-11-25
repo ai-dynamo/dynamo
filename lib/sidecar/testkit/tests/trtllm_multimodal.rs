@@ -143,7 +143,7 @@ async fn images_preserve_order_uuids_and_engine_expanded_usage() {
 
 #[tokio::test]
 async fn formatter_regrouped_tool_media_reaches_openengine_in_rendered_order() {
-    use dynamo_llm::common::checked_file::CheckedFile;
+    use dynamo_llm::checked_file::CheckedFile;
     use dynamo_llm::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::protocols::Annotated;
+use crate::tensor_model::{DataType, Parameters, TensorMetadata};
 use anyhow::Result;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use futures::{Stream, StreamExt, pin_mut};
@@ -20,45 +21,6 @@ use validator::Validate;
 
 // [gluo TODO] nvext is LLM specific, we really only use the annotation field
 pub use super::common::extensions::{NvExt, NvExtProvider};
-
-#[derive(Debug, Serialize, Clone, Eq, PartialEq, Deserialize)]
-pub enum DataType {
-    Bool,
-    Uint8,
-    Uint16,
-    Uint32,
-    Uint64,
-    Int8,
-    Int16,
-    Int32,
-    Int64,
-    Float16,
-    BFloat16,
-    Float32,
-    Float64,
-    Bytes,
-}
-
-impl DataType {
-    pub fn size(&self) -> usize {
-        match self {
-            DataType::Bool => size_of::<bool>(),
-            DataType::Uint8 => size_of::<u8>(),
-            DataType::Uint16 => size_of::<u16>(),
-            DataType::Uint32 => size_of::<u32>(),
-            DataType::Uint64 => size_of::<u64>(),
-            DataType::Int8 => size_of::<i8>(),
-            DataType::Int16 => size_of::<i16>(),
-            DataType::Int32 => size_of::<i32>(),
-            DataType::Int64 => size_of::<i64>(),
-            DataType::Float16 => size_of::<f16>(),
-            DataType::BFloat16 => size_of::<bf16>(),
-            DataType::Float32 => size_of::<f32>(),
-            DataType::Float64 => size_of::<f64>(),
-            DataType::Bytes => 0, // variable length, return 0 as indicator
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Clone, PartialEq, Deserialize)]
 // Self-describing encoding removes ambiguity between signed/unsigned and width variants.
@@ -121,30 +83,6 @@ impl FlattenTensor {
             Self::Bytes(_) => DataType::Bytes,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct TensorMetadata {
-    pub name: String,
-    pub data_type: DataType,
-    pub shape: Vec<i64>,
-
-    /// Optional parameters for this tensor
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    pub parameters: Parameters,
-}
-
-#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TensorModelConfig {
-    pub name: String,
-    pub inputs: Vec<TensorMetadata>,
-    pub outputs: Vec<TensorMetadata>,
-    // Optional Triton model config in serialized protobuf string,
-    // if provided, it supersedes the basic model config defined above.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triton_model_config: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -304,18 +242,6 @@ impl NvCreateTensorResponse {
         response.ok_or_else(|| anyhow::anyhow!("No response received"))
     }
 }
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum ParameterValue {
-    Bool(bool),
-    Int64(i64),
-    String(String),
-    Double(f64),
-    Uint64(u64),
-}
-
-pub type Parameters = HashMap<String, ParameterValue>;
 
 #[cfg(test)]
 mod tests {

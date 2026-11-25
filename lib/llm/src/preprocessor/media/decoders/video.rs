@@ -10,53 +10,16 @@ use ffmpeg_next::Rational;
 use memfile::{CreateOptions, MemFile, Seal};
 use ndarray::Array4;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use video_rs::Time;
 
 use super::Decoder;
+use crate::media_config::VideoDecoder;
 use crate::preprocessor::media::{
     DecodedMediaData, EncodedMediaData, decoders::DecodedMediaMetadata,
 };
 
 /// Small time buffer (seconds) to avoid edge cases when seeking near frame boundaries
 const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
-const DEFAULT_MAX_ALLOC: u64 = 512 * 1024 * 1024; // 512 MB
-
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VideoDecoderLimits {
-    /// Maximum allowed total allocation of decoded frames in bytes
-    #[serde(default)]
-    pub max_alloc: Option<u64>,
-}
-
-impl Default for VideoDecoderLimits {
-    fn default() -> Self {
-        Self {
-            max_alloc: Some(DEFAULT_MAX_ALLOC),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VideoDecoder {
-    #[serde(default)]
-    pub(crate) limits: VideoDecoderLimits,
-
-    /// sample N frames per second
-    #[serde(default)]
-    pub(crate) fps: Option<f64>,
-    /// sample at most N frames
-    #[serde(default)]
-    pub(crate) max_frames: Option<u64>,
-    /// sample N frames in total (linspace)
-    #[serde(default)]
-    pub(crate) num_frames: Option<u64>,
-    /// fail if some frames fail to decode
-    #[serde(default)]
-    pub(crate) strict: bool,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VideoMetadata {
@@ -616,6 +579,7 @@ impl Decoder for VideoDecoder {
 mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
+    use crate::media_config::VideoDecoderLimits;
     use rstest::rstest;
     use video_rs::Location;
 

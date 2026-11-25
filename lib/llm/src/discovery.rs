@@ -47,6 +47,5 @@ pub use watcher::{ModelUpdate, ModelWatcher};
 mod worker_monitor;
 pub(crate) use worker_monitor::RoutableThresholds;
 pub use worker_monitor::{
-    KvWorkerMonitor, LoadThresholdConfig, LoadThresholdHandle, WORKER_TYPE_DECODE,
-    WORKER_TYPE_PREFILL, WorkerLoadState,
+    KvWorkerMonitor, LoadThresholdHandle, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,
 };

@@ -4269,9 +4269,7 @@ async fn chat_completions(
     );
 
     let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
-    state
-        .chat_template_defaults()
-        .apply_to_request(&mut request);
+    super::apply_chat_template_defaults(state.chat_template_defaults(), &mut request);
     if allowed_tools.is_some()
         && request
             .chat_template_args
@@ -4410,9 +4408,7 @@ async fn chat_completions(
         crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
-        ) == Some(
-            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
-        ),
+        ) == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY),
     );
 
     // Any force_nonempty_content=true request: surface reasoning as content when
@@ -5156,9 +5152,7 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    state
-        .chat_template_defaults()
-        .apply_to_request(&mut chat_request);
+    super::apply_chat_template_defaults(state.chat_template_defaults(), &mut chat_request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -5297,9 +5291,7 @@ async fn responses(
             crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
                 parsing_options.tool_call_parser.as_deref(),
                 parsing_options.reasoning_parser.as_deref(),
-            ) == Some(
-                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
-            ),
+            ) == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY),
         );
 
         let mut http_queue_guard = Some(http_queue_guard);

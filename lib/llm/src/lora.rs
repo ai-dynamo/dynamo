@@ -10,14 +10,6 @@ pub use subscription::LoadEstimatorSubscription;
 #[cfg(test)]
 mod metrics_tests;
 
-impl dynamo_lora::runtime::RuntimeLoraWorkerFacts
-    for crate::local_model::runtime_config::ModelRuntimeConfig
-{
-    fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
-        self.runtime_data.get(key)
-    }
-}
-
 /// Inject the frontend registry's existing series into the allocation controller.
 pub fn controller_metrics() -> dynamo_lora::metrics::ControllerMetrics {
     use crate::http::service::metrics::*;

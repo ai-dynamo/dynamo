@@ -42,7 +42,8 @@
 //! ```
 
 use super::{RouteDoc, service_v2};
-use crate::discovery::{LoadThresholdConfig, ModelManager};
+use crate::discovery::ModelManager;
+use crate::router_config::LoadThresholdConfig;
 use axum::{
     Json, Router,
     extract::Request,

@@ -6,9 +6,8 @@ use std::{hint::black_box, io::Cursor};
 use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use dynamo_llm::preprocessor::media::{
-    Decoder, EncodedMediaData, ImageDecoder, libjpeg_turbo_available,
-};
+use dynamo_llm::media_config::ImageDecoder;
+use dynamo_llm::preprocessor::media::{Decoder, EncodedMediaData, libjpeg_turbo_available};
 use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
 use rayon::{ThreadPoolBuilder, prelude::*};
 

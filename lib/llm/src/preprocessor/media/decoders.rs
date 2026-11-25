@@ -3,17 +3,17 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use super::common::EncodedMediaData;
 use super::rdma::DecodedMediaData;
+use crate::media_config::MediaDecoder;
 pub mod image;
 #[cfg(feature = "media-ffmpeg")]
 pub mod video;
 
-pub use image::{ImageDecoder, ImageMetadata};
+pub use image::ImageMetadata;
 #[cfg(feature = "media-ffmpeg")]
-pub use video::{VideoDecoder, VideoMetadata};
+pub use video::VideoMetadata;
 
 #[async_trait::async_trait]
 pub trait Decoder: Clone + Send + 'static {
@@ -45,28 +45,9 @@ pub trait Decoder: Clone + Send + 'static {
     }
 }
 
-/// Media decoder configuration.
-/// Used both for MDC server config and runtime `media_io_kwargs`.
-/// When used at runtime, limits are enforced from MDC and cannot be overridden.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, ToSchema)]
-pub struct MediaDecoder {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<ImageDecoder>,
-    #[cfg(feature = "media-ffmpeg")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video: Option<VideoDecoder>,
-    // TODO: audio decoder
-    /// Rotate by the EXIF orientation tag as vllm-rs reads it: no XMP, no PNG eXIf after IDAT.
-    /// Not in `image`: older frontends reject unknown `image` fields but ignore them here.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub apply_exif_orientation: bool,
-}
-
-impl MediaDecoder {
-    pub(crate) fn warn_if_unavailable_backends(&self) {
-        if let Some(image) = &self.image {
-            image.warn_if_libjpeg_unavailable();
-        }
+pub(crate) fn warn_if_unavailable_backends(decoder: &MediaDecoder) {
+    if let Some(image) = &decoder.image {
+        image::warn_if_libjpeg_unavailable(image);
     }
 }
 
@@ -75,31 +56,4 @@ pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
     #[cfg(feature = "media-ffmpeg")]
     Video(VideoMetadata),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exif_orientation_is_off_unless_the_card_sets_it() {
-        let old_card: MediaDecoder =
-            serde_json::from_value(serde_json::json!({"image": {}})).unwrap();
-        assert!(!old_card.apply_exif_orientation);
-        let default = serde_json::to_value(&old_card).unwrap();
-        assert!(default.get("apply_exif_orientation").is_none());
-
-        let card = serde_json::to_value(MediaDecoder {
-            apply_exif_orientation: true,
-            ..old_card
-        })
-        .unwrap();
-        assert_eq!(card["apply_exif_orientation"], true);
-        assert!(card["image"].get("apply_exif_orientation").is_none());
-        assert!(
-            serde_json::from_value::<MediaDecoder>(card)
-                .unwrap()
-                .apply_exif_orientation
-        );
-    }
 }

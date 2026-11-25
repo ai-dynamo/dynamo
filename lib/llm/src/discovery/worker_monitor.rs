@@ -9,14 +9,14 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt, SchedulerLoadSnapshot};
-use serde::{Deserialize, Serialize};
+use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
 
 use crate::kv_router::ActiveLoad;
 use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
+use crate::router_config::LoadThresholdConfig;
 use dynamo_http_server::metrics::{
     UNSET_DP_RANK_LABEL, WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE,
     WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
@@ -85,59 +85,6 @@ fn publish_overloaded_instances_if_needed(
 
     publish_overloaded_instances(client, &overloaded_tracker.ids());
     true
-}
-
-/// Configuration for worker load thresholds used in overload detection.
-///
-/// All thresholds are opt-in. An unset (`None`) field means the corresponding
-/// check is skipped entirely — it never contributes to a worker being marked
-/// overloaded. If all three are `None`, overload-based rejection is fully disabled.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct LoadThresholdConfig {
-    /// KV cache block utilization threshold (0.0-1.0).
-    /// Worker is overloaded when `active_decode_blocks / total_blocks > threshold`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_decode_blocks_threshold: Option<f64>,
-
-    /// Absolute prefill token count threshold.
-    /// Worker is overloaded when `active_prefill_tokens > threshold`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_prefill_tokens_threshold: Option<u64>,
-
-    /// Fraction of max_num_batched_tokens.
-    /// Worker is overloaded when `active_prefill_tokens > frac * max_num_batched_tokens`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_prefill_tokens_threshold_frac: Option<f64>,
-}
-
-impl LoadThresholdConfig {
-    /// Returns true if any threshold is configured.
-    pub fn is_configured(&self) -> bool {
-        self.active_decode_blocks_threshold.is_some()
-            || self.active_prefill_tokens_threshold.is_some()
-            || self.active_prefill_tokens_threshold_frac.is_some()
-    }
-
-    /// Validate threshold values shared by startup and dynamic configuration.
-    pub fn validate(&self) -> Result<(), String> {
-        if let Some(threshold) = self.active_decode_blocks_threshold
-            && (!threshold.is_finite() || !(0.0..=1.0).contains(&threshold))
-        {
-            return Err(format!(
-                "active_decode_blocks_threshold must be between 0.0 and 1.0, got {threshold}"
-            ));
-        }
-
-        if let Some(threshold) = self.active_prefill_tokens_threshold_frac
-            && (!threshold.is_finite() || threshold < 0.0)
-        {
-            return Err(format!(
-                "active_prefill_tokens_threshold_frac must be a finite value greater than or equal to 0.0, got {threshold}"
-            ));
-        }
-
-        Ok(())
-    }
 }
 
 /// Shared threshold configuration for independently owned routing load contexts.
@@ -716,21 +663,6 @@ impl RoutableThresholds {
     }
 }
 
-impl From<LoadThresholdConfig> for BusyThresholds {
-    /// The queue's vocabulary for the `/busy_threshold` config: token counts narrow to
-    /// `usize` saturating, fractions pass through.
-    fn from(config: LoadThresholdConfig) -> Self {
-        BusyThresholds::default()
-            .with_prefill_busy_threshold(
-                config
-                    .active_prefill_tokens_threshold
-                    .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
-            )
-            .with_prefill_busy_threshold_frac(config.active_prefill_tokens_threshold_frac)
-            .with_decode_busy_threshold_frac(config.active_decode_blocks_threshold)
-    }
-}
-
 /// Worker monitor for tracking KV cache usage and overload states.
 ///
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
@@ -1297,14 +1229,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        BusyThresholds, DecodeSignals, LoadObservation, LoadThresholdConfig, LoadThresholdHandle,
+        DecodeSignals, LoadObservation, LoadThresholdConfig, LoadThresholdHandle,
         OverloadedWorkerTracker, RemoteActiveLoadSnapshot, RoutableThresholds, WORKER_LOAD_METRICS,
         WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
         overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
     use crate::kv_router::ActiveLoad;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::host::{BusyThresholdsHostExt, SchedulerLoadSnapshot};
+    use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt, SchedulerLoadSnapshot};
     use std::collections::HashSet;
     use std::sync::Arc;
 

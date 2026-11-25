@@ -13,15 +13,15 @@ use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as _};
 
-use crate::common::checked_file::CheckedFile;
-use crate::entrypoint::RouterConfig;
+use crate::checked_file::CheckedFile;
 use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsConfig};
+use crate::media_config::{MediaDecoder, MediaFetcher};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
-use crate::protocols::tensor::TensorModelConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
+use crate::router_config::RouterConfig;
+use crate::tensor_model::TensorModelConfig;
 
 pub mod runtime_config;
 
@@ -721,8 +721,8 @@ impl LocalModel {
         model_type: ModelType,
         model_input: ModelInput,
         lora_info: Option<crate::model_card::LoraInfo>,
-        worker_type: Option<crate::worker_type::WorkerType>,
-        needs: Vec<Vec<crate::worker_type::WorkerType>>,
+        worker_type: Option<dynamo_router_protocol::worker_type::WorkerType>,
+        needs: Vec<Vec<dynamo_router_protocol::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
@@ -1028,7 +1028,7 @@ mod local_source_tests {
                 ModelType::Chat,
                 ModelInput::Tokens,
                 None,
-                Some(crate::worker_type::WorkerType::Aggregated),
+                Some(dynamo_router_protocol::worker_type::WorkerType::Aggregated),
                 Vec::new(),
             )
             .await

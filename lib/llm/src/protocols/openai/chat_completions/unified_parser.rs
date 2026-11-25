@@ -35,7 +35,6 @@
 //! to preserve, so every [`UnifiedParserEvent`] becomes its own chunk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
@@ -55,6 +54,16 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
+use crate::parser_family::{
+    BEAM_UNIFIED_FAMILY, DEEPSEEK_V41_UNIFIED_FAMILY, GLM47_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY,
+    MISTRAL_UNIFIED_FAMILY, MUSE_SPARK_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY,
+    NEMOTRON_V3_UNIFIED_FAMILY, QWEN3_UNIFIED_FAMILY, configured_family,
+};
+#[cfg(test)]
+use crate::parser_family::{
+    DEEPSEEK_V4_UNIFIED_FAMILY, FAMILY_NAMES, GEMMA4_UNIFIED_FAMILY, KIMI_K2_UNIFIED_FAMILY,
+    canonical_family,
+};
 use crate::protocols::openai::GuidedToolConstraint;
 use dynamo_tokenizers::traits::Tokenizer;
 
@@ -63,34 +72,8 @@ use super::NvCreateChatCompletionStreamResponse;
 #[cfg(test)]
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-/// The `dynamo-parsers-v2` unified family that serves Qwen3.
-///
-/// `REGISTERED_UNIFIED_FAMILIES` accepts both `qwen3` and the `qwen3_coder` alias for
-/// the same XML grammar; `qwen3` is the canonical registry name and the one the
-/// conformance corpus uses, so it is what this module passes and logs.
-pub(crate) const QWEN3_UNIFIED_FAMILY: &str = "qwen3";
-pub(crate) const KIMI_K2_UNIFIED_FAMILY: &str = "kimi_k2";
-pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
-pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
-pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
-pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 /// The empty thought channel Gemma 4 opens with thinking off.
 pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
-pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
-pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
-/// The `dynamo-parsers-v2` unified family that serves Beam. Dynamo has no v1 Beam
-/// parser, so the `beam` + `beam` pair routes to the unified parser without
-/// `DYN_PARSER_VERSION=2`, like DeepSeek V4.1.
-pub(crate) const BEAM_UNIFIED_FAMILY: &str = "beam";
-pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
-/// Nemotron 3 (Ultra, Super, 3.5 Super): `nemotron_v3` forced reasoning over the
-/// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
-/// with `--dyn-reasoning-parser nemotron_v3`.
-pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
-/// The `dynamo-parsers-v2` unified family for Mistral v11+ (`[TOOL_CALLS]NAME[ARGS]{json}`).
-/// The `mistral` parser name maps to it through [`DYNAMO_FAMILY_ALIASES`], and
-/// [`FAMILY_REQUIRED_TOKENS`] rejects pre-v11 tokenizers at model setup.
-pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
 const MISTRAL_REASONING_START: &str = "[THINK]";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
@@ -98,35 +81,6 @@ const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 
 fn uses_qwen_xml_grammar(family: &str) -> bool {
     matches!(family, QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY)
-}
-
-/// A family that borrows another family's tool grammar names the owner through its
-/// reasoning half: `qwen3_coder` + `nemotron_v3` is Nemotron, not Qwen3, because the
-/// forced-reasoning default lives in the reasoning parser and the XML grammar is shared.
-fn shared_grammar_family(tool_family: &str, reasoning_family: &str) -> Option<&'static str> {
-    match (tool_family, reasoning_family) {
-        (QWEN3_UNIFIED_FAMILY, NEMOTRON_V3_UNIFIED_FAMILY) => Some(NEMOTRON_V3_UNIFIED_FAMILY),
-        _ => None,
-    }
-}
-
-const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
-    ("deepseek-v4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("deepseekv4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("muse", MUSE_UNIFIED_FAMILY),
-    ("gemma-4", GEMMA4_UNIFIED_FAMILY),
-    ("glm45", GLM47_UNIFIED_FAMILY),
-    ("kimi_k25", KIMI_K2_UNIFIED_FAMILY),
-    ("mistral", MISTRAL_UNIFIED_FAMILY),
-];
-
-/// Canonical family names and aliases share one route for registration, stream, and batch.
-pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
-    let parser = DYNAMO_FAMILY_ALIASES
-        .iter()
-        .find_map(|(alias, family)| (*alias == parser).then_some(*family))
-        .unwrap_or(parser);
-    dynamo_parsers_v2::canonical_unified_family(parser)
 }
 
 /// Aliases that still route but are scheduled for removal, paired with the family
@@ -149,33 +103,6 @@ pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
                  parser: `muse_spark_open`"
             )
         })
-}
-
-pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
-    names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
-    names.sort_unstable();
-    names.dedup();
-    names
-});
-
-/// A configured half may select a unified family, but two configured halves must agree.
-pub(crate) fn configured_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    match (tool_call_parser, reasoning_parser) {
-        (Some(tool), Some(reasoning)) => {
-            let tool_family = canonical_family(tool)?;
-            let reasoning_family = canonical_family(reasoning)?;
-            if tool_family == reasoning_family {
-                return Some(tool_family);
-            }
-            shared_grammar_family(tool_family, reasoning_family)
-        }
-        (Some(parser), None) | (None, Some(parser)) => canonical_family(parser),
-        (None, None) => None,
-    }
 }
 
 pub(crate) fn is_v2_configured_family(

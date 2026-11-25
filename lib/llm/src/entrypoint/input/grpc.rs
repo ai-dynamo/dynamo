@@ -7,10 +7,11 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, RouterConfig, input::common},
+    entrypoint::{EngineConfig, input::common},
     grpc::service::kserve,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
+    router_config::RouterConfig,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },

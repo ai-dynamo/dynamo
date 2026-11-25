@@ -18,7 +18,7 @@ use dynamo_kv_hints::{
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
-use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use crate::parser_family::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -473,7 +473,7 @@ const fn default_local_indexer() -> bool {
     true
 }
 
-pub(crate) const fn default_exclude_tools_when_tool_choice_none() -> bool {
+pub const fn default_exclude_tools_when_tool_choice_none() -> bool {
     true
 }
 
@@ -524,14 +524,14 @@ impl Default for ModelRuntimeConfig {
 impl ModelRuntimeConfig {
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
-        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        crate::parser_family::configured_family(
             self.tool_call_parser.as_deref(),
             self.reasoning_parser.as_deref(),
         ) == Some("muse_spark")
     }
 
     /// Normalize older wire fields into the current policy and project it back for older readers
-    pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
+    pub fn normalize_structural_tag_compatibility(&mut self) {
         if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
             self.structural_tag = Some(StructuralTagConfig {
                 scope: self.structural_tag_scope,
@@ -556,7 +556,7 @@ impl ModelRuntimeConfig {
     /// Rust callers commonly store booleans, while compatibility cards may
     /// carry string-encoded flags. Both representations use Dynamo's canonical
     /// truthy vocabulary.
-    pub(crate) fn runtime_flag_enabled(&self, key: &str) -> bool {
+    pub fn runtime_flag_enabled(&self, key: &str) -> bool {
         match self.runtime_data.get(key) {
             Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::String(value)) => is_truthy(value),
@@ -565,7 +565,7 @@ impl ModelRuntimeConfig {
     }
 
     /// Check whether a runtime capability is explicitly enabled.
-    pub(crate) fn supports_runtime_capability(&self, capability: &str) -> bool {
+    pub fn supports_runtime_capability(&self, capability: &str) -> bool {
         self.runtime_flag_enabled(capability)
     }
 
@@ -578,6 +578,12 @@ impl ModelRuntimeConfig {
             .get(&dp_rank)?
             .as_str()?;
         (!endpoint.is_empty()).then_some(endpoint)
+    }
+}
+
+impl dynamo_lora::runtime::RuntimeLoraWorkerFacts for ModelRuntimeConfig {
+    fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.runtime_data.get(key)
     }
 }
 
@@ -922,7 +928,8 @@ impl ModelRuntimeConfig {
 mod tests {
     use super::*;
 
-    use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+    /// Dynamo tool-parser names served by the `dynamo-parsers-v2` tool-call registry.
+    const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
