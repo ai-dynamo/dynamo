@@ -14,6 +14,11 @@ use crate::config::environment_names::discovery;
 const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
 const MAIN_CONTAINER_NAME: &str = "main";
 
+/// Pod readiness gate that holds a worker Pod NotReady until every required frontend can route
+/// to it. A Pod that lists the gate is discovered as held from the moment its containers are
+/// ready, so frontends can prepare its pipeline, and becomes routable when the Pod is Ready.
+pub(super) const FRONTEND_ADMITTED_GATE: &str = "nvidia.com/dynamo-frontend-admitted";
+
 /// Kube discovery mode.
 ///
 /// - `Pod`: default. One identity per pod.
@@ -141,10 +146,66 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, 
     result
 }
 
-/// Extract (instance_id, cr_name, pod_uid) tuples from a Pod for each ready container.
+fn pod_condition_is_true(pod: &Pod, condition_type: &str) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .is_some_and(|conditions| {
+            conditions
+                .iter()
+                .any(|condition| condition.type_ == condition_type && condition.status == "True")
+        })
+}
+
+/// Whether the Pod lists [`FRONTEND_ADMITTED_GATE`] among its readiness gates.
+fn has_frontend_gate(pod: &Pod) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|spec| spec.readiness_gates.as_ref())
+        .is_some_and(|gates| {
+            gates
+                .iter()
+                .any(|gate| gate.condition_type == FRONTEND_ADMITTED_GATE)
+        })
+}
+
+/// Extract (instance_id, cr_name, pod_uid, held) for a Pod that lists [`FRONTEND_ADMITTED_GATE`]
+/// and whose containers are ready.
+///
+/// An EndpointSlice reports such a Pod not ready until the gate passes, and cannot tell that
+/// from a Pod whose containers are not ready. The Pod can, so a gated Pod is read here for both
+/// its held and its routable state. Returns `None` for a Pod without the gate, which leaves it
+/// to its EndpointSlice, and for a terminating Pod, which an EndpointSlice also reports not
+/// ready.
+pub(super) fn extract_gated_pod(pod: &Pod) -> Option<(u64, String, String, bool)> {
+    if !has_frontend_gate(pod)
+        || pod.metadata.deletion_timestamp.is_some()
+        || !pod_condition_is_true(pod, "ContainersReady")
+    {
+        return None;
+    }
+    // The Pod is routable when it is Ready, as its EndpointSlice reports it.
+    let held = !pod_condition_is_true(pod, "Ready");
+    let pod_name = pod.metadata.name.as_deref()?;
+    let pod_uid = pod.metadata.uid.as_deref().filter(|uid| !uid.is_empty())?;
+    let target = KubeDiscoveryTarget::Pod(pod_name.to_string());
+    Some((
+        target.instance_id(),
+        target.cr_name(),
+        pod_uid.to_string(),
+        held,
+    ))
+}
+
+/// Extract (instance_id, cr_name, pod_uid, held) tuples from a Pod for each ready container.
+///
+/// A ready container is held while its Pod lists [`FRONTEND_ADMITTED_GATE`] and the gate has
+/// not passed. Otherwise it is routable whatever the Pod's own readiness, as before: once
+/// the gate has passed, a container that is not ready does not hold the Pod's other
+/// containers.
 ///
 /// Skips pods without `metadata.uid` — never falls back to name-only identity.
-pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> {
+pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String, bool)> {
     let pod_name = match pod.metadata.name.as_deref() {
         Some(name) => name,
         None => return vec![],
@@ -167,12 +228,18 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> 
         None => return vec![],
     };
 
+    let held = has_frontend_gate(pod) && !pod_condition_is_true(pod, FRONTEND_ADMITTED_GATE);
     container_statuses
         .iter()
         .filter(|cs| cs.ready)
         .map(|cs| {
             let target = KubeDiscoveryTarget::Container(pod_name.to_string(), cs.name.clone());
-            (target.instance_id(), target.cr_name(), pod_uid.clone())
+            (
+                target.instance_id(),
+                target.cr_name(),
+                pod_uid.clone(),
+                held,
+            )
         })
         .collect()
 }
@@ -188,6 +255,10 @@ pub(super) struct PodInfo {
     pub mode: KubeDiscoveryMode,
     /// Discovery target for this process, derived from mode + pod/container identity.
     pub target: KubeDiscoveryTarget,
+    /// Whether this process discovers worker Pods that wait on [`FRONTEND_ADMITTED_GATE`], as
+    /// held instances. Read from DYN_KUBE_DISCOVERY_HELD_PODS. Off, such a Pod stays unknown
+    /// until it is Ready.
+    pub discover_held_pods: bool,
 }
 
 const DEFAULT_PODINFO_PATH: &str = "/etc/podinfo";
@@ -252,6 +323,9 @@ impl PodInfo {
             system_port,
             mode,
             target,
+            discover_held_pods: crate::config::env_is_truthy(
+                discovery::DYN_KUBE_DISCOVERY_HELD_PODS,
+            ),
         })
     }
 }
@@ -307,6 +381,136 @@ mod tests {
         assert_eq!(
             e0,
             KubeDiscoveryTarget::Container("worker-0".into(), "engine-0".into()).instance_id()
+        );
+    }
+
+    use k8s_openapi::api::core::v1::{
+        ContainerStatus, PodCondition, PodReadinessGate, PodSpec, PodStatus,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+
+    /// A Pod named `worker-a` with one `main` container. `conditions` lists the Pod
+    /// conditions that are `True`.
+    fn pod(gated: bool, conditions: &[&str]) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                name: Some("worker-a".to_string()),
+                uid: Some("pod-uid".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                readiness_gates: gated.then(|| {
+                    vec![PodReadinessGate {
+                        condition_type: FRONTEND_ADMITTED_GATE.to_string(),
+                    }]
+                }),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                conditions: Some(
+                    conditions
+                        .iter()
+                        .map(|condition| PodCondition {
+                            type_: condition.to_string(),
+                            status: "True".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    ready: conditions.contains(&"ContainersReady"),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn gated_pod_is_held_from_containers_ready_until_pod_ready() {
+        let instance_id = hash_pod_name("worker-a");
+        let entry = |held| {
+            Some((
+                instance_id,
+                "worker-a".to_string(),
+                "pod-uid".to_string(),
+                held,
+            ))
+        };
+
+        // Containers not ready yet: nothing to discover.
+        assert_eq!(extract_gated_pod(&pod(true, &[])), None);
+        // Locally ready, waiting on the gate: held.
+        assert_eq!(
+            extract_gated_pod(&pod(true, &["ContainersReady"])),
+            entry(true)
+        );
+        // The gate condition alone does not make the Pod Ready; the kubelet decides.
+        assert_eq!(
+            extract_gated_pod(&pod(true, &["ContainersReady", FRONTEND_ADMITTED_GATE])),
+            entry(true)
+        );
+        assert_eq!(
+            extract_gated_pod(&pod(true, &["ContainersReady", "Ready"])),
+            entry(false)
+        );
+
+        // A terminating Pod is gone, as it is from its EndpointSlice.
+        let mut terminating = pod(true, &["ContainersReady", "Ready"]);
+        terminating.metadata.deletion_timestamp = Some(Time(Default::default()));
+        assert_eq!(extract_gated_pod(&terminating), None);
+
+        // A Pod without the gate is left to its EndpointSlice.
+        assert_eq!(extract_gated_pod(&pod(false, &["ContainersReady"])), None);
+        assert_eq!(
+            extract_gated_pod(&pod(false, &["ContainersReady", "Ready"])),
+            None
+        );
+    }
+
+    #[test]
+    fn ready_container_of_a_gated_pod_is_held_until_the_gate_passes() {
+        let held = |pod: &Pod| {
+            extract_ready_containers(pod)
+                .into_iter()
+                .map(|(_, _, _, held)| held)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(held(&pod(true, &["ContainersReady"])), vec![true]);
+        assert_eq!(
+            held(&pod(
+                true,
+                &["ContainersReady", FRONTEND_ADMITTED_GATE, "Ready"]
+            )),
+            vec![false]
+        );
+        // Without the gate a ready container is routable whatever the Pod's readiness.
+        assert_eq!(held(&pod(false, &["ContainersReady"])), vec![false]);
+        assert!(held(&pod(true, &[])).is_empty());
+
+        // A second container that is not ready keeps the Pod from being Ready. That holds the
+        // ready container only until the gate has passed.
+        let with_failed_sibling = |conditions: &[&str]| {
+            let mut pod = pod(true, conditions);
+            let statuses = pod
+                .status
+                .as_mut()
+                .and_then(|status| status.container_statuses.as_mut())
+                .unwrap();
+            statuses[0].ready = true;
+            statuses.push(ContainerStatus {
+                name: "engine-1".to_string(),
+                ready: false,
+                ..Default::default()
+            });
+            pod
+        };
+        assert_eq!(held(&with_failed_sibling(&[])), vec![true]);
+        assert_eq!(
+            held(&with_failed_sibling(&[FRONTEND_ADMITTED_GATE])),
+            vec![false]
         );
     }
 }

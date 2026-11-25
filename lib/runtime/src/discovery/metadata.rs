@@ -249,6 +249,20 @@ impl DiscoveryMetadata {
         }
     }
 
+    /// A copy of this metadata with every endpoint marked held out of automatic routing.
+    ///
+    /// Kubernetes discovery uses it for a Pod that waits on its readiness gate: the hold comes
+    /// from the Pod's conditions, not from anything the worker wrote.
+    pub(crate) fn held(&self) -> Self {
+        let mut held = self.clone();
+        for instance in held.endpoints.values_mut() {
+            if let DiscoveryInstance::Endpoint(endpoint) = instance {
+                endpoint.held = true;
+            }
+        }
+        held
+    }
+
     /// Get all registered endpoints
     pub fn get_all_endpoints(&self) -> Vec<DiscoveryInstance> {
         self.endpoints.values().cloned().collect()
