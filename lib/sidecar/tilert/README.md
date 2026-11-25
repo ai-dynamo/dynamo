@@ -53,7 +53,7 @@ Start `python -m dynamo.frontend` as for any other worker.
 | `--model-path` | | Hugging Face model ID or local path, for tokenization and the chat template |
 | `--served-model-name` | `DYN_SERVED_MODEL_NAME` | Public model name. Defaults to `--model-path` |
 | `--context-length` | `TILERT_CONTEXT_LENGTH` | Maximum sequence length; match the decode server's `--max-seq-len` |
-| `--kv-transfer-timeout-secs` | `TILERT_KV_TRANSFER_TIMEOUT_SECS` | How long the decode server waits for a request's KV. Default `120` |
+| `--kv-transfer-timeout-secs` | `TILERT_KV_TRANSFER_TIMEOUT_SECS` | How long the decode server waits for a request's KV. Default `10` |
 | `--probe-token-ids` | | Prompt token ids for one short request run through both engines before the worker registers. A broken KV handoff then fails startup. Empty skips the check |
 
 The shared sidecar flags (`--namespace`, `--dyn-reasoning-parser`, `--dyn-tool-call-parser` and the rest) are listed by `--help`.

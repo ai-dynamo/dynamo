@@ -374,18 +374,17 @@ impl TilertSidecarEngine {
                 "no --probe-token-ids: the KV handoff is not checked before registration"
             );
         } else {
-            let probe = Probe {
-                prefill: &prefill,
-                decode: &decode,
-                decode_kv_host: &decode_kv_host,
-                decode_ctrl_port: args.decode_ctrl_port,
+            let probe = probe(
+                &prefill,
+                &decode,
+                &decode_kv_host,
+                args.decode_ctrl_port,
                 kv_transfer_timeout,
-            };
-            timeout_at(deadline, probe.run(args.probe_token_ids.clone()))
-                .await
-                .map_err(|_| {
-                    connection_timeout("the startup probe exceeded the startup deadline")
-                })??;
+                args.probe_token_ids.clone(),
+            );
+            timeout_at(deadline, probe).await.map_err(|_| {
+                connection_timeout("the startup probe exceeded the startup deadline")
+            })??;
         }
         drop(prefill);
 
@@ -431,74 +430,68 @@ impl TilertSidecarEngine {
 }
 
 /// One short request through both engines.
-struct Probe<'a> {
-    prefill: &'a PrefillClient,
-    decode: &'a DecodeClient,
-    decode_kv_host: &'a str,
+async fn probe(
+    prefill: &PrefillClient,
+    decode: &DecodeClient,
+    decode_kv_host: &str,
     decode_ctrl_port: u16,
     kv_transfer_timeout: Duration,
-}
-
-impl Probe<'_> {
-    async fn run(&self, token_ids: Vec<u32>) -> Result<(), DynamoError> {
-        let rid = new_request_id();
-        let prompt_tokens = token_ids.len();
-        let started = Instant::now();
-        let outcome = self
-            .prefill
-            .prefill(PrefillRequest {
-                request_id: rid.clone(),
-                token_ids,
-                temperature: 1.0,
-                seed: None,
-                ignore_eos: false,
-                repetition_penalty: None,
-                presence_penalty: None,
-                decode_kv_host: self.decode_kv_host.to_string(),
-                decode_ctrl_port: self.decode_ctrl_port,
-            })
-            .await?;
-        let prefill_ms = millis(started);
-        let Some(first_token) = outcome.first_token.or(outcome.stop_token) else {
-            self.decode.release(&rid).await;
-            return Err(backend_error(
-                BackendError::Unknown,
-                "startup probe: vLLM returned neither a first token nor a stop token",
-            ));
-        };
-        let decoded = self
-            .decode
-            .decode_blocking(DecodeBody {
-                rid: rid.clone(),
-                first_token_id: first_token,
-                max_tokens: PROBE_MAX_TOKENS,
-                sampling: serde_json::Map::new(),
-                timeout_s: self.kv_transfer_timeout.as_secs_f64(),
-                stream: false,
-            })
-            .await;
-        let (tokens, phases) = match decoded {
-            Ok(decoded) => decoded,
-            Err(error) if is_kind(&error, BackendError::ConnectionTimeout) => {
-                return Err(connection_timeout(format!(
-                    "startup probe: the prefill finished but no KV for request {rid} reached the \
-                     decode server at {}:{} within {:?}. Check that vLLM runs TileRT's KV \
-                     connector, that this address is reachable from the prefill node, and that \
-                     nothing else is using this decode server.",
-                    self.decode_kv_host, self.decode_ctrl_port, self.kv_transfer_timeout
-                )));
-            }
-            Err(error) => return Err(error),
-        };
-        tracing::info!(
-            prompt_tokens,
-            prefill_ms,
-            decoded_tokens = tokens.len(),
-            phases = %phases.unwrap_or_default(),
-            "TileRT startup probe passed"
-        );
-        Ok(())
-    }
+    token_ids: Vec<u32>,
+) -> Result<(), DynamoError> {
+    let rid = new_request_id();
+    let prompt_tokens = token_ids.len();
+    let started = Instant::now();
+    let outcome = prefill
+        .prefill(PrefillRequest {
+            request_id: rid.clone(),
+            token_ids,
+            temperature: 1.0,
+            seed: None,
+            ignore_eos: false,
+            repetition_penalty: None,
+            presence_penalty: None,
+            decode_kv_host: decode_kv_host.to_string(),
+            decode_ctrl_port,
+        })
+        .await?;
+    let prefill_ms = millis(started);
+    let Some(first_token) = outcome.first_token.or(outcome.stop_token) else {
+        decode.release(&rid).await;
+        return Err(backend_error(
+            BackendError::Unknown,
+            "startup probe: vLLM returned neither a first token nor a stop token",
+        ));
+    };
+    let decoded = decode
+        .decode_blocking(DecodeBody {
+            rid: rid.clone(),
+            first_token_id: first_token,
+            max_tokens: PROBE_MAX_TOKENS,
+            sampling: serde_json::Map::new(),
+            timeout_s: kv_transfer_timeout.as_secs_f64(),
+        })
+        .await;
+    let (tokens, phases) = match decoded {
+        Ok(decoded) => decoded,
+        Err(error) if is_kind(&error, BackendError::ConnectionTimeout) => {
+            return Err(connection_timeout(format!(
+                "startup probe: the prefill finished but no KV for request {rid} reached the \
+                 decode server at {}:{} within {:?}. Check that vLLM runs TileRT's KV \
+                 connector, that this address is reachable from the prefill node, and that \
+                 nothing else is using this decode server.",
+                decode_kv_host, decode_ctrl_port, kv_transfer_timeout
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    tracing::info!(
+        prompt_tokens,
+        prefill_ms,
+        decoded_tokens = tokens.len(),
+        phases = %phases.unwrap_or_default(),
+        "TileRT startup probe passed"
+    );
+    Ok(())
 }
 
 #[async_trait]
@@ -657,7 +650,6 @@ impl LLMEngine for TilertSidecarEngine {
                 max_tokens: plan.max_tokens,
                 sampling: plan.decode_sampling(),
                 timeout_s: kv_transfer_timeout.as_secs_f64(),
-                stream: true,
             }));
             let opened = tokio::select! {
                 biased;
@@ -801,7 +793,8 @@ impl LLMEngine for TilertSidecarEngine {
         // leaving sooner would strand that KV on the decode server.
         if timeout(CLEANUP_DRAIN, self.slot.acquire()).await.is_err() {
             tracing::warn!(
-                "a request was still releasing its KV after {CLEANUP_DRAIN:?}; shutting down anyway"
+                drain = ?CLEANUP_DRAIN,
+                "a request was still releasing its KV; shutting down anyway"
             );
         }
         Ok(())

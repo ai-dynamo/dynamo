@@ -56,7 +56,7 @@ pub(crate) struct Args {
     #[arg(
         long,
         env = "TILERT_KV_TRANSFER_TIMEOUT_SECS",
-        default_value_t = 120,
+        default_value_t = 10,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub kv_transfer_timeout_secs: u64,

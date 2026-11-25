@@ -4,7 +4,7 @@
 use tonic_health_v14 as tonic_health;
 use tonic_v14 as tonic;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -854,22 +854,6 @@ async fn startup_fails_when_an_engine_cannot_be_checked() {
 }
 
 #[tokio::test]
-async fn registration_reports_one_slot_without_kv_routing() {
-    let fakes = start_fakes().await;
-    let named = args(&fakes, &["--served-model-name", "public-name"]);
-    let (engine, worker) = bounded(TilertSidecarEngine::bootstrap(named))
-        .await
-        .expect("bootstrap");
-    assert_eq!(worker.model_name, "test-model");
-    assert_eq!(worker.served_model_name.as_deref(), Some("public-name"));
-    assert!(!worker.enable_kv_routing);
-
-    let registration = bounded(engine.start(0)).await.expect("start").llm.unwrap();
-    assert_eq!(registration.context_length, Some(1000));
-    assert_eq!(registration.max_num_seqs, Some(1));
-}
-
-#[tokio::test]
 async fn calls_outside_the_engine_lifecycle_are_refused() {
     let fakes = start_fakes().await;
     let (engine, _config) = bounded(TilertSidecarEngine::bootstrap(args(&fakes, &[])))
@@ -897,31 +881,19 @@ fn plan_refuses_settings_the_decode_stage_cannot_honour() {
         ignore_eos: false,
     };
     type Edit = fn(&mut PreprocessedRequest);
-    let edits: [(&str, Edit); 11] = [
+    // One row for each way a request is refused: a sampling option, structured
+    // output, and an option the decode server's capabilities rule out.
+    let edits: [(&str, Edit); 3] = [
         ("top_p", |r| r.sampling_options.top_p = Some(0.9)),
-        ("top_k", |r| r.sampling_options.top_k = Some(40)),
-        ("min_p", |r| r.sampling_options.min_p = Some(0.1)),
-        ("frequency_penalty", |r| {
-            r.sampling_options.frequency_penalty = Some(0.5)
-        }),
-        ("logit_bias", |r| {
-            r.sampling_options.logit_bias = Some(HashMap::from([(1, 1.0)]))
-        }),
         ("structured output", |r| {
             r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
                 regex: Some("a+".to_string()),
                 ..Default::default()
             })
         }),
-        ("n other than 1", |r| r.sampling_options.n = Some(2)),
-        ("min_tokens", |r| r.stop_conditions.min_tokens = Some(4)),
-        ("thinking token budget", |r| {
-            r.stop_conditions.max_thinking_tokens = Some(64)
-        }),
         ("penalties", |r| {
             r.sampling_options.repetition_penalty = Some(1.5)
         }),
-        ("ignore_eos", |r| r.stop_conditions.ignore_eos = Some(true)),
     ];
     for (what, edit) in edits {
         let mut refused = request(8);

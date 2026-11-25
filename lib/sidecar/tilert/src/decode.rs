@@ -35,7 +35,13 @@ pub(crate) struct DecodeBody {
     pub max_tokens: u32,
     pub sampling: serde_json::Map<String, serde_json::Value>,
     pub timeout_s: f64,
-    pub stream: bool,
+}
+
+#[derive(Serialize)]
+struct DecodeRequest<'a> {
+    #[serde(flatten)]
+    body: &'a DecodeBody,
+    stream: bool,
 }
 
 impl DecodeBody {
@@ -270,7 +276,6 @@ impl DecodeClient {
                 max_tokens: 1,
                 sampling: serde_json::Map::new(),
                 timeout_s: RELEASE_WAIT.as_secs_f64(),
-                stream: false,
             })
             .await;
         match released {
@@ -314,11 +319,15 @@ impl DecodeClient {
         }
     }
 
-    async fn post_decode(&self, body: &DecodeBody) -> Result<reqwest::Response, DynamoError> {
+    async fn post_decode(
+        &self,
+        body: &DecodeBody,
+        stream: bool,
+    ) -> Result<reqwest::Response, DynamoError> {
         let send = self
             .http
             .post(self.base.with_path("/pd/decode"))
-            .json(body)
+            .json(&DecodeRequest { body, stream })
             .send();
         let response = tokio::time::timeout(body.response_deadline(), send)
             .await
@@ -342,10 +351,9 @@ impl DecodeClient {
 
     pub(crate) async fn decode_blocking(
         &self,
-        mut body: DecodeBody,
+        body: DecodeBody,
     ) -> Result<(Vec<u32>, Option<serde_json::Value>), DynamoError> {
-        body.stream = false;
-        let response = self.post_decode(&body).await?;
+        let response = self.post_decode(&body, false).await?;
         let reply: BlockingReply = tokio::time::timeout(RESPONSE_SLACK, response.json())
             .await
             .map_err(|_| {
@@ -360,11 +368,10 @@ impl DecodeClient {
 
     pub(crate) async fn decode_stream(
         &self,
-        mut body: DecodeBody,
+        body: DecodeBody,
     ) -> Result<impl Stream<Item = Result<DecodeEvent, DynamoError>> + Send + 'static, DynamoError>
     {
-        body.stream = true;
-        let response = self.post_decode(&body).await?;
+        let response = self.post_decode(&body, true).await?;
         let bytes = response.bytes_stream().map_err(std::io::Error::other);
         let mut lines = Box::pin(FramedRead::new(
             StreamReader::new(bytes),

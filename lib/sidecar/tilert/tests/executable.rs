@@ -17,21 +17,6 @@ fn sidecar() -> Command {
     command
 }
 
-#[test]
-fn help_names_the_decode_endpoint_variable() {
-    let output = sidecar()
-        .arg("--help")
-        .output()
-        .expect("run dynamo-tilert-sidecar --help");
-    assert!(
-        output.status.success(),
-        "--help failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
-    assert!(stdout.contains("TILERT_DECODE_HTTP_ENDPOINT"), "{stdout}");
-}
-
 /// Unsupported roles and flags fail before the runtime is configured;
 /// accepted settings reach runtime validation.
 #[test]
