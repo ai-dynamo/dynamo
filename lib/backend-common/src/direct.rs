@@ -39,6 +39,7 @@ use dynamo_runtime::pipeline::{
     ResponseStream, SingleIn, StreamingDispatch,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
@@ -65,18 +66,57 @@ const REPROBE_MAX_DELAY: Duration = Duration::from_secs(30);
 pub struct DirectEngineSpec {
     /// Address of the engine's native API, which also identifies the engine.
     pub url: String,
-    pub mode: DisaggregationMode,
 }
 
-/// Builds the engine implementation that talks to one listed engine; the same
-/// implementation a sidecar for that engine runs.
+/// Builds the engine implementation that talks to one listed engine, and the
+/// worker configuration a sidecar for that engine would run with; the same
+/// constructor that sidecar runs, which usually asks the engine what it is
+/// (its role, model and parsers).
 ///
-/// The host never cancels or times out `LLMEngine::start`, as `Worker` does
-/// not: the engine must bound it itself (the sidecar transports return
-/// `startup_timeout` errors). A start that never returns leaves its engine
-/// unregistered and never probed again.
-pub type DirectEngineFactory =
-    Arc<dyn Fn(&DirectEngineSpec) -> Result<Arc<dyn LLMEngine>, DynamoError> + Send + Sync>;
+/// The host calls it on every probe, so an engine that is down while it is
+/// built is built again later. An error the next call would repeat, a
+/// configuration error, stops the probing of that engine.
+///
+/// The host never cancels or times out the build or `LLMEngine::start`, as
+/// `Worker` does not: the engine must bound them itself (the sidecar
+/// transports return `startup_timeout` errors). One that never returns leaves
+/// its engine unregistered and never probed again.
+pub type DirectEngineFactory = Arc<
+    dyn Fn(
+            &DirectEngineSpec,
+        ) -> BoxFuture<'static, Result<(Arc<dyn LLMEngine>, WorkerConfig), DynamoError>>
+        + Send
+        + Sync,
+>;
+
+/// Frontend settings an engine factory applies to every engine it builds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectEngineOptions {
+    pub namespace: String,
+    /// The model's files on the frontend host, when an engine reports a path
+    /// the frontend cannot read.
+    pub model_path: Option<String>,
+}
+
+impl DirectEngineOptions {
+    /// The arguments a sidecar named `binary` for `spec` would be started with.
+    pub fn sidecar_args(&self, binary: &str, spec: &DirectEngineSpec) -> Vec<String> {
+        vec![
+            binary.to_string(),
+            "--grpc-endpoint".to_string(),
+            spec.url.clone(),
+            "--namespace".to_string(),
+            self.namespace.clone(),
+        ]
+    }
+
+    /// Apply the settings a sidecar's arguments cannot carry.
+    pub fn apply(&self, config: &mut WorkerConfig) {
+        if let Some(model_path) = &self.model_path {
+            config.model_name = model_path.clone();
+        }
+    }
+}
 
 /// The routers' final hop in direct mode: the adapter of the engine each
 /// request was routed to.
@@ -201,18 +241,16 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// finish, and are released after it.
 pub async fn serve_direct_engines(
     drt: &DistributedRuntime,
-    config: WorkerConfig,
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
     let shutdown_drain = dynamo_runtime::config::http_graceful_shutdown_timeout();
-    serve_engines(drt, config, specs, factory, shutdown_drain).await
+    serve_engines(drt, specs, factory, shutdown_drain).await
 }
 
 /// [`serve_direct_engines`] with the shutdown drain window given.
 async fn serve_engines(
     drt: &DistributedRuntime,
-    config: WorkerConfig,
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
     shutdown_drain: Duration,
@@ -230,9 +268,6 @@ async fn serve_engines(
             "direct mode needs at least one engine",
         ));
     }
-    // As the sidecar `Worker` checks: the engines are `LLMEngine`s, and only
-    // the token pipeline's requests have a direct dispatch to reach them.
-    validate_llm_model_input(config.model_input)?;
     let mut urls = HashSet::new();
     for spec in &specs {
         if !urls.insert(normalized_url(&spec.url)) {
@@ -241,16 +276,6 @@ async fn serve_engines(
                 format!("engine {} is listed twice", spec.url),
             ));
         }
-    }
-
-    // Build every engine before any probe: a factory error is a configuration
-    // error, so it fails startup instead of being probed forever. Nothing is
-    // registered with the runtime yet, so the caller can correct its list and
-    // call again.
-    let mut engines = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let engine = factory(&spec)?;
-        engines.push((spec, engine));
     }
 
     // Before any engine is published: routers check for this dispatch once,
@@ -266,10 +291,9 @@ async fn serve_engines(
         )
     })?;
     let shutdown = drt.primary_token();
-    for (spec, engine) in engines {
+    for spec in specs {
         let host = DirectEngineHost {
             drt: drt.clone(),
-            config: config.clone(),
             instance_id: instance_id_for_url(&spec.url),
             spec,
             factory: factory.clone(),
@@ -278,7 +302,7 @@ async fn serve_engines(
         };
         dispatch
             .supervisors
-            .spawn(host.supervise(engine, shutdown.clone()).in_current_span());
+            .spawn(host.supervise(shutdown.clone()).in_current_span());
     }
     dispatch.supervisors.close();
     Ok(dispatch)
@@ -296,7 +320,6 @@ fn normalized_url(url: &str) -> String {
 /// One listed engine and everything needed to (re)register it.
 struct DirectEngineHost {
     drt: DistributedRuntime,
-    config: WorkerConfig,
     spec: DirectEngineSpec,
     instance_id: u64,
     factory: DirectEngineFactory,
@@ -319,10 +342,14 @@ impl DirectEngineHost {
     /// Start the engine, make it dispatchable, then publish it. Nothing cancels
     /// `engine.start()`: the `LLMEngine` contract makes `cleanup` safe only once
     /// `start` has returned, and `Worker` never cancels it either.
-    async fn start(&self, engine: Arc<dyn LLMEngine>) -> Result<HostedEngine, ProbeError> {
+    async fn start(
+        &self,
+        engine: Arc<dyn LLMEngine>,
+        config: &WorkerConfig,
+    ) -> Result<HostedEngine, ProbeError> {
         let records = match engine.start(self.instance_id).await {
             Ok(engine_config) => self
-                .discovery_records(&engine, &engine_config)
+                .discovery_records(&engine, config, &engine_config)
                 .await
                 .map_err(ProbeError::NotRegistered),
             Err(start_error) => Err(ProbeError::NotServing(start_error)),
@@ -339,7 +366,7 @@ impl DirectEngineHost {
         self.dispatch.adapters.write().insert(
             self.instance_id,
             Arc::new(
-                EngineAdapter::new(engine.clone(), self.spec.mode)
+                EngineAdapter::new(engine.clone(), config.disaggregation_mode)
                     .with_engine_cleanup(engine_cleanup.clone()),
             ),
         );
@@ -365,7 +392,7 @@ impl DirectEngineHost {
         tracing::info!(
             url = %self.spec.url,
             instance_id = self.instance_id,
-            mode = ?self.spec.mode,
+            mode = ?config.disaggregation_mode,
             "serving engine directly"
         );
         Ok(hosted)
@@ -393,26 +420,21 @@ impl DirectEngineHost {
     /// when it stops, withdraw it and probe again. Probes back off from
     /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`, and so do the returns of
     /// an engine that is lost again soon after it registers. A probe's start runs
-    /// to completion even on shutdown. Stops probing,
-    /// with an error, when the engine cannot be built or its configuration is
-    /// rejected, since every later probe would fail the same way.
-    async fn supervise(self, engine: Arc<dyn LLMEngine>, shutdown: CancellationToken) {
-        let mut engine = Some(engine);
+    /// to completion even on shutdown. Stops probing, with an error, when the
+    /// engine's configuration is rejected, since every later probe would fail
+    /// the same way.
+    async fn supervise(self, shutdown: CancellationToken) {
         let mut delay = REPROBE_INITIAL_DELAY;
         loop {
             let hosted = loop {
-                let engine = match engine.take().map_or_else(|| (self.factory)(&self.spec), Ok) {
-                    Ok(engine) => engine,
-                    Err(build_error) => {
-                        tracing::error!(
-                            url = %self.spec.url,
-                            %build_error,
-                            "engine cannot be built; no longer probing it"
-                        );
-                        return;
+                let probe = match (self.factory)(&self.spec).await {
+                    Ok((engine, config)) => self.start(engine, &config).await,
+                    Err(build_error) if is_configuration_error(&build_error) => {
+                        Err(ProbeError::NotRegistered(build_error))
                     }
+                    Err(build_error) => Err(ProbeError::NotServing(build_error)),
                 };
-                match self.start(engine).await {
+                match probe {
                     Ok(hosted) => break hosted,
                     Err(ProbeError::NotServing(probe_error)) => {
                         tracing::warn!(
@@ -492,10 +514,13 @@ impl DirectEngineHost {
     async fn discovery_records(
         &self,
         engine: &Arc<dyn LLMEngine>,
+        config: &WorkerConfig,
         engine_config: &EngineConfig,
     ) -> Result<(DiscoveryInstance, DiscoveryInstance), DynamoError> {
-        let mut config = self.config.clone();
-        config.disaggregation_mode = self.spec.mode;
+        // As the sidecar `Worker` checks: the engines are `LLMEngine`s, and only
+        // the token pipeline's requests have a direct dispatch to reach them.
+        validate_llm_model_input(config.model_input)?;
+        let mut config = config.clone();
         if config.model_name.is_empty() {
             config.model_name = engine_config.model.clone();
         }
@@ -519,7 +544,7 @@ impl DirectEngineHost {
         card.worker_type = Some(worker_type);
         card.needs = needs;
 
-        let component = match self.spec.mode {
+        let component = match config.disaggregation_mode {
             DisaggregationMode::Aggregated => config.component.clone(),
             mode => mode.discovery_component().to_string(),
         };
@@ -645,8 +670,8 @@ mod tests {
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::namespace::NamespaceFilter;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
-    use futures::StreamExt;
     use futures::stream::BoxStream;
+    use futures::{FutureExt, StreamExt};
     use tokio::sync::Notify;
 
     use super::*;
@@ -708,6 +733,20 @@ mod tests {
         state: Arc<EngineState>,
         hold_next: Arc<AtomicBool>,
         held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
+    }
+
+    /// A factory that builds a `FakeEngine` on `state`, with `config` as the
+    /// sidecar configuration it reports.
+    fn fake_factory(state: &Arc<EngineState>, config: WorkerConfig) -> DirectEngineFactory {
+        let state = state.clone();
+        Arc::new(move |_: &DirectEngineSpec| {
+            let engine: Arc<dyn LLMEngine> = Arc::new(FakeEngine {
+                state: state.clone(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            });
+            futures::future::ready(Ok((engine, config.clone()))).boxed()
+        })
     }
 
     #[async_trait]
@@ -870,24 +909,24 @@ mod tests {
             let factory_states = states.clone();
             let factory_hold_next = hold_next.clone();
             let factory_held = held.clone();
-            let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
-                Ok(Arc::new(FakeEngine {
-                    state: factory_states[spec.url.as_str()].clone(),
-                    hold_next: factory_hold_next.clone(),
-                    held: factory_held.clone(),
-                }) as Arc<dyn LLMEngine>)
-            });
-            let specs = [A, B]
-                .map(|url| DirectEngineSpec {
-                    url: url.to_string(),
-                    mode: DisaggregationMode::Aggregated,
-                })
-                .to_vec();
             let config = WorkerConfig {
                 namespace: namespace.to_string(),
                 ..WorkerConfig::default()
             };
-            let dispatch = serve_engines(&drt, config, specs, factory, shutdown_drain)
+            let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
+                let engine: Arc<dyn LLMEngine> = Arc::new(FakeEngine {
+                    state: factory_states[spec.url.as_str()].clone(),
+                    hold_next: factory_hold_next.clone(),
+                    held: factory_held.clone(),
+                });
+                futures::future::ready(Ok((engine, config.clone()))).boxed()
+            });
+            let specs = [A, B]
+                .map(|url| DirectEngineSpec {
+                    url: url.to_string(),
+                })
+                .to_vec();
+            let dispatch = serve_engines(&drt, specs, factory, shutdown_drain)
                 .await
                 .unwrap();
 
@@ -1116,21 +1155,14 @@ mod tests {
             flaps: AtomicBool::new(true),
             ..EngineState::default()
         });
-        let factory_state = state.clone();
-        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
-            Ok(Arc::new(FakeEngine {
-                state: factory_state.clone(),
-                hold_next: Arc::default(),
-                held: Arc::default(),
-            }) as Arc<dyn LLMEngine>)
-        });
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
-        };
-        serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory)
-            .await
-            .unwrap();
+        let spec = DirectEngineSpec { url: A.to_string() };
+        serve_direct_engines(
+            &drt,
+            vec![spec],
+            fake_factory(&state, WorkerConfig::default()),
+        )
+        .await
+        .unwrap();
         let started = |count: usize| {
             let state = state.clone();
             async move {
@@ -1183,21 +1215,14 @@ mod tests {
             kv_push: AtomicBool::new(true),
             ..EngineState::default()
         });
-        let factory_state = state.clone();
-        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
-            Ok(Arc::new(FakeEngine {
-                state: factory_state.clone(),
-                hold_next: Arc::default(),
-                held: Arc::default(),
-            }) as Arc<dyn LLMEngine>)
-        });
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
-        };
-        let dispatch = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory)
-            .await
-            .unwrap();
+        let spec = DirectEngineSpec { url: A.to_string() };
+        let dispatch = serve_direct_engines(
+            &drt,
+            vec![spec],
+            fake_factory(&state, WorkerConfig::default()),
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(10), dispatch.stopped())
             .await
             .expect("a rejected engine must not be probed again");
@@ -1221,18 +1246,7 @@ mod tests {
             kv_push: AtomicBool::new(true),
             ..EngineState::default()
         });
-        let factory_state = state.clone();
-        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
-            Ok(Arc::new(FakeEngine {
-                state: factory_state.clone(),
-                hold_next: Arc::default(),
-                held: Arc::default(),
-            }) as Arc<dyn LLMEngine>)
-        });
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
-        };
+        let spec = DirectEngineSpec { url: A.to_string() };
         let config = WorkerConfig {
             enable_kv_routing: false,
             ..WorkerConfig::default()
@@ -1242,7 +1256,7 @@ mod tests {
             component: config.component.clone(),
             endpoint: config.endpoint.clone(),
         };
-        serve_direct_engines(&drt, config, vec![spec], factory)
+        serve_direct_engines(&drt, vec![spec], fake_factory(&state, config))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1261,8 +1275,11 @@ mod tests {
         drt.shutdown();
     }
 
+    /// The engine's own constructor contacts it, so an engine that is down
+    /// while it is built is built again, as an engine whose start fails is
+    /// started again.
     #[tokio::test]
-    async fn an_engine_the_factory_cannot_build_fails_startup() {
+    async fn an_engine_that_cannot_be_built_yet_is_built_again() {
         let drt = DistributedRuntime::new(
             Runtime::from_current().unwrap(),
             DistributedConfig::process_local(),
@@ -1271,40 +1288,41 @@ mod tests {
         .unwrap();
         let state = Arc::new(EngineState::default());
         state.up.store(true, Ordering::SeqCst);
-        let factory_state = state.clone();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let serving = fake_factory(&state, WorkerConfig::default());
+        let factory_builds = builds.clone();
         let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
-            if spec.url == B {
-                return Err(error(ErrorType::InvalidArgument, "bad engine address"));
+            if factory_builds.fetch_add(1, Ordering::SeqCst) == 0 {
+                let down = error(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    "engine is not up",
+                );
+                return futures::future::ready(Err(down)).boxed();
             }
-            Ok(Arc::new(FakeEngine {
-                state: factory_state.clone(),
-                hold_next: Arc::default(),
-                held: Arc::default(),
-            }) as Arc<dyn LLMEngine>)
+            serving(spec)
         });
-        let specs = [A, B]
-            .map(|url| DirectEngineSpec {
-                url: url.to_string(),
-                mode: DisaggregationMode::Aggregated,
-            })
-            .to_vec();
-        let result = serve_direct_engines(
-            &drt,
-            WorkerConfig::default(),
-            specs.clone(),
-            factory.clone(),
-        )
-        .await;
-        assert!(result.is_err());
-        // No engine is started before every engine is built.
-        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
-
-        // The failed call left nothing registered with the runtime: the list
-        // can be corrected and served.
-        let corrected = specs.into_iter().filter(|spec| spec.url == A).collect();
-        serve_direct_engines(&drt, WorkerConfig::default(), corrected, factory)
+        let endpoint = DiscoveryQuery::Endpoint {
+            namespace: WorkerConfig::default().namespace,
+            component: WorkerConfig::default().component,
+            endpoint: WorkerConfig::default().endpoint,
+        };
+        serve_direct_engines(&drt, vec![DirectEngineSpec { url: A.to_string() }], factory)
             .await
-            .expect("the corrected list must be served on the same runtime");
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while drt
+                .discovery()
+                .list(endpoint.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the engine must be built again and served");
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
         drt.shutdown();
     }
 
@@ -1531,51 +1549,60 @@ mod tests {
         assert_eq!(frontend.states[B].cached_tokens.load(Ordering::SeqCst), 0);
     }
 
-    /// Setups direct mode cannot serve fail before any engine is built.
+    /// Discovery other processes share fails startup: direct engines are
+    /// listed, not discovered.
     #[tokio::test]
-    async fn setups_direct_mode_cannot_serve_are_rejected() {
-        async fn rejection(
-            distributed: DistributedConfig,
-            config: WorkerConfig,
-        ) -> Option<ErrorType> {
-            let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), distributed)
-                .await
-                .unwrap();
-            let factory: DirectEngineFactory = Arc::new(
-                |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
-                    panic!("no engine is built for a rejected setup")
-                },
-            );
-            let spec = DirectEngineSpec {
-                url: A.to_string(),
-                mode: DisaggregationMode::Aggregated,
-            };
-            let result = serve_direct_engines(&drt, config, vec![spec], factory).await;
-            drt.shutdown();
-            result.err().map(|rejected| rejected.error_type())
-        }
-        let invalid = Some(ErrorType::Backend(BackendError::InvalidArgument));
-
-        // Discovery other processes share: direct engines are listed, not discovered.
+    async fn shared_discovery_is_rejected() {
         let store = tempfile::tempdir().unwrap();
-        let shared = DistributedConfig {
+        let config = DistributedConfig {
             discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
                 dynamo_runtime::storage::kv::Selector::File(store.path().to_path_buf()),
             ),
             ..DistributedConfig::process_local()
         };
-        assert_eq!(rejection(shared, WorkerConfig::default()).await, invalid);
+        let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let factory: DirectEngineFactory =
+            Arc::new(|_: &DirectEngineSpec| panic!("no engine is built when discovery is shared"));
+        let result =
+            serve_direct_engines(&drt, vec![DirectEngineSpec { url: A.to_string() }], factory)
+                .await;
+        assert_eq!(
+            result.err().map(|rejected| rejected.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
+        drt.shutdown();
+    }
 
-        // A text model would be advertised as ready, and its requests would
-        // find no direct dispatch.
+    /// A text model would be advertised as ready, and its requests would find
+    /// no direct dispatch: the engine is rejected and not probed again.
+    #[tokio::test]
+    async fn an_engine_with_a_text_model_input_is_rejected() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(EngineState::default());
+        state.up.store(true, Ordering::SeqCst);
         let text = WorkerConfig {
             model_input: dynamo_llm::model_type::ModelInput::Text,
             ..WorkerConfig::default()
         };
-        assert_eq!(
-            rejection(DistributedConfig::process_local(), text).await,
-            invalid
-        );
+        let dispatch = serve_direct_engines(
+            &drt,
+            vec![DirectEngineSpec { url: A.to_string() }],
+            fake_factory(&state, text),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), dispatch.stopped())
+            .await
+            .expect("a rejected engine must not be probed again");
+        assert_eq!(state.starts.load(Ordering::SeqCst), 1);
+        drt.shutdown();
     }
 
     #[test]
