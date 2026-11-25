@@ -6,7 +6,7 @@ import json
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
 from pydantic import ValidationError
@@ -40,9 +40,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
-    build_disagg_mm_kwargs,
     engine_consumes_media,
-    extract_media_urls,
     raise_if_unextracted_multimodal,
     reject_unconsumed_media,
 )
@@ -67,36 +65,6 @@ def _read_zstd_payload(path):
     import msgspec
 
     return msgspec.msgpack.decode(raw)
-
-
-def test_extract_media_urls_supports_string_and_wire_items():
-    mm_data = {
-        "video_url": [
-            "file:///tmp/test.mp4",
-            {"Url": "https://example.com/test.mp4"},
-        ]
-    }
-
-    assert extract_media_urls(mm_data, "video_url") == [
-        "file:///tmp/test.mp4",
-        "https://example.com/test.mp4",
-    ]
-
-
-def test_build_disagg_mm_kwargs_includes_audio_urls():
-    request = {
-        "multi_modal_data": {
-            "image_url": [{"Url": "https://example.com/image.png"}],
-            "audio_url": [{"Url": "https://example.com/audio.wav"}],
-            "video_url": [{"Url": "https://example.com/video.mp4"}],
-        }
-    }
-
-    assert build_disagg_mm_kwargs(request) == {
-        "image_data": ["https://example.com/image.png"],
-        "audio_data": ["https://example.com/audio.wav"],
-        "video_data": ["https://example.com/video.mp4"],
-    }
 
 
 @pytest.mark.asyncio
@@ -262,26 +230,6 @@ async def test_prefill_applies_model_default_sampling_params(
 
     assert calls[0]["sampling_params"].get("top_k") == expected_top_k
     assert calls[0]["sampling_params"]["top_p"] == 0.5
-
-
-def test_extract_media_urls_returns_none_for_missing_modality():
-    assert extract_media_urls({}, "image_url") is None
-    assert extract_media_urls(None, "image_url") is None
-    assert extract_media_urls({"image_url": []}, "image_url") is None
-
-
-def test_extract_media_urls_rejects_malformed_payloads():
-    # A bare string (not a list) would otherwise split into per-character items.
-    with pytest.raises(ValueError, match="must be a list"):
-        extract_media_urls({"image_url": "https://example.com/a.png"}, "image_url")
-
-    # Frontend-decoded media is URL-passthrough only in the disaggregated path.
-    with pytest.raises(ValueError, match="Frontend-decoded"):
-        extract_media_urls({"image_url": [{"Decoded": "..."}]}, "image_url")
-
-    # Unsupported dict variant fails clearly instead of degrading to text.
-    with pytest.raises(ValueError, match="Unsupported"):
-        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url")
 
 
 @pytest.mark.parametrize(
@@ -1981,53 +1929,6 @@ def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
 class TestMultimodalGuard:
     """Tests for multimodal guard when frontend extraction is missing."""
 
-    @staticmethod
-    def _image_message():
-        return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.com/a.jpg"},
-                },
-                {"type": "text", "text": "describe image"},
-            ],
-        }
-
-    @pytest.mark.parametrize(
-        "request_factory",
-        [
-            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
-            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
-        ],
-        ids=["top_level_messages", "extra_args_messages"],
-    )
-    def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(InvalidArgument, match="multi_modal_data"):
-            raise_if_unextracted_multimodal(request_factory(self._image_message()))
-
-    def test_raises_for_audio_url(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {"url": "https://example.com/audio.wav"},
-                        }
-                    ],
-                }
-            ],
-        }
-
-        with pytest.raises(InvalidArgument, match="audio_url"):
-            raise_if_unextracted_multimodal(request)
-
-    def test_text_only_request_bypasses_guard(self):
-        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
-
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):
         with pytest.raises(ValueError, match="supported only by the vLLM backend"):
@@ -2536,6 +2437,106 @@ async def test_process_token_stream_preserves_cache_usage_before_metadata_clear(
         for chunk in (chunks[0], chunks[-1])
     )
     uploader.upload_choice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_disagg_decode_drops_prompt_ids_once_dispatched():
+    handler = _new_decode_handler(serving_mode=DisaggregationMode.DECODE)
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    input_params = []
+
+    def get_input_param(request):
+        input_params.append({"input_ids": request["token_ids"]})
+        return input_params[-1]
+
+    handler._get_input_param = get_input_param
+    handler._resolve_lora = lambda request: None
+
+    state_at_first_output = []
+
+    async def output():
+        state_at_first_output.append(("token_ids" in request, dict(input_params[-1])))
+        yield {
+            "output_ids": [68],
+            "meta_info": {"id": "r", "finish_reason": {"type": "stop"}},
+        }
+
+    handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=output()))
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    prompt = [1, 17]
+    request = {
+        "token_ids": prompt,
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    chunks = await _collect(handler.generate(request, context))
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[68]]
+    assert handler.engine.async_generate.await_args.kwargs["input_ids"] is prompt
+    assert state_at_first_output == [(False, {})]
+
+
+@pytest.mark.asyncio
+async def test_native_disagg_decode_drops_prompt_ids_once_dispatched():
+    handler = _new_decode_handler(serving_mode=DisaggregationMode.DECODE)
+    handler._engine_supports_priority = False
+    handler.enable_trace = False
+    input_params = []
+
+    def get_input_param(request):
+        input_params.append({"input_ids": request["token_ids"]})
+        return input_params[-1]
+
+    handler._get_input_param = get_input_param
+    handler._resolve_lora = lambda request: None
+    prompt = [1, 17]
+    request = {
+        "token_ids": prompt,
+        "extra_args": {"sglang_tito": {"sampling_params": {"max_new_tokens": 1}}},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+    native_requests = []
+    state_at_first_output = []
+
+    class TokenizerManager:
+        async def generate_request(self, native_request, request_context):
+            native_requests.append(native_request)
+            state_at_first_output.append(
+                ("token_ids" in request, dict(input_params[-1]))
+            )
+            yield {
+                "output_ids": [68],
+                "meta_info": {"id": "r", "finish_reason": {"type": "stop"}},
+            }
+
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=TokenizerManager(), async_generate=AsyncMock()
+    )
+
+    chunks = await _collect(handler.generate(request, _Context()))
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[68]]
+    assert [native.input_ids for native in native_requests] == [prompt]
+    assert state_at_first_output == [(False, {})]
+    handler.engine.async_generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3294,7 +3295,9 @@ def test_prefill_dp_rank_kwargs_follows_engine_signature():
 
 
 @pytest.mark.asyncio
-async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
+@pytest.mark.parametrize("rank_kwarg", ["routed_dp_rank", "data_parallel_rank"])
+@pytest.mark.parametrize("dp_rank", [None, 0, 1])
+async def test_disagg_decode_passes_prefill_dp_rank_to_engine(rank_kwarg, dp_rank):
     handler = _new_decode_handler()
     handler.serving_mode = DisaggregationMode.DECODE
     handler._enable_frontend_decoding = False
@@ -3309,8 +3312,20 @@ async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
         "output_ids": [42],
         "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
     }
+
+    async def modern_generate(
+        *, routed_dp_rank=None, disagg_prefill_dp_rank=None, **kwargs
+    ):
+        pass
+
+    async def legacy_generate(
+        *, data_parallel_rank=None, disagg_prefill_dp_rank=None, **kwargs
+    ):
+        pass
+
+    generate = modern_generate if rank_kwarg == "routed_dp_rank" else legacy_generate
     handler.engine = SimpleNamespace(
-        async_generate=AsyncMock(return_value=_stream([chunk]))
+        async_generate=create_autospec(generate, return_value=_stream([chunk]))
     )
     context = SimpleNamespace(
         id=lambda: "request-id",
@@ -3321,7 +3336,7 @@ async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
     request = {
         "sampling_options": {"n": 1},
         "stop_conditions": {"max_tokens": 1},
-        "routing": {"dp_rank": 1, "prefill_dp_rank": 3},
+        "routing": {"dp_rank": dp_rank, "prefill_dp_rank": 3},
         "bootstrap_info": {
             "bootstrap_host": "prefill.invalid",
             "bootstrap_port": 1234,
@@ -3331,7 +3346,12 @@ async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
     [output async for output in handler.generate(request, context)]
     kwargs = handler.engine.async_generate.await_args.kwargs
     assert kwargs["disagg_prefill_dp_rank"] == 3
-    assert kwargs["data_parallel_rank"] == 1
+    routed_rank = {
+        name: kwargs[name]
+        for name in ("routed_dp_rank", "data_parallel_rank")
+        if name in kwargs
+    }
+    assert routed_rank == ({} if dp_rank is None else {rank_kwarg: dp_rank})
 
 
 def test_build_native_generate_request_forwards_prefill_dp_rank():

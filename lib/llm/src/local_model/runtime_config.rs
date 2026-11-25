@@ -37,15 +37,27 @@ pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
 ///
-/// Absence means `false` for compatibility with workers that expect the
-/// frontend's structural tag to model an already-opened reasoning block.
+/// For tool structural tags, Dynamo treats an absent value as `false` for
+/// compatibility with workers that expect the frontend's structural tag to
+/// model an already-opened reasoning block.
+///
+/// For bare JSON responses, this key supplies no grammar timing information
+/// when absent. Inferring immediate grammar from this key requires an
+/// explicit `false`.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
 /// A backend consumes the reasoning prefix only when `require_reasoning` is true
-/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+/// on the request. An explicit `false` means no engine-side reasoning gate.
+/// Missing metadata leaves reasoning in the frontend grammar and does not prove
+/// immediate activation for bare structured responses.
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
+
+/// Runtime-data key indicating that the backend compiles a lark
+/// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
+/// `%json` schemas are valid. Absence means `false`.
+pub const LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY: &str = "llguidance_lark_grammar";
 
 /// Describes which request-token overflows the frontend may reject early.
 ///
@@ -148,6 +160,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
+
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
 /// Absence disables exact video routing so a newer frontend remains safe with
@@ -181,6 +197,8 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
+
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
 
 /// Worker-advertised guarantee that disaggregated prefill cancellation is safe
 /// at any point before the prefill stream finishes.
@@ -286,6 +304,11 @@ pub struct ModelRuntimeConfig {
     /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
 
@@ -451,6 +474,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -584,19 +608,12 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -613,10 +630,6 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -1262,21 +1275,6 @@ mod tests {
 
         let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
         assert!(error.contains("basetenkenizer"));
-    }
-
-    #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_scheduler::host::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

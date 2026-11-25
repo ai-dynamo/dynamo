@@ -341,12 +341,7 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
         ),
         "groups": groups,
     }
-    # vLLM 0.29.0 resolves the layout in the engine-core process and records
-    # it on both configs; 0.28.0 keeps it in a worker-process global and the
-    # key is simply absent there.
-    layout = getattr(kv_cache_config, "kv_cache_layout", None) or getattr(
-        cache_config, "kv_cache_layout", None
-    )
+    layout = getattr(kv_cache_config, "kv_cache_layout", None)
     if layout is not None:
         block["kv_cache_layout"] = _json_safe(layout)
     return block
@@ -432,6 +427,9 @@ def _bench_capture_engine(
 
         engine["attention"] = _bench_engine_attention(attention_config, hf_config)
         engine["kv_cache"] = _bench_engine_kv_cache(cache_config, kv_cache_config)
+        engine["kv_cache"]["num_hash_lookahead_tokens"] = _json_safe(
+            getattr(vllm_config, "num_hash_lookahead_tokens", 0)
+        )
         engine["quantization"] = _bench_engine_quantization(vllm_config, model_config)
         engine["scheduler"] = {
             "max_num_batched_tokens": _json_safe(
@@ -2254,8 +2252,10 @@ class _FpmPublisherThread:
 # ---------------------------------------------------------------------------
 
 
-_BASE_SCHEDULE_TAKES_THROTTLE = (
-    "throttle_prefills" in inspect.signature(AsyncScheduler.schedule).parameters
+# vLLM 0.33 (CPU, XPU and enterprise images) requires Model Runner V1's
+# resume fields; remove once they ship 0.34.
+_HAS_V1_RESUME_FIELDS = (
+    "resumed_req_ids" in inspect.signature(CachedRequestData).parameters
 )
 
 
@@ -2395,9 +2395,6 @@ class InstrumentedScheduler(AsyncScheduler):
                     total_num_scheduled_tokens=0,
                     scheduled_spec_decode_tokens={},
                     scheduled_encoder_inputs={},
-                    num_common_prefix_blocks=(
-                        [0] * self.kv_cache_manager.num_kv_cache_groups
-                    ),
                     finished_req_ids=self.finished_req_ids,
                     free_encoder_mm_hashes=[],
                 )
@@ -2427,13 +2424,7 @@ class InstrumentedScheduler(AsyncScheduler):
     ) -> SchedulerOutput:
         """Dispatch a step and track it until its matching output is processed."""
         self._mark_heartbeat_busy()
-        # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
-        # the runtime images were built; pass it only when the base accepts it
-        # so one overlay works across both.
-        if _BASE_SCHEDULE_TAKES_THROTTLE:
-            output = super().schedule(throttle_prefills)
-        else:
-            output = super().schedule()
+        output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             if self._bench_active:
                 try:
@@ -2481,12 +2472,9 @@ class InstrumentedScheduler(AsyncScheduler):
         """Reuse completed-pass snapshots and bound additional queue scans."""
         if self._bench_active:
             return
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-        waiting = bool(self.waiting) or bool(other_waiting)
-        # Newer vLLM versions park asynchronous KV loads in a third queue.
+        waiting = bool(self.waiting) or bool(self.kv_holding_waiting)
+        # vLLM 0.33 (CPU, XPU and enterprise images) has no async_kv_waiting
+        # queue; remove the check once they ship 0.34.
         if hasattr(self, "async_kv_waiting"):
             waiting = waiting or bool(self.async_kv_waiting)
         now = time.monotonic()
@@ -2623,6 +2611,11 @@ class InstrumentedScheduler(AsyncScheduler):
                             "end_monotonic": model_output_arrival,
                         },
                         "cudagraph": _bench_observed_cudagraph(stats),
+                        # The scheduler decision is not proof of the runner's
+                        # executed drafts (V1 and DP may handle it differently).
+                        "scheduler_skip_drafts": getattr(
+                            scheduler_output, "skip_drafts", None
+                        ),
                     }
             self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
@@ -2781,13 +2774,12 @@ class InstrumentedScheduler(AsyncScheduler):
         """Classify requests across vLLM's waiting queues by their next work."""
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
-        # vLLM 0.31 splits waiting queues by whether requests hold KV blocks.
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-
-        waiting_queues: tuple[Iterable[Request], ...] = (self.waiting, other_waiting)
+        waiting_queues: tuple[Iterable[Request], ...] = (
+            self.waiting,
+            self.kv_holding_waiting,
+        )
+        # vLLM 0.33 (CPU, XPU and enterprise images) has no async_kv_waiting
+        # queue; remove the check once they ship 0.34.
         if hasattr(self, "async_kv_waiting"):
             waiting_queues += (self.async_kv_waiting,)
         for request in chain.from_iterable(waiting_queues):
@@ -3097,8 +3089,17 @@ class InstrumentedScheduler(AsyncScheduler):
                 self.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
+            # vLLM 0.33 hashes the drafter's lookahead tokens too. Earlier
+            # runtimes expose neither the config property nor the argument.
+            hash_lookahead = getattr(vllm_config, "num_hash_lookahead_tokens", 0)
             self._bench_block_hasher = get_request_block_hasher(
-                self._bench_hash_block_size, caching_hash_fn
+                self._bench_hash_block_size,
+                caching_hash_fn,
+                **(
+                    {"num_hash_lookahead_tokens": hash_lookahead}
+                    if hash_lookahead
+                    else {}
+                ),
             )
         else:
             self._bench_block_hasher = None
@@ -3191,6 +3192,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "measurement_protocol": self._bench_measurement_protocol(),
             "block_size": self.block_size,
             "hash_block_size": self._bench_hash_block_size,
+            "num_hash_lookahead_tokens": getattr(self, "num_hash_lookahead_tokens", 0),
             "cache_block_size": getattr(self.cache_config, "block_size", None),
             "enable_prefix_caching": getattr(
                 self.cache_config, "enable_prefix_caching", True
@@ -3858,16 +3860,18 @@ class InstrumentedScheduler(AsyncScheduler):
         except ValueError:
             return False
 
-        eagle_cache_drop_tokens = self._bench_eagle_cache_drop_tokens()
-        if eagle_cache_drop_tokens and any(
-            kv_read_tokens > 0 and new_tokens <= eagle_cache_drop_tokens
+        proof_tokens = self._bench_prefix_proof_tokens()
+        if self.num_spec_tokens > 0:
+            # Cached single-token admissions are padded even without EAGLE hashes.
+            proof_tokens = max(proof_tokens, 1)
+        if proof_tokens and any(
+            kv_read_tokens > 0 and new_tokens <= proof_tokens
             for new_tokens, kv_read_tokens in zip(
                 new_token_lengths, kv_read_lengths, strict=True
             )
         ):
-            # EAGLE recomputes the last matched cache block. A request needs
-            # more than that block's tokens to reach the extra seeded block
-            # while preserving both benchmark axes.
+            # Keep an independent measured tail after the shared tokens that
+            # prove the last cache hit, for both EAGLE hashing regimes.
             return False
 
         prompt_lengths = [
@@ -4159,9 +4163,16 @@ class InstrumentedScheduler(AsyncScheduler):
         return chain
 
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
-        # EAGLE/MTP deliberately drops the last matched cache block. Seed one
-        # additional block so the measured request still reads the grid target.
-        return kv_read_tokens + self._bench_eagle_cache_drop_tokens()
+        if kv_read_tokens == 0:
+            return 0
+        return kv_read_tokens + self._bench_prefix_proof_tokens()
+
+    def _bench_prefix_proof_tokens(self) -> int:
+        # 0.33 replaces EAGLE's trailing block drop with lookahead hashes
+        # where supported; KV connectors retain the legacy drop regime.
+        return self._bench_eagle_cache_drop_tokens() + getattr(
+            self, "num_hash_lookahead_tokens", 0
+        )
 
     def _bench_uses_per_group_cache_lookup(self) -> bool:
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
@@ -4818,11 +4829,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
-                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # vLLM's v2 GPU model runner requires `prefill_token_ids`
                     # (asserted non-None in gpu/model_runner.add_requests, used as the
                     # request's `all_token_ids`). vLLM's own scheduler passes
                     # `req._all_token_ids` for new requests; mirror that here for the
-                    # synthetic decode requests we build directly. Older runners ignore it.
+                    # synthetic decode requests we build directly.
                     prefill_token_ids=req._all_token_ids,
                 )
             )
@@ -4844,7 +4855,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(new_reqs_data),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=new_block_ids_to_zero,
@@ -5381,11 +5391,9 @@ class InstrumentedScheduler(AsyncScheduler):
         # Completion alone does not prove a cache hit or exact shape warming.
         self._bench_finish_warmup()
         chain = self._bench_realseed_chain(point.batch_size)
-        # Under EAGLE/MTP the prefix-cache lookup drops the last matched
-        # block, so the chain holds ``seed_len = kv + drop`` tokens per slot
-        # and the measured prompt must reproduce all of them for the hit to
-        # come back as exactly ``kv``; the fresh tail fills the rest of the
-        # request's new tokens (feasibility guarantees new > drop).
+        # Reproduce the proof tokens after the cached prefix too: either the
+        # legacy EAGLE block or the tokens covered by lookahead hashes. Only
+        # the remaining tail differs between the warm and measured shots.
         seed_lens = [
             self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
         ]
@@ -6410,10 +6418,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _kvwarm_admission_cap(manager) -> int | None:
-        if hasattr(manager, "max_admission_blocks_per_request"):
-            cap = manager.max_admission_blocks_per_request
-        else:
-            cap = getattr(manager, "_max_admission_blocks_per_request", None)
+        cap = getattr(manager, "max_admission_blocks_per_request", None)
         return cap if isinstance(cap, int) and cap > 0 else None
 
     def _kvwarm_circular_table_manager(self, manager) -> bool:
@@ -7241,7 +7246,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(new_reqs_data),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=zero_ids or None,
@@ -7331,21 +7335,25 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._kvwarm_take_cow_copies()
             raise
         native_resumes = self._kvwarm_native_resume_ids or set()
-        # V1 dropped parked requests from its persistent batch. Restore their
-        # full native tables and sampled token history. V2 retains the table
-        # until finish and only accepts appended block deltas.
-        resumed = (
-            native_resumes if native_resumes and not self.use_v2_model_runner else set()
-        )
+        resumed: set[str] = set()
+        v1_resume_fields: dict[str, Any] = {}
+        if _HAS_V1_RESUME_FIELDS:
+            # V1 dropped parked requests from its persistent batch. Restore their
+            # full native tables and sampled token history. V2 retains the table
+            # until finish and only accepts appended block deltas.
+            if native_resumes and not self.use_v2_model_runner:
+                resumed = native_resumes
+            v1_resume_fields = {
+                "resumed_req_ids": resumed,
+                "all_token_ids": {
+                    request.request_id: request.all_token_ids.copy()
+                    for request in reqs
+                    if request.request_id in native_resumes
+                },
+            }
         cached = CachedRequestData(
             req_ids=[request.request_id for request in reqs],
-            resumed_req_ids=resumed,
             new_token_ids=[],
-            all_token_ids={
-                request.request_id: request.all_token_ids.copy()
-                for request in reqs
-                if request.request_id in native_resumes
-            },
             new_block_ids=[
                 (
                     self.kv_cache_manager.get_block_ids(request.request_id)
@@ -7361,6 +7369,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 max(1, request.num_output_tokens + request.num_output_placeholders)
                 for request in reqs
             ],
+            **v1_resume_fields,
         )
         output = SchedulerOutput(
             scheduled_new_reqs=[],
@@ -7369,7 +7378,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(reqs),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=(

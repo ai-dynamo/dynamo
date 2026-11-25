@@ -4,7 +4,7 @@
 //! What a host implements or calls to run the kernel in-process, in one place: the core and
 //! its constructor inputs, the capability structs a host fills, the hook traits it
 //! implements, and the operation it runs. Everything here is re-exported from its owning
-//! module; this list is the contract (hosts inventory section 3.6).
+//! module; this list is the contract.
 
 pub use crate::config::{CacheHitWeights, RouterPrefillLoadModel};
 pub use crate::config::{RouterConfig, RouterConfigOverride, Validated};
@@ -14,8 +14,7 @@ pub use crate::overlap::{OverlapAnalysis, OverlapScoresResponse, OverlapSignals}
 pub use crate::overlap_summary::MooncakeOverlapSummary;
 pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{
-    PotentialLoad, RouterEventSink, RouterRequest, RouterResponse, RoutingConstraints,
-    WorkerConfigLike, WorkerSelectionResult,
+    PotentialLoad, RouterEventSink, RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
 pub use crate::queue::{ClassQueueStats, RuntimePolicyControl};
 pub use crate::replication::{
@@ -30,7 +29,7 @@ pub use crate::selection::core::{
 };
 pub use crate::selection::ingress::{KvEventIngress, LocalIndexIngress};
 pub use crate::selection::input::{PromptRequest, PromptView};
-pub use crate::selection::membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
+pub use crate::selection::membership::{CatalogReconciler, WorkerCatalogSource};
 pub use crate::selection::pending::SelectionCacheConfig;
 /// The service request and response DTOs a host or the composed router's HTTP server hands in
 /// and gets back.

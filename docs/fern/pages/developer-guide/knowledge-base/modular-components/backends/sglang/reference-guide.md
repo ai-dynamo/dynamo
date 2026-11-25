@@ -61,7 +61,7 @@ By default, Dynamo handles tokenization and detokenization through its Rust-base
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
 
-Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The SGLang sidecar logs a warning instead, because its engine can also serve SGLang's own HTTP server. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
+Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
 
 > [!WARNING]
 > `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
@@ -135,13 +135,61 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 |-------|-------------|
 | `/engine/control/start_profile` | Start PyTorch profiling |
 | `/engine/control/stop_profile` | Stop profiling and save traces |
-| `/engine/control/release_memory_occupation` | Release GPU memory for maintenance |
-| `/engine/control/resume_memory_occupation` | Resume GPU memory after release |
+| `/engine/pause_generation` | Pause generation and remove the worker from routing |
+| `/engine/continue_generation` | Continue generation and return the worker to routing |
+| `/engine/release_memory_occupation` | Release GPU memory while generation is paused |
+| `/engine/resume_memory_occupation` | Restore GPU memory before generation continues |
 | `/engine/control/update_weights_from_disk` | Update model weights from disk |
 | `/engine/control/update_weights_from_tensor` | Update model weights from tensor payload |
 | `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
 | `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
 | `/engine/control/update_weight_version` | Update weight version metadata |
+
+> [!NOTE]
+> Earlier docs listed the memory routes under `/engine/control/`. Those paths return HTTP 404; use `/engine/release_memory_occupation` and `/engine/resume_memory_occupation`.
+
+### Release and Resume GPU Memory
+
+Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without [`--engine-route`](#configurable-sglang-method-routes). Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
+
+> [!WARNING]
+> Start SGLang with `--enable-memory-saver` (`--load-format gms` turns it on). Without it, `release_memory_occupation` returns success but frees no managed GPU allocations. SGLang selects a [memory-saver adapter whose `pause` method does nothing](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/utils/torch_memory_saver_adapter.py).
+
+With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. What happens to the weights on release:
+
+- **`--load-format gms`:** the GPU Memory Service keeps them, and resume maps them back.
+- **`--enable-weights-cpu-backup` without GMS:** SGLang keeps a CPU copy and restores it on resume.
+- **Neither:** the weights are discarded. Reload them with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+
+Call the routes in this order:
+
+1. **Pause generation** with `{"mode": "retract"}`. Running requests return to SGLang's waiting queue, and the worker leaves discovery so the router stops sending it new requests. Do not use `in_place`: SGLang releases memory only when no request is running. Releasing memory with running requests fails [SGLang's idle assertion](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/managers/scheduler_components/weight_updater.py#L337-L341) and can terminate the scheduler. Restart the worker if this happens.
+
+   > [!NOTE]
+   > The XPU image pins SGLang 0.5.19, which also needs an empty waiting queue before release. On XPU, pause with `{"mode": "abort"}`. This aborts all in-flight requests.
+
+2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
+3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery. Send resume only once after each release. With GMS, a second resume crashes the scheduler; see [Known Issues](../../../../../reference/general/releases/known-issues.mdx).
+4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
+
+After each of these routes, Dynamo checks SGLang's pause state and updates discovery to match. Release and resume do not change discovery on their own.
+
+Set `DYN_SYSTEM_PORT` on the worker (the system server is disabled by default) and send the requests to that port:
+
+```bash
+WORKER_URL=http://localhost:8081
+
+curl --fail-with-body -X POST "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' -d '{"mode": "retract"}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/release_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/resume_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/continue_generation" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`. `--fail-with-body` makes curl exit with an error on an HTTP error status, and `&&` stops the sequence there. A failed resume leaves the worker paused and out of discovery. Check the worker logs and restart the worker after fixing the reported cause. Do not retry resume or call continue: resume can fail after restoring only part of the memory, and a second resume can crash the scheduler.
 
 ### Configurable SGLang Method Routes
 
@@ -156,10 +204,10 @@ Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang m
 - The target defaults to the `sgl.Engine` instance. Set `:tm` to target its tokenizer manager.
 - Repeat `--engine-route` for multiple routes. Separate multiple `DYN_SGLANG_ENGINE_ROUTES` descriptors with whitespace.
 
-For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose this allowlist:
+For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose these additional routes. Pause and continue are already on by default:
 
 ```bash
-export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info pause_generation:tm flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group continue_generation:tm"
+export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group"
 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
 ```
 

@@ -104,6 +104,212 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### Unreleased
+
+#### API Availability
+
+##### DGDR v1beta2 Available by Default
+
+**Change:** The operator installs and serves the DGDR v1beta2 Request, Run, and Candidate APIs
+and starts their controllers without a feature gate. The API is available but not feature complete.
+Existing v1beta1 Requests retain their API and behavior; the Request storage version and conversion
+contract are unchanged.
+
+**Affected:** All operator installations, including those that previously left
+`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Installations with
+`dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, require the matching
+CRDs to be installed before upgrading the operator.
+
+**Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
+Ordinary Helm upgrades remove the flag automatically. The legacy
+`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
+for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
+unchanged. Review API migration notes before future upgrades.
+
+#### Operator behavior breaking changes
+
+##### LPX units-only deployment contract
+
+**Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
+The operator no longer reads `manifest.v2.capnp.bin` or legacy placement fields,
+and it no longer generates placement ConfigMaps under `/configs`.
+
+**Affected:** Every existing LPX deployment must be deployed again. Bundles that have no
+`deployment.v1.capnp.bin` or no `lpuUnits`, including bundles that have only
+`manifest.v2.capnp.bin`, must also be recompiled. Bundles that already contain
+`lpuUnits` can be used as they are.
+
+**Action:**
+
+1. Recompile the affected models with a compiler that writes `lpuUnits`, and record the new
+   build IDs.
+2. With the old operator and the old LPU scheduler still installed, delete each DGD that has an
+   LPX component. Wait until its `LpuPipelineRequest` objects and Pods are gone. Rolling overlap
+   across this upgrade is not supported.
+3. Upgrade the operator and the LPU scheduler together. Install a compatible scheduler version with an
+   `LpuPipelineRequest` CRD that has no `allocationMetadata` and `compilerPartitionId`
+   fields. This command prints `0` for a compatible CRD:
+
+   ```bash
+   kubectl get crd lpupipelinerequests.scheduling.lpu.nvidia.com -o json | grep -c -e allocationMetadata -e compilerPartitionId
+   ```
+
+4. Update each DGD manifest: set the new `buildId`, use runtime images that read placement from
+   `lpuUnits`, and remove each `/configs` mount and its volume.
+5. Apply the DGD manifests.
+
+A bundle that has no `lpuUnits` fails reconciliation with a message that contains
+`config.lpuUnits is empty; recompile the model with LPU units`. The operator creates no
+workload for that bundle.
+
+> [!WARNING]
+> Remove `/configs` mounts and their volumes before you create the workloads again. The operator
+> no longer rejects them. A `main` container mount named `config` that has no volume is treated
+> as any other mount without a volume: the operator adds a PersistentVolumeClaim volume with the
+> claim name `config`, and the Pods stay Pending unless that claim exists.
+
+**Existing deployments:** An LPX workload that the old operator created does not continue across
+this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
+
+#### Dependency compatibility
+
+##### AISimulate 0.15.0.dev202611230000000114
+
+**Change:** Dynamo now pins AISimulate `0.15.0.dev202611230000000114`, replacing
+`0.15.0.dev202611130000000104`. Planner, the DGDR profiler, and mocker workers run the AISimulate
+that their image installs. On `b200_sxm`, `b300_sxm`, `gb200`, `gb300`, `h100_sxm`, `h200_sxm`,
+`l40s`, and `rtx_pro_6000_server`, the new release accepts these backend versions:
+
+| Backend | Accepted versions | No longer accepted |
+|---|---|---|
+| vLLM | 0.30.0, 0.32.0 (current) | 0.24.0, 0.31.0 |
+| SGLang | 0.5.21, 0.5.23 (current) | 0.5.14 |
+| TensorRT-LLM | 1.3.0rc29, 1.4.0rc2 (current) | 1.3.0rc20 |
+
+`a100_sxm` and `b60` keep their versions. The profiler writes the current version into
+`--ais-perf-model`, so newly generated deployments move to the versions marked current. An
+execution profile loads only when the pinned release compiles the same engine as the one recorded in
+the profile, so profiles generated with the old pin can fail to load, although both releases use
+engine spec schema version 30.
+
+**Affected:**
+
+- Planner configurations whose `ais_perf_model` entries set a `backend_version` that the new
+  release no longer accepts. They fail with `UnlistedQueryVersionError`.
+- Planner configurations that load an execution-profile dataset generated with the old pin. Loading
+  can fail with `compiled baseline differs from the profile basis`.
+- Mocker workers whose `--ais-perf-model` sets a version that the new release no longer accepts.
+
+**Action:**
+
+1. Download or generate each execution-profile dataset again with the new pin. Then restart
+   Planner, which prepares a dataset only when its configured source changes.
+2. Set each explicit `backend_version` to a version that the new release accepts and that matches
+   your workers. If your workers run the current version, you can use `current`:
+
+   ```diff
+    ais_perf_model:
+      - worker_type: prefill
+        model: Qwen/Qwen3-0.6B
+        system: b200_sxm
+        backend: vllm
+   -    backend_version: 0.24.0
+   +    backend_version: current
+   ```
+
+   This field selects AISimulate performance data. It does not upgrade the inference engine. The
+   new release has no data for the versions that it no longer accepts. If your workers keep such a
+   version, select the accepted version that is closest to it.
+
+**Existing deployments:** A running DGD keeps the AISimulate version of the images that it names
+until you change those images. An operator upgrade alone moves new profiling work to the new pin:
+v1beta2 Runs, and v1beta1 Requests created without `spec.image`, use
+`dynamo-operator.controllerManager.manager.dgdrDefaultImage`, or `dynamo-planner:<chart appVersion>`
+when that value is empty. v1beta1 Requests that set `spec.image` keep that image.
+
+### v1.8.0
+
+#### Operator behavior breaking changes
+
+##### Environment variable order in newly created DGDs
+
+**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.8.0 or later,
+the operator preserves source-list order and topologically orders references between environment
+layers. Precedence is operator defaults, DGD-level `spec.env`, then the selected component or role
+PodTemplate's container `env`. A specific definition replaces the entire general definition,
+including `valueFrom`, without emitting duplicate names for a cross-layer override. Existing
+operator-owned topology, GMS, and per-engine failover bindings remain authoritative.
+
+Layers may be interleaved: a general variable referencing a component override follows that
+override. Independent entries use their original input order, not alphabetical name order.
+Cycles and conflicts with local list order fail rendering with a source-path diagnostic.
+Generated DCDs now retain graph defaults in a separate `spec.env`, supported natively in both
+served DCD API versions. Previously these defaults were flattened into each PodTemplate.
+
+**Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
+cross-layer overrides or references. Within one input list, Kubernetes still leaves a forward
+reference literal unless an external value is available; those entries are not reordered.
+The operator does not fetch ConfigMaps or Secrets for sorting.
+
+Order-only environment edits propagate to workloads for these origins. The NIXL exporter-port lookup
+replays known references without rewriting the manifest or requiring runtime inputs to be
+resolvable. SGLang keeps existing port declarations when the NIXL exporter base port is unknown;
+automatic scrape-port alignment is not guaranteed in that case. Known invalid ports still fail.
+
+**Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
+variable before dependent variables within the same list. Use component entries to override graph
+defaults; dependent entries in other layers will reference the effective override. Do not depend
+on retaining a lower-layer definition to expand a same-named self-reference. For example:
+
+```yaml
+spec:
+  env:
+    - name: MODEL_ROOT
+      value: /models
+    - name: MODEL_PATH
+      value: "$(MODEL_ROOT)/model"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: MODEL_ROOT
+                  value: /fast/models
+```
+
+The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models/model`.
+
+**Root-list validation:** DGD `spec.env` (`spec.envs` in `v1alpha1`) requires unique names on
+create and whenever that list changes, regardless of origin. DCD root `spec.env` applies this
+rule only when its effective operator origin is 1.8.0 or later. **For origins 1.8.0 and later,
+both resources reject duplicates even on updates that leave the list unchanged.** Repair stored
+duplicates before unrelated updates; the operator does not silently de-duplicate them. Earlier
+or missing DGD origins retain a pre-existing duplicate list only when the complete ordered list
+is unchanged; changing a value, source, order, or member requires unique names throughout.
+Overrides between layers remain allowed. The root OpenAPI list schema is unchanged so it does
+not reject unchanged legacy-origin duplicates before webhook ratcheting runs.
+
+New or changed root entries must not combine a non-empty `value` with `valueFrom`. Alpha
+component `envs` lists also require unique names and valid value/source combinations on create
+or list changes. Only earlier or missing origins can retain an unchanged existing list with
+duplicates; origins 1.8.0 and later reject it. Cross-layer overrides remain valid.
+
+**Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
+annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
+reorder their rendered environment lists or roll their workloads for this change. Deleting and
+recreating a DGD under 1.8.0 or later opts it into the new behavior and causes workload downtime.
+To preserve availability, create a new DGD under a different name and migrate traffic before
+deleting the old DGD.
+
+**Before downgrading to 1.7:** Standalone DCD root `spec.env` is new in 1.8 in both served API
+versions; 1.7 cannot retain this field. While 1.8 is still running, move required defaults into
+each consuming `main` and `runtime` container's `env`, including role templates, preserving
+container-specific overrides. Remove root `spec.env` and verify the resulting workloads before
+downgrading. Also remove dependencies on the new ordering contract: 1.7 sorts and de-duplicates
+environment lists. Do not edit graph-generated child DCDs; configure their parent DGD instead.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility
@@ -154,6 +360,41 @@ upgrades. Explicitly authored complete probes remain effective.
 `startupProbe` on its frontend container. This is an intentional Pod-template update;
 plan for frontend replacement, including a possible single-replica Grove Service outage.
 
+#### CRD and admission breaking changes
+
+##### Complete health probes
+
+**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include
+exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. These are the rules Kubernetes
+applies to every Pod probe; the DGD and DCD CRDs now apply them at admission, so a timing-only
+probe or a probe with two handlers is rejected on the manifest instead of failing later when the
+operator creates the Deployment or Grove creates the Pods. An authored probe replaces the
+applicable operator default as a complete value. For `main` and the `runtime` sidecar this was
+already the rendering behavior, so a probe that passes the new rules rendered the same before.
+For the container selected by `frontendSidecar`, operator 1.6.x field-merged an authored probe
+with its frontend defaults, which made a timing-only sidecar probe produce a valid Pod; that is
+the one shape the rules reject that previously worked. Complete-value replacement applies to
+workloads whose operator origin is 1.7.0 or later.
+
+**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main
+containers, sidecars, and role templates. In practice, `frontendSidecar` containers with
+timing-only probes; every other rejected shape already failed at Pod creation.
+
+**Action:** Before upgrading, supply a complete handler with any custom timing settings, or
+omit the probe to use the applicable operator default. A frontend-sidecar probe that relied on
+merged defaults keeps rendering as before on an existing workload. Authoring a complete probe
+does not change the merge policy of an existing workload. Complete-value replacement applies
+only to workloads whose immutable operator origin is 1.7.0 or later.
+
+**Existing deployments:** An operator-only upgrade does not change rendered probes. Workloads
+created by operator 1.6.x or earlier keep the field-merged frontend-sidecar probes they run
+today, including timing-only probes that the 1.6.x operator completed from its defaults.
+Installing the CRDs does not rewrite stored probes. The rules are CRD validation rules, and
+Kubernetes 1.30 and later ratchet these container-scoped rules while the container
+remains unchanged. Editing that container, including only its image or environment,
+requires each supplied probe to define exactly one handler. Resource re-creation
+also requires complete probes.
+
 #### Operator behavior breaking changes
 
 ##### Legacy LWS migration cleanup removed
@@ -173,36 +414,6 @@ and Volcano PodGroups created by Dynamo v1.1.x and earlier.
 
 **Existing deployments:** Unmigrated legacy resources remain after
 upgrading, and excess LWS objects can continue consuming cluster resources.
-
-##### Native sidecar backend inference
-
-**Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
-including a literal absolute path. It continues to inspect the engine for backend
-validation and compilation-cache defaults, independently of the runtime sidecar launch.
-The inferred framework participates in the graph-wide worker-generation hash.
-
-**Affected:** Deployments with this engine command and no explicit `backendFramework`
-previously resolved to an undetected backend. The vLLM reference manifests already set
-`backendFramework: vllm` and are unaffected by this inference change.
-
-**Action:** Plan for a one-time worker rollout when upgrading to v1.7.0. To perform the
-migration before the operator upgrade, set `spec.backendFramework: vllm` on affected
-DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
-it does not eliminate it. Explicit frameworks must match the engine launch. Opaque
-engine commands, including shell wrappers and image entrypoints, still require an
-explicit framework.
-
-**Existing deployments:** Reconciliation can roll all workers in an affected DGD without
-an authored manifest change. With `compilationCache.mountPath` set, the engine also gains
-`VLLM_CACHE_ROOT` pointing to that path. Standalone DCDs can roll when newly inferred cache
-defaults change their pod template. Runtime registration used by Planner does not affect
-the desired worker hash or engine configuration.
-
-**Planner permissions:** Registration-based native identity requires `list` on `pods`
-in addition to worker metadata access. If an older Planner service account receives
-HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
-Grant Pod-list access to enable registered native names, models, and capabilities;
-other API errors still propagate.
 
 ##### LPX model paths in every container
 
@@ -248,6 +459,35 @@ not update its templates or replica count, and it does not retire or republish p
 so a faulted pipeline does not recover.
 
 #### New behavior
+
+##### Per-component Grove rollout budgets
+
+**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires Grove `v0.1.0-alpha.15` or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876); the bundled Grove `v0.2.0-beta1` satisfies this.
+
+**Warning:** Admission warns when an explicit RollingRecreate or Coherent budget could take a complete component offline. Coherent also warns about this risk with its default budget, including single-replica frontends. RollingRecreate keeps its established warning behavior when no budget is configured. Warnings appear on creation and relevant rollout edits; unchanged metadata edits do not repeat them. No warning is emitted for externally scaled LPX capacity that is unknown to admission.
+
+**Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
+
+**Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
+
+##### Planner reads Pods for native sidecar identity
+
+**Change:** Planner resolves the served model name and component identity of native sidecar
+workers from their runtime registration, which requires `list` on `pods` in addition to worker
+metadata access. The chart's Planner Role has granted `pods/list` unconditionally since v1.6.0.
+In v1.5.x the rule is rendered only when `planner.powerAwareness.enabled` is `true`, which is
+not the default.
+
+**Affected:** Planner service accounts managed outside the chart, from a chart older than
+v1.5.0, or from a v1.5.x chart with the default `planner.powerAwareness.enabled=false`, that lack
+Pod list access.
+
+**Action:** Grant `list` on `pods` in the DGD's namespace to enable registered native names,
+models, and capabilities.
+
+**Existing deployments:** If Planner receives HTTP 403 when listing Pods, it warns and uses the
+existing status and default fallbacks; other API errors still propagate. Runtime registration
+does not affect the desired worker hash or engine configuration.
 
 ##### LWS no longer requires Volcano
 
@@ -365,16 +605,6 @@ defaults to `minAvailable` rather than `replicas`; existing explicit minima are 
 
 #### CRD and admission breaking changes
 
-##### Complete health probes
-
-**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only probes and probes with multiple handlers. An authored probe replaces the applicable operator default as a complete value.
-
-**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main containers, sidecars, and role templates.
-
-**Action:** Before upgrading, supply a complete handler with any custom timing settings, or omit the probe to use the applicable operator default.
-
-**Existing deployments:** Installing the CRDs does not rewrite stored probes. Correct invalid probes before the next specification update; new and updated manifests must satisfy the validation rules.
-
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
@@ -427,31 +657,20 @@ Components without a frontend sidecar or using pod discovery are unaffected by t
 
 **Affected:** Existing Grove-backed DGDs retain their legacy defaults and rollout strategy after an operator upgrade. The upgrade does not automatically migrate availability fields or roll unchanged workloads.
 
-**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.15` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
-
-##### Per-component Grove rollout budgets
-
-**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires Grove `v0.1.0-alpha.15` or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876).
-
-**Warning:** Admission warns when an explicit RollingRecreate or Coherent budget could take a complete component offline. Coherent also warns about this risk with its default budget, including single-replica frontends. RollingRecreate keeps its established warning behavior when no budget is configured. Warnings appear on creation and relevant rollout edits; unchanged metadata edits do not repeat them. No warning is emitted for externally scaled LPX capacity that is unknown to admission.
-
-**Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
-
-**Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
+**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.14` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
 
 #### Dependency compatibility
 
-**Change:** The bundled Grove version is now `v0.1.0-alpha.15`. It fixes corrective Coherent
-update recovery and permits rollout budgets above the creation-time replica seed. It also provides
-the group-wide pod index and environment-variable ordering used by Dynamo's backend-independent
-`DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` aliases.
+**Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod
+index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS` aliases.
 
-**Affected:** Grove-backed DGDs using rollout budgets or Coherent updates, and new multinode DGDs
-created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
+**Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
+chart.
 
-**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.15` or later before
-using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
-dependency or platform chart does not upgrade separately managed Grove installations.
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
+creating new multinode DGDs. Updating Dynamo's dependency or platform chart does not upgrade
+separately managed Grove installations.
 
 **Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only into DGDs
 created by operator 1.6.0 or later. An operator upgrade does not add them to an older DGD, and
@@ -710,6 +929,7 @@ Kubernetes: `>=1.30.0-0`
 | global.nats.install | bool | `false` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. NATS is optional because the default request and event planes use TCP and ZMQ, respectively. |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.kai-scheduler.schedulerName | string | `"kai-scheduler"` | Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI. |
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
@@ -732,7 +952,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
+| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability. |
 | dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
@@ -875,7 +1095,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 | 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
@@ -894,6 +1114,48 @@ global:
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
+
+To use a KAI-compatible scheduler under a different name (for example, Run:ai),
+install it separately and set its name:
+
+```yaml
+global:
+  kai-scheduler:
+    install: false        # A custom name requires an externally managed scheduler
+    enabled: true
+    schedulerName: runai-scheduler
+  grove:
+    enabled: true
+```
+
+> [!WARNING]
+> This setting changes only the scheduler name in Dynamo's pod templates. It does not
+> rename or reconfigure KAI or Grove. Before using a custom name, confirm that your Grove
+> version maps that name to its KAI backend and that the scheduler reads Grove's PodGroups
+> and queue metadata. The bundled Grove `v0.2.0-beta1` KAI profile is named `kai-scheduler`
+> and does not support a custom name. Changing this value alone does not enable Run:ai.
+> Custom KAI scheduler identity support is tracked in
+> [Grove PR #962](https://github.com/ai-dynamo/grove/pull/962); verify release availability
+> before choosing an external Grove version.
+
+The default is `kai-scheduler`. An empty value also uses that default. For a directly
+managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
+Names must be DNS subdomains, like `PodSpec.schedulerName`: lowercase letters, digits,
+`-` and `.`, at most 253 characters, with each dot-separated part starting and ending
+in a letter or digit. An invalid name such as `Runai_Scheduler` stops the operator at
+startup with an error on `orchestrators.kaiScheduler.schedulerName`.
+
+The operator sets `schedulerName` and the `kai.scheduler/queue` label when a component
+omits `schedulerName` or sets it to the configured name. A component that sets a
+different scheduler name is left unchanged, without injecting a KAI queue label.
+The queue comes from the DGD's `nvidia.com/kai-scheduler-queue` annotation (default
+`dynamo`), and the operator checks that the KAI Queue exists.
+
+> [!NOTE]
+> Changing the configured scheduler name can change the pod templates and roll Grove
+> workloads using the KAI integration. Explicit component overrides selecting another
+> scheduler stay unchanged. Coordinate the change with your scheduler and Grove
+> configuration. Leaving the value unset keeps current templates.
 
 Volcano:
 

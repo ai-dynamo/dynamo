@@ -1472,6 +1472,40 @@ mod interface_tests {
         .await;
     }
 
+    /// A hash the index does not hold, or already dropped earlier in the same batch,
+    /// must not stop the batch: the blocks after it are still removed.
+    #[tokio::test]
+    #[apply(matching_indexer_template)]
+    async fn test_remove_batch_continues_past_missing_blocks(variant: &str) {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let full_hashes: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
+        let seq_hashes = compute_seq_hash_for_block(&full_hashes);
+        let block_2 = ExternalSequenceBlockHash(seq_hashes[1]);
+        let block_3 = ExternalSequenceBlockHash(seq_hashes[2]);
+
+        for batch in [
+            vec![ExternalSequenceBlockHash(999), block_3, block_2],
+            vec![block_3, block_3, block_2],
+        ] {
+            let index = make_matching_indexer(variant, &workers);
+            index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+            index.apply_event(remove_event(0, 0, 0, batch)).await;
+
+            flush_and_settle(index.as_ref()).await;
+
+            assert_query_scores_with_semantics(
+                variant,
+                index.as_ref(),
+                &[1, 2, 3],
+                &workers,
+                &[(worker, 1)],
+                MatchSemantics::Exact,
+            )
+            .await;
+        }
+    }
+
     #[tokio::test]
     #[apply(matching_indexer_template)]
     async fn test_clear_then_reuse(variant: &str) {
