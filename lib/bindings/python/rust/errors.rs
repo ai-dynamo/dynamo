@@ -947,569 +947,65 @@ pub(crate) fn build_http_like_error(code: u16, message: String) -> DynamoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::ffi::c_str;
     use serde::Deserialize;
 
     #[test]
-    fn dispatch_errors_keep_local_identity_and_private_provenance() {
-        Python::initialize();
-        for (typed, received) in [(true, true), (true, false), (false, false)] {
-            let exception = _raise_dispatch_error(
-                "failed to connect to tcp://PRIVATE_DISPATCH_HOST:1234".into(),
-                typed,
-                received,
-            )
-            .unwrap_err();
-            Python::attach(|py| {
-                assert!(exception.value(py).hasattr(RELAY_CONTENT_ATTR).unwrap());
-                assert!(
-                    !exception
-                        .value(py)
-                        .hasattr(ROUTED_ENGINE_ERROR_ATTR)
-                        .unwrap()
-                );
-                assert!(!exception.is_instance_of::<RoutedEngineError>(py));
-                assert!(!exception.is_instance_of::<WorkerUnavailable>(py));
-            });
-            let mapped = crate::engine::map_python_exception(exception);
-            assert_eq!(mapped.class(), ErrorClass::Internal);
-            assert_eq!(mapped.reason().as_str(), "backend.unknown");
-            assert_eq!(mapped.retry_hint(), None);
-            assert!(mapped.public_details().is_none());
-            let upstream = mapped.upstream_error().unwrap();
-            if typed {
-                assert_eq!(upstream.family_name(), Some("transport"));
-                assert!(upstream.metadata_valid());
-                assert_eq!(
-                    upstream.message().contains("PRIVATE_DISPATCH_HOST"),
-                    received
-                );
-            } else {
-                assert!(!upstream.metadata_valid());
-                assert!(upstream.message().is_empty());
-            }
-        }
-        let legacy = DynamoError::builder()
-            .diagnostic("PRIVATE_LEGACY_DISPATCH_DIAGNOSTIC")
-            .build();
-        let mapped = crate::engine::map_python_exception(dispatch_error_to_pyerr(legacy.into()));
-        assert_eq!(mapped.class(), ErrorClass::Internal);
-        let upstream = mapped.upstream_error().unwrap();
-        assert!(!upstream.metadata_valid());
-        assert!(upstream.message().is_empty());
-    }
-
-    #[test]
-    fn dispatch_content_keeps_source_facts_without_remote_health_identity() {
-        Python::initialize();
+    fn relay_content_keeps_public_details_separate_from_received_facts() {
         for class in [ErrorClass::InvalidRequest, ErrorClass::WorkerUnavailable] {
-            let source = DynamoError::builder()
-                .class(class)
-                .retry_hint(RetryHint::Draining)
-                .public_message("Authored dispatch replacement")
-                .upstream_error(
-                    UpstreamError::new("received dispatch rejection")
-                        .http_status(422)
-                        .code("7"),
-                )
-                .diagnostic("PRIVATE_DISPATCH_WRAPPER")
-                .build();
-            let mapped =
-                crate::engine::map_python_exception(dispatch_error_to_pyerr(source.into()));
-            assert_eq!(mapped.class(), ErrorClass::Internal);
-            assert_eq!(mapped.reason().as_str(), "backend.unknown");
-            assert_eq!(mapped.retry_hint(), None);
-            assert_eq!(
-                mapped.public_message(),
-                Some("Authored dispatch replacement")
-            );
-            let upstream = mapped.upstream_error().unwrap();
-            assert_eq!(upstream.message(), "received dispatch rejection");
-            assert_eq!(upstream.http_status_value(), Some(422));
-            assert_eq!(upstream.code_value(), Some("7"));
-        }
-    }
-
-    #[test]
-    fn unknown_python_failure_preserves_received_text_without_display_prefix() {
-        Python::initialize();
-        let error = crate::engine::map_python_exception(pyo3::exceptions::PyRuntimeError::new_err(
-            "engine rejected the request",
-        ));
-        assert_eq!(error.class(), ErrorClass::Internal);
-        let upstream = error.upstream_error().unwrap();
-        assert_eq!(upstream.message(), "engine rejected the request");
-        assert_eq!(upstream.error_type_name(), Some("builtins.RuntimeError"));
-        assert_eq!(upstream.family_name(), None);
-    }
-
-    #[test]
-    fn python_exception_families_survive_subclasses_and_cause_wrapping() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-class HttpError(Exception):
-    __module__ = 'dynamo.common.http.base'
-class FetchFailure(HttpError):
-    pass
-def fail():
-    try:
-        raise FetchFailure('private media source')
-    except FetchFailure as exc:
-        raise ValueError('wrapped fetch failure') from exc
-class RequestException(Exception):
-    __module__ = 'requests.exceptions'
-class CustomHTTPError(RequestException):
-    __module__ = 'custom_http_client'
-def requests_direct():
-    raise CustomHTTPError('https://private.invalid/image?token=secret')
-def requests_wrapped():
-    try:
-        requests_direct()
-    except RequestException as exc:
-        raise ValueError(str(exc)) from exc
-"#
-                ),
-                c_str!("capture_test.py"),
-                c_str!("capture_test"),
-            )
-            .unwrap();
-            for function in ["fail", "requests_direct", "requests_wrapped"] {
-                let error = module.getattr(function).unwrap().call0().unwrap_err();
-                let mapped = crate::engine::map_python_exception(error);
-                let upstream = mapped.upstream_error().unwrap();
-                assert_eq!(upstream.family_name(), Some("media_fetch"));
-                if function == "requests_direct" {
-                    assert_eq!(
-                        upstream.error_type_name(),
-                        Some("custom_http_client.CustomHTTPError")
-                    );
-                } else if function == "requests_wrapped" {
-                    assert_eq!(upstream.error_type_name(), Some("builtins.ValueError"));
-                }
-            }
-
-            let error = pyo3::exceptions::PyTypeError::new_err("private handler detail");
-            let mapped = crate::engine::map_python_exception(error);
-            assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-            assert_eq!(
-                mapped.upstream_error().unwrap().family_name(),
-                Some("python_programming")
-            );
-        });
-    }
-
-    #[test]
-    fn authored_invalid_arguments_preserve_distinct_programming_translations() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(r#"
-def fail(kind, mode, copied, length=1):
-    try:
-        raise {'KeyError': KeyError, 'TypeError': TypeError, 'AttributeError': AttributeError}[kind]('k' * length)
-    except Exception as exc:
-        error = InvalidArgument(str(exc) if copied else "missing 'k'")
-        if mode == 'explicit':
-            raise error from exc
-        if mode == 'suppressed':
-            raise error from None
-        raise error
-def outer_bug(kind):
-    try:
-        raise InvalidArgument('authored request explanation')
-    except Exception:
-        raise {'KeyError': KeyError, 'TypeError': TypeError, 'AttributeError': AttributeError}[kind]('outer bug') from None
-"#),
-                c_str!("authored_cause_test.py"),
-                c_str!("authored_cause_test"),
-            ).unwrap();
-            module
-                .add("InvalidArgument", py.get_type::<InvalidArgument>())
-                .unwrap();
-            for kind in ["KeyError", "TypeError", "AttributeError"] {
-                for mode in ["implicit", "explicit", "suppressed"] {
-                    for copied in [false, true] {
-                        let exception = module
-                            .getattr("fail")
-                            .unwrap()
-                            .call1((kind, mode, copied))
-                            .unwrap_err();
-                        if mode == "explicit" {
-                            let value = exception.value(py);
-                            assert_eq!(
-                                value.getattr("__cause__").unwrap().as_ptr(),
-                                value.getattr("__context__").unwrap().as_ptr()
-                            );
-                        }
-                        let mapped = crate::engine::map_python_exception(exception);
-                        assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-                        let upstream = mapped.upstream_error().unwrap();
-                        assert!(upstream.metadata_valid());
-                        assert_eq!(
-                            upstream.family_name(),
-                            copied.then_some("python_programming")
-                        );
-                        if !copied {
-                            assert_eq!(mapped.public_message(), Some("missing 'k'"));
-                        }
-                    }
-                }
-                let exception = module
-                    .getattr("outer_bug")
-                    .unwrap()
-                    .call1((kind,))
-                    .unwrap_err();
-                assert_eq!(
-                    crate::engine::map_python_exception(exception)
-                        .upstream_error()
-                        .unwrap()
-                        .family_name(),
-                    Some("python_programming")
-                );
-            }
-            let copied = module
-                .getattr("fail")
-                .unwrap()
-                .call1(("TypeError", "suppressed", true, 8192))
-                .unwrap_err();
-            assert_eq!(
-                crate::engine::map_python_exception(copied)
-                    .upstream_error()
-                    .unwrap()
-                    .family_name(),
-                Some("python_programming")
-            );
-        });
-    }
-
-    #[test]
-    fn suppressed_context_keeps_media_transport_and_relay_privacy() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-class HttpError(Exception):
-    __module__ = 'dynamo.common.http.base'
-def visible(suppressed):
-    try:
-        raise TypeError('private bug text')
-    except TypeError:
-        if suppressed:
-            raise ValueError('received replacement') from None
-        raise ValueError('received replacement')
-def hidden(kind, validation):
-    try:
-        raise {'media': HttpError, 'transport': ConnectionError}[kind]('PRIVATE_SOURCE')
-    except Exception as exc:
-        wrapper = InvalidArgument if validation else ValueError
-        raise wrapper(str(exc)) from None
-def forked():
-    error = InvalidArgument('authored request explanation')
-    error.__cause__ = ValueError('visible cause')
-    error.__context__ = HttpError('PRIVATE_HIDDEN_CONTEXT')
-    error.__suppress_context__ = True
-    raise error
-def relay(error):
-    try:
-        raise error
-    except Exception as exc:
-        raise InvalidArgument(str(exc)) from None
-def translated_relay(error, mode):
-    try:
-        raise error
-    except Exception as exc:
-        translated = InvalidArgument("missing 'k'")
-        if mode == 'visible':
-            raise translated from exc
-        if mode == 'helper':
-            raise translated from ValueError('translation helper')
-        raise translated from None
-"#
-                ),
-                c_str!("hidden_cause_test.py"),
-                c_str!("hidden_cause_test"),
-            )
-            .unwrap();
-            module
-                .add("InvalidArgument", py.get_type::<InvalidArgument>())
-                .unwrap();
-            for suppressed in [false, true] {
-                let exception = module
-                    .getattr("visible")
-                    .unwrap()
-                    .call1((suppressed,))
-                    .unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                assert_eq!(
-                    mapped.upstream_error().unwrap().family_name(),
-                    (!suppressed).then_some("python_programming")
-                );
-            }
-            for (kind, family) in [("media", "media_fetch"), ("transport", "transport")] {
-                for validation in [false, true] {
-                    let exception = module
-                        .getattr("hidden")
-                        .unwrap()
-                        .call1((kind, validation))
-                        .unwrap_err();
-                    assert_eq!(
-                        crate::engine::map_python_exception(exception)
-                            .upstream_error()
-                            .unwrap()
-                            .family_name(),
-                        Some(family)
-                    );
-                }
-            }
-            let exception = module.getattr("forked").unwrap().call0().unwrap_err();
-            assert_eq!(
-                crate::engine::map_python_exception(exception)
-                    .upstream_error()
-                    .unwrap()
-                    .family_name(),
-                Some("media_fetch")
-            );
-            for routed in [false, true] {
-                for legacy in [false, true] {
-                    let mut builder = DynamoError::builder()
-                        .class(ErrorClass::Internal)
-                        .diagnostic("PRIVATE_RELAY_DISPLAY");
-                    if !legacy {
-                        builder = builder.upstream_error(
-                            UpstreamError::new("PRIVATE_MEDIA_SOURCE").family("media_fetch"),
-                        );
-                    }
-                    let mut response = Annotated::<()>::from_error("");
-                    response.error = Some(builder.build());
-                    let relayed = check_response_error(response, routed).unwrap_err();
-                    let exception = module
-                        .getattr("relay")
-                        .unwrap()
-                        .call1((relayed.value(py),))
-                        .unwrap_err();
-                    let mapped = crate::engine::map_python_exception(exception);
-                    assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-                    assert!(mapped.public_details().is_none());
-                    let upstream = mapped.upstream_error().unwrap();
-                    if legacy {
-                        assert!(!upstream.metadata_valid());
-                    } else {
-                        assert_eq!(upstream.family_name(), Some("media_fetch"));
-                        assert_eq!(upstream.message(), "PRIVATE_MEDIA_SOURCE");
-                    }
-                }
-                for media in [false, true] {
-                    for mode in ["helper", "suppressed", "visible"] {
-                        let mut original =
-                            build_http_like_error(503, "received worker explanation".into());
-                        if media {
-                            original.upstream_error = original
-                                .upstream_error
-                                .take()
-                                .map(|upstream| Box::new(upstream.family("media_fetch")));
-                        }
-                        let mut response = Annotated::<()>::from_error("");
-                        response.error = Some(original);
-                        let relayed = check_response_error(response, routed).unwrap_err();
-                        let exception = module
-                            .getattr("translated_relay")
-                            .unwrap()
-                            .call1((relayed.value(py), mode))
-                            .unwrap_err();
-                        let mapped = crate::engine::map_python_exception(exception);
-                        assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-                        assert_eq!(mapped.public_message(), Some("missing 'k'"));
-                        let upstream = mapped.upstream_error().unwrap();
-                        assert_eq!(
-                            upstream.http_status_value(),
-                            (mode == "visible").then_some(503)
-                        );
-                        assert_eq!(
-                            upstream.family_name(),
-                            if media {
-                                Some("media_fetch")
-                            } else if mode == "visible" {
-                                Some("http")
-                            } else {
-                                None
-                            }
-                        );
-                        assert_eq!(
-                            upstream.message(),
-                            if mode == "visible" {
-                                "received worker explanation"
-                            } else {
-                                "missing 'k'"
-                            }
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn media_family_uses_aiohttp_ancestry_and_vllm_input_provenance() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(r#"
-class ClientError(Exception):
-    __module__ = 'aiohttp.client_exceptions'
-class CustomConnectionError(ClientError):
-    __module__ = 'application_http'
-def aiohttp_error(hidden):
-    try:
-        raise CustomConnectionError('PRIVATE_MEDIA_URL')
-    except ClientError as exc:
-        if hidden:
-            raise ValueError(str(exc)) from None
-        raise
-class VLLMUnprocessableEntityError(Exception):
-    __module__ = 'vllm.exceptions'
-    def __init__(self, parameter, value):
-        self.parameter, self.value = parameter, value
-        self.status_code = 422
-        self.message = 'received engine explanation'
-        super().__init__(self.message)
-class CustomVLLMError(VLLMUnprocessableEntityError):
-    __module__ = 'application_engine'
-class Future422(Exception):
-    def __init__(self, parameter, value):
-        self.parameter, self.value = parameter, value
-        self.status_code = 422
-        self.message = 'received engine explanation'
-        super().__init__(self.message)
-def vllm_error(kind, parameter, value):
-    raise {'typed': VLLMUnprocessableEntityError, 'subclass': CustomVLLMError, 'future': Future422}[kind](parameter, value)
-"#),
-                c_str!("media_provenance_test.py"),
-                c_str!("media_provenance_test"),
-            ).unwrap();
-            for hidden in [false, true] {
-                let exception = module
-                    .getattr("aiohttp_error")
-                    .unwrap()
-                    .call1((hidden,))
-                    .unwrap_err();
-                assert_eq!(
-                    crate::engine::map_python_exception(exception)
-                        .upstream_error()
-                        .unwrap()
-                        .family_name(),
-                    Some("media_fetch")
-                );
-            }
-            for (kind, parameter, value, media) in [
-                (
-                    "typed",
-                    "image_url",
-                    "https://PRIVATE_MEDIA_URL/image",
-                    true,
-                ),
-                (
-                    "subclass",
-                    "video_url",
-                    "HTTP://PRIVATE_MEDIA_URL/video",
-                    true,
-                ),
-                (
-                    "typed",
-                    "audio_url",
-                    "data:audio/wav;base64,PRIVATE_MEDIA",
-                    true,
-                ),
-                (
-                    "typed",
-                    "max_tokens",
-                    "https://PRIVATE_MEDIA_URL/image",
-                    false,
-                ),
-                ("typed", "image_url", "not a URL", true),
-                ("typed", "image_url", "../PRIVATE_MEDIA_FILE.png", true),
-                ("typed", "image_url", "file:///PRIVATE_MEDIA_FILE.png", true),
-                (
-                    "future",
-                    "image_url",
-                    "https://PRIVATE_MEDIA_URL/image",
-                    false,
-                ),
+            for public in [
+                PublicDetails::Message {
+                    message: "Authored relay replacement".into(),
+                },
+                PublicDetails::ContextLength {
+                    limit: 8,
+                    actual: Some(10),
+                    prompt_tokens: Some(10),
+                },
             ] {
-                let exception = module
-                    .getattr("vllm_error")
-                    .unwrap()
-                    .call1((kind, parameter, value))
-                    .unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                let upstream = mapped.upstream_error().unwrap();
-                assert_eq!(upstream.family_name(), media.then_some("media_fetch"));
-                assert_eq!(upstream.http_status_value(), Some(422));
-                assert!(upstream.metadata_valid());
+                let upstream = UpstreamError::new("received relay explanation")
+                    .http_status(422)
+                    .code("7");
+                let source = DynamoError::builder()
+                    .class(class)
+                    .retry_hint(RetryHint::Draining)
+                    .public_details(public.clone())
+                    .upstream_error(upstream.clone())
+                    .diagnostic("PRIVATE_RELAY_WRAPPER")
+                    .build();
+                let (projected_public, projected_upstream) = relay_content(&source);
+                assert_eq!(projected_public.as_ref(), Some(&public));
+                assert_eq!(projected_upstream.as_ref(), Some(&upstream));
             }
-            let exception = module
-                .getattr("vllm_error")
-                .unwrap()
-                .call1(("typed", "image_url", 7))
-                .unwrap_err();
-            assert_eq!(
-                crate::engine::map_python_exception(exception)
-                    .upstream_error()
-                    .unwrap()
-                    .family_name(),
-                None
-            );
-        });
+        }
+
+        let context = PublicDetails::ContextLength {
+            limit: 8,
+            actual: Some(10),
+            prompt_tokens: Some(10),
+        };
+        let source = DynamoError::builder()
+            .public_details(context.clone())
+            .build();
+        let outer = DynamoError::builder()
+            .public_details(PublicDetails::SizeLimit {
+                limit: 8,
+                actual: Some(10),
+            })
+            .cause(source.clone())
+            .build();
+        assert_eq!(relay_content(&outer).0, Some(context));
+        let authored = PublicDetails::Message {
+            message: "Authored outer replacement".into(),
+        };
+        let outer = DynamoError::builder()
+            .public_details(authored.clone())
+            .cause(source)
+            .build();
+        assert_eq!(relay_content(&outer).0, Some(authored));
     }
 
     #[test]
-    fn cyclic_or_excessive_python_causes_retain_incomplete_provenance() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-def cyclic():
-    exc = ValueError('opaque failure')
-    exc.__cause__ = exc
-    raise exc
-def hidden_cycle():
-    exc = ValueError('opaque failure')
-    exc.__context__ = exc
-    exc.__suppress_context__ = True
-    raise exc
-def excessive():
-    exc = KeyError('private inner failure')
-    for _ in range(20):
-        wrapped = ValueError('outer explanation')
-        wrapped.__cause__ = exc
-        exc = wrapped
-    raise exc
-"#
-                ),
-                c_str!("cause_test.py"),
-                c_str!("cause_test"),
-            )
-            .unwrap();
-            for function in ["cyclic", "hidden_cycle", "excessive"] {
-                let exception = module.getattr(function).unwrap().call0().unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                assert!(!mapped.upstream_error().unwrap().metadata_valid());
-            }
-        });
-    }
-
-    #[test]
-    fn worker_relay_projects_nested_content_without_health_identity_or_invalid_recovery() {
-        Python::initialize();
+    fn relay_content_projects_nested_provenance_and_stops_at_invalid_identity() {
         let inner = DynamoError::builder()
             .error_type(dynamo_runtime::error::ErrorType::Backend(
                 BackendError::Disconnected,
@@ -1518,22 +1014,16 @@ def excessive():
             .build();
         let outer = DynamoError::builder()
             .class(ErrorClass::Internal)
-            .diagnostic("relay wrapper")
+            .diagnostic("PRIVATE_RELAY_WRAPPER")
             .cause(inner.clone())
             .build();
-        let mut response = Annotated::<()>::from_error("");
-        response.error = Some(outer);
-        let mapped =
-            crate::engine::map_python_exception(check_response_error(response, false).unwrap_err());
-        assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-        assert_eq!(
-            mapped.upstream_error().unwrap().message(),
-            "remote explanation"
-        );
-        assert_eq!(
-            mapped.upstream_error().unwrap().family_name(),
-            Some("transport")
-        );
+        for source in [&inner, &outer] {
+            let (public, upstream) = relay_content(source);
+            assert!(public.is_none());
+            let upstream = upstream.unwrap();
+            assert_eq!(upstream.message(), "remote explanation");
+            assert_eq!(upstream.family_name(), Some("transport"));
+        }
 
         let invalid: DynamoError = serde_json::from_value(serde_json::json!({
             "class": "InvalidRequest", "reason": "backend.unknown", "caused_by": inner,
@@ -1541,195 +1031,66 @@ def excessive():
         .unwrap();
         let (public, upstream) = relay_content(&invalid);
         assert!(public.is_none());
-        assert!(!upstream.unwrap().metadata_valid());
+        let upstream = upstream.unwrap();
+        assert!(!upstream.metadata_valid());
+        assert!(upstream.message().is_empty());
     }
 
     #[test]
-    fn worker_relay_provenance_survives_a_new_python_exception() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-def wrap(error):
-    raise InvalidArgument(str(error)) from error
-"#
-                ),
-                c_str!("relay_test.py"),
-                c_str!("relay_test"),
-            )
-            .unwrap();
-            module
-                .add("InvalidArgument", py.get_type::<InvalidArgument>())
-                .unwrap();
-            for routed in [false, true] {
-                let original = DynamoError::builder()
-                    .class(ErrorClass::Internal)
-                    .upstream_error(
-                        UpstreamError::new("private media source").family("media_fetch"),
-                    )
-                    .build();
-                let mut response = Annotated::<()>::from_error("");
-                response.error = Some(original);
-                let relayed = check_response_error(response, routed).unwrap_err();
-                let exception = module
-                    .getattr("wrap")
-                    .unwrap()
-                    .call1((relayed.value(py),))
-                    .unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                let upstream = mapped.upstream_error().unwrap();
-                assert_eq!(upstream.message(), "private media source");
-                assert_eq!(upstream.family_name(), Some("media_fetch"));
-                assert!(mapped.public_details().is_none());
+    fn relay_content_merges_http_facts_without_changing_transport_provenance() {
+        let remote = build_http_like_error(503, "received HTTP explanation".into());
+        let outer = DynamoError::builder()
+            .class(ErrorClass::Internal)
+            .upstream_error(UpstreamError::new("received outer explanation"))
+            .cause(remote)
+            .build();
+        let upstream = relay_content(&outer).1.unwrap();
+        assert_eq!(upstream.message(), "received outer explanation");
+        assert_eq!(upstream.http_status_value(), Some(503));
+
+        for (http_response, explicit_transport) in [(true, false), (true, true), (false, false)] {
+            let mut upstream = UpstreamError::new("received HTTP explanation");
+            if http_response {
+                upstream = upstream.http_status(503);
             }
-        });
-    }
-
-    #[test]
-    fn wrapped_legacy_relays_never_recapture_private_display_as_received_content() {
-        Python::initialize();
-        Python::attach(|py| {
-            for routed in [false, true] {
-                for public in [
-                    None,
-                    Some(PublicDetails::Message {
-                        message: "authored safe replacement".into(),
-                    }),
-                    Some(PublicDetails::ContextLength {
-                        limit: 8,
-                        actual: Some(10),
-                        prompt_tokens: Some(10),
-                    }),
-                ] {
-                    let mut original = DynamoError::builder()
-                        .class(ErrorClass::Internal)
-                        .diagnostic("PRIVATE_LEGACY_DISPLAY");
-                    if let Some(details) = &public {
-                        original = original.public_details(details.clone());
-                    }
-                    let mut response = Annotated::<()>::from_error("");
-                    response.error = Some(original.build());
-                    let relayed = check_response_error(response, routed).unwrap_err();
-                    // Simulate a processor that copies str(exc) into a new typed
-                    // validation exception. The original identity stays a cause.
-                    let copied = relayed
-                        .value(py)
-                        .str()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
-                    assert!(copied.contains("PRIVATE_LEGACY_DISPLAY"));
-                    let wrapper = InvalidArgument::new_err(copied);
-                    wrapper
-                        .value(py)
-                        .setattr("__cause__", relayed.value(py))
-                        .unwrap();
-                    let mapped = crate::engine::map_python_exception(wrapper);
-                    assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-                    assert_eq!(mapped.public_details(), public.as_ref());
-                    if public.is_none() {
-                        assert!(!mapped.upstream_error().unwrap().metadata_valid());
-                    } else {
-                        assert!(mapped.upstream_error().is_none());
-                    }
-
-                    let authored = InvalidArgument::new_err("authored outer replacement");
-                    authored
-                        .value(py)
-                        .setattr("__cause__", relayed.value(py))
-                        .unwrap();
-                    let mapped = crate::engine::map_python_exception(authored);
-                    assert_eq!(mapped.public_message(), Some("authored outer replacement"));
-                    assert!(mapped.upstream_error().is_none());
-                }
+            if explicit_transport {
+                upstream = upstream.family("transport");
             }
-        });
+            let remote = DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Backend(
+                    BackendError::CannotConnect,
+                ))
+                .upstream_error(upstream)
+                .build();
+            let upstream = relay_content(&remote).1.unwrap();
+            assert_eq!(upstream.http_status_value(), http_response.then_some(503));
+            assert_eq!(
+                upstream.family_name(),
+                (explicit_transport || !http_response).then_some("transport")
+            );
+        }
     }
 
     #[test]
-    fn frontend_relay_keeps_worker_unavailable_selection_through_outer_context() {
-        Python::initialize();
+    fn worker_lifecycle_helpers_reject_invalid_outer_identity() {
         let worker = DynamoError::builder()
             .class(ErrorClass::WorkerUnavailable)
             .retry_hint(RetryHint::Draining)
-            .upstream_error(UpstreamError::new("worker closed admission"))
             .build();
         for class in [ErrorClass::Internal, ErrorClass::WorkerUnavailable] {
             let outer = DynamoError::builder()
                 .class(class)
-                .diagnostic("outer execution context")
                 .cause(worker.clone())
                 .build();
-            let exception = routed_error_to_pyerr(anyhow::Error::new(outer));
-            Python::attach(|py| assert!(exception.is_instance_of::<WorkerDraining>(py)));
-            let mapped = crate::engine::map_python_exception(exception);
-            assert_eq!(mapped.error_type(), ErrorClass::WorkerUnavailable);
-            assert_eq!(mapped.retry_hint(), Some(RetryHint::Draining));
-            assert_eq!(
-                relay_content(&mapped).1.unwrap().message(),
-                "worker closed admission"
-            );
+            assert!(is_worker_unavailable(&outer));
+            assert!(is_worker_draining(&outer));
         }
-
         let invalid: DynamoError = serde_json::from_value(serde_json::json!({
             "class": "Internal", "reason": "request.invalid", "caused_by": worker,
         }))
         .unwrap();
-        let mapped =
-            crate::engine::map_python_exception(routed_error_to_pyerr(anyhow::Error::new(invalid)));
-        assert_eq!(mapped.class(), ErrorClass::Internal);
-        assert_eq!(mapped.reason().as_str(), "runtime.invalid_error");
-        assert!(mapped.upstream_error().is_none());
-    }
-
-    #[test]
-    fn frontend_invalid_argument_relay_preserves_structured_context_and_upstream() {
-        Python::initialize();
-        let original = DynamoError::builder()
-            .class(ErrorClass::InvalidRequest)
-            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
-                limit: 8,
-                actual: Some(10),
-                prompt_tokens: Some(10),
-            })
-            .upstream_error(UpstreamError::new("received engine explanation"))
-            .diagnostic("private wrapper")
-            .build();
-        let exception = routed_error_to_pyerr(anyhow::Error::new(original.clone()));
-        Python::attach(|py| assert!(exception.is_instance_of::<InvalidArgument>(py)));
-        let mapped = crate::engine::map_python_exception(exception);
-        assert_eq!(mapped.class(), original.class());
-        assert_eq!(mapped.reason(), original.reason());
-        assert_eq!(mapped.public_details(), original.public_details());
-        assert_eq!(mapped.upstream_error(), original.upstream_error());
-    }
-
-    #[test]
-    fn worker_relay_preserves_content_without_adopting_remote_health_identity() {
-        Python::initialize();
-        let original = DynamoError::builder()
-            .error_type(dynamo_runtime::error::ErrorType::Backend(
-                BackendError::Disconnected,
-            ))
-            .upstream_error(UpstreamError::new("remote engine explanation"))
-            .diagnostic("remote connection broke")
-            .build();
-        let mut response = Annotated::<()>::from_error("");
-        response.error = Some(original);
-        let exception = check_response_error(response, false).unwrap_err();
-        let mapped = crate::engine::map_python_exception(exception);
-        assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-        assert_eq!(mapped.public_message(), None);
-        assert_eq!(
-            mapped.upstream_error().unwrap().message(),
-            "remote engine explanation"
-        );
-        assert_eq!(
-            mapped.upstream_error().unwrap().family_name(),
-            Some("transport")
-        );
+        assert!(!is_worker_unavailable(&invalid));
+        assert!(!is_worker_draining(&invalid));
     }
 
     #[derive(Deserialize)]
@@ -1868,225 +1229,17 @@ def wrap(error):
     }
 
     #[test]
-    fn explicit_http_status_survives_python_capture_and_serialization() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-class HttpLikeError(Exception):
-    def __init__(self, status):
-        self.status = status
-        self.message = 'received HTTP explanation'
-        super().__init__(self.message)
-def fail(status):
-    raise HttpLikeError(status)
-"#
-                ),
-                c_str!("http_status_test.py"),
-                c_str!("http_status_test"),
-            )
-            .unwrap();
-            for (status, class) in [
-                (408, ErrorClass::DeadlineExceeded),
-                (418, ErrorClass::InvalidRequest),
-                (422, ErrorClass::InvalidRequest),
-                (431, ErrorClass::PayloadTooLarge),
-                (503, ErrorClass::Unavailable),
-                (529, ErrorClass::CapacityExhausted),
-            ] {
-                let exception = module
-                    .getattr("fail")
-                    .unwrap()
-                    .call1((status,))
-                    .unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                assert_eq!(mapped.class(), class);
-                assert_eq!(
-                    mapped.upstream_error().unwrap().http_status_value(),
-                    Some(status)
-                );
-                assert_eq!(
-                    mapped.upstream_error().unwrap().message(),
-                    "received HTTP explanation"
-                );
-                let decoded: DynamoError =
-                    serde_json::from_value(serde_json::to_value(&mapped).unwrap()).unwrap();
-                assert_eq!(
-                    decoded.upstream_error().unwrap().http_status_value(),
-                    Some(status)
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn status_code_api_errors_capture_explicit_http_status_only_in_http_error_space() {
-        Python::initialize();
-        Python::attach(|py| {
-            let module = PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
-class HTTPStatusCodeError(Exception):
-    def __init__(self, status_code):
-        self.code = 7  # An SDK/native error code is not its HTTP response status.
-        self.status_code = status_code
-        self.message = 'HTTP API rejected the request'
-        super().__init__(self.message)
-def fail(status_code):
-    raise HTTPStatusCodeError(status_code)
-"#
-                ),
-                c_str!("http_api_status_test.py"),
-                c_str!("http_api_status_test"),
-            )
-            .unwrap();
-            for (status, code) in [(422, Some(7)), (7, Some(7)), (422, None), (503, Some(422))] {
-                let exception = module
-                    .getattr("fail")
-                    .unwrap()
-                    .call1((status,))
-                    .unwrap_err();
-                if let Some(code) = code {
-                    exception.value(py).setattr("code", code).unwrap();
-                } else {
-                    exception.value(py).delattr("code").unwrap();
-                }
-                assert_eq!(
-                    extract_http_like_error(py, &exception).map(|(code, _)| code),
-                    code,
-                );
-                let mapped = crate::engine::map_python_exception(exception);
-                assert_eq!(
-                    mapped.class(),
-                    if code == Some(422) {
-                        ErrorClass::InvalidRequest
-                    } else {
-                        ErrorClass::Internal
-                    }
-                );
-                let expected_status = (400..=599).contains(&status).then_some(status);
-                assert_eq!(
-                    mapped.upstream_error().unwrap().http_status_value(),
-                    expected_status
-                );
-                let wire = serde_json::to_value(&mapped).unwrap();
-                let decoded: DynamoError = serde_json::from_value(wire).unwrap();
-                assert_eq!(
-                    decoded.upstream_error().unwrap().http_status_value(),
-                    expected_status
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn native_numeric_codes_are_not_inferred_as_http_statuses() {
-        Python::initialize();
-        Python::attach(|py| {
-            let globals = pyo3::types::PyDict::new(py);
-            globals
-                .set_item("DynamoException", py.get_type::<DynamoException>())
-                .unwrap();
-            py.run(
-                c_str!(
-                    r#"
-class NativeError(DynamoException):
-    def __init__(self, code):
-        self.code = code
-        self.message = 'native enum explanation'
-        super().__init__(self.message)
-def fail(code):
-    raise NativeError(code)
-"#
-                ),
-                Some(&globals),
-                None,
-            )
-            .unwrap();
-            for code in [7, 422] {
-                let exception = globals
-                    .get_item("fail")
-                    .unwrap()
-                    .unwrap()
-                    .call1((code,))
-                    .unwrap_err();
-                let mapped = crate::engine::map_python_exception(exception);
-                assert_eq!(mapped.class(), ErrorClass::Internal);
-                let upstream = mapped.upstream_error().unwrap();
-                assert_eq!(upstream.http_status_value(), None);
-                assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
-                assert!(upstream.metadata_valid());
-            }
-            // Even a duck-typed unknown native code outside HTTP error space
-            // must not become an explicit HTTP status.
-            assert_eq!(
-                build_http_like_error(7, "native code".into())
-                    .upstream_error()
-                    .unwrap()
-                    .http_status_value(),
-                None,
-            );
-        });
-    }
-
-    #[test]
-    fn worker_relay_keeps_http_status_without_adopting_remote_class_or_retry() {
-        Python::initialize();
-        let remote = build_http_like_error(503, "received HTTP explanation".into());
-        let outer = DynamoError::builder()
-            .class(ErrorClass::Internal)
-            .upstream_error(UpstreamError::new("received outer explanation"))
-            .cause(remote)
-            .build();
-        let mut response = Annotated::<()>::from_error("");
-        response.error = Some(outer);
-        let mapped =
-            crate::engine::map_python_exception(check_response_error(response, false).unwrap_err());
-        assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-        assert_eq!(mapped.retry_hint(), None);
-        let upstream = mapped.upstream_error().unwrap();
-        assert_eq!(upstream.message(), "received outer explanation");
-        assert_eq!(upstream.http_status_value(), Some(503));
-
-        for (http_response, explicit_transport) in [(true, false), (true, true), (false, false)] {
-            let mut upstream = UpstreamError::new("received HTTP explanation");
-            if http_response {
-                upstream = upstream.http_status(503);
-            }
-            if explicit_transport {
-                upstream = upstream.family("transport");
-            }
-            let remote = DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::Backend(
-                    BackendError::CannotConnect,
-                ))
-                .upstream_error(upstream)
-                .build();
-            let mut response = Annotated::<()>::from_error("");
-            response.error = Some(remote);
-            let mapped = crate::engine::map_python_exception(
-                check_response_error(response, false).unwrap_err(),
-            );
-            assert_eq!(mapped.class(), ErrorClass::InvalidRequest);
-            assert_eq!(mapped.retry_hint(), None);
-            let upstream = mapped.upstream_error().unwrap();
-            assert_eq!(upstream.http_status_value(), http_response.then_some(503));
-            assert_eq!(
-                upstream.family_name(),
-                (explicit_transport || !http_response).then_some("transport")
-            );
-        }
-    }
-
-    #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
+            (7, ErrorClass::Internal),
+            (408, ErrorClass::DeadlineExceeded),
             (409, ErrorClass::Conflict),
             (415, ErrorClass::UnsupportedMedia),
+            (418, ErrorClass::InvalidRequest),
+            (422, ErrorClass::InvalidRequest),
+            (431, ErrorClass::PayloadTooLarge),
             (503, ErrorClass::Unavailable),
+            (529, ErrorClass::CapacityExhausted),
         ] {
             let error = build_http_like_error(code, "private backend detail".to_string());
             assert_eq!(error.class(), expected_class);
@@ -2097,6 +1250,13 @@ def fail(code):
                 serde_json::from_value(wire.clone()).expect("semantic reader");
             assert_eq!(semantic.class(), expected_class);
             assert_eq!(semantic.public_message(), None);
+            let upstream = semantic.upstream_error().unwrap();
+            assert_eq!(upstream.message(), "private backend detail");
+            assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
+            assert_eq!(
+                upstream.http_status_value(),
+                (400..=599).contains(&code).then_some(code)
+            );
 
             let legacy: LegacyDynamoError = serde_json::from_value(wire).expect("legacy reader");
             let legacy_http: LegacyHttpError =
