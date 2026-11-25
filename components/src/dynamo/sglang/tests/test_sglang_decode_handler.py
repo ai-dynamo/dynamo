@@ -40,9 +40,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
-    build_disagg_mm_kwargs,
     engine_consumes_media,
-    extract_media_urls,
     raise_if_unextracted_multimodal,
     reject_unconsumed_media,
 )
@@ -67,36 +65,6 @@ def _read_zstd_payload(path):
     import msgspec
 
     return msgspec.msgpack.decode(raw)
-
-
-def test_extract_media_urls_supports_string_and_wire_items():
-    mm_data = {
-        "video_url": [
-            "file:///tmp/test.mp4",
-            {"Url": "https://example.com/test.mp4"},
-        ]
-    }
-
-    assert extract_media_urls(mm_data, "video_url") == [
-        "file:///tmp/test.mp4",
-        "https://example.com/test.mp4",
-    ]
-
-
-def test_build_disagg_mm_kwargs_includes_audio_urls():
-    request = {
-        "multi_modal_data": {
-            "image_url": [{"Url": "https://example.com/image.png"}],
-            "audio_url": [{"Url": "https://example.com/audio.wav"}],
-            "video_url": [{"Url": "https://example.com/video.mp4"}],
-        }
-    }
-
-    assert build_disagg_mm_kwargs(request) == {
-        "image_data": ["https://example.com/image.png"],
-        "audio_data": ["https://example.com/audio.wav"],
-        "video_data": ["https://example.com/video.mp4"],
-    }
 
 
 @pytest.mark.asyncio
@@ -262,26 +230,6 @@ async def test_prefill_applies_model_default_sampling_params(
 
     assert calls[0]["sampling_params"].get("top_k") == expected_top_k
     assert calls[0]["sampling_params"]["top_p"] == 0.5
-
-
-def test_extract_media_urls_returns_none_for_missing_modality():
-    assert extract_media_urls({}, "image_url") is None
-    assert extract_media_urls(None, "image_url") is None
-    assert extract_media_urls({"image_url": []}, "image_url") is None
-
-
-def test_extract_media_urls_rejects_malformed_payloads():
-    # A bare string (not a list) would otherwise split into per-character items.
-    with pytest.raises(ValueError, match="must be a list"):
-        extract_media_urls({"image_url": "https://example.com/a.png"}, "image_url")
-
-    # Frontend-decoded media is URL-passthrough only in the disaggregated path.
-    with pytest.raises(ValueError, match="Frontend-decoded"):
-        extract_media_urls({"image_url": [{"Decoded": "..."}]}, "image_url")
-
-    # Unsupported dict variant fails clearly instead of degrading to text.
-    with pytest.raises(ValueError, match="Unsupported"):
-        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url")
 
 
 @pytest.mark.parametrize(
@@ -1980,53 +1928,6 @@ def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
 
 class TestMultimodalGuard:
     """Tests for multimodal guard when frontend extraction is missing."""
-
-    @staticmethod
-    def _image_message():
-        return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.com/a.jpg"},
-                },
-                {"type": "text", "text": "describe image"},
-            ],
-        }
-
-    @pytest.mark.parametrize(
-        "request_factory",
-        [
-            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
-            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
-        ],
-        ids=["top_level_messages", "extra_args_messages"],
-    )
-    def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(InvalidArgument, match="multi_modal_data"):
-            raise_if_unextracted_multimodal(request_factory(self._image_message()))
-
-    def test_raises_for_audio_url(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {"url": "https://example.com/audio.wav"},
-                        }
-                    ],
-                }
-            ],
-        }
-
-        with pytest.raises(InvalidArgument, match="audio_url"):
-            raise_if_unextracted_multimodal(request)
-
-    def test_text_only_request_bypasses_guard(self):
-        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):

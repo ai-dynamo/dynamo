@@ -308,7 +308,7 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Let the API server refuse a new request before a PCS update rolls the running workload to it.
 	// PCS replacement is not covered: it deletes the workload before its requests are prepared.
 	if len(missingRequests) > 0 {
-		change, err := commoncontroller.GetSpecChangeResult(pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
+		change, err := commoncontroller.GetSpecChangeResult(pcs, desiredPCS, commoncontroller.WithPreservedListOrder(true))
 		if err == nil && change.SpecNeedsUpdate {
 			err = r.validatePipelineRequests(ctx, pcs, missingRequests)
 		}
@@ -322,7 +322,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
-	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
+	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder(true))
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
 			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")

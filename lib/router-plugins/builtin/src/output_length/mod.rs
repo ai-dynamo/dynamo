@@ -176,9 +176,9 @@ impl RequestClassifier for OutputLengthClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: &dyn WorkerView,
-    ) -> ClassifyFuture {
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.predict(&mut request, Instant::now());
-        Box::pin(async move { Ok(request) })
+        Ok(request)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {

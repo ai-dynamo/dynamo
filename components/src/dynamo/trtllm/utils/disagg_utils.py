@@ -87,7 +87,7 @@ class DisaggregatedParamsCodec:
 
         TRT-LLM stores logprobs as ``[{token_id(int): Logprob, ...}, ...]``
         where dict keys are integer token IDs. The Rust transport layer
-        (pythonize 0.23 → serde_json::Value) requires string map keys, so
+        (pythonize → serde_json::Value) requires string map keys, so
         we flatten to a list-of-lists format matching TRT-LLM's own
         ``_serialize_first_gen_log_probs`` in ``openai_protocol.py``::
 

@@ -22,22 +22,11 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-18";
+export const GENERATED_ON = "2026-11-24";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [
-  {
-    "title": "SIG Router",
-    "start": "2026-11-19T16:30:00.000Z",
-    "month": "Nov",
-    "day": "19",
-    "year": "2026",
-    "dateLabel": "Thu, Nov 19, 2026",
-    "timeLabel": "8:30 AM",
-    "isPast": false,
-    "location": null,
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
+export const UPCOMING_EVENTS: DynamoEvent[] = [];
+
+export const PAST_EVENTS: DynamoEvent[] = [
   {
     "title": "SIG Frontend — Biweekly Sync",
     "start": "2026-11-19T21:00:00.000Z",
@@ -46,14 +35,24 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "year": "2026",
     "dateLabel": "Thu, Nov 19, 2026",
     "timeLabel": "1:00 PM",
-    "isPast": false,
+    "isPast": true,
     "location": null,
     "locationUrl": null,
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  }
-];
-
-export const PAST_EVENTS: DynamoEvent[] = [
+  },
+  {
+    "title": "SIG Router",
+    "start": "2026-11-19T16:30:00.000Z",
+    "month": "Nov",
+    "day": "19",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "8:30 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "SIG Engines — Biweekly Sync",
     "start": "2026-11-13T01:00:00.000Z",
@@ -105,31 +104,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": null,
     "locationUrl": null,
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+Deploy&dates=20261103T160000Z%2F20261103T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fmer-jrnu-mry%0AOr+dial%3A+%28DE%29+%2B49+40+8081618610+PIN%3A+612378808%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fmer-jrnu-mry%3Fpin%3D2635519655187%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
-  {
-    "title": "CoreWeave x NVIDIA Dynamo Meetup",
-    "start": "2026-10-16T01:00:00.000Z",
-    "month": "Oct",
-    "day": "15",
-    "year": "2026",
-    "dateLabel": "Thu, Oct 15, 2026",
-    "timeLabel": "6:00 PM",
-    "isPast": true,
-    "location": "San Francisco",
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you."
-  },
-  {
-    "title": "Dynamo Engineering Sync",
-    "start": "2026-10-13T16:00:00.000Z",
-    "month": "Oct",
-    "day": "13",
-    "year": "2026",
-    "dateLabel": "Tue, Oct 13, 2026",
-    "timeLabel": "9:00 AM",
-    "isPast": true,
-    "location": null,
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=%3Ca+href%3D%22https%3A%2F%2Fdocs.google.com%2Fdocument%2Fd%2F1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8%2Fview%3Fpli%3D1%26amp%3Btab%3Dt.pgw0qvggnec%22+class%3D%22pastedDriveLink-0%22%3EDynamo+Engineering+Sync+Meeting+Notes+-+Google+Docs%3C%2Fa%3E%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   }
 ];

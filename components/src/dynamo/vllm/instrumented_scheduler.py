@@ -341,12 +341,7 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
         ),
         "groups": groups,
     }
-    # vLLM 0.29.0 resolves the layout in the engine-core process and records
-    # it on both configs; 0.28.0 keeps it in a worker-process global and the
-    # key is simply absent there.
-    layout = getattr(kv_cache_config, "kv_cache_layout", None) or getattr(
-        cache_config, "kv_cache_layout", None
-    )
+    layout = getattr(kv_cache_config, "kv_cache_layout", None)
     if layout is not None:
         block["kv_cache_layout"] = _json_safe(layout)
     return block
@@ -2257,8 +2252,10 @@ class _FpmPublisherThread:
 # ---------------------------------------------------------------------------
 
 
-_BASE_SCHEDULE_TAKES_THROTTLE = (
-    "throttle_prefills" in inspect.signature(AsyncScheduler.schedule).parameters
+# vLLM 0.33 (CPU, XPU and enterprise images) requires Model Runner V1's
+# resume fields; remove once they ship 0.34.
+_HAS_V1_RESUME_FIELDS = (
+    "resumed_req_ids" in inspect.signature(CachedRequestData).parameters
 )
 
 
@@ -2398,9 +2395,6 @@ class InstrumentedScheduler(AsyncScheduler):
                     total_num_scheduled_tokens=0,
                     scheduled_spec_decode_tokens={},
                     scheduled_encoder_inputs={},
-                    num_common_prefix_blocks=(
-                        [0] * self.kv_cache_manager.num_kv_cache_groups
-                    ),
                     finished_req_ids=self.finished_req_ids,
                     free_encoder_mm_hashes=[],
                 )
@@ -2430,13 +2424,7 @@ class InstrumentedScheduler(AsyncScheduler):
     ) -> SchedulerOutput:
         """Dispatch a step and track it until its matching output is processed."""
         self._mark_heartbeat_busy()
-        # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
-        # the runtime images were built; pass it only when the base accepts it
-        # so one overlay works across both.
-        if _BASE_SCHEDULE_TAKES_THROTTLE:
-            output = super().schedule(throttle_prefills)
-        else:
-            output = super().schedule()
+        output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             if self._bench_active:
                 try:
@@ -2484,12 +2472,9 @@ class InstrumentedScheduler(AsyncScheduler):
         """Reuse completed-pass snapshots and bound additional queue scans."""
         if self._bench_active:
             return
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-        waiting = bool(self.waiting) or bool(other_waiting)
-        # Newer vLLM versions park asynchronous KV loads in a third queue.
+        waiting = bool(self.waiting) or bool(self.kv_holding_waiting)
+        # vLLM 0.33 (CPU, XPU and enterprise images) has no async_kv_waiting
+        # queue; remove the check once they ship 0.34.
         if hasattr(self, "async_kv_waiting"):
             waiting = waiting or bool(self.async_kv_waiting)
         now = time.monotonic()
@@ -2789,13 +2774,12 @@ class InstrumentedScheduler(AsyncScheduler):
         """Classify requests across vLLM's waiting queues by their next work."""
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
-        # vLLM 0.31 splits waiting queues by whether requests hold KV blocks.
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-
-        waiting_queues: tuple[Iterable[Request], ...] = (self.waiting, other_waiting)
+        waiting_queues: tuple[Iterable[Request], ...] = (
+            self.waiting,
+            self.kv_holding_waiting,
+        )
+        # vLLM 0.33 (CPU, XPU and enterprise images) has no async_kv_waiting
+        # queue; remove the check once they ship 0.34.
         if hasattr(self, "async_kv_waiting"):
             waiting_queues += (self.async_kv_waiting,)
         for request in chain.from_iterable(waiting_queues):
@@ -4845,11 +4829,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
-                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # vLLM's v2 GPU model runner requires `prefill_token_ids`
                     # (asserted non-None in gpu/model_runner.add_requests, used as the
                     # request's `all_token_ids`). vLLM's own scheduler passes
                     # `req._all_token_ids` for new requests; mirror that here for the
-                    # synthetic decode requests we build directly. Older runners ignore it.
+                    # synthetic decode requests we build directly.
                     prefill_token_ids=req._all_token_ids,
                 )
             )
@@ -4871,7 +4855,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(new_reqs_data),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=new_block_ids_to_zero,
@@ -6435,10 +6418,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _kvwarm_admission_cap(manager) -> int | None:
-        if hasattr(manager, "max_admission_blocks_per_request"):
-            cap = manager.max_admission_blocks_per_request
-        else:
-            cap = getattr(manager, "_max_admission_blocks_per_request", None)
+        cap = getattr(manager, "max_admission_blocks_per_request", None)
         return cap if isinstance(cap, int) and cap > 0 else None
 
     def _kvwarm_circular_table_manager(self, manager) -> bool:
@@ -7266,7 +7246,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(new_reqs_data),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=zero_ids or None,
@@ -7356,21 +7335,25 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._kvwarm_take_cow_copies()
             raise
         native_resumes = self._kvwarm_native_resume_ids or set()
-        # V1 dropped parked requests from its persistent batch. Restore their
-        # full native tables and sampled token history. V2 retains the table
-        # until finish and only accepts appended block deltas.
-        resumed = (
-            native_resumes if native_resumes and not self.use_v2_model_runner else set()
-        )
+        resumed: set[str] = set()
+        v1_resume_fields: dict[str, Any] = {}
+        if _HAS_V1_RESUME_FIELDS:
+            # V1 dropped parked requests from its persistent batch. Restore their
+            # full native tables and sampled token history. V2 retains the table
+            # until finish and only accepts appended block deltas.
+            if native_resumes and not self.use_v2_model_runner:
+                resumed = native_resumes
+            v1_resume_fields = {
+                "resumed_req_ids": resumed,
+                "all_token_ids": {
+                    request.request_id: request.all_token_ids.copy()
+                    for request in reqs
+                    if request.request_id in native_resumes
+                },
+            }
         cached = CachedRequestData(
             req_ids=[request.request_id for request in reqs],
-            resumed_req_ids=resumed,
             new_token_ids=[],
-            all_token_ids={
-                request.request_id: request.all_token_ids.copy()
-                for request in reqs
-                if request.request_id in native_resumes
-            },
             new_block_ids=[
                 (
                     self.kv_cache_manager.get_block_ids(request.request_id)
@@ -7386,6 +7369,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 max(1, request.num_output_tokens + request.num_output_placeholders)
                 for request in reqs
             ],
+            **v1_resume_fields,
         )
         output = SchedulerOutput(
             scheduled_new_reqs=[],
@@ -7394,7 +7378,6 @@ class InstrumentedScheduler(AsyncScheduler):
             total_num_scheduled_tokens=len(reqs),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=(

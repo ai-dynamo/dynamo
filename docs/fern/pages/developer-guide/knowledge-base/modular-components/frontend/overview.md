@@ -72,7 +72,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           command:
             - python3
             - -m

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for ``InstrumentedScheduler._compute_queued`` classification.
 
-Focus: correct handling of ``self.skipped_waiting`` and disaggregated-serving
+Focus: correct handling of ``self.kv_holding_waiting`` and disaggregated-serving
 request states. The production scheduler is heavy to construct (needs a real
 ``VllmConfig`` + ``KVCacheConfig`` + ``StructuredOutputManager``), so these
 tests invoke ``_compute_queued`` as an unbound method against a minimal stub
@@ -91,9 +91,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
-    RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
-) or getattr(RequestStatus, "WAITING_FOR_FSM")
+STRUCTURED_OUTPUT_WAITING_STATUS = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
 
 def _benchmark_capacity(
@@ -146,7 +144,7 @@ def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     )
 
 
-def _run_compute_queued(waiting, skipped_waiting):
+def _run_compute_queued(waiting, kv_holding_waiting):
     """Invoke the real ``InstrumentedScheduler._compute_queued`` on a stub.
 
     Bypasses ``__init__`` (which needs full vLLM config) and populates only
@@ -154,7 +152,7 @@ def _run_compute_queued(waiting, skipped_waiting):
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = waiting
-    stub.skipped_waiting = skipped_waiting
+    stub.kv_holding_waiting = kv_holding_waiting
     return InstrumentedScheduler._compute_queued(stub)
 
 
@@ -477,7 +475,7 @@ def test_waiting_new_requests_count_as_queued_prefill():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        skipped_waiting=[],
+        kv_holding_waiting=[],
     )
     assert q.num_prefill_requests == 2
     assert q.sum_prefill_tokens == 300
@@ -495,7 +493,7 @@ def test_waiting_preempted_requests_count_as_queued_decode():
                 RequestStatus.PREEMPTED, num_tokens=256, num_computed_tokens=240
             ),
         ],
-        skipped_waiting=[],
+        kv_holding_waiting=[],
     )
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
@@ -505,18 +503,18 @@ def test_waiting_preempted_requests_count_as_queued_decode():
 
 
 # ---------------------------------------------------------------------------
-# self.skipped_waiting classification (the fix)
+# self.kv_holding_waiting classification
 # ---------------------------------------------------------------------------
 
 
-def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
+def test_kv_holding_waiting_for_remote_kvs_counts_as_queued_decode():
     """Disagg decode-engine: request has KV being transferred; should count
     as queued decode, not queued prefill.
     """
 
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1000,
@@ -537,12 +535,12 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
+def test_kv_holding_waiting_for_structured_output_counts_as_queued_prefill():
     """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
         ],
     )
@@ -552,10 +550,10 @@ def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
     assert q.sum_decode_kv_tokens == 0
 
 
-def test_skipped_waiting_for_streaming_req_counts_as_queued_prefill():
+def test_kv_holding_waiting_for_streaming_req_counts_as_queued_prefill():
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(RequestStatus.WAITING_FOR_STREAMING_REQ, num_tokens=64),
         ],
     )
@@ -571,7 +569,7 @@ def test_skipped_waiting_for_streaming_req_counts_as_queued_prefill():
 
 def test_mixed_disagg_decode_engine_snapshot():
     """Realistic decode-engine snapshot: some local preempts in ``self.waiting``
-    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.skipped_waiting``.
+    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.kv_holding_waiting``.
     """
 
     q = _run_compute_queued(
@@ -580,7 +578,7 @@ def test_mixed_disagg_decode_engine_snapshot():
                 RequestStatus.PREEMPTED, num_tokens=800, num_computed_tokens=780
             ),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1024,
@@ -614,7 +612,7 @@ def test_mixed_prefill_engine_snapshot():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -624,7 +622,7 @@ def test_mixed_prefill_engine_snapshot():
 
 
 def test_empty_queues():
-    q = _run_compute_queued(waiting=[], skipped_waiting=[])
+    q = _run_compute_queued(waiting=[], kv_holding_waiting=[])
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
     assert q.num_decode_requests == 0
@@ -669,7 +667,7 @@ def test_variance_spans_both_queues():
         waiting=[
             _make_request(RequestStatus.WAITING, num_tokens=100),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -993,20 +991,16 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
     assert common.max_num_running_reqs == 128
 
 
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_capacity_digest_tracks_admission_cap(cap_attribute):
+def test_capacity_digest_tracks_admission_cap():
     stub = _digest_stub(max_num_running_reqs=128)
     manager = SimpleNamespace(block_size=16)
     stub.kv_cache_manager = SimpleNamespace(
         coordinator=SimpleNamespace(single_type_managers=[manager])
     )
-    setattr(manager, cap_attribute, 32)
+    manager.max_admission_blocks_per_request = 32
     initial_digest = stub._bench_grid_invariants_digest()
 
-    setattr(manager, cap_attribute, 64)
+    manager.max_admission_blocks_per_request = 64
 
     assert stub._bench_grid_invariants_digest() != initial_digest
 
@@ -1704,7 +1698,7 @@ def heartbeat_scheduler(monkeypatch):
 
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = deque()
-    stub.skipped_waiting = deque()
+    stub.kv_holding_waiting = deque()
     stub.running = []
     stub.requests = {}
     stub.finished_req_ids = set()
@@ -1739,7 +1733,7 @@ def heartbeat_scheduler(monkeypatch):
         """Remove scheduler-visible requests while batches may still be in flight."""
         aborted = list(self.waiting) + self.running
         self.waiting.clear()
-        self.skipped_waiting.clear()
+        self.kv_holding_waiting.clear()
         self.running.clear()
         return aborted
 
@@ -1762,12 +1756,15 @@ def heartbeat_scheduler(monkeypatch):
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "has_unfinished_requests",
-        lambda self: bool(self.running or self.waiting or self.skipped_waiting),
+        lambda self: bool(self.running or self.waiting or self.kv_holding_waiting),
     )
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "get_request_counts",
-        lambda self: (len(self.running), len(self.waiting) + len(self.skipped_waiting)),
+        lambda self: (
+            len(self.running),
+            len(self.waiting) + len(self.kv_holding_waiting),
+        ),
     )
 
     def heartbeat():
@@ -1938,9 +1935,7 @@ def test_waiting_abort_restores_idle_without_a_scheduled_batch(heartbeat_schedul
     assert heartbeat()[-1].is_idle()
 
 
-@pytest.mark.parametrize(
-    "queue_name", ["skipped_waiting", "kv_holding_waiting", "async_kv_waiting"]
-)
+@pytest.mark.parametrize("queue_name", ["kv_holding_waiting", "async_kv_waiting"])
 def test_secondary_waiting_queue_prevents_idle(heartbeat_scheduler, queue_name):
     """Supported vLLM secondary waiting queues contribute to heartbeats."""
     stub, _, heartbeat = heartbeat_scheduler
@@ -2127,7 +2122,7 @@ def test_dp_rank_multi_node_start_offset():
 
 def test_decode_variance_spans_both_queues():
     """Decode variance mixes local-preempted (``self.waiting``) and
-    remote-KV-waiting (``self.skipped_waiting``) into one accumulator.
+    remote-KV-waiting (``self.kv_holding_waiting``) into one accumulator.
     KV lengths 500 and 1500 → mean 1000, population variance 250000.
     """
 
@@ -2137,7 +2132,7 @@ def test_decode_variance_spans_both_queues():
                 RequestStatus.PREEMPTED, num_tokens=520, num_computed_tokens=500
             ),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1500,
@@ -5171,7 +5166,6 @@ def test_make_steady_step_builds_production_shaped_output():
     assert output.scheduled_new_reqs == []
     cached = output.scheduled_cached_reqs
     assert cached.req_ids == ["__bench_0", "__bench_1"]
-    assert cached.resumed_req_ids == set()
     assert cached.new_token_ids == []
     assert cached.num_computed_tokens == [63, 64]
     assert cached.num_output_tokens == [1, 1]
@@ -6114,7 +6108,8 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
         stub.requests = {}
         stub.running = []
         stub.finished_req_ids = set()
-        stub.use_v2_model_runner = False
+        # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+        stub.use_v2_model_runner = True
         stub.needs_kv_cache_zeroing = False
         stub.connector = stub.ec_connector = None
         stub.sched_step_seq = 0
@@ -6252,7 +6247,7 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
     assert histories[0] == histories[1]
 
 
-def _kvwarm_native_resume_stub(use_v2):
+def _kvwarm_native_resume_stub():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._kvwarm_native = True
     stub._kvwarm_chain_ids = ["chain-a", "chain-b"]
@@ -6271,7 +6266,6 @@ def _kvwarm_native_resume_stub(use_v2):
     stub.requests = {request.request_id: request for request in requests}
     stub.running = []
     stub._bench_active_req_ids = set()
-    stub.use_v2_model_runner = use_v2
     stub._bench_random_kda = False
     stub._kvwarm_borrowed_ids = set()
     blocks = MagicMock()
@@ -6287,6 +6281,8 @@ def _kvwarm_native_resume_stub(use_v2):
     stub.sched_step_seq = 10
     stub._free_cow_retained_blocks = MagicMock()
     stub.num_lookahead_tokens = 0
+    # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+    stub.use_v2_model_runner = True
     stub.needs_kv_cache_zeroing = False
     stub.finished_req_ids = set()
     stub.connector = None
@@ -6296,19 +6292,15 @@ def _kvwarm_native_resume_stub(use_v2):
 
 @pytest.mark.core
 @pytest.mark.parametrize("with_state", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
 def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_state(
-    use_v2, with_state
+    with_state,
 ):
-    stub, requests = _kvwarm_native_resume_stub(use_v2)
-    tables = {"chain-a": ([1, 11], [2, 21]), "chain-b": ([3, 12], [4, 22])}
+    stub, requests = _kvwarm_native_resume_stub()
     delta = ([11], [21])
     if with_state:
         # Second group is a Mamba/KDA state group holding one live state block
         # per request; this decode step reuses it, so its delta is empty.
-        tables = {"chain-a": ([1, 11], [31]), "chain-b": ([3, 12], [32])}
         delta = ([11], [])
-        stub.kv_cache_manager.get_block_ids.side_effect = tables.__getitem__
         blocks = stub.kv_cache_manager.allocate_slots.return_value
         blocks.get_block_ids.return_value = delta
 
@@ -6324,17 +6316,8 @@ def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_st
     assert stub._kvwarm_borrowed_ids == set()
     cached = output.scheduled_cached_reqs
     assert cached.num_computed_tokens == [3, 4]
-    assert cached.all_token_ids == {
-        request.request_id: request.all_token_ids for request in requests
-    }
-    if use_v2:
-        # V2 keeps the parked tables and accepts only the appended delta.
-        assert cached.resumed_req_ids == set()
-        assert cached.new_block_ids == [delta, delta]
-    else:
-        # V1 re-adds the parked requests: every group's full table, unchanged.
-        assert cached.resumed_req_ids == {"chain-a", "chain-b"}
-        assert cached.new_block_ids == [tables["chain-a"], tables["chain-b"]]
+    # The runner keeps the parked tables and accepts only the appended delta.
+    assert cached.new_block_ids == [delta, delta]
     assert output.kv_cache_block_copies == [(8, 9)]
     stub._free_cow_retained_blocks.assert_called_once_with(["retained"], 11)
     assert stub._kvwarm_native_resume_ids == set()
@@ -6465,11 +6448,7 @@ def test_kvwarm_native_capacity_counts_resident_blocks_not_evicted_placeholders(
 
 
 @pytest.mark.core
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_kvwarm_native_capacity_uses_sliding_window_admission_caps(cap_attribute):
+def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.max_model_len = 1024
     stub.num_lookahead_tokens = 0
@@ -6477,7 +6456,7 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps(cap_attribute
         coordinator=SimpleNamespace(
             single_type_managers=[
                 SimpleNamespace(block_size=16),
-                SimpleNamespace(block_size=4, **{cap_attribute: 4}),
+                SimpleNamespace(block_size=4, max_admission_blocks_per_request=4),
             ]
         )
     )
@@ -6538,7 +6517,7 @@ def test_kvwarm_native_capacity_counts_mamba_state_blocks(modes):
 def test_kvwarm_native_failed_resume_remains_owned_for_cleanup(
     allocation_raises, after_admission
 ):
-    stub, _ = _kvwarm_native_resume_stub(False)
+    stub, _ = _kvwarm_native_resume_stub()
     if after_admission:
         stub._kvwarm_resume_native()
     stub.kv_cache_manager.allocate_slots.return_value = None
@@ -6568,7 +6547,7 @@ def test_kvwarm_native_failed_resume_remains_owned_for_cleanup(
 def test_kvwarm_synthetic_fallback_releases_copies_after_failed_steady_allocation(
     after_native,
 ):
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     if after_native:
         stub._kvwarm_resume_native()
         stub._bench_finish_requests = MagicMock()
@@ -6595,7 +6574,7 @@ def test_kvwarm_synthetic_fallback_releases_copies_after_failed_steady_allocatio
 
 @pytest.mark.core
 def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6626,7 +6605,7 @@ def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
 
 @pytest.mark.core
 def test_kvwarm_native_decode_records_stage_prompt_evidence():
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6663,7 +6642,7 @@ def test_kvwarm_native_decode_records_stage_prompt_evidence():
 
 def _kvwarm_uncovered_dispatch_stub(warm_eligible, skip_reason=None):
     """Native-layout decode dispatch of a point no warm-up stage covers."""
-    stub, _ = _kvwarm_native_resume_stub(False)
+    stub, _ = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6764,7 +6743,7 @@ def test_kvwarm_native_dp_dispatch_caps_repeats_by_negotiated_model_length(
     )
     dispatches = []
     for capacity in capacities:
-        stub, _ = _kvwarm_native_resume_stub(False)
+        stub, _ = _kvwarm_native_resume_stub()
         stub.max_model_len = capacity.max_model_len
         stub._bench_negotiated_capacity = negotiated
         stub.requests = {}
@@ -6879,8 +6858,9 @@ def test_kvwarm_native_capacity_fallback_saves_available_steady_samples(monkeypa
     stub.finished_req_ids = set()
     stub.connector = None
     stub.ec_connector = None
+    # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+    stub.use_v2_model_runner = True
     stub.needs_kv_cache_zeroing = False
-    stub.use_v2_model_runner = False
     stub.sched_step_seq = 0
     stub._bench_point_deadline = 0.0
     stub._schedule_times = deque()
@@ -7617,7 +7597,7 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     sliding-window group keeps absolute positions (null placeholders included),
     so the shadow at ctx=152 forks table index 9, never the last ``cap`` entries."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
-    mgr._max_admission_blocks_per_request = 4
+    mgr.max_admission_blocks_per_request = 4
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=True)
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 152, 3
@@ -7628,18 +7608,14 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     assert mgr.num_cached_block["shadow"] == 9
 
 
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_kvwarm_shadow_registration_forks_circular_tail_table(cap_attribute):
+def test_kvwarm_shadow_registration_forks_circular_tail_table():
     """GLM5-Next's k-pool tail: one circularly reused block per request
     (admission cap 1, excluded from prefix caching). The chain holds a single
     block whatever its depth; the shadow shares nothing and forks that block."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
     mgr.req_to_blocks["chain"] = chain[:1]
     mgr.block_size = 4
-    setattr(mgr, cap_attribute, 1)
+    mgr.max_admission_blocks_per_request = 1
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
     assert stub._bench_blocks_per_req(152, apply_admission_cap=True) == 1
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
@@ -7702,7 +7678,7 @@ def test_kvwarm_live_state_keeps_circular_kpool_geometry():
     chain = [_FakeBlock(0)]
     mgr = KpoolTailManager(chain, cow=True)
     mgr.block_size = 4
-    mgr._max_admission_blocks_per_request = 1
+    mgr.max_admission_blocks_per_request = 1
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
     pool = _FakePool()
     stub.kv_cache_manager = SimpleNamespace(
@@ -8999,8 +8975,6 @@ def _provenance_vllm_config(
         enable_prefix_caching=True,
         num_gpu_blocks=1234,
     )
-    if with_layout:
-        cache_config.kv_cache_layout = "LBNHC"
     spec = MLAAttentionSpec(
         dtype=_ProvenanceDtype(),
         head_size=576,
@@ -9010,9 +8984,8 @@ def _provenance_vllm_config(
     )
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+        kv_cache_layout="LBNHC" if with_layout else None,
     )
-    if with_layout:
-        kv_cache_config.kv_cache_layout = "LBNHC"
     model_config = SimpleNamespace(
         dtype=_ProvenanceDtype(),
         max_model_len=163840,
@@ -9205,7 +9178,7 @@ def test_bench_capture_engine_preserves_observed_decode_context_parallel_size(si
 
 
 def test_bench_capture_engine_omits_absent_optional_blocks():
-    """vLLM 0.28.0 has no kv_cache_layout, and a model without a sparse
+    """An unresolved kv_cache_layout is omitted, and a model without a sparse
     indexer has no indexer topology."""
     vllm_config, kv_cache_config = _provenance_vllm_config(
         with_indexer=False, with_layout=False

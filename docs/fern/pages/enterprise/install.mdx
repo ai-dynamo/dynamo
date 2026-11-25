@@ -5,7 +5,7 @@ title: Install
 subtitle: Pull the enterprise images and Helm chart, and reference them from your deployments.
 ---
 
-The Dynamo Enterprise Support install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references and the Helm chart name.
+The Dynamo Enterprise Support install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references, the Helm chart name, and the base image of the vLLM runtime.
 
 <Note>
 The commands below pin one release. For the release currently in support, use the tags listed in [Supported Artifacts](../reference/general/enterprise-supported-artifacts.mdx).
@@ -18,11 +18,11 @@ For the full walkthrough of cluster prerequisites, accelerator support, optional
 The enterprise images are public. Anonymous `docker pull` works from any host with network access to `nvcr.io`. Environments that require authenticated pulls (a bastion registry, an air-gapped mirror, or a policy that blocks anonymous access to `nvcr.io`) can configure an NGC API key on the pulling host; see the [NGC User Guide](https://docs.nvidia.com/ngc/ngc-catalog-user-guide/index.html) for the API-key workflow.
 
 ```bash
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:1.5.1
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:1.5.1
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.5.1
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.5.1
-docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:1.5.1
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:1.7.0
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:1.7.0
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.7.0
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:1.7.0
 ```
 
 Kubernetes clusters that already pull from `nvcr.io` need no additional pull secret for the enterprise images. Air-gapped and internal-mirror installs should retag these into the internal registry using the same repository names and versions to keep the manifests portable.
@@ -33,7 +33,7 @@ The enterprise Helm chart installs the Dynamo Operator. The chart defaults to th
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.5.1
+export RELEASE_VERSION=1.7.0
 
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-enterprise-$RELEASE_VERSION.tgz
 helm install dynamo-platform dynamo-platform-enterprise-$RELEASE_VERSION.tgz \
@@ -71,7 +71,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.5.1
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.7.0
     - name: worker
       type: worker
       replicas: 1
@@ -79,7 +79,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.5.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -96,6 +96,6 @@ For the full DGD walkthrough (choosing a model, sizing parallelism, applying and
 
 ## Differences from the Open-Source Install
 
-- **Image references.** Enterprise and open-source images both resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names carry an `-enterprise` suffix, which is the only difference.
+- **Image references.** Enterprise and open-source images both resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names carry an `-enterprise` suffix. Starting with v1.7.0, `vllm-runtime-enterprise` is also built on the certified NVIDIA NIM vLLM base image, so it is a separate build from the open-source `vllm-runtime` image. The other enterprise images match their open-source builds.
 - **Helm chart.** Enterprise chart: `dynamo-platform-enterprise`. Open-source chart: `dynamo-platform`. The values schema is the same. The enterprise install overrides the Operator repository to the supported `kubernetes-operator-enterprise` image.
 - **Support scope.** Only the images and chart listed above are eligible for enterprise support. The Python wheels, Rust crates, and non-listed component containers in the same release remain community-supported.
