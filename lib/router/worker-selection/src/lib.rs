@@ -7,7 +7,9 @@
 //! [`WorkerSelectionPolicy`] pulls each rank's row at the columns its filters, scorers,
 //! and picker declared, and returns a [`RowPick`] or a [`SelectionFailure`]. Everything a
 //! plugin names lives here: the [`WorkerFilter`], [`WorkerScorer`], and [`WorkerPicker`]
-//! traits, the [`WorkerSelectionContext`] view of the request, the candidate rows and
+//! traits, the [`WorkerSelectionRequest`] view of the request and the [`RequestInfo`] every
+//! stage reads from it, the
+//! [`WorkerSelectionPolicyContext`] a policy factory receives, the candidate rows and
 //! their views, runtime parameter updates, the selection slice of the router config, the
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
 //! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
@@ -15,7 +17,6 @@
 //! materialization, and the config- and projection-derived columns stay in `lib/router/kv-router`.
 
 mod conditional_disagg;
-mod context;
 mod error;
 pub mod experimental;
 pub mod host;
@@ -25,6 +26,7 @@ mod lora_filter;
 mod policy;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 mod reference_picker;
+mod request;
 mod runtime;
 /// The selection slice of the router config, with the defaults and validators the flat
 /// router config in `lib/router/kv-router` shares.
@@ -40,11 +42,8 @@ pub use conditional_disagg::{
     default_conditional_disagg_eff_isl_threshold, make_conditional_disagg_policy,
     policy_needs_prefill_worker_busy,
 };
-pub use context::WorkerSelectionContext;
 pub use error::WorkerSelectionPolicyError;
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
-#[allow(deprecated)]
-pub use inputs::WorkerTransferInput;
 pub use inputs::{
     CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
@@ -53,10 +52,11 @@ pub use inputs::{
 pub use lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
-    SelectionFailure, WorkerSelectionPolicy,
+    SelectionFailure, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
 };
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference_picker::{DefaultPick, DefaultWorkerPicker};
+pub use request::{RequestInfo, WorkerSelectionRequest};
 pub use runtime::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
@@ -89,7 +89,7 @@ pub trait WorkerScorer: Send + Sync {
     /// each contribution to that row's total. The candidate view and cost slice may not be retained after this call.
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError>;
@@ -110,7 +110,7 @@ pub trait WorkerFilter: Send + Sync {
     /// Return `true` to keep an eligible worker in the policy candidate set.
     fn keep(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError>;
 }
@@ -130,7 +130,7 @@ pub trait WorkerPicker: Send + Sync {
     /// of relying on a stable position.
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;
 }
