@@ -19,6 +19,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -803,7 +804,7 @@ func TestDiscoveryConversionErrorDoesNotWithdrawPublishedRelay(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 	}
-	childKey := types.NamespacedName{Name: serviceName(key.Name), Namespace: key.Namespace}
+	childKey := types.NamespacedName{Name: multicluster.PoolRelayServiceName(key.Name), Namespace: key.Namespace}
 	service := &corev1.Service{Name: childKey.Name, Namespace: childKey.Namespace}
 	deployment := &appsv1.Deployment{Name: childKey.Name, Namespace: childKey.Namespace}
 	for _, obj := range []client.Object{service, deployment} {
@@ -887,7 +888,7 @@ func TestApplyFailureWithdrawsStaleReadiness(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 	}
-	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+	childKey := types.NamespacedName{Namespace: key.Namespace, Name: multicluster.PoolRelayServiceName(key.Name)}
 	denyDeployment := false
 	apiClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
@@ -958,7 +959,7 @@ func TestWithdrawUsesVerifiedUIDAndPreservesGenerationOnFailure(t *testing.T) {
 		Spec:   relaySpec("east"),
 		Status: v1alpha1.DynamoPoolRelayStatus{ObservedGeneration: 2},
 	}
-	childKey := types.NamespacedName{Name: serviceName(relay.Name), Namespace: relay.Namespace}
+	childKey := types.NamespacedName{Name: multicluster.PoolRelayServiceName(relay.Name), Namespace: relay.Namespace}
 	service := &corev1.Service{Name: childKey.Name, Namespace: childKey.Namespace, UID: "old-service"}
 	if err := controllerutil.SetControllerReference(relay, service, scheme); err != nil {
 		t.Fatal(err)
@@ -998,7 +999,7 @@ func TestPrerequisiteOwnershipConflictWithdrawsRelay(t *testing.T) {
 		}
 	}
 	key := types.NamespacedName{Namespace: "inference", Name: "green"}
-	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+	childKey := types.NamespacedName{Namespace: key.Namespace, Name: multicluster.PoolRelayServiceName(key.Name)}
 	relay := &v1alpha1.DynamoPoolRelay{
 		Name: key.Name, Namespace: key.Namespace, UID: "relay-uid",
 		Spec: relaySpec("east"),
@@ -1113,7 +1114,7 @@ func TestWithdrawCleansOwnedDeploymentAfterForeignService(t *testing.T) {
 		ObjectMeta: relayMeta,
 		Spec:       relaySpec("east"),
 	}
-	key := types.NamespacedName{Name: serviceName(relay.Name), Namespace: relay.Namespace}
+	key := types.NamespacedName{Name: multicluster.PoolRelayServiceName(relay.Name), Namespace: relay.Namespace}
 	resourceMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
 	foreignService := &corev1.Service{ObjectMeta: resourceMeta}
 	deployment := &appsv1.Deployment{ObjectMeta: resourceMeta}
