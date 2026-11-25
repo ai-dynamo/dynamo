@@ -1720,6 +1720,7 @@ mod tests {
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
     use crate::session_affinity::SessionAffinityMode;
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
     use dynamo_runtime::discovery::DiscoveryEvent;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;
@@ -2908,8 +2909,9 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier, WorkerView,
+            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
         };
+        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct RejectingClassifier {
@@ -2922,7 +2924,7 @@ mod tests {
             fn classify(
                 &mut self,
                 _request: ClassifyRequest,
-                _workers: &dyn WorkerView,
+                _workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 self.calls += 1;
                 self.events
@@ -2985,11 +2987,13 @@ request_classifier:
                     let selectors = selectors.clone();
                     move |_| {
                         let selectors = selectors.clone();
-                        Ok(Arc::new(move |config, role, partition| {
-                            selectors.lock().push((role, partition.into_owned()));
+                        Ok(Arc::new(move |context| {
+                            selectors
+                                .lock()
+                                .push((context.worker_type(), context.partition().into_owned()));
                             dynamo_router_policies::default_policy(
-                                config.clone(),
-                                role.default_selector_label(),
+                                context.selection_config().clone(),
+                                context.worker_type().default_selector_label(),
                             )
                         }))
                     }
@@ -4062,9 +4066,9 @@ request_classifier:
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
         let custom = RouterPluginBuilder::new(
-            dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
-                |_, _, _| unreachable!("role validation never constructs the policy"),
-            )),
+            dynamo_kv_router::plugins::host::RouterPlugins::default().with_worker_selection(
+                Arc::new(|_| unreachable!("role validation never constructs the policy")),
+            ),
         );
         let mut card = ModelDeploymentCard::with_name_only("model");
         assert!(validate_policy_worker_role(&card, &unresolved).is_ok());
