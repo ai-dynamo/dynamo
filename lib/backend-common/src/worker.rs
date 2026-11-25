@@ -2070,7 +2070,7 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// carried by `WorkerType::Encode`.
 ///
 /// Everything else falls back to the parsed `endpoint_types`.
-fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
+pub(crate) fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
@@ -2090,7 +2090,9 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
 /// `Encode` with `route_to_encoder=true`) are rejected upstream in
 /// `validate_route_to_encoder`; this function trusts that gate and only
 /// applies the flag when it is meaningful.
-fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
+pub(crate) fn resolve_worker_type_and_needs(
+    config: &WorkerConfig,
+) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
         DisaggregationMode::Prefill => {
             let inner = if config.route_to_encoder {
@@ -2184,24 +2186,26 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     Ok(out)
 }
 
+/// An [`LLMEngine`] takes tokens: `model_input` must be `Tokens`.
+pub(crate) fn validate_llm_model_input(model_input: ModelInput) -> Result<(), DynamoError> {
+    if model_input == ModelInput::Tokens {
+        return Ok(());
+    }
+    Err(err(
+        ErrorType::Backend(BackendError::InvalidArgument),
+        format!(
+            "LLMEngine (token pipeline) requires ModelInput::Tokens; got '{}'. \
+             Use a RawEngine for ModelInput::Text / Tensor.",
+            model_input.as_str()
+        ),
+    ))
+}
+
 /// Check `model_input` matches the engine modality: [`LLMEngine`] needs
 /// `Tokens`; [`RawEngine`] needs `Text`/`Tensor` (no tokenizer stage).
 fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<(), DynamoError> {
     match engine {
-        EngineKind::Llm(_) => {
-            if model_input == ModelInput::Tokens {
-                Ok(())
-            } else {
-                Err(err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    format!(
-                        "LLMEngine (token pipeline) requires ModelInput::Tokens; got '{}'. \
-                         Use a RawEngine for ModelInput::Text / Tensor.",
-                        model_input.as_str()
-                    ),
-                ))
-            }
-        }
+        EngineKind::Llm(_) => validate_llm_model_input(model_input),
         EngineKind::Raw(_) => {
             if model_input == ModelInput::Tokens {
                 Err(err(
@@ -2217,7 +2221,7 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
     }
 }
 
-async fn build_local_model(
+pub(crate) async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
