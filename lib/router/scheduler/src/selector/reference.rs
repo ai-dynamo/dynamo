@@ -18,6 +18,7 @@ use crate::types::{KvSchedulerError, SchedulingRequest};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::DefaultWorkerPicker;
 use dynamo_worker_selection::SelectionConfig;
+use dynamo_worker_selection::SharedCacheHits;
 
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
@@ -205,6 +206,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
         request: &WorkerSelectionRequest<'_>,
+        shared_cache_hits: Option<&SharedCacheHits>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
         formula_name: &'static str,
@@ -219,7 +221,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let device_overlap_blocks = cache.device_overlap_blocks;
         // Host and disk blocks already earn their own tier credit; the shared
         // cache extends the prefix from where the worker's ends.
-        let shared_beyond_local_blocks = request.shared_cache_hits().map_or(0, |hits| {
+        let shared_beyond_local_blocks = shared_cache_hits.map_or(0, |hits| {
             let local_blocks =
                 device_overlap_blocks + cache.host_overlap_blocks + cache.disk_overlap_blocks;
             hits.loadable_beyond(local_blocks.round().max(0.0) as u32)
@@ -347,10 +349,12 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     fn worker_cost(
         &self,
         request: &WorkerSelectionRequest<'_>,
+        shared_cache_hits: Option<&SharedCacheHits>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
     ) -> f64 {
-        let base_score = self.worker_logit(request, default_context, row, "Formula");
+        let base_score =
+            self.worker_logit(request, shared_cache_hits, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -386,7 +390,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         );
         return Some((
             worker,
-            scorer.worker_logit(selection_request, default_context, &row, "Pinned formula"),
+            scorer.worker_logit(
+                selection_request,
+                request.shared_cache_hits.as_ref(),
+                default_context,
+                &row,
+                "Pinned formula",
+            ),
         ));
     }
 
@@ -399,6 +409,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
             selection_request,
+            request.shared_cache_hits.as_ref(),
             default_context,
             &default_row(
                 source,
@@ -465,7 +476,6 @@ mod tests {
     use super::*;
     use crate::config::RouterConfigOverride;
     use crate::{OverlapSignals, ScheduleMode};
-    use dynamo_worker_selection::SharedCacheHits;
     use dynamo_worker_selection::host::SelectionConfigHostExt;
 
     fn worker_logit(
@@ -483,6 +493,7 @@ mod tests {
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
                 &selection_request,
+                request.shared_cache_hits.as_ref(),
                 default_context,
                 &default_row(
                     &source,

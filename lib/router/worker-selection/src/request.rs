@@ -172,13 +172,6 @@ impl<'a> WorkerSelectionRequest<'a> {
         self.router_temperature_override
     }
 
-    /// Block positions the external shared cache holds for this request, when a shared
-    /// cache is configured and answered.
-    #[inline]
-    pub fn shared_cache_hits(&self) -> Option<&SharedCacheHits> {
-        self.shared_cache_hits
-    }
-
     /// Whether this selection only previews a worker, as a peek does, without routing the
     /// request to it. A picker that keeps state between selections, such as a rotation
     /// cursor, should read that state without advancing it. Always `false` when the router
