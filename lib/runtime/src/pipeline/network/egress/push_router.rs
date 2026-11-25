@@ -3625,10 +3625,11 @@ mod tests {
     }
 
     /// A foreign request-plane worker is a local configuration error: the
-    /// request fails typed, the worker stays eligible, and an allowed fallback
-    /// does not migrate the request to the healthy tcp worker.
+    /// request fails typed and both workers stay eligible. The frontend's
+    /// retry manager owns migration policy; this covers the router's
+    /// classification and eligibility.
     #[tokio::test]
-    async fn mixed_request_plane_fails_internal_without_migrating() {
+    async fn mixed_request_plane_fails_internal_and_leaves_workers_eligible() {
         const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
         const TCP_ID: u64 = 41;
         const VELO_ID: u64 = 42;

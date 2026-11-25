@@ -15,11 +15,11 @@ use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
-use crate::pipeline::network::VELO_SCHEME;
 use crate::pipeline::network::codec::{
     TcpRequestFrame, TcpRequestMessage, check_tcp_request_max_message_size,
 };
 use crate::pipeline::network::get_tcp_max_message_size;
+use crate::pipeline::network::is_velo_request_address;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
@@ -1649,7 +1649,7 @@ impl TcpRequestClient {
 
         let parse_socket_addr = |socket_part: &str| {
             socket_part.parse::<SocketAddr>().map_err(|e| {
-                if address.starts_with(VELO_SCHEME) {
+                if is_velo_request_address(address) {
                     mixed_request_plane_error("tcp", address)
                 } else {
                     anyhow::anyhow!("Invalid TCP address '{}': {}", address, e)
@@ -1922,16 +1922,19 @@ mod tests {
 
     #[test]
     fn invalid_tcp_address_keeps_its_parse_error() {
-        let err = TcpRequestClient::parse_address("invalid").unwrap_err();
-        assert!(
-            err.to_string().contains("Invalid TCP address 'invalid'"),
-            "{err:#}"
-        );
-        assert!(!match_error_chain(
-            err.as_ref(),
-            &[ErrorType::Internal, ErrorType::WorkerUnavailable],
-            &[]
-        ));
+        for address in ["invalid", "velo://custom-service"] {
+            let err = TcpRequestClient::parse_address(address).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("Invalid TCP address '{address}'")),
+                "{err:#}"
+            );
+            assert!(!match_error_chain(
+                err.as_ref(),
+                &[ErrorType::Internal, ErrorType::WorkerUnavailable],
+                &[]
+            ));
+        }
     }
 
     #[test]
