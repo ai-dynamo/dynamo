@@ -28,6 +28,7 @@ use args::Args;
 
 pub mod args;
 pub mod client;
+pub mod direct;
 mod discovery;
 pub mod engine;
 mod listeners;
