@@ -113,7 +113,5 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 
 1. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
    JSON while speculative decoding is enabled; use tool calling or validate client-side.
-2. With native Harmony on vLLM, `tool_choice: "auto"` returns at most one tool call per Chat Completions
-   response, even with `parallel_tool_calls: true`.
-   See [GPT-OSS tool call limits](../../docs/fern/pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#known-limitations-and-follow-up).
+2. In native Harmony mode, GPT-OSS returns at most one tool call per response when `tool_choice: "auto"` is set, even if `parallel_tool_calls: true` is specified. See [GPT-OSS tool call limits](../../docs/fern/pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#known-limitations-and-follow-up).
 

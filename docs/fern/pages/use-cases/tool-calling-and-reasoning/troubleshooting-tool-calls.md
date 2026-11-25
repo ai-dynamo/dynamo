@@ -189,12 +189,7 @@ Forced choices can install guided JSON or family-native structural tags. A mode 
 
 ## Known limitations and follow-up
 
-**GPT-OSS on vLLM.** In Chat Completions using native Harmony with
-`tool_choice: "auto"`, vLLM stops generation at the first tool call's
-`<|call|>` end-of-sequence token. Each response can contain at most one
-tool call, even with `parallel_tool_calls: true`. To allow multiple tool
-calls, set `tool_choice: "required"` and `parallel_tool_calls: true` on the
-V2 parser route with [structural tags enabled](structural-tag.md).
+**GPT-OSS with native Harmony.** On the vLLM and SGLang backends, the Chat Completions and Responses APIs return at most one tool call per response when `tool_choice: "auto"` is set, even if `parallel_tool_calls: true` is specified. To enable multiple parallel tool calls in a single response, set `tool_choice: "required"` and `parallel_tool_calls: true`, and use the V2 parser route with [structural tags enabled](structural-tag.md).
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
 
