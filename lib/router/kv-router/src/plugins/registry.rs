@@ -22,7 +22,9 @@ use crate::config::KvRouterConfig;
 pub use crate::scheduling::config::DYN_ROUTER_DECODE_POLICY;
 pub use crate::scheduling::config::DYN_ROUTER_PREFILL_POLICY;
 pub use crate::scheduling::config::DYN_ROUTER_WORKER_SELECTION_POLICY;
-use crate::scheduling::config::WorkerSelectionPolicySelections;
+use crate::scheduling::config::{
+    WorkerSelectionPolicyConfigError, WorkerSelectionPolicySelections,
+};
 use dynamo_router_protocol::WorkerType;
 
 /// Configured factories shared across router construction, with fresh instances per router.
@@ -134,8 +136,10 @@ pub enum WorkerSelectionPolicyRegistryError {
     ReservedDefault,
     #[error("worker-selection policy type {name:?} is already registered")]
     Duplicate { name: String },
+    /// The policy selection in the router configuration could not be read. It carries the
+    /// configuration error as its message and source only: that error's type is the host's.
     #[error(transparent)]
-    Selection(#[from] crate::scheduling::config::WorkerSelectionPolicyConfigError),
+    Selection(Box<dyn std::error::Error + Send + Sync>),
     #[error("unknown worker-selection policy type {name:?}; available: {available}")]
     UnknownType { name: String, available: String },
     #[error("invalid parameters for worker-selection policy type {policy_type:?}: {source}")]
@@ -144,6 +148,11 @@ pub enum WorkerSelectionPolicyRegistryError {
         #[source]
         source: WorkerSelectionPolicyProviderError,
     },
+}
+
+/// A configuration error as the registry error that carries it.
+fn selection_error(error: WorkerSelectionPolicyConfigError) -> WorkerSelectionPolicyRegistryError {
+    WorkerSelectionPolicyRegistryError::Selection(Box::new(error))
 }
 
 impl RouterPluginRegistry {
@@ -391,7 +400,7 @@ impl crate::plugins::host::RouterPluginRegistryHostExt for RouterPluginRegistry 
             worker_selection: self.resolve(config)?,
             custom_worker_selection: config
                 .selected_worker_selection_policy_instance()
-                .map_err(WorkerSelectionPolicyRegistryError::from)?
+                .map_err(selection_error)?
                 .is_some(),
             request_classifier: self.resolve_request_classifier(config)?,
         })
@@ -421,9 +430,11 @@ impl crate::plugins::host::RouterPluginRegistryHostExt for RouterPluginRegistry 
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instances()?;
+        let selected = config
+            .selected_worker_selection_policy_instances()
+            .map_err(selection_error)?;
         let policy_config = config.worker_selection_config().map_err(|source| {
-            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+            selection_error(WorkerSelectionPolicyConfigError::Config { source })
         })?;
         self.resolve_selections(policy_config, selected)
     }
@@ -433,7 +444,9 @@ impl crate::plugins::host::RouterPluginRegistryHostExt for RouterPluginRegistry 
         config: &KvRouterConfig,
         worker_type: WorkerType,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instances()?;
+        let selected = config
+            .selected_worker_selection_policy_instances()
+            .map_err(selection_error)?;
         let selected = match worker_type {
             WorkerType::Aggregated => selected.aggregated,
             WorkerType::Prefill => selected.prefill,
@@ -441,7 +454,7 @@ impl crate::plugins::host::RouterPluginRegistryHostExt for RouterPluginRegistry 
             WorkerType::Encode => selected.encode,
         };
         let policy_config = config.worker_selection_config().map_err(|source| {
-            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+            selection_error(WorkerSelectionPolicyConfigError::Config { source })
         })?;
         self.resolve_selected(policy_config, selected.as_ref())
     }

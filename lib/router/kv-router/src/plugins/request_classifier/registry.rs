@@ -68,10 +68,12 @@ pub enum RequestClassifierRegistryError {
     ReservedDefault,
     #[error("request-classifier type {name:?} is already registered")]
     Duplicate { name: String },
+    /// It carries the configuration error as its message and source only: that error's type
+    /// is the host's.
     #[error("could not load request_classifier from router_policy_config: {source}")]
     Config {
         #[source]
-        source: crate::scheduling::policy_config::RouterPolicyConfigError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("unknown request-classifier type {name:?}; linked classifier types: {available}")]
     UnknownType { name: String, available: String },
@@ -111,9 +113,11 @@ impl RequestClassifierRegistry {
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
-        let Some(classifier) = config
-            .request_classifier_config()
-            .map_err(|source| RequestClassifierRegistryError::Config { source })?
+        let Some(classifier) = config.request_classifier_config().map_err(|source| {
+            RequestClassifierRegistryError::Config {
+                source: Box::new(source),
+            }
+        })?
         else {
             return Ok(None);
         };
