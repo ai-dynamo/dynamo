@@ -197,6 +197,20 @@ const AFFINITY_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// wrote since, or all of them, and drops the rows of workers whose every rank is full.
 /// Full ranks require fresh rows only when exclusive affinity or fetch sources can
 /// change preparation's eligibility.
+///
+/// The actor's checks, in the order it makes them:
+///
+/// | Check | The caller read | The actor requires | Otherwise it |
+/// |---|---|---|---|
+/// | `TurnPrepared::take_for` | | same turn, no overlap refresh | builds rows and load |
+/// | `TurnPrepared::drop_judged_load` | reject limits | no await since | builds load |
+/// | `adopt_prepared_load` | limits, overlap, writes, table version | see there | builds load |
+/// | `adopt_prepared_rows` | generation, availability, overload | see there | builds rows |
+/// | `select_with_policy` | the policy's inputs | same inputs, no filters | builds rows |
+///
+/// "Builds load" is the actor projecting every rank itself. A rank another task changed
+/// after the caller's pass is never checked and keeps the caller's load. When preparation
+/// starts to read another input, add it to the check that owns it and to this table.
 struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
@@ -423,6 +437,55 @@ impl<P: SequencePublisher + 'static> ActorSlots<P> {
     ) -> usize {
         self.tracker
             .additional_active_blocks(token_sequence, worker)
+    }
+}
+
+/// The rows a caller prepared for the request the actor received in its current turn.
+///
+/// A turn is one command or wakeup, including one handled during an overlap refresh. A
+/// request admitted in the turn that received it may select from its caller's rows. The
+/// next turn drops them: a request still queued rebuilds its rows when it is admitted, so
+/// parked requests hold none. A request admitted on arrival without entering the queue
+/// takes its rows straight to admission and never passes through here.
+#[derive(Default)]
+struct TurnPrepared {
+    turn: u64,
+    prepared: Option<Box<PreparedAdmission>>,
+}
+
+impl TurnPrepared {
+    /// Starts the next turn and drops the last one's rows.
+    fn begin_turn(&mut self) {
+        self.turn = self.turn.wrapping_add(1);
+        self.prepared = None;
+    }
+
+    /// The current turn, stamped on a request as it enters the queue.
+    fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    /// Holds the rows of the request that enters the queue this turn.
+    fn stash(&mut self, prepared: Option<Box<PreparedAdmission>>) {
+        self.prepared = prepared;
+    }
+
+    /// After an await inside a turn: the held rows' request is not admitted yet, and the
+    /// fullness its caller judged before the await is stale, so the actor judges again.
+    fn drop_judged_load(&mut self) {
+        if let Some(prepared) = &mut self.prepared {
+            prepared.load.take_if(|load| load.limits.is_some());
+        }
+    }
+
+    /// The rows for a request leaving the queue: only this turn's request has any, and an
+    /// overlap refresh replaces the overlap they were built from.
+    fn take_for(&mut self, enqueue_turn: u64, refreshed: bool) -> Option<Box<PreparedAdmission>> {
+        if enqueue_turn == self.turn && !refreshed {
+            self.prepared.take()
+        } else {
+            None
+        }
     }
 }
 
@@ -1211,10 +1274,8 @@ struct SchedulerQueueActor<
     workers_generation: Arc<AtomicU64>,
     /// Current preparer, republished after a runtime policy update.
     candidate_preparer: Arc<ArcSwapOption<CandidatePreparer>>,
-    /// One per command or wakeup. A request enqueued in an earlier turn rebuilds its rows.
-    turn: u64,
-    /// Rows prepared for the request enqueued this turn, dropped when the turn ends.
-    turn_prepared: Option<Box<PreparedAdmission>>,
+    /// The current turn and the rows prepared for the request enqueued in it.
+    turn_prepared: TurnPrepared,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
@@ -1535,8 +1596,7 @@ impl<
             workers_with_configs: self.workers_with_configs.clone(),
             workers_generation: Arc::clone(&self.workers_generation),
             candidate_preparer: Arc::clone(&self.candidate_preparer),
-            turn: 0,
-            turn_prepared: None,
+            turn_prepared: TurnPrepared::default(),
             projected_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
@@ -2147,7 +2207,7 @@ impl<
         let mut affinity_recheck = tokio::time::interval(AFFINITY_RECHECK_INTERVAL);
         affinity_recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            self.begin_turn();
+            self.turn_prepared.begin_turn();
             let due_at = match (self.class_timers.next_deadline(), self.gate_recheck_at) {
                 (Some(class_due), Some(gate_due)) => Some(class_due.min(gate_due)),
                 (class_due, gate_due) => class_due.or(gate_due),
@@ -2214,14 +2274,6 @@ impl<
             let mut request = entry.into_payload().request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
         }
-    }
-
-    /// One turn per command or wakeup, including one handled during an overlap refresh. Rows
-    /// prepared in the previous turn are dropped; a request still queued rebuilds them when
-    /// admitted.
-    fn begin_turn(&mut self) {
-        self.turn = self.turn.wrapping_add(1);
-        self.turn_prepared = None;
     }
 
     async fn drain_after_command(&mut self, drain: Drain, reply: Option<CommandReply>) {
@@ -2405,10 +2457,10 @@ impl<
             enqueue_at: decay_now,
             due_at,
             block_hashes,
-            enqueue_turn: self.turn,
+            enqueue_turn: self.turn_prepared.turn(),
             gate_target: Cell::new(None),
         };
-        self.turn_prepared = prepared;
+        self.turn_prepared.stash(prepared);
         if let Insertion::Refused { exposed } =
             self.insert_arrival(queue_metadata, queued, limits_now)
         {
@@ -2969,11 +3021,7 @@ impl<
                         stopping = matches!(end, RefreshEnd::Shutdown);
                     }
                 }
-                // This turn's request is not admitted yet: fullness its caller judged before
-                // the await is stale, so the actor judges again.
-                if let Some(prepared) = &mut self.turn_prepared {
-                    prepared.load.take_if(|load| load.limits.is_some());
-                }
+                self.turn_prepared.drop_judged_load();
             }
             let mut queued = candidate.into_payload();
             // The gate's `Go` target replaces the soft affinity target unless the caller
@@ -2993,13 +3041,7 @@ impl<
                     queued.request.pinned_worker.or(target),
                 );
             }
-            // Only this turn's request has rows, and a refresh replaces the overlap
-            // they were built from.
-            let prepared = if queued.enqueue_turn == self.turn && !refreshed {
-                self.turn_prepared.take()
-            } else {
-                None
-            };
+            let prepared = self.turn_prepared.take_for(queued.enqueue_turn, refreshed);
             // The due time can pass during the refresh. Admission checks it again before
             // selection and before booking or delivery.
             let admission = if released {
@@ -3089,7 +3131,7 @@ impl<
                     None => return RefreshEnd::Shutdown,
                 },
             };
-            self.begin_turn();
+            self.turn_prepared.begin_turn();
             match event {
                 RefreshEvent::ClassTimer => {
                     self.expire_due_classes(Instant::now());
@@ -3217,6 +3259,34 @@ impl<
             })
     }
 
+    /// The rows the caller prepared, when the actor would build the same ones now: the
+    /// configuration, availability and overload it selects with, read under the selection's
+    /// borrow of `workers`, are the ones the rows were built from. None, and the selector
+    /// builds its rows, otherwise.
+    fn adopt_prepared_rows(
+        &self,
+        prepared: Option<Box<PreparedAdmission>>,
+        request: &SchedulingRequest,
+        workers: &watch::Ref<'_, HashMap<WorkerId, C>>,
+        available_worker_ids: Option<&Arc<WorkerIdSet>>,
+        overloaded_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
+    ) -> Option<PreparedCandidates> {
+        // Full rows remain usable unless affinity or fetch sources can change
+        // preparation's eligibility when the projection finds full ranks.
+        let prepared_rows_usable = self.full_ranks.is_empty()
+            || (!(self.eligibility.exclusive && request.affinity_target.is_some())
+                && request.kv_transfer_candidates.is_none());
+        prepared
+            .filter(|_| !workers.has_changed() && prepared_rows_usable)
+            .and_then(|prepared| {
+                prepared.into_current(
+                    self.workers_generation.load(AtomicOrdering::Relaxed),
+                    available_worker_ids,
+                    overloaded_worker_ids,
+                )
+            })
+    }
+
     /// `admitted` selections may carry the installed selection trace; advisory
     /// probes never do, so they do not pay for capture.
     fn select_worker_for_request(
@@ -3231,20 +3301,13 @@ impl<
             &self.full_ranks,
             true,
             |workers, eligibility, _, available_worker_ids, overloaded_worker_ids| {
-                // Full rows remain usable unless affinity or fetch sources can change
-                // preparation's eligibility when the projection finds full ranks.
-                let prepared_rows_usable = self.full_ranks.is_empty()
-                    || (!(self.eligibility.exclusive && request.affinity_target.is_some())
-                        && request.kv_transfer_candidates.is_none());
-                let prepared = prepared
-                    .filter(|_| !workers.has_changed() && prepared_rows_usable)
-                    .and_then(|prepared| {
-                        prepared.into_current(
-                            self.workers_generation.load(AtomicOrdering::Relaxed),
-                            available_worker_ids,
-                            overloaded_worker_ids,
-                        )
-                    });
+                let prepared = self.adopt_prepared_rows(
+                    prepared,
+                    request,
+                    workers,
+                    available_worker_ids,
+                    overloaded_worker_ids,
+                );
                 let trace = if admitted {
                     self.selection_trace.get().copied()
                 } else {
@@ -5829,6 +5892,34 @@ mod tests {
             );
             assert_eq!(prepared_queue.prepared_selections(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn turn_prepared_rows_last_one_turn_and_no_refresh() {
+        let prepared_queue = make_prepared_queue();
+        let (request, _rx) = make_request("request", 64);
+        let prepare = || prepared_queue.queue.prepare_candidates(&request);
+        let mut turn_prepared = TurnPrepared::default();
+
+        // The turn that received the request takes its rows, once.
+        turn_prepared.begin_turn();
+        let arrival = turn_prepared.turn();
+        turn_prepared.stash(prepare());
+        assert!(turn_prepared.take_for(arrival, false).is_some());
+        assert!(turn_prepared.take_for(arrival, false).is_none());
+
+        // A refresh replaced the overlap the rows were built from.
+        turn_prepared.stash(prepare());
+        assert!(turn_prepared.take_for(arrival, true).is_none());
+
+        // The next turn drops them, for the request they were built for and for any other.
+        turn_prepared.begin_turn();
+        assert!(turn_prepared.take_for(arrival, false).is_none());
+        assert!(
+            turn_prepared
+                .take_for(turn_prepared.turn(), false)
+                .is_none()
+        );
     }
 
     #[tokio::test]
