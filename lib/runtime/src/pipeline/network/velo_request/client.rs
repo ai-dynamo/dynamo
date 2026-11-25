@@ -117,13 +117,23 @@ impl RequestPlaneClient for VeloRequestClient {
             deadline,
         )
         .await?;
-        let _staged = (payload.len() > self.service.velo.staging_threshold())
-            .then(|| {
-                peer.staged.try_acquire().map_err(|_| {
-                    error(ErrorType::ResourceExhausted, "staged window to worker full")
-                })
-            })
-            .transpose()?;
+        // The window bounds the staged bytes one caller can have in flight at a
+        // worker. A request above it waits its turn: the worker is healthy, so
+        // only the request deadline ends the wait, and never as a worker fault.
+        let _staged = if payload.len() > self.service.velo.staging_threshold() {
+            let permit = by_deadline(deadline, peer.staged.acquire())
+                .await
+                .map_err(|_| {
+                    error(
+                        ErrorType::ResourceExhausted,
+                        "staged window to worker stayed full until the request deadline",
+                    )
+                })?
+                .map_err(|_| error(ErrorType::Internal, "staged window closed"))?;
+            Some(permit)
+        } else {
+            None
+        };
         let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
             error(
                 ErrorType::ResourceExhausted,
@@ -485,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_window_refuses_before_sending() {
+    async fn staged_window_queues_requests_beyond_the_window() {
         let frontend = service().await;
         let worker = service().await;
         let entered = Arc::new(Semaphore::new(0));
@@ -502,9 +512,7 @@ mod tests {
                         async move {
                             entered.add_permits(1);
                             release.acquire().await.unwrap().forget();
-                            Ok(Some(Bytes::from_static(
-                                b"Server overloaded: worker at capacity",
-                            )))
+                            Ok(Some(Bytes::from_static(b"ack")))
                         }
                     }
                 })
@@ -527,31 +535,116 @@ mod tests {
         )
         .await
         .unwrap();
+        // Leave a window of two.
         let _reserved = peer.staged.try_acquire_many(2).unwrap();
         let payload = Bytes::from(vec![0; 1024 * 1024]);
         let mut calls = tokio::task::JoinSet::new();
-        for _ in 0..10 {
+        for _ in 0..4 {
             let (client, target, payload) = (client.clone(), target.clone(), payload.clone());
             calls.spawn(async move { client.send_request(target, payload, Headers::new()).await });
         }
-        tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(2))
+        let wait_for_two = || async {
+            tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+        };
+        wait_for_two().await;
+        // The other two wait at the caller: none fails and none reaches the worker.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), calls.join_next())
+                .await
+                .is_err()
+        );
+        assert_eq!(entered.available_permits(), 0);
+        // A request below the staging threshold does not use the window.
+        let small = tokio::spawn({
+            let (client, target) = (client.clone(), target.clone());
+            async move {
+                client
+                    .send_request(target, Bytes::new(), Headers::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.acquire())
             .await
             .unwrap()
             .unwrap()
             .forget();
-        for _ in 0..8 {
-            let result = tokio::time::timeout(Duration::from_millis(300), calls.join_next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            assert_eq!(error_type(result), ErrorType::ResourceExhausted);
-        }
-        assert_eq!(entered.available_permits(), 0);
+
+        release.add_permits(3);
+        assert_eq!(small.await.unwrap().unwrap(), "ack");
+        wait_for_two().await;
         release.add_permits(2);
         for result in calls.join_all().await {
-            assert!(result.unwrap().starts_with(b"Server overloaded:"));
+            assert_eq!(result.unwrap(), "ack");
         }
+    }
+
+    #[tokio::test]
+    async fn staged_window_wait_ends_at_the_request_deadline() {
+        let frontend = service().await;
+        let worker = service().await;
+        let seen = Arc::new(AtomicUsize::new(0));
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, {
+                    let seen = seen.clone();
+                    move |_| {
+                        seen.fetch_add(1, Ordering::Relaxed);
+                        Ok(Some(Bytes::new()))
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+        let worker_info = worker.velo.peer_info();
+        let timeout = Duration::from_millis(500);
+        let client = VeloRequestClient::new(frontend.clone(), timeout);
+        let target = address(&worker_info);
+        let worker_address = encode_worker_address(worker_info.worker_address()).unwrap();
+        let (peer, epoch) = establish_route(
+            &frontend,
+            worker_info.instance_id(),
+            &worker_address,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let reserved = peer.staged.try_acquire_many(4).unwrap();
+
+        let start = Instant::now();
+        let result = client
+            .send_request(
+                target.clone(),
+                Bytes::from(vec![0; 300 * 1024]),
+                Headers::new(),
+            )
+            .await;
+        assert!(start.elapsed() >= timeout);
+        // The caller ran out of time. The worker saw nothing and keeps its route.
+        assert_eq!(error_type(result), ErrorType::ResourceExhausted);
+        assert_eq!(seen.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            frontend
+                .confirmed_peer(worker_info.instance_id())
+                .unwrap()
+                .1,
+            epoch
+        );
+        assert_eq!(frontend.velo.response_slots_in_use(), 0);
+
+        drop(reserved);
+        assert!(
+            client
+                .send_request(target, Bytes::from(vec![0; 300 * 1024]), Headers::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
