@@ -531,6 +531,215 @@ fn capacity_recheck_skips_gate_held_lanes() {
 }
 
 #[test]
+fn full_recheck_asks_a_shared_lane_the_gate_now_holds_once() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "session");
+    let gate_holds = std::cell::Cell::new(false);
+    let asks = std::cell::Cell::new(0usize);
+    let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
+        asks.set(asks.get() + 1);
+        if gate_holds.get() {
+            LaneCheck::Blocked(BlockReason::Gate)
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::SharedCapacity)
+    );
+
+    // The gate's wake asks the shared group, which files the lane as held; the held lanes
+    // the same recheck asks are the ones held before it, so the lane is asked once.
+    gate_holds.set(true);
+    asks.set(0);
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 1);
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+}
+
+#[test]
+fn full_recheck_asks_each_shared_lane_once_and_leaves_the_rest_in_place() {
+    // Three lanes leave the group. With one lane staying its order is rebuilt from that lane;
+    // with four the three are dropped from it one by one.
+    for stayers in [1, 4] {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let stays: &[&'static str] = &["stays-1", "stays-2", "stays-3", "stays-4"][..stayers];
+        let leaves = ["goes", "held", "constrained"];
+        for (id, payload) in stays.iter().chain(&leaves).copied().enumerate() {
+            enqueue_due(&mut queue, None, None, lane_of(id as u64), payload);
+        }
+        let woke = std::cell::Cell::new(false);
+        let room = std::cell::Cell::new(false);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+            asked.borrow_mut().push(*payload);
+            match *payload {
+                "goes" if woke.get() => LaneCheck::Dispatch,
+                "held" if woke.get() => LaneCheck::Blocked(BlockReason::Gate),
+                "constrained" if woke.get() => LaneCheck::Blocked(BlockReason::Capacity),
+                name if name.starts_with("stays") && room.get() => LaneCheck::Dispatch,
+                _ => LaneCheck::Blocked(BlockReason::SharedCapacity),
+            }
+        };
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(queue.class_blocked_lane_count(0), stayers + 3);
+
+        // The gate's wake asks every shared lane once, the lane now blocked on its own
+        // capacity included: it is not asked again with the capacity lanes. The lane that may
+        // go is asked a second time at its dispatch.
+        woke.set(true);
+        asked.borrow_mut().clear();
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "goes");
+        let mut all = asked.borrow().clone();
+        all.sort_unstable();
+        let mut expected = [stays, &["goes", "goes", "held", "constrained"][..]].concat();
+        expected.sort_unstable();
+        assert_eq!(all, expected);
+        for id in 0..stayers {
+            assert_eq!(
+                queue.class_lane_block_reason(0, lane_of(id as u64)),
+                Some(BlockReason::SharedCapacity)
+            );
+        }
+        for (id, reason) in [(1, BlockReason::Gate), (2, BlockReason::Capacity)] {
+            assert_eq!(
+                queue.class_lane_block_reason(0, lane_of((stayers + id) as u64)),
+                Some(reason)
+            );
+        }
+
+        // The lanes left in place are the shared group, in its order: capacity admits them
+        // in turn, and nothing that left is promoted after them.
+        room.set(true);
+        queue.recheck_blocked_lanes(RecheckScope::Capacity);
+        for payload in stays {
+            assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), *payload);
+        }
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(queue.class_blocked_lane_count(0), 2);
+    }
+}
+
+#[test]
+fn full_recheck_with_room_admits_one_shared_lane_and_leaves_the_rest_in_place() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    for (id, payload) in [(1, "s1"), (2, "s2"), (3, "s3"), (4, "s4")] {
+        enqueue_due(&mut queue, None, None, lane_of(id), payload);
+    }
+    let room = std::cell::Cell::new(false);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        asked.borrow_mut().push(*payload);
+        if room.get() {
+            LaneCheck::Dispatch
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 4);
+
+    // The gate's wake finds a slot free, so every lane may go. Only the group's best leaves
+    // it, to dispatch, and the next best stands in: the other two are not moved.
+    room.set(true);
+    asked.borrow_mut().clear();
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s1");
+    let mut all = asked.borrow().clone();
+    all.sort_unstable();
+    assert_eq!(all, ["s1", "s1", "s2", "s3", "s4"]);
+    assert_eq!(queue.class_blocked_lane_count(0), 2);
+
+    // The slot is taken: the stand-in alone is asked, and it rejoins the group.
+    room.set(false);
+    asked.borrow_mut().clear();
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asked.borrow().as_slice(), ["s2"]);
+    for id in 2..=4 {
+        assert_eq!(
+            queue.class_lane_block_reason(0, lane_of(id)),
+            Some(BlockReason::SharedCapacity)
+        );
+    }
+
+    // A stand-in promoted before a wake is still a candidate after it, ahead of the lane the
+    // wake promotes: both dispatch, in the group's order.
+    room.set(true);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s2");
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s3");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s4");
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 0);
+}
+
+#[test]
+fn full_recheck_asks_a_lane_the_gate_lets_go_once() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "session");
+    let answer = std::cell::Cell::new(BlockReason::Gate);
+    let asks = std::cell::Cell::new(0usize);
+    let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
+        asks.set(asks.get() + 1);
+        LaneCheck::Blocked(answer.get())
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+
+    // The gate lets the lane go but it has no room: the recheck that asked it as held files
+    // it on capacity without asking it again with the capacity lanes.
+    for now in [BlockReason::Capacity, BlockReason::SharedCapacity] {
+        answer.set(BlockReason::Gate);
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert!(queue.pop_next(predicate).is_none());
+        answer.set(now);
+        asks.set(0);
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(asks.get(), 1, "{now:?}");
+        assert_eq!(queue.class_lane_block_reason(0, lane_of(1)), Some(now));
+    }
+}
+
+#[test]
+fn cancelling_a_gate_held_root_asks_its_successor() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "held");
+    enqueue_due(&mut queue, None, None, lane_of(1), "next");
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        if *payload == "held" {
+            LaneCheck::Blocked(BlockReason::Gate)
+        } else {
+            LaneCheck::Dispatch
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+
+    // The held root leaves: the lane is unblocked and its successor is asked at the next
+    // dispatch, with no recheck from the gate.
+    let (removed, root_removed) = queue.take_if_in_class(0, |payload| *payload == "held");
+    assert_eq!(removed.len(), 1);
+    assert!(root_removed);
+    assert_eq!(queue.class_lane_block_reason(0, lane_of(1)), None);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "next");
+}
+
+#[test]
 fn shared_group_stand_in_is_handed_on_when_it_is_cancelled() {
     // Three keyed lanes refused as SharedCapacity; the pinned lane keeps its own reason.
     let mut queue = PolicyQueue::new(&edf_profile());

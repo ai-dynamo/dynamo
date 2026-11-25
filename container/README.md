@@ -34,10 +34,10 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
 |  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
 | **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
-|  /usr/local/ucx/ | Built from source (→ runtime)
-|  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
-|  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
+| **STAGE: nixl_builder** (XPU and CPU only) | **FROM wheel_builder_base** |
+|  /usr/local/ucx/ | Built from source (→ runtime)
+|  /opt/intel/intel_nixl/ (XPU), /opt/nvidia/nvda_nixl/ (CPU) | Built from source (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
 | **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
 |  /usr/bin/nats-server | COPY from dynamo_base |
@@ -242,7 +242,7 @@ container/render.py --framework=vllm --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # Build TensorRT-LLM runtime image called dynamo:latest-trtllm-runtime
-container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)

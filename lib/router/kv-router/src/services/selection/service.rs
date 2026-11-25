@@ -24,6 +24,7 @@ use dynamo_session_affinity::AffinityBindingEvent;
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_router_protocol::WorkerType;
 #[cfg(feature = "ingest-zmq")]
 use dynamo_scheduler::host::HostCache;
@@ -220,7 +221,7 @@ impl SelectionServiceBuilder {
             None => self
                 .plugin_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
-                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
+                .ok_or(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         // Hint policies are a peer plugin role, resolved independently of worker selection.
         if self.host.hints.policies.is_none() {
@@ -554,10 +555,10 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
-                    std::sync::Arc::new(|config, role, _| {
+                    std::sync::Arc::new(|context| {
                         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                            config.clone(),
-                            role.default_selector_label(),
+                            context.selection_config().clone(),
+                            context.worker_type().default_selector_label(),
                         )
                     }),
                     SelectionHost {
@@ -725,6 +726,41 @@ impl SelectionService {
             .unwrap_or_default()
     }
 
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Events update local and replicated reservations without being republished.
+    /// Requires replica sync. Returns `true` if the subscription was added.
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn register_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.register_worker_publisher(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn deregister_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.deregister_worker_publisher(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub fn list_worker_publishers(&self) -> Vec<String> {
+        self.peer_manager
+            .as_ref()
+            .map(|peer_manager| peer_manager.list_worker_publishers())
+            .unwrap_or_default()
+    }
+
     // Only the HTTP server's replica-peer routes read it.
     #[cfg(all(
         feature = "http",
@@ -800,10 +836,10 @@ mod tests {
     }
 
     fn test_registry() -> RouterPluginRegistry {
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         }))
     }
@@ -821,8 +857,8 @@ mod tests {
             panic!("missing default accepted")
         };
         assert!(matches!(
-            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
-            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+            error.downcast_ref::<crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)
         ));
     }
 

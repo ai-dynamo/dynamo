@@ -4,7 +4,7 @@
 //! Publication of neutral generalized-engine effects through Dynamo sinks.
 
 use super::*;
-use aisim_core::engine::PassStartEffects;
+use aisim_core::engine::{KvEventTier, PassStartEffects};
 use dynamo_kv_events::residency::StorageTier;
 
 #[derive(Clone)]
@@ -476,6 +476,13 @@ impl RankDispatch {
                 );
                 continue;
             }
+            // The live mocker has no KV state agent, so it publishes worker-owned
+            // residency only. KVCR-owned memory is dropped: as G2 residency it would
+            // make the worker a fetch source for blocks its G2 does not hold. KVCR
+            // disk is kept as the worker's disk residency, which is never a source.
+            if event.tier == KvEventTier::HostPinned && cache_owned(&event) {
+                continue;
+            }
             let storage_tier = dynamo_storage_tier(event.tier);
             let (event, block_token_ids, session_id) = dynamo_kv_event(event);
             raw_events.push(RawKvEvent {
@@ -495,7 +502,7 @@ impl RankDispatch {
             })
             .collect();
         // The vLLM wire format needs each block's token IDs, which AISimulate
-        // does not carry for G2 residency; those events use only the event sink.
+        // does not carry for G2 or G3 residency; those events use only the event sink.
         raw_events.retain(|event| {
             event.storage_tier == StorageTier::Device || event.block_token_ids.is_some()
         });

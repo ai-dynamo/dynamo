@@ -1115,6 +1115,13 @@ class TestAudioFormatterFormat:
         }
         # DELTA output can retain sr after the engine drains the audio key.
         assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        # Qwen3-TTS also keeps its running codec_frames, so a step that decoded
+        # no new samples arrives as codec_frames and sr alone.
+        codec_only = {
+            "codec_frames": torch.zeros((1, 16), dtype=torch.long),
+            "sr": 24000,
+        }
+        assert await formatter.format(codec_only, "req-1", **context) is None
         response = await formatter.format(
             {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
             "req-1",
@@ -1132,10 +1139,14 @@ class TestAudioFormatterFormat:
     async def test_delta_metadata_alone_cannot_complete_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioAggregateState()
-        assert (
-            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
-            is None
-        )
+        for payload in (
+            {"sr": 24000},
+            {"codec_frames": torch.zeros((1, 16), dtype=torch.long), "sr": 24000},
+        ):
+            assert (
+                await formatter.format(payload, "req-1", audio_aggregate_state=state)
+                is None
+            )
         response = await formatter.finish_aggregate("req-1", state)
         assert response["status"] == "failed"
         assert "No audio generated" in response["error"]

@@ -264,9 +264,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         echo "       removal; the globs no longer match the base layout:" >&2; \
         echo "$left" >&2; \
         exit 1; \
-    fi
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    fi; \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -442,8 +441,8 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 #
 # - mooncake-transfer-engine-cuda13: the specifier requirements.vllm.txt and
 #   requirements.sglang.txt use, kept equal by
-#   tests/dependencies/test_mooncake_floor_consistency.py. tensorrt-llm declares
-#   ==0.3.13, so pip check reports that pin.
+#   tests/dependencies/test_mooncake_floor_consistency.py. If the base's
+#   tensorrt-llm pins an older build, pip check reports that pin.
 # - aiohttp: the floor requirements.common.txt sets for the other images.
 #   cp312 manylinux_2_28 wheels exist for both architectures.
 # - certifi (CA bundle) and Pillow: no required dependencies, so each moves

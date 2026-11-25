@@ -1233,12 +1233,13 @@ class AudioFormatter:
                 return None
             return self._error_response(request_id, "No audio generated")
 
-        # DELTA output drains the audio key but can retain sample-rate metadata.
+        # DELTA output drains the audio key but can retain sample-rate metadata
+        # and Qwen3-TTS's undrained running ``codec_frames`` (vllm-omni#8619).
         # It is not a media result or a failure. Aggregate completion and health
         # probes still require nonempty audio elsewhere in the response stream.
         if (
             isinstance(mm_output, Mapping)
-            and set(mm_output) == {"sr"}
+            and set(mm_output) <= {"sr", "codec_frames"}
             and (
                 stream_state is not None
                 or (aggregate_state is not None and not aggregate_state.cumulative)

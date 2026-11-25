@@ -698,6 +698,11 @@ impl IndexState {
     }
 
     fn is_ancestor_or_self(&self, candidate: NodeId, node: NodeId) -> bool {
+        let entry = &self.nodes[candidate];
+        // A leaf has no proper descendants, and a child cannot be its parent's ancestor.
+        if entry.child_count == 0 || entry.parent == Some(node) {
+            return candidate == node;
+        }
         let limit = self.nodes.len();
         let mut current = Some(node);
         let mut steps = 0usize;

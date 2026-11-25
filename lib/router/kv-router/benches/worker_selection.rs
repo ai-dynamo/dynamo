@@ -29,10 +29,11 @@ use dynamo_scheduler::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelect
 use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 use dynamo_worker_selection::{
     SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError,
+    WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 use rustc_hash::FxHashMap;
 
@@ -68,7 +69,7 @@ struct KeepAllFilter;
 impl WorkerFilter for KeepAllFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
@@ -81,7 +82,7 @@ struct CapacityFilter;
 impl WorkerFilter for CapacityFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let info = candidate.info();
@@ -99,7 +100,7 @@ impl WorkerScorer for BenchScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -111,8 +112,8 @@ impl WorkerScorer for BenchScorer {
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = (uncached_blocks + load_blocks)
@@ -133,7 +134,7 @@ impl WorkerScorer for IgnoringPreferenceScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -145,8 +146,8 @@ impl WorkerScorer for IgnoringPreferenceScorer {
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = uncached_blocks + load_blocks;
@@ -165,7 +166,7 @@ impl WorkerScorer for ResidentBlocksScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -181,8 +182,8 @@ impl WorkerScorer for ResidentBlocksScorer {
                 WorkerSelectionPolicyError::failed("resident blocks input unavailable")
             })?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = uncached_blocks + load_blocks + resident_blocks as f64;
@@ -196,7 +197,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input
@@ -306,11 +307,11 @@ fn worker_selection(c: &mut Criterion) {
             for worker_count in [2, 32, 1_024, 2_048, 10_000] {
                 let (workers, request) = fixture(worker_count);
                 let selector = DefaultWorkerSelector::new(
-                    Some(SelectionConfig {
-                        router_temperature: temperature,
-                        overlap_score_credit_decay,
-                        ..Default::default()
-                    }),
+                    Some(
+                        SelectionConfig::default()
+                            .with_router_temperature(temperature)
+                            .with_overlap_score_credit_decay(overlap_score_credit_decay),
+                    ),
                     "prefill",
                 );
                 group.throughput(Throughput::Elements(worker_count as u64));
@@ -342,25 +343,18 @@ fn custom_worker_selection(c: &mut Criterion) {
     const WORKER_COUNT: usize = 10_000;
 
     let (workers, request) = fixture(WORKER_COUNT);
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
     let custom_no_filter = WorkerSelectionPolicy::new(
-        config.clone(),
         "prefill",
         vec![Box::new(BenchScorer)],
         Box::new(LowestCostPicker),
     );
     let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
-        config.clone(),
         "prefill",
         vec![Box::new(KeepAllFilter)],
         vec![Box::new(BenchScorer)],
         Box::new(LowestCostPicker),
     );
     let custom_capacity_filter = WorkerSelectionPolicy::new_with_filters(
-        config,
         "prefill",
         vec![Box::new(CapacityFilter)],
         vec![Box::new(BenchScorer)],
@@ -419,10 +413,6 @@ fn custom_worker_selection(c: &mut Criterion) {
 
 fn unused_preferred_taint_metadata(c: &mut Criterion) {
     const WORKER_COUNT: usize = 10_000;
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
     let mut group = c.benchmark_group("unused_preferred_taint_metadata/10_000");
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(5));
@@ -432,7 +422,6 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
     for preferred_taint_count in [0, 1, 4] {
         let (workers, request) = fixture_with_preferred_taints(WORKER_COUNT, preferred_taint_count);
         let policy = WorkerSelectionPolicy::new(
-            config.clone(),
             "prefill",
             vec![Box::new(IgnoringPreferenceScorer)],
             Box::new(LowestCostPicker),
@@ -460,10 +449,6 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
 }
 
 fn resident_blocks_read(c: &mut Criterion) {
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
     let mut group = c.benchmark_group("resident_blocks_read");
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(5));
@@ -473,13 +458,11 @@ fn resident_blocks_read(c: &mut Criterion) {
         let (workers, request) = fixture(worker_count);
         group.throughput(Throughput::Elements(worker_count as u64));
         let without = WorkerSelectionPolicy::new(
-            config.clone(),
             "prefill",
             vec![Box::new(IgnoringPreferenceScorer)],
             Box::new(LowestCostPicker),
         );
         let with = WorkerSelectionPolicy::new(
-            config.clone(),
             "prefill",
             vec![Box::new(ResidentBlocksScorer)],
             Box::new(LowestCostPicker),
@@ -620,10 +603,7 @@ fn resident_blocks_write(c: &mut Criterion) {
 }
 
 fn default_policy_wrapper(c: &mut Criterion) {
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
+    let config = SelectionConfig::default().with_router_temperature(0.0);
     let mut group = c.benchmark_group("default_policy_wrapper");
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(5));

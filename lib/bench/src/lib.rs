@@ -11,7 +11,8 @@ pub mod common;
     feature = "dc-ckf-consumer",
     feature = "dc-ckf-relay",
     feature = "mooncake",
-    feature = "router-test-support"
+    feature = "router-test-support",
+    feature = "selection-replay"
 ))]
 #[path = "../kv_router/common/mod.rs"]
 pub mod kv_router_common;

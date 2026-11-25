@@ -31,6 +31,8 @@ tokio-util = { workspace = true }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }
 dynamo-scheduler = { workspace = true, features = ["bench"] }
+dynamo-slot-tracker = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 rustc-hash = "2.1.1"
 criterion = "0.5"
 tempfile = { workspace = true }
