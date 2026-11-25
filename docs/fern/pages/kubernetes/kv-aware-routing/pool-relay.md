@@ -87,16 +87,15 @@ compatibility from DGD annotations, environment variables, commands, or PodTempl
 does not discover workers, check the workers' discovery settings and the published source namespaces.
 
 The controller reads worker namespaces from `status.components.<name>.runtimeNamespace` and follows
-status-only namespace changes through the source file. It uses the published frontend runtime
-namespace for frontend load collection. A graph without a frontend uses the first worker namespace
-in sorted order for the Relay's own runtime binding. Changes to that binding roll the Relay Pods;
-changes only to worker sources do not roll Pods when the frontend binding is unchanged.
+status-only namespace changes through the source file without rolling Relay Pods. The Relay's own
+`DYN_NAMESPACE` keeps the existing base namespace derived from its Kubernetes namespace and name,
+without a worker hash. This also provides the namespace for frontend load collection, whether or
+not the DGD declares a frontend. Frontend status is not required or inspected.
 
-If a required worker or frontend runtime namespace has not been published, `Ready` is Unknown with
+If a required worker runtime namespace has not been published, `Ready` is Unknown with
 reason `RuntimeNamespacePending`. Existing resources, the source file, and the endpoint remain
-unchanged until the bindings are available. The controller does not derive missing namespaces from
-resource names or worker hashes. Frontends with distinct runtime namespaces and the shared global
-Dynamo namespace remain unsupported.
+unchanged until the bindings are available. The controller does not derive missing worker namespaces
+from resource names or worker hashes. The shared global Dynamo namespace remains unsupported.
 
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The

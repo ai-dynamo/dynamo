@@ -127,18 +127,12 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	// Frontend load must use its published namespace, not a naming convention.
-	runtimeNamespace, frontendComplete, err := frontendNamespace(&dgd)
-	if err != nil {
-		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", err.Error())
-	}
-
-	// Preserve the last published resources until all required bindings exist.
-	if !complete || !frontendComplete {
+	// Preserve the last published resources until every worker binding exists.
+	if !complete {
 		before := relay.DeepCopy()
 		meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
 			Type: "Ready", Status: metav1.ConditionUnknown, Reason: "RuntimeNamespacePending",
-			Message: "Waiting for published component runtime namespaces", ObservedGeneration: relay.Generation,
+			Message: "Waiting for published worker runtime namespaces", ObservedGeneration: relay.Generation,
 		})
 		if !equality.Semantic.DeepEqual(before.Status, relay.Status) {
 			return ctrl.Result{}, r.Status().Update(ctx, &relay)
@@ -146,11 +140,7 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	// A worker-only graph has no frontend load binding; use a published source.
-	if runtimeNamespace == "" {
-		runtimeNamespace = namespaces[0]
-	}
-	resources, desiredDeployment, err := render(&relay, runtimeNamespace, namespaces)
+	resources, desiredDeployment, err := render(&relay, namespaces)
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
@@ -391,28 +381,6 @@ func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) ([]string, bool) {
 	return namespaces, complete
 }
 
-// frontendNamespace reads the shared load binding, absent on worker-only graphs.
-// The boolean reports whether every declared frontend has a published binding.
-func frontendNamespace(dgd *v1beta1.DynamoGraphDeployment) (string, bool, error) {
-	namespace := ""
-	complete := true
-	for _, component := range dgd.Spec.Components {
-		if component.ComponentType != v1beta1.ComponentTypeFrontend {
-			continue
-		}
-		current := dgd.Status.Components[component.ComponentName].RuntimeNamespace
-		if current == "" {
-			complete = false
-			continue
-		}
-		if current == commonconsts.GlobalDynamoNamespace || (namespace != "" && namespace != current) {
-			return "", false, fmt.Errorf("the Relay requires a single non-global frontend runtime namespace")
-		}
-		namespace = current
-	}
-	return namespace, complete, nil
-}
-
 type sourcesDocument struct {
 	Version            int    `json:"version"`
 	ConnectionRevision string `json:"connectionRevision"`
@@ -434,7 +402,7 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 
 func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
 
-func render(relay *v1alpha1.DynamoPoolRelay, runtimeNamespace string, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
+func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := serviceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
@@ -455,6 +423,9 @@ func render(relay *v1alpha1.DynamoPoolRelay, runtimeNamespace string, namespaces
 	}
 	labels := map[string]string{"app.kubernetes.io/name": "pool-relay", "nvidia.com/relay-uid": string(relay.UID)}
 	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace, Labels: labels}
+
+	// Preserve the Relay's base namespace for identity and frontend load, without a worker hash.
+	runtimeNamespace := v1beta1.ComputeDynamoNamespace(false, relay.Namespace, relay.Name)
 
 	// Runtime-managed values cannot be replaced by transport configuration.
 	env := []corev1.EnvVar{

@@ -31,21 +31,16 @@ func TestRelayUsesPublishedRuntimeBindings(t *testing.T) {
 		name        string
 		workers     map[string]string
 		frontends   map[string]string
-		wantRuntime string
 		wantSources []string
 		wantReason  string
 	}{
-		{name: "worker-only graph", workers: map[string]string{"decode": "opaque-worker"}, wantRuntime: "opaque-worker", wantSources: []string{"opaque-worker"}},
-		{name: "frontend load binding is independent of worker sources", workers: map[string]string{"decode": "worker-hash"}, frontends: map[string]string{"frontend": "load-scope"}, wantRuntime: "load-scope", wantSources: []string{"worker-hash"}},
-		{name: "deduplicate and sort worker bindings", workers: map[string]string{"decode": "b", "prefill": "a", "worker": "b"}, wantRuntime: "a", wantSources: []string{"a", "b"}},
-		{name: "frontends sharing one binding", workers: map[string]string{"decode": "worker"}, frontends: map[string]string{"http": "load", "grpc": "load"}, wantRuntime: "load", wantSources: []string{"worker"}},
+		{name: "worker-only graph", workers: map[string]string{"decode": "opaque-worker"}, wantSources: []string{"opaque-worker"}},
+		{name: "frontend namespaces do not select Relay identity", workers: map[string]string{"decode": "worker"}, frontends: map[string]string{"http": "first", "grpc": "second"}, wantSources: []string{"worker"}},
+		{name: "deduplicate and sort worker bindings", workers: map[string]string{"decode": "b", "prefill": "a", "worker": "b"}, wantSources: []string{"a", "b"}},
 		{name: "missing worker binding", workers: map[string]string{"decode": ""}, wantReason: "RuntimeNamespacePending"},
 		{name: "incomplete sources must not publish a partial set", workers: map[string]string{"decode": "known", "prefill": ""}, wantReason: "RuntimeNamespacePending"},
-		{name: "missing frontend binding", workers: map[string]string{"decode": "worker"}, frontends: map[string]string{"frontend": ""}, wantReason: "RuntimeNamespacePending"},
 		{name: "no declared workers", frontends: map[string]string{"frontend": "load"}, wantReason: "NoWorkers"},
-		{name: "distinct frontend scopes are unsupported", workers: map[string]string{"decode": "worker"}, frontends: map[string]string{"http": "first", "grpc": "second"}, wantReason: "UnsupportedSourceScope"},
 		{name: "published global worker scope", workers: map[string]string{"decode": consts.GlobalDynamoNamespace}, wantReason: "UnsupportedSourceScope"},
-		{name: "published global frontend scope", workers: map[string]string{"decode": "worker"}, frontends: map[string]string{"frontend": consts.GlobalDynamoNamespace}, wantReason: "UnsupportedSourceScope"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Publish semantic bindings without current role status or interpreting authored discovery settings")
@@ -105,14 +100,14 @@ func TestRelayUsesPublishedRuntimeBindings(t *testing.T) {
 				return
 			}
 
-			t.Log("Wire the published runtime binding and complete source set into the Relay")
+			t.Log("Keep the Relay's existing base identity while wiring the published worker sources")
 			if err := kube.Get(t.Context(), key, &deployment); err != nil {
 				t.Fatal(err)
 			}
 			if !slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool {
-				return env.Name == "DYN_NAMESPACE" && env.Value == test.wantRuntime
+				return env.Name == "DYN_NAMESPACE" && env.Value == "ns-graph"
 			}) {
-				t.Fatalf("Relay did not use the published runtime namespace: %+v", deployment.Spec.Template.Spec.Containers[0].Env)
+				t.Fatalf("Relay did not retain its base namespace: %+v", deployment.Spec.Template.Spec.Containers[0].Env)
 			}
 			var configMap corev1.ConfigMap
 			if err := kube.Get(t.Context(), key, &configMap); err != nil {
@@ -128,6 +123,43 @@ func TestRelayUsesPublishedRuntimeBindings(t *testing.T) {
 			}
 			if !slices.Equal(sources, test.wantSources) {
 				t.Fatalf("sources=%v, want %v", sources, test.wantSources)
+			}
+
+			t.Log("Worker namespace changes update sources without rolling Relay, including worker-only graphs")
+			deploymentVersion, connectionRevision := deployment.ResourceVersion, document.ConnectionRevision
+			for name := range test.workers {
+				status := dgd.Status.Components[name]
+				status.RuntimeNamespace += "-next"
+				dgd.Status.Components[name] = status
+			}
+			if err := kube.Status().Update(t.Context(), dgd); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(relay)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := kube.Get(t.Context(), key, &deployment); err != nil {
+				t.Fatal(err)
+			}
+			if err := kube.Get(t.Context(), key, &configMap); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(configMap.Data["sources.json"]), &document); err != nil {
+				t.Fatal(err)
+			}
+			if deployment.ResourceVersion != deploymentVersion || document.ConnectionRevision != connectionRevision {
+				t.Fatal("worker namespace changes rewrote the Relay Deployment or connection revision")
+			}
+			var updatedSources []string
+			for _, source := range document.Sources {
+				updatedSources = append(updatedSources, source.Namespace)
+			}
+			var wantSources []string
+			for _, source := range test.wantSources {
+				wantSources = append(wantSources, source+"-next")
+			}
+			if !slices.Equal(updatedSources, wantSources) {
+				t.Fatalf("updated sources=%v, want %v", updatedSources, wantSources)
 			}
 		})
 	}

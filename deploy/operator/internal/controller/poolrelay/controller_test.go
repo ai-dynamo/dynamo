@@ -65,8 +65,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"frontend": {RuntimeNamespace: "inference-green"},
-			"decode":   {RuntimeNamespace: "inference-green-hash"},
+			"decode": {RuntimeNamespace: "inference-green-hash"},
 		}},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).
@@ -98,7 +97,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		!slices.Equal(container.Args, []string{"--cluster-id", "east", "--sources-file", sourcesFilePath, "--bind", "0.0.0.0:5561"}) {
 		t.Fatalf("unexpected Relay process command: %v %v", container.Command, container.Args)
 	}
-	t.Log("Relay uses the published frontend binding while workers use a different namespace")
+	t.Log("Relay keeps its base namespace even before frontend status is published")
 	foundNamespace := false
 	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
 		if item.Name == "DYN_NAMESPACE" {
@@ -231,9 +230,8 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		t.Fatal("new Relay Pod does not match the updated source file")
 	}
 
-	t.Log("Roll the Relay when its published frontend load binding changes")
-	previousTemplate := deployment.Spec.Template.DeepCopy()
-	connectionRevision = sourceDocument.ConnectionRevision
+	t.Log("Frontend status publication does not change Relay identity or roll Pods")
+	beforeFrontendDeployment, beforeFrontendSources := deployment.DeepCopy(), sources.DeepCopy()
 	if err := client.Get(ctx, key, dgd); err != nil {
 		t.Fatal(err)
 	}
@@ -250,19 +248,8 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	if err := client.Get(ctx, childKey, &sources); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(sources.Data["sources.json"]), &sourceDocument); err != nil {
-		t.Fatal(err)
-	}
-	if reflect.DeepEqual(*previousTemplate, deployment.Spec.Template) || sourceDocument.ConnectionRevision == connectionRevision ||
-		!slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool {
-			return env.Name == "DYN_NAMESPACE" && env.Value == "opaque-load-scope"
-		}) || !slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool {
-		return env.Name == "DYN_RELAY_CONNECTION_REVISION" && env.Value == sourceDocument.ConnectionRevision
-	}) {
-		t.Fatal("frontend binding change did not update the Pod and paired source revision")
-	}
-	if len(sourceDocument.Sources) != 1 || sourceDocument.Sources[0].Namespace != "green-runtime-next" {
-		t.Fatalf("frontend binding change altered worker sources: %+v", sourceDocument.Sources)
+	if !reflect.DeepEqual(*beforeFrontendDeployment, deployment) || !reflect.DeepEqual(*beforeFrontendSources, sources) {
+		t.Fatal("frontend status publication changed Relay resources or source configuration")
 	}
 
 	t.Log("Make both listeners available before testing missing runtime bindings")
@@ -517,7 +504,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			"decode": {RuntimeNamespace: "green-runtime"},
 		}},
 	}
-	_, old, err := render(relay, "green-runtime", []string{"green-runtime"})
+	_, old, err := render(relay, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +518,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 	stale := old.DeepCopy()
 	relay.Spec.PodTemplate.Spec.Containers[0].Image = "relay:new"
-	_, wanted, err := render(relay, "green-runtime", []string{"green-runtime"})
+	_, wanted, err := render(relay, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +571,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "relay-registry"}}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_PUBLICATION_THRESHOLD", Value: "32"}}
-	_, deployment, err := render(relay, "green-runtime", []string{"green-runtime"})
+	_, deployment, err := render(relay, []string{"green-runtime"})
 	if err != nil {
 		t.Fatalf("supported Relay tuning was rejected: %v", err)
 	}
@@ -597,7 +584,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 		t.Fatal("PodTemplate image pull secrets were not preserved")
 	}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_CONNECTION_REVISION", Value: "wrong"}}
-	if _, _, err := render(relay, "green-runtime", []string{"green-runtime"}); err == nil {
+	if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
 		t.Fatal("operator-owned connection revision was accepted")
 	}
 }
@@ -611,7 +598,7 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 				ObjectMeta: relayMeta,
 				Spec:       relaySpec(clusterID),
 			}
-			if _, _, err := render(relay, "green-runtime", []string{"green-runtime"}); err == nil {
+			if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
 				t.Fatalf("accepted cluster ID %q", clusterID)
 			}
 		})
