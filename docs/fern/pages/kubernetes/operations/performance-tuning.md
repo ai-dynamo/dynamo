@@ -112,20 +112,12 @@ measured traffic.
 ## Bound frontend host memory growth
 
 The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
-assembly. With the default glibc allocator, freed memory may be retained in allocator arenas instead
-of being returned to the operating system, so frontend resident memory can climb to a high-water
-mark under load and may not drop when the load stops. This retention is allocator behavior rather
-than a leak.
+assembly. Its Rust allocations use a built-in jemalloc that returns unused pages to the operating
+system over about 10 seconds, so after the load stops resident memory falls substantially, but not
+to the live heap: partly used pages stay resident, and CPython and C libraries keep the system
+allocator's high-water mark. This is allocator behavior rather than a leak. To change the settings,
+see [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator).
 
-To bound the retained footprint, preload jemalloc with decay enabled on the frontend container. See
-[Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
-for the `LD_PRELOAD` and `MALLOC_CONF` values and for which container images ship `libjemalloc2`.
-
-To verify the change, run the same workload and track the frontend container's memory usage
-(`memory.current` on cgroup v2, or `memory.usage_in_bytes` on cgroup v1) across repeated benchmark
-rounds and through an idle window after the load stops.
-
-With glibc the value typically stays at its peak, while with jemalloc and decay it may
-settle toward a floor. Those decay settings do not guarantee that purging occurs during an idle
-window; include an idle period in the benchmark to confirm whether memory actually settles for
-your workload.
+To verify a change, track the frontend container's `memory.current` (cgroup v2) or
+`memory.usage_in_bytes` (cgroup v1) across repeated runs of the same workload, and again after a
+minute or two of idle, because purging is time-based.

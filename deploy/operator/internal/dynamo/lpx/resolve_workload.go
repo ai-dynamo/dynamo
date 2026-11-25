@@ -90,11 +90,6 @@ func ResolveWorkload(
 			snapshot = acquired
 		}
 
-		// Paired readers share configuration; they must move to units together.
-		if len(projections) != 0 && projections[0].placesLPUUnits() != (snapshot.lpuUnits.Len() != 0) {
-			return nil, fmt.Errorf("LPX workload mixes builds with and without lpuUnits: components %q and %q must use the same placement format", projections[0].stage, configuredModel)
-		}
-
 		// Validated model cardinality fixes one runtime shape for the selected workload.
 		if pipeline == "" {
 			pipeline = PipelineSingle
@@ -109,31 +104,26 @@ func ResolveWorkload(
 			return nil, err
 		}
 
-		// Project the component once into the resolver-owned aggregate destination.
+		// Project the component's models from its build once.
 		modelNames := expandedModelNames(len(components), ServesEndpoint(stage), int(ptr.Deref(stage.Replicas, 1)))
 		intent := ModelProjectionInput{
 			Pipeline:        pipeline,
 			Models:          modelNames,
+			Stage:           stage.ComponentName,
 			RuntimeBuildRef: model.BuildID,
 			Build:           snapshot,
 			LocalPartitions: model.LocalPartitions(),
 		}
-		projected, err := appendModelProjections(projections, intent)
+		projected, err := projectModels(intent)
 		if err != nil {
 			return nil, fmt.Errorf("project LPX model %q from build %q: %w", modelNames[0], model.BuildID, err)
 		}
 
 		// Component geometry fixes the Agent count independently of draft fanout.
-		componentProjections := projected[len(projections):]
-		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).Replicas; count != nil && int(*count) != componentProjections[0].agentReplicas {
-			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, componentProjections[0].agentReplicas)
+		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).Replicas; count != nil && int(*count) != projected[0].agentReplicas {
+			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, projected[0].agentReplicas)
 		}
-
-		// Retain the authored stage association before acquiring the next component.
-		for _, projection := range componentProjections {
-			projection.stage = stage.ComponentName
-		}
-		projections = projected
+		projections = append(projections, projected...)
 	}
 
 	// The conductor component owns explicit capacity or the initial native seed.
@@ -225,7 +215,7 @@ func expandedModelNames(componentCount int, target bool, draftCount int) []strin
 	}
 	names := make([]string, draftCount)
 	for index := range names {
-		names[index] = fmt.Sprintf("draft%d", index)
+		names[index] = fmt.Sprintf("%s%d", runtimeModelDraft, index)
 	}
 	return names
 }

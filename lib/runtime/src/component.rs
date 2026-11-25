@@ -80,12 +80,19 @@ pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
     Tcp(String),
+    /// An engine this process dials itself, through the dispatch registered
+    /// with [`DistributedRuntime::register_direct_dispatch`](crate::DistributedRuntime::register_direct_dispatch);
+    /// no request-plane server exists for it. The address is the engine's URL;
+    /// the engine's own protocol (gRPC, HTTP, ...) is the dispatch's concern.
+    Direct(String),
 }
 
 impl TransportType {
     pub fn address(&self) -> &str {
         match self {
-            TransportType::Nats(address) | TransportType::Tcp(address) => address,
+            TransportType::Nats(address)
+            | TransportType::Tcp(address)
+            | TransportType::Direct(address) => address,
         }
     }
 }
@@ -284,6 +291,8 @@ impl Component {
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
+            inflight_requests: Arc::new(OnceLock::new()),
+            track_response_completion: false,
             lifecycle_operation_role: Arc::new(OnceLock::new()),
         };
         // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
@@ -373,6 +382,9 @@ pub struct Endpoint {
 
     /// This hierarchy's own metrics registry
     metrics_registry: crate::MetricsRegistry,
+
+    pub(crate) inflight_requests: Arc<OnceLock<prometheus::IntGauge>>,
+    pub(crate) track_response_completion: bool,
 
     /// Topology role shared by all clones of this endpoint.
     lifecycle_operation_role: Arc<OnceLock<crate::telemetry::LifecycleOperationRole>>,

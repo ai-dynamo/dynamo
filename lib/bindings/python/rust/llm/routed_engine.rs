@@ -13,6 +13,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
 use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
@@ -38,7 +39,7 @@ fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedReque
     let py = obj.py();
     let token_ids_key = pyo3::intern!(py, "token_ids");
     let extra_args_key = pyo3::intern!(py, "extra_args");
-    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let dict = obj.cast_exact::<PyDict>().ok()?;
     let token_ids = py_convert::read_exact_u32_list(&dict.get_item(token_ids_key).ok()??)?;
     let extra_args = match dict.get_item(extra_args_key).ok()? {
         Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
@@ -61,7 +62,7 @@ pub fn _convert_preprocessed_request(
     py: Python<'_>,
     preprocessed: &Bound<'_, PyAny>,
     fast_path: bool,
-) -> PyResult<Option<PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     let request = if fast_path {
         fast_preprocessed_request(preprocessed)
     } else {
@@ -81,20 +82,38 @@ fn copy_session_affinity(
     }
 }
 
+/// Give the routed request its parent request's agent context, unless it carries its own. The
+/// router and workers read the session only from this field.
+fn inherit_agent_context(
+    parent_context: &crate::context::Context,
+    request: &mut PreprocessedRequest,
+) {
+    if request.agent_context.is_none() {
+        request.agent_context = parent_context.agent_context().cloned();
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
+    ///
+    /// With `context`, the routed request inherits the parent request's session affinity and,
+    /// unless `preprocessed` sets `agent_context`, its agent context.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
-        preprocessed: PyObject,
+        preprocessed: Py<PyAny>,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let preprocessed = preprocessed.bind(py);
-        let request = fast_preprocessed_request(preprocessed)
+        let mut request = fast_preprocessed_request(preprocessed)
             .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
+            inherit_agent_context(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(
@@ -131,7 +150,7 @@ impl RoutedEngine {
                     .await
                     .map_err(routed_error_to_pyerr)?;
                 let task_context = stream.context();
-                let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(32);
+                let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<Py<PyAny>>>(32);
 
                 tokio::spawn(async move {
                     loop {
@@ -147,7 +166,7 @@ impl RoutedEngine {
                             break;
                         };
 
-                        let py_response = Python::with_gil(|py| {
+                        let py_response = Python::attach(|py| {
                             response.map_data(|data| {
                                 pythonize(py, &data)
                                     .map(|obj| obj.unbind())
@@ -162,7 +181,7 @@ impl RoutedEngine {
                     }
                 });
 
-                Ok(crate::AsyncResponseStream::new(rx, true))
+                Ok(crate::AsyncResponseStream::routed_engine(rx))
             }
             .instrument(dispatch_span),
         )
@@ -198,7 +217,7 @@ fn dispatch_span(
 mod tests {
     use super::*;
     use dynamo_llm::protocols::common::extensions::{
-        SessionAffinityId, session_affinity_from_headers,
+        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, session_affinity_from_headers,
     };
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
@@ -230,6 +249,27 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
+    }
+
+    #[test]
+    fn processor_agent_context_is_not_overwritten() {
+        let agent_context = |session_id: &str| -> AgentContext {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
+        };
+        let mut source = SingleIn::new(());
+        source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_agent_context_from(&source)
+                .expect("pipeline context converts to Python binding context");
+
+        let mut request = preprocessed_request();
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-headers")));
+
+        request.agent_context = Some(agent_context("from-processor"));
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-processor")));
     }
 
     fn make_trace_context(

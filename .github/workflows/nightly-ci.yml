@@ -323,7 +323,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
@@ -527,7 +527,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -573,6 +573,85 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  # ============================================================================
+  # ADVISORY FRONTEND REPLAY
+  # Replays the public DeepSeek V4.1 traces through this run's frontend image,
+  # with a CPU token worker in place of an engine (no GPU, no weights). It is
+  # advisory: a failed replay never fails the nightly. See
+  # tests/frontend/trace_replay/README.md.
+  # ============================================================================
+  frontend-replay:
+    name: frontend-replay (advisory)
+    needs: [compute-release-mode, resolve-source-sha, frontend-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    continue-on-error: true
+    runs-on: prod-tester-amd-v2
+    timeout-minutes: 20
+    container:
+      # The image frontend-build pushed in this run (tag scheme in shared-build-image.yml).
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
+      env:
+        # Same ARC uid workaround as the mypy job in dynamo-pipeline.yml.
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    env:
+      REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json
+      REPLAY_ASSETS: frontend-replay-assets
+      REPLAY_OUTPUT: frontend-replay-output
+      DYN_REPLAY_HARNESS_REVISION: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      DYN_REPLAY_IMAGE: ${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
+    steps:
+      # The default checkout is github.sha, which resolve-source-sha also gives
+      # frontend-build; the next step fails if the two ever differ.
+      - name: Checkout the harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Require the harness and image to share a commit
+        shell: bash
+        run: test "${GITHUB_SHA}" = "${DYN_REPLAY_HARNESS_REVISION}"
+
+      - name: Prepare sealed tokenizer assets
+        shell: bash
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay prepare-assets \
+            --corpus "${REPLAY_CORPUS}" \
+            --model-dir "${GITHUB_WORKSPACE}/${REPLAY_ASSETS}"
+
+      - name: Replay both frontend boundaries
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay run \
+            --corpus "${REPLAY_CORPUS}" \
+            --model-dir "${GITHUB_WORKSPACE}/${REPLAY_ASSETS}" \
+            --output-dir "${GITHUB_WORKSPACE}/${REPLAY_OUTPUT}" \
+            --modes unary,sse \
+            --concurrency 1
+
+      - name: Record an infrastructure result if the replay left none
+        if: always()
+        shell: bash
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay report \
+            --output-dir "${GITHUB_WORKSPACE}/${REPLAY_OUTPUT}"
+          cat "${REPLAY_OUTPUT}/summary.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload replay evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: frontend-replay-${{ github.run_attempt }}
+          path: ${{ env.REPLAY_OUTPUT }}
+          if-no-files-found: warn
+          retention-days: 30
+
   deepseek-v4-pro-agg-perf:
     name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]
@@ -611,7 +690,7 @@ jobs:
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -1015,7 +1094,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
-      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["gpu-{0}","amd64","runner-version-v1","gpu-generic","us-west-2"]', matrix.gpu_count) }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -1043,7 +1122,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang
       test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
-      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["gpu-{0}","amd64","runner-version-v1","gpu-generic","us-west-2"]', matrix.gpu_count) }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -1076,9 +1155,9 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm
       test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]'
       run_sanity_check: false
       gpu_test_markers: 'sidecar and trtllm and gpu_1'
@@ -1100,7 +1179,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -1111,10 +1190,11 @@ jobs:
       # TODO: this ad-hoc exclusion is duplicated across pr.yaml, post-merge-ci.yml,
       # and nightly-ci.yml's gpu_test_markers; consolidate into shared-test.yml
       # once there's a second marker that needs the same treatment.
-      gpu_test_markers: vllm and gpu_1 and not sidecar
+      # Exclude h100 tests: they need Hopper-class GPUs and run on the vllm-h100-test lane below.
+      gpu_test_markers: vllm and gpu_1 and not h100 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
-      # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      # 24 GiB admits all profiled vLLM tests on the smallest GPU fallback.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -1132,7 +1212,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -1155,7 +1235,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner_labels: '["gpu-4","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -1207,7 +1287,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -1218,8 +1298,8 @@ jobs:
       gpu_test_markers: sglang and gpu_1 and not h100 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
-      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
-      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      # Keep the per-test cap compatible with the smallest GPU fallback.
+      # Larger GPUs get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -1237,7 +1317,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -1260,7 +1340,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 4-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner_labels: '["gpu-4","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -1311,9 +1391,9 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -1340,9 +1420,9 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -1366,7 +1446,7 @@ jobs:
       # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false

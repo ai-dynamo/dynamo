@@ -14,14 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
-use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
+use super::prefill_tracker::PrefillLoadSnapshot;
 use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::busy::FullRankCounts;
-use crate::prelude::WorkerWithDpRank;
-use dynamo_router_protocol::worker::WorkerCapacity;
+use dynamo_router_protocol::worker::{WorkerCapacity, WorkerWithDpRank};
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -85,13 +84,6 @@ impl WorkerLoadSnapshot {
             additional_active_blocks,
         }
     }
-
-    pub(super) fn modeled_remaining_prefill_time_ms(
-        &self,
-        now: Instant,
-    ) -> Result<u64, PrefillTimeLoadError> {
-        self.prefill.modeled_remaining_prefill_time_ms_at(now)
-    }
 }
 
 #[derive(Debug)]
@@ -142,6 +134,8 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    /// Changes whenever a rank is added or removed, or reports another capacity.
+    version: u64,
 }
 
 impl WorkerLoadTable {
@@ -151,6 +145,13 @@ impl WorkerLoadTable {
 
     fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadSnapshot> {
         self.entries.get(&worker).map(WorkerLoadSlot::snapshot)
+    }
+
+    /// One entry with its position, so a caller can pair it with [`Self::capacity_at`].
+    fn get_indexed(&self, worker: WorkerWithDpRank) -> Option<(usize, WorkerLoadSnapshot)> {
+        self.entries
+            .get_full(&worker)
+            .map(|(index, _, slot)| (index, slot.snapshot()))
     }
 
     fn iter(&self) -> impl Iterator<Item = (WorkerWithDpRank, WorkerLoadSnapshot)> + '_ {
@@ -178,7 +179,11 @@ impl WorkerLoadTable {
         let Some(index) = self.entries.get_index_of(&worker) else {
             return false;
         };
-        self.capacities[index] = capacity;
+        if self.capacities[index] != capacity {
+            self.capacities[index] = capacity;
+            // Full ranks counted before this were judged against the old capacity.
+            self.version += 1;
+        }
         true
     }
 
@@ -189,6 +194,7 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -206,6 +212,7 @@ impl WorkerLoadTable {
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -213,6 +220,7 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.version += 1;
         }
     }
 }
@@ -386,19 +394,34 @@ impl PromptRegistry {
         )
     }
 
+    /// The `additional_active_blocks` a projection of `token_sequence` gives `worker`,
+    /// computed for that rank alone.
+    pub(super) fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        token_sequence
+            .len()
+            .saturating_sub(self.membership.overlap_depth_for(token_sequence, worker))
+    }
+
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the same pass also judges each rank's projection against the busy
-    /// thresholds it carries and counts the ranks without room per worker.
+    /// thresholds it carries and counts the ranks without room per worker. Returns the
+    /// load table's version, which changes whenever a rank is added or removed, or reports
+    /// another capacity.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
+        let version = loads.version;
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             load.projection(decay_now, query_len.saturating_sub(overlap_depth))
@@ -417,7 +440,7 @@ impl PromptRegistry {
                         .is_some()
                 })
             {
-                return;
+                return version;
             }
 
             projections.clear();
@@ -427,7 +450,7 @@ impl PromptRegistry {
                     .iter()
                     .map(|(worker, load)| (worker, project(worker, load))),
             );
-            return;
+            return version;
         };
 
         // The same two shapes, judging each rank as its projection is written.
@@ -442,7 +465,7 @@ impl PromptRegistry {
                     .is_some()
             });
             if refreshed {
-                return;
+                return version;
             }
             // The in-place pass counted a prefix before the key sets diverged.
             full_ranks.clear();
@@ -455,9 +478,90 @@ impl PromptRegistry {
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
+        version
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`], and judge it again in the `full_ranks` that pass
+    /// counted. `version` is what that pass returned: false, with nothing overwritten, when
+    /// a rank was added or removed since, or reported another capacity.
+    pub(super) fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        mut full_ranks: Option<&mut FullRankCounts>,
+    ) -> bool {
+        // Each edge on the query's path is matched once for every worker.
+        let additional_active_blocks: Vec<usize> = match token_sequence {
+            Some(query) => {
+                let path = self.membership.overlap_path(query);
+                workers
+                    .iter()
+                    .map(|&worker| query.len().saturating_sub(path.depth_for(worker)))
+                    .collect()
+            }
+            None => vec![0; workers.len()],
+        };
+        let loads = self.loads.read();
+        if loads.version != version {
+            return false;
+        }
+        // NOTE(perf): read every rank before writing any. A slot read ends in a memory
+        // barrier, and `projections` was filled on another thread, so written in the same
+        // loop each cache miss on it would wait for the one before.
+        // Capacity is read only for a pass that judges busy thresholds, as in the full pass.
+        let is_judged = full_ranks.is_some();
+        let reread: Vec<Option<(WorkerLoadProjection, WorkerCapacity)>> = workers
+            .iter()
+            .zip(additional_active_blocks)
+            .map(|(&worker, additional_active_blocks)| {
+                let (index, load) = loads.get_indexed(worker)?;
+                let capacity = if is_judged {
+                    loads.capacity_at(index)
+                } else {
+                    WorkerCapacity::default()
+                };
+                Some((
+                    load.projection(decay_now, additional_active_blocks),
+                    capacity,
+                ))
+            })
+            .collect();
+        drop(loads);
+        for (&worker, reread) in workers.iter().zip(reread) {
+            // The ranks are those of the pass, so one it did not project is not registered.
+            if let (Some((reread, capacity)), Some(projection)) =
+                (reread, projections.get_mut(&worker))
+            {
+                if let Some(full_ranks) = full_ranks.as_deref_mut() {
+                    full_ranks.rejudge(worker, capacity, projection, &reread);
+                }
+                *projection = reread;
+            }
+        }
+        true
+    }
+
+    pub(super) fn record_full_worker_ranks_at(
+        &self,
+        decay_now: Instant,
+        full_ranks: &mut FullRankCounts,
+    ) {
+        full_ranks.clear();
+        let loads = self.loads.read();
+        for (index, worker, load) in loads.iter_indexed() {
+            full_ranks.record(
+                worker,
+                loads.capacity_at(index),
+                &load.projection(decay_now, 0),
+            );
+        }
+    }
+
+    /// Read ranks' loads one at a time at `decay_now` under one read guard.
     pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         WorkerLoadReader {
             loads: self.loads.read(),
@@ -489,17 +593,7 @@ impl PromptRegistry {
             .collect()
     }
 
-    pub(super) fn modeled_remaining_prefill_times_ms(
-        &self,
-        now: Instant,
-    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
-        self.loads
-            .read()
-            .iter()
-            .map(|(worker, load)| (worker, load.modeled_remaining_prefill_time_ms(now)))
-            .collect()
-    }
-
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,
@@ -529,7 +623,7 @@ impl PromptRegistry {
         );
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn is_block_index_empty(&self) -> bool {
         self.membership.is_empty()
     }
@@ -543,9 +637,9 @@ mod tests {
 
     use super::*;
     use crate::prefill_tracker::AnchoredPrefillSnapshot;
-    use crate::prelude::WorkerWithDpRank;
     use crate::single::{PromptMembershipRemove, PromptMembershipStore};
     use crate::topology::RemovedWorkerState;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     fn worker(worker_id: u64, dp_rank: u32) -> WorkerWithDpRank {
         WorkerWithDpRank::new(worker_id, dp_rank)
@@ -588,8 +682,7 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
-                total_modeled_prefill_time_ms: expected_prefill_duration
-                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
+                all_prefills_modeled: expected_prefill_duration.is_some(),
             },
         }
     }
@@ -822,16 +915,14 @@ mod tests {
     #[test]
     fn projection_pass_counts_full_ranks_against_each_ranks_capacity() {
         use crate::busy::BusyThresholds;
+        use crate::host::BusyThresholdsHostExt;
 
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
         let worker_c = worker(3, 0);
         let registry = PromptRegistry::new([worker_a, worker_b]);
         let decay_now = Instant::now();
-        let limits = BusyThresholds {
-            decode_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        };
+        let limits = BusyThresholds::default().with_decode_busy_threshold_frac(Some(0.5));
         // Both ranks hold 7 blocks; only worker 1 reports the 8-block capacity that makes
         // 7 blocks "full". An unknown rank cannot be given a capacity.
         let capacity = WorkerCapacity::new(Some(100), Some(8));
@@ -855,6 +946,17 @@ mod tests {
             "unreported capacity is never full"
         );
         assert_eq!(projections[&worker_a].active_decode_blocks, 7);
+        let mut count_only = FullRankCounts::default();
+        count_only.reset(limits);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
 
         // Worker 1 leaves and worker 3 arrives with the same capacity and load. The in-place
         // pass counts a prefix before it notices the key sets diverged; the rebuild must count
@@ -879,6 +981,73 @@ mod tests {
         assert!(full_ranks.worker_is_full(3, 1));
         assert!(!full_ranks.worker_is_full(3, 2), "one rank is counted once");
         assert_eq!(projections.len(), 2);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reprojection_judges_the_ranks_it_rereads_again() {
+        use crate::busy::BusyThresholds;
+        use crate::host::BusyThresholdsHostExt;
+
+        let worker_a = worker(1, 0);
+        let worker_b = worker(1, 1);
+        let registry = PromptRegistry::new([worker_a, worker_b]);
+        let decay_now = Instant::now();
+        // A rank past 4 of its 8 blocks is full.
+        let capacity = WorkerCapacity::new(Some(100), Some(8));
+        assert!(registry.set_worker_capacity(worker_a, capacity));
+        assert!(registry.set_worker_capacity(worker_b, capacity));
+        registry.replace_worker_load_state(worker_a, worker_load_snapshot(7));
+
+        let mut projections = FxHashMap::default();
+        let mut full_ranks = FullRankCounts::default();
+        full_ranks.reset(BusyThresholds::default().with_decode_busy_threshold_frac(Some(0.5)));
+        let version = registry.project_worker_loads_into(
+            None,
+            decay_now,
+            &mut projections,
+            Some(&mut full_ranks),
+        );
+        assert!(!full_ranks.worker_is_full(1, 2));
+        let mut reproject = |workers: &[WorkerWithDpRank], full_ranks: &mut FullRankCounts| {
+            registry.reproject_worker_loads(
+                None,
+                decay_now,
+                workers,
+                version,
+                &mut projections,
+                Some(full_ranks),
+            )
+        };
+
+        // A rank re-read on the same side of its limit is not counted again.
+        assert!(reproject(&[worker_a, worker_b], &mut full_ranks));
+        assert!(!full_ranks.worker_is_full(1, 2));
+
+        // The other rank fills: re-reading it alone makes the worker full.
+        registry.replace_worker_load_state(worker_b, worker_load_snapshot(7));
+        assert!(reproject(&[worker_b], &mut full_ranks));
+        assert!(full_ranks.worker_is_full(1, 2));
+
+        // Both drain: a worker without a full rank leaves no count behind.
+        registry.replace_worker_load_state(worker_a, worker_load_snapshot(0));
+        registry.replace_worker_load_state(worker_b, worker_load_snapshot(0));
+        assert!(reproject(&[worker_a, worker_b], &mut full_ranks));
+        assert!(full_ranks.is_empty());
+
+        // The counts were judged against the capacity the rank reported then.
+        assert!(registry.set_worker_capacity(worker_a, capacity));
+        assert!(reproject(&[worker_a], &mut full_ranks));
+        assert!(registry.set_worker_capacity(worker_a, WorkerCapacity::new(Some(100), Some(16))));
+        assert!(!reproject(&[worker_a], &mut full_ranks));
     }
 
     #[test]

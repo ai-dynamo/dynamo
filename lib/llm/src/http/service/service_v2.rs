@@ -5,8 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -15,7 +13,6 @@ use axum::body::Body;
 use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
 
-use super::Metrics;
 use super::RouteDoc;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
@@ -29,11 +26,15 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_http_server::lifecycle::{
+    InflightPermit, ServiceObserver, ServiceStage, echo_request_id_header, track_inflight_response,
+};
+use dynamo_http_server::metrics::Metrics;
+use dynamo_http_server::server::{HttpServer, HttpServerConfig, listen_socket_addr};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
@@ -45,8 +46,8 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use std::net::{IpAddr, SocketAddr};
-use tokio::sync::{Notify, Semaphore};
+use std::net::SocketAddr;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -55,19 +56,6 @@ use crate::frontend_config::{
     ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
     MediaRejectionConfig, MetricsConfig,
 };
-
-/// Middleware that echoes `x-request-id` from request to response headers.
-async fn echo_request_id_header(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let x_request_id = request.headers().get("x-request-id").cloned();
-    let mut response = next.run(request).await;
-    if let Some(value) = x_request_id {
-        response.headers_mut().insert("x-request-id", value);
-    }
-    response
-}
 
 /// State used to select the error format for unmatched routes.
 #[derive(Clone)]
@@ -176,7 +164,6 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
@@ -193,14 +180,7 @@ async fn track_inflight_inference(
     }
 
     let response = next.run(request).await;
-    let (parts, body) = response.into_parts();
-    // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    track_inflight_response(response, permit)
 }
 
 /// HTTP service shared state
@@ -397,169 +377,6 @@ impl BackendErrorCheck {
                 );
                 Self::Skip
             }
-        }
-    }
-}
-
-/// Lifecycle stage for the HTTP frontend.
-///
-/// The stage gates readiness and request admission separately from the runtime
-/// cancellation token so the frontend can stop accepting new requests before
-/// tearing down discovery and transport state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceStage {
-    /// The frontend is ready to admit new inference requests.
-    Ready = 0,
-    /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
-    /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
-}
-
-impl ServiceStage {
-    fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Ready,
-            1 => Self::Draining,
-            _ => Self::Stopping,
-        }
-    }
-}
-
-impl std::fmt::Display for ServiceStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ready => f.write_str("ready"),
-            Self::Draining => f.write_str("draining"),
-            Self::Stopping => f.write_str("stopping"),
-        }
-    }
-}
-
-/// Shared HTTP frontend lifecycle and inflight request tracker.
-///
-/// `ServiceObserver` is shared by HTTP handlers, health endpoints, and the
-/// shutdown path. It lets shutdown first mark the frontend as draining, then
-/// wait for admitted inference response bodies to complete before cancelling
-/// runtime state.
-#[derive(Debug)]
-pub struct ServiceObserver {
-    stage: AtomicU8,
-    inflight_inference: AtomicU64,
-    inflight_zero: Notify,
-}
-
-impl Default for ServiceObserver {
-    fn default() -> Self {
-        Self {
-            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
-            inflight_inference: AtomicU64::new(0),
-            inflight_zero: Notify::new(),
-        }
-    }
-}
-
-impl ServiceObserver {
-    /// Return the current frontend lifecycle stage.
-    pub fn stage(&self) -> ServiceStage {
-        ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
-    }
-
-    /// Return true when the frontend should admit new inference requests.
-    pub fn is_ready(&self) -> bool {
-        self.stage() == ServiceStage::Ready
-    }
-
-    /// Mark the frontend as draining.
-    ///
-    /// Draining makes readiness fail and causes request admission checks to
-    /// reject new inference requests while existing response bodies continue.
-    pub fn start_draining(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering draining stage"
-        );
-        self.stage
-            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
-    }
-
-    /// Mark the frontend as stopping.
-    ///
-    /// Stopping is entered after inflight requests drain or the graceful
-    /// shutdown timeout expires.
-    pub fn start_stopping(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering stopping stage"
-        );
-        self.stage
-            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
-    }
-
-    /// Track one admitted inference response body.
-    ///
-    /// The returned permit must live for the full HTTP response body lifetime,
-    /// including streaming responses. Dropping the permit decrements the
-    /// inflight count and wakes shutdown waiters when the count reaches zero.
-    pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
-        self.inflight_inference.fetch_add(1, Ordering::Relaxed);
-        InflightPermit {
-            observer: self.clone(),
-        }
-    }
-
-    /// Return the number of admitted inference requests still in flight.
-    pub fn inflight_count(&self) -> u64 {
-        self.inflight_inference.load(Ordering::Acquire)
-    }
-
-    /// Wait until all admitted inference requests drain or `timeout` expires.
-    ///
-    /// Returns `true` when inflight work drained before the timeout and `false`
-    /// when shutdown should proceed because the timeout expired.
-    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.inflight_zero.notified();
-                tokio::pin!(notified);
-                // Register before reading the count so a final permit drop
-                // cannot notify between the count check and the await.
-                notified.as_mut().enable();
-                if self.inflight_count() == 0 {
-                    break;
-                }
-                notified.as_mut().await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-}
-
-/// RAII guard for one admitted inference response.
-///
-/// This permit is held by a response-body wrapper so it is released only when
-/// the client response body finishes or is dropped.
-pub struct InflightPermit {
-    observer: Arc<ServiceObserver>,
-}
-
-impl Drop for InflightPermit {
-    fn drop(&mut self) {
-        if self
-            .observer
-            .inflight_inference
-            .fetch_sub(1, Ordering::AcqRel)
-            == 1
-            && self.observer.stage() != ServiceStage::Ready
-        {
-            self.observer.inflight_zero.notify_waiters();
         }
     }
 }
@@ -950,6 +767,10 @@ pub struct HttpService {
     /// Admin routes, served on their own listener when enabled.
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
+    /// The registry the HTTP service's own metrics are registered into.
+    prometheus_registry: prometheus::Registry,
+    /// Keeps `prometheus_registry` attached to the DRT's metrics tree while any clone of this service lives.
+    _drt_metrics_attachment: Option<Arc<dynamo_runtime::metrics::AttachedPrometheusRegistry>>,
 }
 
 /// Admin routes and the address they are served on.
@@ -1126,6 +947,14 @@ impl HttpService {
         HttpServiceConfigBuilder::default()
     }
 
+    /// The registry this service's own metrics (`dynamo_frontend_*` and the
+    /// rest) are registered into. Public only for the integration tests in
+    /// `tests/http_metrics.rs`.
+    #[doc(hidden)]
+    pub fn prometheus_registry(&self) -> &prometheus::Registry {
+        &self.prometheus_registry
+    }
+
     pub fn state_clone(&self) -> Arc<State> {
         self.state.clone()
     }
@@ -1189,95 +1018,37 @@ impl HttpService {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
         }
 
-        let address = format!("{}:{}", self.host, self.port);
-        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
-        tracing::info!(protocol, address, "Starting HTTP(S) service");
-
-        let router = self.router.clone();
-        let observer = cancel_token.child_token();
-
-        let state = self.state.clone();
-        let state_cancel = state.cancel_token().clone();
+        let server = HttpServer::prepare(
+            self.router.clone(),
+            HttpServerConfig {
+                host: self.host.clone(),
+                port: self.port,
+                enable_tls: self.enable_tls,
+                tls_cert_path: self.tls_cert_path.clone(),
+                tls_key_path: self.tls_key_path.clone(),
+                tls_client_ca_cert_path: self.tls_client_ca_cert_path.clone(),
+            },
+            listener,
+        )
+        .await?;
         // Telemetry continues during drain and stops on every service exit path.
         let publisher_cancel = CancellationToken::new();
         let _publisher_guard = publisher_cancel.clone().drop_guard();
 
-        let tls = if self.enable_tls {
-            let cert_path = self
-                .tls_cert_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
-            let key_path = self
-                .tls_key_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-            let mut server_config = dynamo_runtime::tls_utils::server_tls_config(
-                cert_path,
-                key_path,
-                self.tls_client_ca_cert_path.as_deref(),
-            )
-            .context("Failed to create TLS config")?;
-            server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
-        } else {
-            None
-        };
-
-        let listener = match listener {
-            Some(l) => l,
-            None => {
-                let addr = listen_socket_addr(&self.host, self.port)?;
-                bind_listener(addr).map_err(|e| {
-                    tracing::error!(
-                        protocol = %protocol,
-                        address = %address,
-                        error = %e,
-                        "Failed to bind server to address"
-                    );
-                    match e.kind() {
-                        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                            "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                            protocol,
-                            self.port
-                        ),
-                        _ => anyhow::anyhow!(
-                            "Failed to start {} server on {}: {}",
-                            protocol,
-                            address,
-                            e
-                        ),
-                    }
-                })?
-            }
-        };
-        tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
-
-        self.spawn_admin_listener_if_configured(&cancel_token, tls.clone())?;
+        self.spawn_admin_listener_if_configured(&cancel_token, server.tls_acceptor())?;
         self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
         // Spawn canary after all fallible startup so it won't leak on early errors
         tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
         self.start_frontend_load_publisher(&publisher_cancel);
 
-        // The server keeps accepting while inflight requests drain, then gives open
-        // connections what is left of the shutdown budget.
-        let shutdown = async {
-            observer.cancelled().await;
-            state.start_draining();
-            tracing::info!("{protocol} server shutdown requested");
-            let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-            let drain_started = tokio::time::Instant::now();
-            if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                tracing::warn!(
-                    inflight_requests = state.inflight_count(),
-                    "Timed out waiting for inflight inference requests to drain"
-                );
-            }
-            shutdown_timeout.saturating_sub(drain_started.elapsed())
-        };
-        super::server::serve(listener, tls, router, write_idle_timeout(), shutdown).await;
-        state.start_stopping();
-        state_cancel.cancel();
+        server
+            .serve(
+                self.state.service_observer(),
+                self.state.cancel_token().clone(),
+                cancel_token,
+            )
+            .await?;
         Ok(())
     }
 
@@ -1309,15 +1080,15 @@ impl HttpService {
         let Some(admin) = self.admin.clone() else {
             return Ok(());
         };
-        let listener = bind_listener(admin.addr)
+        let listener = dynamo_http_server::server::bind_listener(admin.addr)
             .map_err(|e| anyhow::anyhow!("Failed to bind admin listener on {}: {e}", admin.addr))?;
         tracing::info!(address = %admin.addr, "Admin listener started");
         let admin_cancel = cancel_token.child_token();
-        tokio::spawn(super::server::serve(
+        tokio::spawn(dynamo_http_server::server::serve(
             listener,
             tls,
             admin.router,
-            write_idle_timeout(),
+            dynamo_http_server::server::write_idle_timeout(),
             async move {
                 admin_cancel.cancelled_owned().await;
                 Duration::ZERO
@@ -1392,66 +1163,6 @@ impl HttpService {
     pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
         self.state.flags.get(&endpoint_type)
     }
-}
-
-fn get_graceful_shutdown_timeout() -> usize {
-    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(5)
-}
-
-fn write_idle_timeout() -> Duration {
-    std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .filter(|duration| tokio::time::Instant::now().checked_add(*duration).is_some())
-        .unwrap_or(Duration::from_secs(120))
-}
-
-const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
-
-// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
-fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
-    value
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| (1..=i32::MAX as u32).contains(n))
-        .unwrap_or(DEFAULT_LISTEN_BACKLOG)
-}
-
-fn listen_backlog() -> u32 {
-    parse_listen_backlog(std::env::var(env_llm::DYN_HTTP_LISTEN_BACKLOG))
-}
-
-/// Build the listen address from an IP literal host. IPv6 brackets are optional,
-/// so `::` and `[::]` are equivalent.
-fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
-    let literal = host.trim();
-    let literal = literal
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(literal);
-    let ip: IpAddr = literal
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid address '{host}:{port}': {e}"))?;
-    Ok(SocketAddr::new(ip, port))
-}
-
-/// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
-/// clients connecting within seconds overflow that, and overflowed connections
-/// are delayed or, depending on host TCP settings, fail.
-fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
-    let socket = if addr.is_ipv4() {
-        tokio::net::TcpSocket::new_v4()?
-    } else {
-        tokio::net::TcpSocket::new_v6()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(listen_backlog())
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -1601,16 +1312,10 @@ impl HttpServiceConfigBuilder {
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let systemone_enabled = frontend_api_config.systemone_enabled();
         let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
-        let mut generate_engine_capabilities = generate_routes
+        let generate_engine_capabilities = generate_routes
             .iter()
             .map(|(_, format)| format.capability())
             .collect::<Vec<_>>();
-        // System One scores through SGLang's native format without mounting `/generate`.
-        if systemone_enabled && !generate_engine_capabilities.contains(&SGLANG_GENERATE_CAPABILITY)
-        {
-            generate_engine_capabilities.push(SGLANG_GENERATE_CAPABILITY);
-        }
-
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
@@ -1667,11 +1372,13 @@ impl HttpServiceConfigBuilder {
         state.flags.set(&EndpointType::SystemOne, systemone_enabled);
 
         // enable prometheus metrics
-        let registry = metrics::Registry::new();
+        let registry = dynamo_http_server::metrics::Registry::new();
         register_frontend_metrics_start_time_metric(&registry)?;
-        state
-            .metrics_clone()
-            .register_with_model_manager(&registry, Some(state.manager_clone()))?;
+        metrics::register_with_model_manager(
+            &state.metrics_clone(),
+            &registry,
+            state.manager_clone(),
+        )?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
@@ -1724,9 +1431,9 @@ impl HttpServiceConfigBuilder {
         // System routes (health, metrics, models) — debug-level spans
         let mut system_routes = vec![
             metrics::router(
-                registry,
+                registry.clone(),
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
-                config.drt_metrics,
+                config.drt_metrics.clone(),
             ),
             if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
@@ -1748,7 +1455,7 @@ impl HttpServiceConfigBuilder {
                 gateway,
                 var(HTTP_SVC_FILES_PATH_ENV).ok(),
                 var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
-                super::openai::get_body_limit(),
+                dynamo_http_server::request::get_body_limit(),
                 super::batch_proxy::upload_body_limit(),
                 state.cancel_token().clone(),
             )?);
@@ -1897,6 +1604,13 @@ impl HttpServiceConfigBuilder {
             None
         };
 
+        // Attach only once nothing above can fail, so a failed build leaves no
+        // registry behind on the DRT.
+        let drt_metrics_attachment = config
+            .drt_metrics
+            .as_ref()
+            .map(|drt_metrics| Arc::new(drt_metrics.add_prometheus_registry(registry.clone())));
+
         Ok(HttpService {
             state,
             router,
@@ -1915,6 +1629,8 @@ impl HttpServiceConfigBuilder {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),
+            prometheus_registry: registry,
+            _drt_metrics_attachment: drt_metrics_attachment,
         })
     }
 
@@ -3070,6 +2786,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_inflight_inference_preserves_length() {
+        use axum::body::HttpBody;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
+    }
+
+    #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
         // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
@@ -4084,65 +3827,6 @@ mod tests {
     }
 
     #[test]
-    fn test_listen_backlog_env_var() {
-        assert_eq!(
-            parse_listen_backlog(Err(std::env::VarError::NotPresent)),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok("0".to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok("invalid".to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok(i32::MAX.to_string())),
-            i32::MAX as u32
-        );
-        assert_eq!(parse_listen_backlog(Ok(" 8192 ".to_string())), 8192);
-    }
-
-    #[tokio::test]
-    async fn test_bind_listener_accepts_connections() {
-        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert_ne!(addr.port(), 0);
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (_server_side, peer) = listener.accept().await.unwrap();
-        assert_eq!(peer, client.local_addr().unwrap());
-    }
-
-    #[test]
-    fn test_listen_socket_addr_accepts_ip_literals() {
-        for (host, expected) in [
-            ("0.0.0.0", "0.0.0.0:8000"),
-            ("127.0.0.1", "127.0.0.1:8000"),
-            ("::", "[::]:8000"),
-            ("[::]", "[::]:8000"),
-            (" [::1] ", "[::1]:8000"),
-        ] {
-            assert_eq!(
-                listen_socket_addr(host, 8000).unwrap(),
-                expected.parse::<SocketAddr>().unwrap(),
-                "{host}"
-            );
-        }
-        for host in ["localhost", "[::", "::1]", ""] {
-            let error = listen_socket_addr(host, 8000).unwrap_err().to_string();
-            assert!(
-                error.starts_with(&format!("Invalid address '{host}:8000'")),
-                "{host}: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn test_sse_keep_alive_for_deferred_response() {
         let configured = Duration::from_millis(5000);
         assert_eq!(
@@ -4205,7 +3889,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn decisions_mount_both_routes_and_internal_sglang_capability() {
+    fn decisions_mount_both_routes_without_enabling_public_generate_capabilities() {
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -4221,10 +3905,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                assert_eq!(
-                    service.generate_engine_capabilities(),
-                    vec![SGLANG_GENERATE_CAPABILITY]
-                );
+                assert!(service.generate_engine_capabilities().is_empty());
                 assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
                 assert!(!service.model_endpoint_enabled(EndpointType::Generate));
                 let routes = service
@@ -4445,6 +4126,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn systemone_does_not_bypass_disabled_public_generate_route() {
+        crate::generate_format::test_formats::install();
         let mut api = FrontendApiConfig::default();
         api.set_systemone_enabled(true);
         let service = HttpService::builder()

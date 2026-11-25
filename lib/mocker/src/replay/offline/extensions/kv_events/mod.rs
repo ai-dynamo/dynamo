@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use aisimulate_core::engine::KvEvent;
+use aisim_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_events::event::RouterEvent;
 use dynamo_kv_events::residency::StorageTier;
@@ -13,7 +13,7 @@ use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
 use crate::scheduler::RouterEventVisibility;
-use aisimulate_core::replay::{
+use aisim_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, EngineEventBatch, KvIngestEventEncoder, ProviderSpec,
     ReplayAdapters, ReplayArtifactKvEventVisibility, ReplayEngineObservation, ReplayRuntimeInput,
     ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
@@ -101,6 +101,26 @@ impl ReplayEngineObservation for RouterEventObservation {
         encoder: &mut KvIngestEventEncoder<'_>,
     ) -> anyhow::Result<()> {
         encode_events(encoder, &batch.0)
+    }
+}
+
+/// Observation for a router without KV events (`--no-router-kv-events`), which indexes its own
+/// routing decisions and never reads engine KV events, so its engines export none.
+#[derive(Debug, Default)]
+pub(in crate::replay) struct NoRouterEventObservation;
+
+impl ReplayEngineObservation for NoRouterEventObservation {
+    type Batch = RouterEventBatch;
+
+    const CAPTURE_ENGINE_KV_EVENTS: bool = false;
+
+    fn observe_engine_events(
+        _stage: WorkerStage,
+        _worker_id: usize,
+        _dp_rank: u32,
+        _events: Vec<KvEvent>,
+    ) -> Self::Batch {
+        RouterEventBatch::default()
     }
 }
 
@@ -259,13 +279,14 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisimulate_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
+    use aisim_core::engine::{KvBlock, KvEventData, KvEventDomain, KvEventTier, StoredBlocks};
 
     fn stored(tier: KvEventTier, event_id: u64) -> KvEvent {
         KvEvent {
             event_id,
             dp_rank: 0,
             tier,
+            domain: KvEventDomain::Worker,
             data: KvEventData::Stored(StoredBlocks {
                 parent_hash: None,
                 start_position: Some(0),
@@ -275,6 +296,7 @@ mod tests {
                     token_ids: None,
                 }],
                 session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }
@@ -284,6 +306,7 @@ mod tests {
             event_id,
             dp_rank: 0,
             tier,
+            domain: KvEventDomain::Worker,
             data: KvEventData::Removed {
                 block_hashes: vec![71],
             },

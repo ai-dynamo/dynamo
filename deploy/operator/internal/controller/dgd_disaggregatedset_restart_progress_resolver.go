@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,14 +63,14 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 	inProgress []string,
 ) []string {
 	logger := log.FromContext(ctx)
-	selection, reason := selectDisaggregatedSetComponents(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		logger.V(1).Info("failed to select DisaggregatedSet components for restart progress", "reason", reason)
 		return inProgress
 	}
 
 	ds := newDisaggregatedSetObject()
-	dsErr := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)
+	dsErr := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}, ds)
 	if dsErr != nil && !apierrors.IsNotFound(dsErr) {
 		logger.V(1).Info("failed to get DisaggregatedSet for restart progress", "error", dsErr)
 	}
@@ -100,7 +101,7 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
-		if _, selected := selection.componentToRole[componentName]; !selected {
+		if _, selected := selection.ComponentToRole[componentName]; !selected {
 			isFullyUpdated, reason := r.component.checkComponentFullyUpdated(ctx, dgd, componentName)
 			if !isFullyUpdated {
 				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
@@ -129,7 +130,7 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 
 // disaggregatedSetRestartApplied requires the requested restart on every selected
 // leader and worker template. ds is non-nil and is never mutated.
-func disaggregatedSetRestartApplied(ds *unstructured.Unstructured, selection disaggregatedSetSelection, restartID string) (bool, error) {
+func disaggregatedSetRestartApplied(ds *unstructured.Unstructured, selection disaggregatedset.Selection, restartID string) (bool, error) {
 	// Decode the observed spec, keeping absent or malformed templates pending.
 	spec, found, err := unstructured.NestedMap(ds.Object, "spec")
 	if err != nil {
@@ -152,7 +153,7 @@ func disaggregatedSetRestartApplied(ds *unstructured.Unstructured, selection dis
 			leader.Annotations[consts.RestartAnnotation] == restartID &&
 			role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations[consts.RestartAnnotation] == restartID
 	}
-	for _, roleName := range selection.componentToRole {
+	for _, roleName := range selection.ComponentToRole {
 		if !appliedRoles[roleName] {
 			return false, nil
 		}

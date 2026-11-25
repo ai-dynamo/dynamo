@@ -12,7 +12,6 @@ use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
-    http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
@@ -33,6 +32,7 @@ use crate::{
         },
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_lora::policy::validate_router_mode_for_lora;
@@ -285,18 +285,18 @@ pub async fn prepare_engine(
                 local_model.runtime_config().tokenizer_fallback_enabled,
             );
             let watch_obj = Arc::new(watcher);
-            let discovery = distributed_runtime.discovery();
-            let discovery_stream = discovery
-                .list_and_watch(
-                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
-                    Some(distributed_runtime.primary_token().clone()),
-                )
-                .await?;
-            let inner_watch_obj = watch_obj.clone();
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 local_model.namespace(),
                 local_model.namespace_prefix(),
             );
+            let discovery = distributed_runtime.discovery();
+            let discovery_stream = discovery
+                .list_and_watch(
+                    namespace_filter.model_query(),
+                    Some(distributed_runtime.primary_token().clone()),
+                )
+                .await?;
+            let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj
                     .watch(discovery_stream, namespace_filter)
@@ -386,6 +386,13 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
+    // In-process cards have no model type, so the preprocessor skips this check, yet
+    // `mistral` still selects `mistral_4`, which would drop every pre-v11 tool call.
+    crate::protocols::openai::chat_completions::unified_parser::check_family_tokens(
+        card.runtime_config.tool_call_parser.as_deref(),
+        card.runtime_config.reasoning_parser.as_deref(),
+        tokenizer.as_ref(),
+    )?;
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
@@ -517,6 +524,64 @@ impl PreprocessedRouting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnusedEngine;
+
+    #[dynamo_runtime::pipeline::async_trait]
+    impl
+        dynamo_runtime::pipeline::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for UnusedEngine
+    {
+        async fn generate(
+            &self,
+            _: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, dynamo_runtime::pipeline::Error> {
+            unreachable!("building a pipeline sends no request")
+        }
+    }
+
+    // The `mistral` parser needs `[ARGS]` unless DYN_PARSER_VERSION=1 selects the v1
+    // parsers, which read the pre-v11 call format.
+    #[tokio::test]
+    async fn in_process_pipeline_rejects_pre_v11_mistral_tokenizer() {
+        const MODE: &str = "DYN_TEST_IN_PROCESS_MISTRAL_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::in_process_pipeline_rejects_pre_v11_mistral_tokenizer"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
+            return;
+        };
+        for (fixture, has_args) in [("TinyLlama_v1.1", false), ("mock-mistral-tekken", true)] {
+            let mut card = ModelDeploymentCard::load_from_disk(
+                format!("tests/data/sample-models/{fixture}"),
+                None,
+            )
+            .unwrap();
+            card.runtime_config.tool_call_parser = Some("mistral".to_string());
+            card.runtime_config.reasoning_parser = Some("mistral".to_string());
+            let tokenizer = card.tokenizer().unwrap();
+            let result = build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(&card, Arc::new(UnusedEngine), tokenizer)
+            .await;
+            if has_args || mode == "1" {
+                result.unwrap();
+            } else {
+                let error = format!("{:#}", result.err().unwrap());
+                assert!(error.contains("DYN_PARSER_VERSION=1"), "{fixture}: {error}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn invalid_runtime_lora_configuration_fails_before_waiting_for_workers() {

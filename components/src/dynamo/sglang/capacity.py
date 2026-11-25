@@ -57,6 +57,24 @@ def sglang_dp_layout(server_args: Any) -> tuple[int, bool]:
     return dp_size, getattr(server_args, "ep_join_mode", None) == "scale"
 
 
+def sglang_attention_tp_size(server_args: Any) -> int:
+    """Return the TP width of one attention group.
+
+    Under attention DP, SGLang names HiCache storage keys by the rank inside the
+    attention-TP group (``HiCacheController._generate_storage_config``), so the
+    keys cover ``tp_size // attn_dp_size // attn_cp_size`` ranks, not ``tp_size``.
+    """
+    tp_size = _positive_int(getattr(server_args, "tp_size", 1))
+    _, enable_dp_attention = sglang_dp_layout(server_args)
+    if not enable_dp_attention:
+        return tp_size
+    attn_dp_size = _positive_int(getattr(server_args, "attn_dp_size", 1))
+    if attn_dp_size == 1 and getattr(server_args, "enable_dp_attention", False):
+        attn_dp_size = _positive_int(getattr(server_args, "dp_size", 1))
+    attn_cp_size = _positive_int(getattr(server_args, "attn_cp_size", 1))
+    return max(1, tp_size // attn_dp_size // attn_cp_size)
+
+
 def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
     dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     nnodes = getattr(server_args, "nnodes", 1) or 1

@@ -81,7 +81,7 @@ async fn e2e_real_disagg_handoff() {
     );
     let handoff = prefill_outputs
         .iter()
-        .find_map(|output| output.disaggregated_params.clone())
+        .find_map(|output| output.disaggregated_params.as_deref().cloned())
         .expect("prefill terminal carries the KV handoff");
     eprintln!("[e2e-disagg] handoff = {handoff}");
 
@@ -188,7 +188,7 @@ async fn e2e_real_openengine_image_disagg() {
     );
     let handoff = prefill_outputs
         .iter()
-        .find_map(|output| output.disaggregated_params.clone())
+        .find_map(|output| output.disaggregated_params.as_deref().cloned())
         .expect("image prefill terminal carries the KV handoff");
 
     let mut decode_request = image_request();

@@ -7,7 +7,7 @@ use super::types::{KvSchedulerError, WorkerIdSet};
 use crate::protocols::{RoutingConstraints, WorkerConfigLike};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
-use dynamo_slot_tracker::busy::FullRankCounts;
+use dynamo_slot_tracker::FullRankCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkerEligibilityError {
@@ -519,8 +519,9 @@ mod tests {
 
     #[test]
     fn full_rank_counts_skip_a_worker_only_when_every_rank_is_full() {
+        use dynamo_slot_tracker::BusyThresholds;
         use dynamo_slot_tracker::WorkerLoadProjection;
-        use dynamo_slot_tracker::busy::BusyThresholds;
+        use dynamo_slot_tracker::host::BusyThresholdsHostExt;
         use dynamo_worker_selection::WorkerCapacity;
 
         let constraints = RoutingConstraints::default();
@@ -535,10 +536,7 @@ mod tests {
         };
         let count_full = |ranks: &[WorkerWithDpRank]| {
             let mut counts = FullRankCounts::default();
-            counts.reset(BusyThresholds {
-                prefill_busy_threshold: Some(10),
-                ..Default::default()
-            });
+            counts.reset(BusyThresholds::default().with_prefill_busy_threshold(Some(10)));
             for &rank in ranks {
                 counts.record(rank, WorkerCapacity::default(), &past_limit);
             }

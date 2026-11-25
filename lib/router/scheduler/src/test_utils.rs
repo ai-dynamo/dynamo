@@ -7,6 +7,9 @@
 use std::collections::HashSet;
 
 use crate::protocols::WorkerConfigLike;
+pub use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 pub use dynamo_kv_indexer::testing::{
     add_blocks, add_blocks_with_start_position, create_remove_event, create_store_event,
     create_store_event_with_start_position, make_blocks, make_clear_event,
@@ -71,8 +74,7 @@ pub fn test_router_config(
 ) -> crate::config::RouterConfig {
     crate::config::RouterConfig {
         selection: dynamo_worker_selection::SelectionConfig::default(),
-        conditional_disagg:
-            dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::default(),
+        conditional_disagg: dynamo_worker_selection::ConditionalDisaggConfig::default(),
         use_kv_events,
         track_prefill_tokens: true,
         assume_kv_reuse: true,
@@ -88,10 +90,10 @@ pub fn test_router_config(
 
 /// The reference worker-selection policy as a factory.
 pub fn reference_policy_factory() -> crate::types::WorkerSelectionPolicyFactory {
-    std::sync::Arc::new(|config, role, _| {
+    std::sync::Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
@@ -108,13 +110,12 @@ pub fn test_core_with(
     worker_type: dynamo_router_protocol::worker_type::WorkerType,
     affinity: Option<dynamo_session_affinity::SessionAffinityConfig>,
 ) -> crate::selection::SelectionCore {
-    let indexer_policy = dynamo_kv_indexer::backend::IndexerPolicy::from_config(
-        &dynamo_kv_indexer::config::IndexerConfig {
+    let indexer_policy =
+        dynamo_kv_indexer::IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig {
             use_kv_events: config.use_kv_events,
             ..Default::default()
-        },
-    )
-    .expect("indexer policy");
+        })
+        .expect("indexer policy");
     crate::selection::SelectionCore::new(
         config.validate().expect("valid router config"),
         indexer_threads,

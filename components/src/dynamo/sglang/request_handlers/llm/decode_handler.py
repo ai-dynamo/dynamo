@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    routed_dp_rank_kwargs,
     supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -455,6 +456,57 @@ def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _validate_stop_token_ids(
+    handler: BaseWorkerHandler, request: Dict[str, Any]
+) -> None:
+    """Reject client stop token IDs outside the model vocabulary.
+
+    SGLang does not range-check stop_token_ids, and its min_new_tokens
+    penalizer scatters them into a vocab-sized CUDA tensor on every extend
+    batch, prefill included, so one out-of-vocabulary ID kills the scheduler
+    (sgl-project/sglang#44535). Decode, diffusion and prefill workers all call
+    this before their engine call. Hidden stop IDs come from the model card,
+    not the client, and are not checked.
+    """
+    native_payload = native_generate_payload(request)
+    if native_payload is not None:
+        sampling_params = native_payload.get("sampling_params")
+        if isinstance(sampling_params, list):
+            batch = [
+                (f"sampling_params[{index}].stop_token_ids", params)
+                for index, params in enumerate(sampling_params)
+            ]
+        else:
+            batch = [("sampling_params.stop_token_ids", sampling_params)]
+        for label, params in batch:
+            if isinstance(params, dict) and params.get("stop_token_ids"):
+                # Match SamplingParams.__post_init__ before checking the range.
+                try:
+                    native_stop_token_ids = [
+                        int(token_id)
+                        for token_id in params["stop_token_ids"]
+                        if token_id is not None
+                    ]
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise HttpError(
+                        400, f"{label} must contain token IDs convertible to integers"
+                    ) from error
+                handler._validate_token_ids(native_stop_token_ids, label=label)
+        return
+
+    if handler.use_sglang_tokenizer:
+        # Check what _openai_stop_sampling_params forwards: an integer
+        # `stop` list, or the integer entries of `stop_token_ids`.
+        stop_token_ids = _openai_stop_sampling_params(request).get("stop_token_ids")
+        label = "stop" if stop_token_ids is request.get("stop") else "stop_token_ids"
+    else:
+        stop_conditions = request.get("stop_conditions") or {}
+        stop_token_ids = stop_conditions.get("stop_token_ids")
+        label = "stop_token_ids"
+    if stop_token_ids:
+        handler._validate_token_ids(stop_token_ids, label=label)
+
+
 def _extract_sglang_stop_reason(
     finish_reason: Dict[str, Any] | None,
     user_stop_token_ids: set[int] | None = None,
@@ -757,6 +809,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _raise_if_conditional_disagg_bypass(request)
         sglang_request_id = new_sglang_request_id()
         input_param = self._get_input_param(request)
+        _validate_stop_token_ids(self, request)
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         native_session_request_id = None
@@ -793,6 +846,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sglang_request_id,
                 priority,
             )
+            if self.serving_mode == DisaggregationMode.DECODE:
+                request.pop("token_ids", None)
+                input_param.clear()
             async for output in self._process_native_generate_stream(
                 stream,
                 context,
@@ -884,13 +940,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
                 **kv_hint_kwargs(self.engine, request),
             )
+            request.pop("token_ids", None)
+            input_param.clear()
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
@@ -987,7 +1045,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,

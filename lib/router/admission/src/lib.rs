@@ -8,34 +8,35 @@
 //! against a [`PolicyProfile`], and holds it in a [`PolicyQueue`] until a worker has room or a
 //! limit rejects it with a typed [`QueueRejection`]. [`RequestLifecycle`] is the per-request
 //! state machine that feeds the plugin its events. Everything a plugin names lives here: the
-//! [`RequestClassifier`] trait, [`ClassifyRequest`], [`ClassifyEvent`], the [`WorkerView`] it
-//! reads workers through, and [`RequestProgress`]. The YAML policy file, the plugin registry,
-//! and the gate that judges "all eligible workers full" over the slot projection stay in
-//! `lib/router/kv-router`, which implements [`WorkerView`] over worker selection's rows.
+//! [`RequestClassifier`] trait, [`ClassifyRequest`], [`ClassifyEvent`], and
+//! [`RequestProgress`]. A classifier reads workers through worker selection's
+//! `WorkerCandidates`, the view a filter or scorer reads, so the two plugin kinds share one
+//! set of worker inputs. The YAML policy file, the plugin registry, and the gate that judges
+//! "all eligible workers full" over the slot projection stay in `lib/router/kv-router`.
 //!
-//! Kernel-facing: the `ClassifyRequest` constructors, `ClassificationOverrides`, the
-//! `PolicyQueue` scheduling methods (`extract_next`, `settle`, `take_expired`), and
-//! `RequestClassifierRuntime` are public for the kernel in another crate; hosts and plugins do
-//! not call them. `QueueMetadata` is also what offline replay enqueues with.
+//! Kernel-facing: `host::ClassifyRequestHostExt` (building a `ClassifyRequest` and reading
+//! back what the classifier set), `ClassificationOverrides`, the `PolicyQueue` scheduling
+//! methods (`extract_next`, `settle`, `take_expired`), and `RequestClassifierRuntime` are
+//! public for the kernel in another crate; hosts and plugins do not call them. `QueueMetadata` is also what offline replay enqueues with.
 
-pub mod classifier;
+mod classifier;
 pub mod host;
-pub mod placement;
-pub mod profile;
-pub mod queue;
+mod placement;
+mod profile;
+mod queue;
 
 pub use classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyFuture, ClassifyRequest, NoWorkers, RequestClassifier, RequestClassifierContext,
-    RequestClassifierRuntime, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-    WorkerCacheView, WorkerLoadView, WorkerView,
+    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    RequestProgress, RequestProgressUpdater,
 };
-pub use placement::WorkerPlacement;
+pub use placement::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,
 };
 pub use queue::{
-    DispatchCharge, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLimitKind, QueueMetadata,
-    QueueRejection, QueueSnapshot,
+    BlockReason, DispatchCharge, LaneCheck, PolicyQueue, PolicyQueueEntry, PolicyQueueStats,
+    QueueLane, QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, RecheckScope,
 };
