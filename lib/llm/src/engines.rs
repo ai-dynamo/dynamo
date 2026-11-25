@@ -16,6 +16,7 @@ use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 
+use crate::protocols::ValidateRequest;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
@@ -94,11 +95,6 @@ impl<E> EngineDispatcher<E> {
     pub fn new(inner: E) -> Self {
         EngineDispatcher { inner }
     }
-}
-
-/// Trait on request types that allows us to validate the data
-pub trait ValidateRequest {
-    fn validate(&self) -> Result<(), anyhow::Error>;
 }
 
 /// Trait that allows handling both completion and chat completions requests

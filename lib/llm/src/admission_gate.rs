@@ -169,6 +169,8 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::common::llm_backend::LLMEngineOutput;
+use crate::protocols::common::preprocessor::PreprocessedRequest;
 
 mod metrics;
 
@@ -556,6 +558,14 @@ pub trait AdmissionRequest {
     fn dp_rank(&self) -> Option<u32>;
 }
 
+/// The worker's backend admission gate admits a request under `routing.dp_rank`:
+/// the rank routing selected for this dispatch, which the backend serves it on.
+impl AdmissionRequest for PreprocessedRequest {
+    fn dp_rank(&self) -> Option<u32> {
+        self.routing.as_ref().and_then(|routing| routing.dp_rank)
+    }
+}
+
 /// What one backend response carries, as far as its request's wait for the
 /// engine is concerned: the backend's own reading of its response contract.
 ///
@@ -609,6 +619,22 @@ impl<T: AdmissionResponse> AdmissionResponse for Annotated<T> {
         match &self.data {
             Some(data) if !self.is_error() => data.admission_output(),
             _ => ResponseOutput::INTERIM,
+        }
+    }
+}
+
+/// What an engine output carries for the worker's backend admission gate, by
+/// the native backend contract: its `token_ids` are the tokens it generated,
+/// and a `finish_reason` marks the one terminal output that completes the
+/// request — a prefill or encode handoff's included, which may carry no token.
+/// A token-less output without one, such as a disaggregation bootstrap
+/// announcement, is interim. Usage is not a completion marker: an engine may
+/// report it early.
+impl AdmissionResponse for LLMEngineOutput {
+    fn admission_output(&self) -> ResponseOutput {
+        ResponseOutput {
+            generated_token: !self.token_ids.is_empty(),
+            completion: self.finish_reason.is_some(),
         }
     }
 }
@@ -5873,5 +5899,107 @@ mod tests {
         assert!(is_queue_full(&one.acquire(None, None).await));
         assert_eq!((rejections(&one), rejections(&two)), (1, 0));
         assert_eq!((published(&one), published(&two)), ((1, 1, 0), (0, 0, 0)));
+    }
+
+    /// A native worker's ingress reads the rank from the body as sent, under
+    /// either request-plane codec: `routing.dp_rank` when it is set, and no rank
+    /// when it, or `routing`, is missing or null.
+    #[tokio::test]
+    async fn worker_ingress_reads_routing_dp_rank_from_the_body() {
+        use dynamo_runtime::pipeline::network::{
+            IngressRequestDecoder, RequestPlanePayloadCodec, SerdeIngressPayloadAdapter,
+        };
+        use serde_json::{Value, json};
+
+        let body = |routing: Option<Value>| {
+            let mut body = json!({
+                "model": "m",
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {},
+                "sampling_options": {},
+                "output_options": {},
+            });
+            if let Some(routing) = routing {
+                body["routing"] = routing;
+            }
+            body
+        };
+        let cases = [
+            (
+                body(Some(json!({"dp_rank": 5, "prefill_dp_rank": 3}))),
+                Some(5),
+            ),
+            (body(Some(json!({"dp_rank": null}))), None),
+            (body(Some(json!({"backend_instance_id": 7}))), None),
+            (body(Some(Value::Null)), None),
+            (body(None), None),
+        ];
+        for (body, expected) in cases {
+            for codec in [
+                RequestPlanePayloadCodec::Json,
+                RequestPlanePayloadCodec::Msgpack,
+            ] {
+                let request: PreprocessedRequest = SerdeIngressPayloadAdapter
+                    .decode_request(codec, codec.encode(&body).unwrap().into())
+                    .await
+                    .unwrap();
+                assert_eq!(request.dp_rank(), expected, "{body}");
+            }
+        }
+    }
+
+    /// A token, a terminal and a token-less handoff announcement each carry
+    /// what they say, independently; early usage completes nothing.
+    #[test]
+    fn engine_outputs_classify_their_tokens_and_completion_independently() {
+        use crate::protocols::TokenIdType;
+        use crate::protocols::common::FinishReason;
+        use dynamo_protocols::types::CompletionUsage;
+
+        let output =
+            |token_ids: Vec<TokenIdType>, finish_reason: Option<FinishReason>| LLMEngineOutput {
+                token_ids,
+                finish_reason,
+                ..LLMEngineOutput::stop()
+            };
+        let classified = |generated_token, completion| ResponseOutput {
+            generated_token,
+            completion,
+        };
+
+        let bootstrap = LLMEngineOutput {
+            disaggregated_params: Some(Box::new(serde_json::json!({"bootstrap_room": 7}))),
+            ..output(vec![], None)
+        };
+        assert_eq!(bootstrap.admission_output(), ResponseOutput::INTERIM);
+        let early_usage = LLMEngineOutput {
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            disaggregated_params: Some(Box::new(serde_json::json!("dummy"))),
+            ..output(vec![42], None)
+        };
+        assert_eq!(early_usage.admission_output(), classified(true, false));
+        assert_eq!(
+            output(vec![], Some(FinishReason::Length)).admission_output(),
+            classified(false, true),
+            "a token-less terminal handoff completes the request"
+        );
+        assert_eq!(
+            output(vec![42], Some(FinishReason::Stop)).admission_output(),
+            classified(true, true)
+        );
+        assert_eq!(
+            Annotated::from_data(output(vec![42], None)).admission_output(),
+            classified(true, false)
+        );
+        assert_eq!(
+            Annotated::<LLMEngineOutput>::from_error("engine failed").admission_output(),
+            ResponseOutput::INTERIM
+        );
     }
 }

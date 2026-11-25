@@ -80,7 +80,6 @@ pub use active_load::ActiveLoad;
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
-pub(crate) use request_lease::RequestAttemptRelease;
 pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,

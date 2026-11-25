@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn metadata_upload_single_choice_admission_covers_both_endpoints() {
-        use crate::engines::ValidateRequest;
+        use crate::protocols::ValidateRequest;
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
         use crate::protocols::openai::completions::NvCreateCompletionRequest;
         let artifact = serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}});
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn artifact_upload_rejects_frontend_string_stop_before_generation() {
-        use crate::engines::ValidateRequest;
+        use crate::protocols::ValidateRequest;
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
         use crate::protocols::openai::completions::NvCreateCompletionRequest;
 

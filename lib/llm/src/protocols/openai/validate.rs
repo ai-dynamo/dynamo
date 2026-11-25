@@ -1006,7 +1006,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::engines::ValidateRequest;
+    use crate::protocols::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
 
     #[test]
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn null_passthrough_fields_are_omitted_from_chat_and_completion_requests() {
-        use crate::engines::ValidateRequest;
+        use crate::protocols::ValidateRequest;
         use crate::protocols::common::extensions::request_cache_salt;
         use crate::protocols::openai::{
             OpenAIStopConditionsProvider, chat_completions::NvCreateChatCompletionRequest,

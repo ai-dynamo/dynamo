@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, FunctionObject};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -23,6 +24,17 @@ pub(crate) fn custom_input_or_raw(arguments: &str) -> String {
         tracing::warn!("Custom tool output lacks a string input wrapper; returning raw arguments");
         arguments.to_owned()
     })
+}
+
+pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| ToolDefinition {
+            name: tool.function.name.clone(),
+            parameters: tool.function.parameters.clone(),
+            strict: tool.function.strict,
+        })
+        .collect()
 }
 
 /// Errors that can occur when deriving JSON schemas for tool_choice requests.

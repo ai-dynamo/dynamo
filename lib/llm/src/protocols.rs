@@ -41,6 +41,11 @@ pub trait ContentProvider {
     fn content(&self) -> String;
 }
 
+/// Trait on request types that allows us to validate the data
+pub trait ValidateRequest {
+    fn validate(&self) -> Result<(), anyhow::Error>;
+}
+
 /// Converts of a stream of [codec::Message]s into a stream of [Annotated]s.
 pub fn convert_sse_stream<R>(
     stream: impl Stream<Item = Result<codec::Message, codec::SseCodecError>>,

@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::indexer::ApproximateRequestLease;
+use crate::protocols::common::preprocessor::PrefillBookingRelease;
 
 const LEASE_QUIET: u8 = 0;
 const LEASE_TOUCHED: u8 = 1;
@@ -472,6 +473,12 @@ impl RequestAttemptRelease {
         if !self.manager.finish(&self.record).await {
             self.manager.release_booking(&self.record.booking).await;
         }
+    }
+}
+
+impl PrefillBookingRelease for RequestAttemptRelease {
+    fn release(&self) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(RequestAttemptRelease::release(self))
     }
 }
 
