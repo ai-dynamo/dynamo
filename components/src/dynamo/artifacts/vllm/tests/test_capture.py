@@ -424,11 +424,11 @@ async def test_cancelled_encoder_holds_reservation_until_thread_finishes(monkeyp
     started = threading.Event()
     finish = threading.Event()
 
-    def delayed(view):
+    def delayed(view, **kwargs):
         started.set()
         if not finish.wait(timeout=5):
             raise RuntimeError("test encoder was not released")
-        return original(view)
+        return original(view, **kwargs)
 
     monkeypatch.setattr(generation_artifact, "encode_generation_artifact", delayed)
     budget = CaptureBudget(1 << 20)

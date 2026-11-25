@@ -128,6 +128,41 @@ To skip rows the trainer already holds, set `token_start` in `content_options`. 
 
 `token_start` must be between 0 and the prompt length. A larger value fails the request before inference, and a value past the observed prompt returns `capture_invalid`; it is never clamped. The option reduces delivered bytes and capture memory, not the worker's own extraction work.
 
+### Read the Artifact Directly over NIXL
+
+Instead of uploading to object storage, a worker can hold the encoded artifact in its own memory and let the trainer pull it once over NIXL. Nothing passes through the frontend or a storage service. Enable it on the worker with a byte budget for held artifacts:
+
+```bash
+DYNAMO_ARTIFACT_NIXL_BYTES=4294967296 python -m dynamo.vllm ...
+```
+
+`DYNAMO_ARTIFACT_NIXL_MAX_LEASE_SECONDS` (default `300`) caps how long a request may ask the worker to hold an artifact. Request the `nixl_read` mode with a lease:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "nixl_read",
+  "destination": {"kind": "nixl_read", "lease_seconds": 120}
+}
+```
+
+The receipt in `nvext.metadata_upload` carries `rdma_metadata`, `byte_count`, `sha256`, and `expires_at`. Read it with the helper, which pulls the bytes into a host or GPU tensor and checks the digest for host reads:
+
+```python
+from dynamo.artifacts.nixl import read_nixl_artifact
+from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+tensor = await read_nixl_artifact(receipt, device="cpu")
+artifact = decode_generation_artifact(tensor.numpy().tobytes())
+```
+
+The worker frees the buffer after one read or when the lease expires, whichever comes first. When held artifacts fill the budget, new `nixl_read` requests are rejected as overloaded before inference. Artifacts served this way are not compressed, so tensors sit at fixed offsets in the buffer.
+
+<Warning>
+The receipt's `rdma_metadata` is a capability: any NIXL agent that holds it can read the artifact until the lease ends. Deliver receipts only to trusted consumers on the same network as the workers.
+</Warning>
+
 Limits of the current implementation:
 
 - `extract_hidden_states` takes the place of a drafter, so the worker does not speculate while it captures.

@@ -3940,7 +3940,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             wants_hidden_states = "hidden_states" in requested_contents
             artifact_runtime = None
-            if artifact_settings.get("mode") != "inline_base64":
+            nixl_delivery = artifact_settings.get("mode") == "nixl_read"
+            object_store_delivery = (
+                not nixl_delivery and artifact_settings.get("mode") != "inline_base64"
+            )
+            if nixl_delivery:
+                from dynamo.artifacts.nixl import (
+                    NixlArtifactCapacityError,
+                    configured_nixl_artifact_server,
+                )
+
+                artifact_runtime = configured_nixl_artifact_server()
+                if artifact_runtime is None:
+                    raise InvalidArgument(
+                        "NIXL artifact delivery is not enabled on this worker"
+                    )
+            elif object_store_delivery:
                 # Object-store delivery needs opendal from the optional
                 # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
@@ -3982,17 +3997,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             except CaptureCapacityError as exc:
                 raise WorkerOverloaded(str(exc)) from None
             except ValueError as exc:
-                if artifact_runtime is not None and isinstance(
-                    exc, ArtifactAuthorityClosed
-                ):
+                if object_store_delivery and isinstance(exc, ArtifactAuthorityClosed):
                     raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
             except RuntimeError as exc:
+                if nixl_delivery and isinstance(exc, NixlArtifactCapacityError):
+                    raise WorkerOverloaded(str(exc)) from None
                 # Storage policy rejects the requested destination before
                 # inference with a credential-safe message. A provider without
                 # conditional creation is a server fault and stays one.
                 if (
-                    artifact_runtime is not None
+                    object_store_delivery
                     and isinstance(exc, ArtifactStorageError)
                     and exc.code in ("invalid_target", "destination_denied", "expired")
                 ):

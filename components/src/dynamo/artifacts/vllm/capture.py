@@ -18,6 +18,8 @@ from typing import Any, Protocol, cast
 import numpy as np
 
 from dynamo.artifacts.vllm.format import (
+    CODEC_NONE,
+    CODEC_ZSTD,
     GenerationArtifactChoice,
     GenerationArtifactView,
     HiddenStates,
@@ -239,7 +241,7 @@ class VllmArtifactSession:
         ):
             raise ValueError("invalid artifact contents")
         mode = settings.get("mode")
-        if mode not in {"inline_base64", "object_store", "relay_store"}:
+        if mode not in {"inline_base64", "object_store", "relay_store", "nixl_read"}:
             raise ValueError("invalid artifact delivery mode")
         if mode == "inline_base64" and "destination" in settings:
             raise ValueError("inline artifact cannot contain destination")
@@ -522,8 +524,11 @@ class VllmArtifactSession:
                     asyncio.to_thread(self._load_hidden_states)
                 )
                 await asyncio.shield(encoding)
+            # A NIXL read hands the consumer the object as is: skip zstd, which
+            # barely shrinks activations, so tensors sit at fixed offsets.
+            codec = CODEC_NONE if self.settings["mode"] == "nixl_read" else CODEC_ZSTD
             encoding = asyncio.create_task(
-                asyncio.to_thread(encode_generation_artifact, self._view())
+                asyncio.to_thread(encode_generation_artifact, self._view(), codec=codec)
             )
             encoded = await asyncio.shield(encoding)
             if self.settings["mode"] == "inline_base64":

@@ -387,6 +387,10 @@ async def worker(argv: list[str] | None = None) -> None:
             # Accepted generations can finalize after the pre-shutdown hook.
             if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
                 await close_configured_artifact_runtime()
+            if os.environ.get("DYNAMO_ARTIFACT_NIXL_BYTES"):
+                from dynamo.artifacts.nixl import close_configured_nixl_artifact_server
+
+                await close_configured_nixl_artifact_server()
 
     logger.debug("Worker function completed, exiting...")
 

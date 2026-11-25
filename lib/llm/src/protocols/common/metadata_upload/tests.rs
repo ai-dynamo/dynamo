@@ -196,3 +196,46 @@ fn content_options_reject_unrequested_contents_non_objects_and_oversize() {
         assert!(result.is_err());
     }
 }
+
+#[test]
+fn nixl_read_requires_its_destination_and_a_bounded_lease() {
+    let input = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "nixl_read",
+        "destination": {"kind": "nixl_read", "lease_seconds": 120}
+    });
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    for (mode, destination) in [
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 0}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 3601}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 60, "host": "x"}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "mooncake_store", "profile": "p", "consumer_group": "g", "retention_seconds": 1}),
+        ),
+        (
+            "object_store",
+            json!({"kind": "nixl_read", "lease_seconds": 60}),
+        ),
+    ] {
+        let value = json!({
+            "kind": "generation_artifact", "contents": ["hidden_states"], "mode": mode,
+            "destination": destination
+        });
+        assert!(serde_json::from_value::<MetadataUpload>(value).is_err());
+    }
+    let missing = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "nixl_read"
+    });
+    assert!(serde_json::from_value::<MetadataUpload>(missing).is_err());
+}

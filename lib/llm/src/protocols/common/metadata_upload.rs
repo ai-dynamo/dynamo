@@ -200,6 +200,9 @@ pub enum ArtifactMode {
     InlineBase64,
     ObjectStore,
     RelayStore,
+    /// The worker holds the encoded artifact and returns NIXL read metadata;
+    /// the consumer pulls it once, directly from worker memory.
+    NixlRead,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -253,6 +256,9 @@ impl GenerationArtifactUpload {
             (ArtifactMode::RelayStore, Some(ArtifactDestination::MooncakeStore(target))) => {
                 target.validate()
             }
+            (ArtifactMode::NixlRead, Some(ArtifactDestination::NixlRead(target))) => {
+                target.validate()
+            }
             _ => Err("artifact destination is incompatible with the delivery mode"),
         }
     }
@@ -264,6 +270,7 @@ pub enum ArtifactDestination {
     PresignedHttpPut(PresignedHttpPutDestination),
     ManagedStore(ManagedStoreDestination),
     MooncakeStore(MooncakeStoreDestination),
+    NixlRead(NixlReadDestination),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -370,6 +377,25 @@ impl MooncakeStoreDestination {
             || self.retention_seconds == 0
         {
             return Err("Mooncake relay requires a profile, consumer group and positive retention");
+        }
+        Ok(())
+    }
+}
+
+/// How long the worker keeps the artifact readable. The worker applies its own,
+/// usually lower, maximum.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NixlReadDestination {
+    pub lease_seconds: u64,
+}
+
+const MAX_NIXL_LEASE_SECONDS: u64 = 3600;
+
+impl NixlReadDestination {
+    fn validate(&self) -> Result<(), &'static str> {
+        if !(1..=MAX_NIXL_LEASE_SECONDS).contains(&self.lease_seconds) {
+            return Err("NIXL read requires a lease between 1 and 3600 seconds");
         }
         Ok(())
     }
