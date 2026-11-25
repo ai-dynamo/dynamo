@@ -243,9 +243,9 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** Remove the `nvidia.com/grove-update-strategy: OnDelete` annotation from existing LPX deployments before any other update is admitted, then replace the stale Pods with a new `spec.restart.id`.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Deployment-request shape detection and defaulting changed** ([#17308](https://github.com/ai-dynamo/dynamo/pull/17308), [#13744](https://github.com/ai-dynamo/dynamo/pull/13744)). An omitted `gpuSku` resolves to the GPU type of the node with the most GPUs, ties broken by VRAM per GPU, and a `numGpusPerNode` or `vramMb` differing from the selected shape is rejected when `totalGpus` is omitted. The `v1beta1` defaults for `spec.autoApply`, `spec.enableGpuDiscovery`, and `spec.useMocker` now come from the creating admission webhook rather than the CRD schema.
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Deployment-request shape detection and defaulting changed** ([#17308](https://github.com/ai-dynamo/dynamo/pull/17308), [#13744](https://github.com/ai-dynamo/dynamo/pull/13744)). An omitted `gpuSku` resolves to the GPU type of the node with the most GPUs, ties broken by VRAM per GPU. The `totalGpus` requirement for shape overrides is covered in the `hardware.totalGpus` entry above. The `v1beta1` defaults for `spec.autoApply`, `spec.enableGpuDiscovery`, and `spec.useMocker` now come from the creating admission webhook rather than the CRD schema.
 
-  > **Migrate:** Set `gpuSku` explicitly on mixed-GPU clusters that relied on the old selection, set `totalGpus` alongside any shape override, and set those three fields on any request that depended on update-time defaulting.
+  > **Migrate:** Set `gpuSku` explicitly on mixed-GPU clusters that relied on the old selection, and set those three fields on any request that depended on update-time defaulting.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **`/health` returns status only** ([#16454](https://github.com/ai-dynamo/dynamo/pull/16454)). It no longer serializes every discovered instance on every call, which on a large deployment meant a multi-megabyte body per probe. The not-ready 503 response and `/live` are unchanged.
 
