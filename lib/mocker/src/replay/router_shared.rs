@@ -282,17 +282,25 @@ fn replay_plugins(
     })
 }
 
-/// The worker inputs whose resources the router of one replay worker pool starts, checked as
-/// the live router checks a role: the worker selection's inputs plus those of the role's
-/// configured hint policies. A role computes KV copy sources, and so sends `kv.fetch` hints,
-/// when these contain `WorkerInputs::KV_COPY`; they keep the KV index when
-/// `WorkerInputs::reads_kv_index` holds.
-pub(super) fn replay_role_inputs(
+/// What the live router's role check decides for one replay worker pool.
+pub(super) struct ReplayRole {
+    /// The worker inputs whose resources the router starts: the worker selection's plus those
+    /// of the role's configured hint policies. Default hint policies start none.
+    pub(super) inputs: WorkerInputs,
+    /// Whether the router computes KV copy sources for the selected worker: the selection
+    /// reads them, or one of the role's hint policies does. A default hint policy counts
+    /// here although it starts no index: it uses the one the selection reads.
+    pub(super) computes_copy_sources: bool,
+}
+
+/// Check one replay worker pool's role as the live router does at startup
+/// ([`dynamo_kv_router::plugins::check_role`]), rejecting what it rejects.
+pub(super) fn replay_role(
     config: &KvRouterConfig,
     worker_type: WorkerType,
     router_plugins: Option<&RouterPluginRegistry>,
     selector: &DefaultWorkerSelector,
-) -> anyhow::Result<WorkerInputs> {
+) -> anyhow::Result<ReplayRole> {
     let hint_policies = replay_plugins(router_plugins)?
         .resolve_hint_policies(config)?
         .instances(
@@ -300,7 +308,16 @@ pub(super) fn replay_role_inputs(
             worker_type,
             RoutingPartitionRef::new("replay", "default"),
         );
-    Ok(selector.check_role(worker_type, hint_policies, config)?)
+    let hints_read_copy_sources = hint_policies.policies().iter().any(|(_, policy)| {
+        policy
+            .required_worker_inputs()
+            .contains(WorkerInputs::KV_COPY)
+    });
+    let inputs = selector.check_role(worker_type, hint_policies, config)?;
+    Ok(ReplayRole {
+        inputs,
+        computes_copy_sources: inputs.contains(WorkerInputs::KV_COPY) || hints_read_copy_sources,
+    })
 }
 
 pub(crate) fn replay_router_config(

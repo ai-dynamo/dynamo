@@ -30,7 +30,6 @@ pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRo
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
-use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::WorkerType;
@@ -62,7 +61,7 @@ use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_cache_owner, replay_cache_owner_hint_source,
-    replay_role_inputs, replay_router_config, replay_selector_with_seed, replay_slots,
+    replay_role, replay_router_config, replay_selector_with_seed, replay_slots,
     replay_worker_config, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{
@@ -644,9 +643,11 @@ pub(crate) struct OfflineReplayRouter {
     affinity_staged: HashMap<Uuid, (Hold, AffinityTarget)>,
     affinity_active: HashMap<Uuid, AffinityLease>,
     needs_drain: bool,
-    /// The role computes KV copy sources, as resolved for the live router. Fixed at
-    /// startup, like production's index; see `new_with_selector_seed`.
+    /// Fixed at startup, like production's index; see `new_with_selector_seed`.
+    kv_transfer_chain_supported: bool,
+    /// The role computes KV copy sources, as resolved for the live router.
     sends_kv_fetch_hints: bool,
+    kv_transfer_gate_warned: bool,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -983,9 +984,13 @@ impl OfflineReplayRouter {
         // the role's configured hint policies reads it (a later retune keeps the index
         // it started with), and the role sends KV fetch hints when one of them reads
         // copy sources.
-        let role_inputs = replay_role_inputs(&config, worker_type, router_plugins, &selector)?;
-        let reads_kv_index = role_inputs.reads_kv_index();
-        let sends_kv_fetch_hints = role_inputs.contains(WorkerInputs::KV_COPY);
+        let role = replay_role(&config, worker_type, router_plugins, &selector)?;
+        let reads_kv_index = role.inputs.reads_kv_index();
+        // A default hint policy starts no index, so its copy sources need the index the
+        // selection reads to retain the chain.
+        let kv_transfer_chain_supported =
+            reads_kv_index && config.supports_kv_transfer_chain_retention();
+        let sends_kv_fetch_hints = role.computes_copy_sources;
         if !config.use_kv_events {
             config.validate().map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
@@ -1031,7 +1036,9 @@ impl OfflineReplayRouter {
             affinity_staged: HashMap::new(),
             affinity_active: HashMap::new(),
             needs_drain: false,
+            kv_transfer_chain_supported,
             sends_kv_fetch_hints,
+            kv_transfer_gate_warned: false,
         };
         router.refresh_kv_transfer_chain();
         router.refresh_cache_owners();
@@ -1371,15 +1378,23 @@ impl OfflineReplayRouter {
         Ok(())
     }
 
-    /// Lookups retain the transfer chain that KV fetch hints need while the role sends
-    /// them and a routable worker takes hints. The role check at startup has rejected an
-    /// index that cannot retain it.
+    /// Lookups retain the transfer chain that KV fetch hints need while the role
+    /// computes copy sources, the index supports it and a routable worker takes hints.
+    /// The role check has rejected a selection or a configured hint policy over an index
+    /// that cannot; a default hint policy over one sends nothing, with one warning.
     fn refresh_kv_transfer_chain(&mut self) {
-        self.indexer.retain_kv_transfer_chain = self.sends_kv_fetch_hints
+        let hinted = self.sends_kv_fetch_hints
             && self
                 .workers_with_configs
                 .values()
                 .any(ReplayWorkerConfig::is_hint_capable);
+        self.indexer.retain_kv_transfer_chain = hinted && self.kv_transfer_chain_supported;
+        if hinted && !self.kv_transfer_chain_supported && !self.kv_transfer_gate_warned {
+            self.kv_transfer_gate_warned = true;
+            tracing::warn!(
+                "KV copy sources need a local, event-driven KV index with no approximate side index; workers advertise router hints, but the router computes no copy sources for them"
+            );
+        }
     }
 
     /// Remove a worker from routing eligibility.
@@ -4309,6 +4324,39 @@ policy_classes:
             (placed.scheduler_id, placed.kv_hints),
             (1 - busy, fetch_hint(busy))
         );
+    }
+
+    #[test]
+    fn default_kv_fetch_of_kvcr_sends_hints_without_copy_credit() {
+        // With `shared_cache_multiplier: 0` the `kvcr` selection reads no copy sources.
+        // Its default `kv_fetch` still sends the selected worker a fetch; `hints: []`
+        // turns that off.
+        for (hints, hint) in [("", fetch_hint(1)), ("    hints: []\n", None)] {
+            let policy = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                policy.path(),
+                format!(
+                    "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.0}}\n{hints}"
+                ),
+            )
+            .unwrap();
+            let config = KvRouterConfig {
+                router_policy_config: Some(policy.path().display().to_string()),
+                ..router_config()
+            };
+            let mut placement = seeded_placement(&replay_args(), config, 2, true);
+            occupy_worker_1(&mut placement, 0);
+            placement
+                .router
+                .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+                .unwrap();
+            let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+            assert_eq!(
+                (placed.scheduler_id, placed.kv_hints),
+                (0, hint),
+                "hints {hints:?}"
+            );
+        }
     }
 
     #[test]
