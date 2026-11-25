@@ -19,6 +19,14 @@ Load it with::
     --worker-extension-cls \
       dynamo.artifacts.vllm.gpu_hidden_states.DynamoHiddenStateWorkerExtension
 
+Reading over CUDA IPC without NVLink: UCX disables CUDA IPC GETs unless the GPUs
+are NVLink-connected ("cuda-ipc get zcopy disabled as no nvlinks detected"), so a
+NIXL read of GPU memory falls back to software emulation over loopback TCP. Set
+`UCX_CUDA_IPC_ENABLE_GET_ZCOPY=y` in the *reading* process (the worker needs no
+change) before it creates its first NIXL agent. On a GB10, that took a 1 GiB
+GPU-to-GPU read from 3.5 s to 1.2 s, almost all of it connection setup. Measure
+on PCIe topologies before relying on it: UCX's default exists for those.
+
 Each gathered tensor is freed after one read, when its lease ends, or when nobody
 claims it within `claim_timeout_s`. `max_held_bytes` caps GPU memory held.
 Extra config keys: `max_held_bytes` (default 2 GiB), `claim_timeout_s` (30),
