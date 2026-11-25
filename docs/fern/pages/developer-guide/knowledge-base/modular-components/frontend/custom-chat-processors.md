@@ -103,9 +103,8 @@ An exception your engine raises becomes the HTTP error response:
   the [image-download advice](../../../../reference/components/frontend-configuration.mdx#streaming-errors),
   is returned verbatim. Other messages are logged and replaced with generic text for the status.
 - A worker's error reaches your engine from `routed_engine` as `InvalidArgument` for a rejected
-  request, as `dynamo.llm.exceptions.Cancelled` for a cancelled request, and as
-  `dynamo.llm.exceptions.RoutedEngineError`, a `ValueError`, for any other classified error.
-  Re-raise it unchanged, or let it escape, to retain the worker's classification
+  request, and as `dynamo.llm.exceptions.RoutedEngineError`, a `ValueError`, for any other
+  classified error. Re-raise it unchanged, or let it escape, to retain the worker's classification
   and any message the worker explicitly marks for clients. Without such a message, the client
   receives generic text. Classified errors include unavailable-worker errors (503), deadlines (504),
   and overload (529 by default). Before streaming headers are committed, the classification sets

@@ -42,7 +42,6 @@ from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import (
-    Cancelled,
     HttpError,
     InvalidArgument,
     RoutedEngineError,
@@ -1661,10 +1660,6 @@ class VllmProcessor:
             # that 503 into a 500; let the binding restore the class instead.
             raise
         except InvalidArgument:
-            raise
-        except Cancelled:
-            # A cancelled request is HTTP 499, not a server fault; an error
-            # envelope would turn it into a 500.
             raise
         except RoutedEngineError:
             # Keep the worker's error class (for example CapacityExhausted, HTTP 529);

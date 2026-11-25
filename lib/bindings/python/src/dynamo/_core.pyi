@@ -3250,10 +3250,9 @@ class RoutedEngineError(ValueError):
     """A backend error raised by `RoutedEngine.generate` and its response stream.
 
     Raised for every classified error except a validation error, which raises
-    `InvalidArgument`, and a cancelled request, which raises `Cancelled`. A chat
-    engine that lets it escape answers with the backend's status, because the
-    original error is restored. `Client` and `KvRouter` streams raise a plain
-    `ValueError` instead.
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...

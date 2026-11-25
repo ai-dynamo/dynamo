@@ -213,7 +213,6 @@ def _load_processor_module(
     _install_module(
         install_module,
         "dynamo.llm.exceptions",
-        Cancelled=type("Cancelled", (Exception,), {}),
         HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
         RoutedEngineError=type("RoutedEngineError", (ValueError,), {}),

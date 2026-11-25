@@ -67,13 +67,8 @@ pyo3::create_exception!(
 const ROUTED_ENGINE_ERROR_ATTR: &str = "_dynamo_error";
 
 /// Raise a backend's `DynamoError` in Python as a [`RoutedEngineError`] with
-/// `message`, the text of the exception it replaces. A cancelled request raises
-/// the typed `Cancelled` instead, so a chat processor can re-raise it and the
-/// client gets HTTP 499 rather than the 500 of an internal error.
+/// `message`, the text of the exception it replaces.
 fn routed_engine_error(error: &DynamoError, message: String) -> PyErr {
-    if error.class() == ErrorClass::Cancelled {
-        return Cancelled::new_err(message);
-    }
     let err = RoutedEngineError::new_err(message);
     // Without the attribute the error still raises; it only loses its class.
     if let Ok(serialized) = serde_json::to_string(error) {
@@ -99,8 +94,8 @@ pub(crate) fn routed_engine_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Opti
 }
 
 /// Convert a routed-pipeline error to a Python exception, keeping the
-/// `WorkerUnavailable`, `InvalidArgument` and `Cancelled` class that the generic
-/// [`crate::to_pyerr`] would drop, and any other classified error as a [`RoutedEngineError`].
+/// `WorkerUnavailable` and `InvalidArgument` class that the generic [`crate::to_pyerr`] would drop,
+/// and any other classified error as a [`RoutedEngineError`].
 pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
     if is_worker_draining(err.as_ref()) {
         return WorkerDraining::new_err(err.to_string());
@@ -297,8 +292,7 @@ fn invalid_request_client_message(error: &DynamoError) -> Option<String> {
 /// public message or the generic label when there is none; diagnostic text must
 /// never be promoted into a public `InvalidArgument` message. Any other error
 /// raises a `ValueError`, which on a `RoutedEngine`'s stream (`routed_engine`)
-/// is a [`RoutedEngineError`] that keeps the backend's `DynamoError`, or a typed
-/// `Cancelled` for a cancelled request.
+/// is a [`RoutedEngineError`] that keeps the backend's `DynamoError`.
 pub(crate) fn check_response_error<R>(
     response: Annotated<R>,
     routed_engine: bool,

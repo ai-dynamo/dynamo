@@ -38,7 +38,6 @@ from dynamo.frontend.prepost import (
     build_tool_call_guided_decoding,
 )
 from dynamo.llm.exceptions import (
-    Cancelled,
     HttpError,
     InvalidArgument,
     RoutedEngineError,
@@ -2793,8 +2792,7 @@ class TestRoutedEnginePath:
             rejection = WorkerUnavailable("prefill routing is still activating")
         else:
             message = IMAGE_FETCH_ERROR_MESSAGES.get(status, "worker unavailable")
-            expected = Cancelled if status == 499 else RoutedEngineError
-            with pytest.raises(expected) as backend:
+            with pytest.raises(RoutedEngineError) as backend:
                 _raise_routed_http_error(status, message)
             rejection = backend.value
 
@@ -2821,8 +2819,7 @@ class TestRoutedEnginePath:
         self, vllm_processor_module, rejected_after_frames, http_status
     ):
         # Keep cancellation (499) and capacity (529) errors before or during a stream.
-        expected = Cancelled if http_status == 499 else RoutedEngineError
-        with pytest.raises(expected) as raised:
+        with pytest.raises(RoutedEngineError) as raised:
             _raise_routed_http_error(http_status, "worker rejected request")
         rejection = raised.value
 
@@ -2844,7 +2841,7 @@ class TestRoutedEnginePath:
         )
         processor = _make_processor(vllm_processor_module, routed_engine)
 
-        with pytest.raises(expected) as caught:
+        with pytest.raises(RoutedEngineError) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 

@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 
 from dynamo._core import _raise_routed_http_error
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import Cancelled, RoutedEngineError
+from dynamo.llm.exceptions import RoutedEngineError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -51,12 +53,17 @@ def test_routed_engine_error_is_a_value_error():
     assert isinstance(raised.value, ValueError)
 
 
-def test_routed_engine_stream_keeps_cancelled_typed():
-    # Chat processors re-raise `Cancelled`, so the client gets 499, not 500.
-    with pytest.raises(Cancelled):
-        _raise_routed_http_error(499, "client went away")
+@pytest.mark.parametrize("message", ["client went away", "Unsupported video media"])
+def test_routed_engine_stream_keeps_original_cancellation(message):
+    with pytest.raises(RoutedEngineError) as routed:
+        _raise_routed_http_error(499, message)
+    assert isinstance(routed.value, ValueError)
+    error = json.loads(routed.value._dynamo_error)
+    assert error["error_type"] == "Cancelled"
+    if message == "Unsupported video media":
+        assert error["public"]["message"] == message
     with pytest.raises(ValueError) as raised:
-        _raise_routed_http_error(499, "client went away", routed_engine=False)
+        _raise_routed_http_error(499, message, routed_engine=False)
     assert type(raised.value) is ValueError
 
 
