@@ -9,7 +9,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use super::{
-    CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionContext, WorkerSelectionInput,
+    CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionInput, WorkerSelectionRequest,
     WorkerSelector, select_reference,
 };
 use crate::filter::RoutingEligibility;
@@ -130,15 +130,15 @@ fn selection_weights(
             .router_config_override
             .as_ref()
             .and_then(|config| config.overlap_score_credit)
-            .unwrap_or(kv_router_config.overlap_score_credit),
-        overlap_score_credit_decay: kv_router_config.overlap_score_credit_decay,
+            .unwrap_or(kv_router_config.overlap_score_credit()),
+        overlap_score_credit_decay: kv_router_config.overlap_score_credit_decay(),
         prefill_load_scale: request
             .router_config_override
             .as_ref()
             .and_then(|config| config.prefill_load_scale)
-            .unwrap_or(kv_router_config.prefill_load_scale),
-        shared_cache_multiplier: kv_router_config.shared_cache_multiplier.unwrap_or(
-            match kv_router_config.shared_cache_type {
+            .unwrap_or(kv_router_config.prefill_load_scale()),
+        shared_cache_multiplier: kv_router_config.shared_cache_multiplier().unwrap_or(
+            match kv_router_config.shared_cache_type() {
                 dynamo_worker_selection::SharedCacheType::None => 0.0,
                 dynamo_worker_selection::SharedCacheType::Hicache => 0.5,
             },
@@ -204,12 +204,13 @@ fn default_row<C: WorkerConfigLike>(
 impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
+        let info = request.info();
         let weights = default_context.weights;
         let worker = row.worker;
         let cache = &row.cache;
@@ -218,7 +219,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let device_overlap_blocks = cache.device_overlap_blocks;
         // Host and disk blocks already earn their own tier credit; the shared
         // cache extends the prefix from where the worker's ends.
-        let shared_beyond_local_blocks = context.shared_cache_hits().map_or(0, |hits| {
+        let shared_beyond_local_blocks = request.shared_cache_hits().map_or(0, |hits| {
             let local_blocks =
                 device_overlap_blocks + cache.host_overlap_blocks + cache.disk_overlap_blocks;
             hits.loadable_beyond(local_blocks.round().max(0.0) as u32)
@@ -230,35 +231,35 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
         let overlap_credit_decay =
-            if context.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
+            if request.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
                 let excess_active_prefill_blocks = load
-                    .active_prefill_tokens
+                    .active_prefill_tokens()
                     .saturating_sub(default_context.min_active_prefill_tokens)
                     as f64
-                    / context.block_size() as f64;
+                    / request.block_size() as f64;
                 // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
                 // clamp so a worker at the load floor does not compute 0/0.
                 let normalized_prefill_load =
-                    excess_active_prefill_blocks / context.request_blocks().max(1) as f64;
+                    excess_active_prefill_blocks / request.request_blocks().max(1) as f64;
                 1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
             } else {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
         let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
-            + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
-            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
+            + kv_router_config.host_cache_hit_weight() * cache.host_overlap_blocks
+            + kv_router_config.disk_cache_hit_weight() * cache.disk_overlap_blocks
             + shared_overlap_blocks;
-        let decode_cost_blocks = load.decode_cost_blocks;
+        let decode_cost_blocks = load.decode_cost_blocks();
         let active_request_cost_blocks =
-            kv_router_config.decode_active_request_weight * load.active_requests as f64;
+            kv_router_config.decode_active_request_weight() * load.active_requests() as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
         // conditional disagg leaves a positive overlap credit in place, prefer
         // cache-hot decode workers while still charging decode backlog.
         if self.worker_type == "decode"
-            && !context.tracks_prefill_tokens()
+            && !request.tracks_prefill_tokens()
             && weights.overlap_score_credit > 0.0
         {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
@@ -271,7 +272,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -284,18 +285,18 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
 
         // Keep reference-only arithmetic out of public worker-input rows, including
         // benchmark builds: their layout must match the production plugin's inputs.
-        let raw_prefill_tokens = if context.tracks_prefill_tokens() {
-            if load.available {
+        let raw_prefill_tokens = if request.tracks_prefill_tokens() {
+            if load.is_available() {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = context.isl_tokens().saturating_sub(cached_tokens);
-                (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
+                let uncached_tokens = info.isl_tokens().saturating_sub(cached_tokens);
+                (load.active_prefill_tokens() + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                context.isl_tokens()
+                info.isl_tokens()
             }
         } else {
             0
         };
-        let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size() as f64;
+        let raw_prefill_blocks = raw_prefill_tokens as f64 / request.block_size() as f64;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
@@ -308,7 +309,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if remote_blocks > 0 {
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -325,7 +326,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             );
         } else {
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -345,11 +346,11 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     #[inline]
     fn worker_cost(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
     ) -> f64 {
-        let base_score = self.worker_logit(context, default_context, row, "Formula");
+        let base_score = self.worker_logit(request, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -363,7 +364,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
 pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     scorer: &DefaultWorkerScorer<&SelectionConfig>,
     picker: &DefaultWorkerPicker,
-    context: &WorkerSelectionContext<'_>,
+    selection_request: &WorkerSelectionRequest<'_>,
     source: &SelectionRowSource<'_, C>,
 ) -> Option<(WorkerWithDpRank, f64)> {
     let workers = source.workers;
@@ -385,19 +386,19 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         );
         return Some((
             worker,
-            scorer.worker_logit(context, default_context, &row, "Pinned formula"),
+            scorer.worker_logit(selection_request, default_context, &row, "Pinned formula"),
         ));
     }
 
-    let temperature = context
+    let temperature = selection_request
         .router_temperature_override()
-        .unwrap_or(scorer.kv_router_config.router_temperature);
+        .unwrap_or(scorer.kv_router_config.router_temperature());
     let get_score = |worker, config: &C| {
         let preferred_taint_multiplier = request
             .routing_constraints
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
-            context,
+            selection_request,
             default_context,
             &default_row(
                 source,
@@ -465,6 +466,7 @@ mod tests {
     use crate::config::RouterConfigOverride;
     use crate::{OverlapSignals, ScheduleMode};
     use dynamo_worker_selection::SharedCacheHits;
+    use dynamo_worker_selection::host::SelectionConfigHostExt;
 
     fn worker_logit(
         selector: &DefaultWorkerSelector,
@@ -475,12 +477,12 @@ mod tests {
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
         let source = SelectionRowSource::new(request, &workers, request.eligibility(), block_size);
-        let context = source.context();
+        let selection_request = source.selection_request();
         let default_context =
             DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
-                &context,
+                &selection_request,
                 default_context,
                 &default_row(
                     &source,
@@ -564,11 +566,11 @@ mod tests {
 
         for overlap_score_credit_decay in [0.0, 1.0] {
             let selector = DefaultWorkerSelector::new(
-                Some(SelectionConfig {
-                    router_temperature: 0.0,
-                    overlap_score_credit_decay,
-                    ..Default::default()
-                }),
+                Some(
+                    SelectionConfig::default()
+                        .with_router_temperature(0.0)
+                        .with_overlap_score_credit_decay(overlap_score_credit_decay),
+                ),
                 "test",
             );
             let result = selector
@@ -590,10 +592,7 @@ mod tests {
     fn test_default_selector_randomizes_zero_temperature_ties() {
         use crate::test_utils::SimpleWorkerConfig;
 
-        let config = SelectionConfig {
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default().with_router_temperature(0.0);
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let workers = HashMap::from([
             (10, SimpleWorkerConfig::default()),
@@ -674,19 +673,13 @@ mod tests {
                 ],
             ),
         ] {
-            let config = SelectionConfig {
-                router_temperature: temperature,
-                ..Default::default()
-            };
+            let config = SelectionConfig::default().with_router_temperature(temperature);
             let mut first = DefaultWorkerSelector::new_seeded(
-                Some(SelectionConfig {
-                    router_temperature: 0.0,
-                    ..Default::default()
-                }),
+                Some(SelectionConfig::default().with_router_temperature(0.0)),
                 "test",
                 42,
             );
-            first.kv_router_config.router_temperature = temperature;
+            first.kv_router_config = first.kv_router_config.with_router_temperature(temperature);
             let second = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
             let first_workers = HashMap::from([
                 (30, SimpleWorkerConfig::default()),
@@ -770,13 +763,11 @@ mod tests {
         let shared_cache_hits = SharedCacheHits::from_ranges(vec![0..4]);
         request.shared_cache_hits = Some(shared_cache_hits);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            prefill_load_scale: 1.0,
-            shared_cache_multiplier: Some(0.0),
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_prefill_load_scale(1.0)
+            .with_shared_cache_multiplier(Some(0.0))
+            .with_router_temperature(0.0);
         let select = |request: &SchedulingRequest| {
             DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42)
                 .select_worker(WorkerSelectionInput::configured(
@@ -824,11 +815,11 @@ mod tests {
         use crate::test_utils::SimpleWorkerConfig;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.0,
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(
+                SelectionConfig::default()
+                    .with_overlap_score_credit(1.0)
+                    .with_router_temperature(0.0),
+            ),
             "test",
         );
         let workers = HashMap::from([
@@ -862,10 +853,7 @@ mod tests {
         use crate::test_utils::SimpleWorkerConfig;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(1.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -894,10 +882,7 @@ mod tests {
         use dynamo_session_affinity::WorkerAffinityTarget;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -1188,10 +1173,7 @@ mod tests {
     #[test]
     fn test_preferred_taints_prefer_matching_worker() {
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -1260,10 +1242,7 @@ mod tests {
     #[test]
     fn test_negative_preferred_taints_avoid_matching_worker() {
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -1359,12 +1338,10 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            shared_cache_multiplier: Some(0.5),
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_shared_cache_multiplier(Some(0.5))
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();
@@ -1434,12 +1411,10 @@ mod tests {
         let mut tier_overlap_blocks = crate::TierOverlapBlocks::default();
         tier_overlap_blocks.device.insert(worker0, 2);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            prefill_load_scale: 2.0,
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_prefill_load_scale(2.0)
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();
@@ -1528,17 +1503,11 @@ mod tests {
         );
 
         let normal_credit = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit(1.0)),
             "test",
         );
         let amplified_credit = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.5,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit(1.5)),
             "test",
         );
 
@@ -1617,10 +1586,7 @@ mod tests {
         };
         let default = DefaultWorkerSelector::new(Some(SelectionConfig::default()), "test");
         let weighted = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                decode_active_request_weight: 32.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_decode_active_request_weight(32.0)),
             "test",
         );
 
@@ -1686,17 +1652,11 @@ mod tests {
         );
 
         let no_decay = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(0.0)),
             "test",
         );
         let with_decay = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(1.0)),
             "test",
         );
 
@@ -1738,11 +1698,9 @@ mod tests {
         let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 4.0);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();

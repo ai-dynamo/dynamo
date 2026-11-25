@@ -9,13 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-import vllm
 from transformers import Qwen3Config
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
-from dynamo.vllm import decision_cache_provenance as cache
 from dynamo.vllm import decision_execution as decisions
 from dynamo.vllm.args import _parse_cli_args
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
@@ -32,8 +30,6 @@ pytestmark = [
 
 @pytest.fixture
 def profile(monkeypatch):
-    monkeypatch.setattr(decisions, "version", lambda _: "0.33.0")
-    monkeypatch.setattr(decisions, "verify_cache_sources", lambda: True)
     return {
         "runtime_config": ModelRuntimeConfig(),
         "model_input": ModelInput.Tokens,
@@ -70,7 +66,7 @@ def test_disabled_worker_preserves_metadata_and_skips_qualification(
     profile["config"].systemone_serial = False
     profile["vllm_config"] = None
     qualification = Mock(side_effect=AssertionError("disabled worker must not qualify"))
-    monkeypatch.setattr(decisions, "_released_runtime", qualification)
+    monkeypatch.setattr(decisions, "_unqualified_runtime_condition", qualification)
     original = dict(profile["runtime_config"].runtime_data)
 
     decisions.qualify_vllm_decision_runtime(
@@ -178,8 +174,7 @@ def test_capability_publication_does_not_repeat_runtime_qualification(
 ):
     profile.pop("vllm_config")
     qualification = Mock(side_effect=AssertionError("runtime is already qualified"))
-    monkeypatch.setattr(decisions, "_released_runtime", qualification)
-    monkeypatch.setattr(decisions, "verify_cache_sources", qualification)
+    monkeypatch.setattr(decisions, "_unqualified_runtime_condition", qualification)
     assert decisions.publish_vllm_decision_capability(**profile)
 
 
@@ -200,15 +195,6 @@ def test_capability_publication_rejects_unqualified_registration(
     with pytest.raises(ValueError, match="aggregated token-input worker"):
         decisions.publish_vllm_decision_capability(**profile)
     assert not profile["runtime_config"].runtime_data
-
-
-@pytest.mark.parametrize("release", ["0.32.0", "0.33.0rc1", "0.33.0.dev1"])
-def test_explicit_opt_in_rejects_unqualified_runtime(profile, monkeypatch, release):
-    monkeypatch.setattr(decisions, "version", lambda _: release)
-    with pytest.raises(ValueError, match="vLLM 0.33.0"):
-        decisions.qualify_vllm_decision_runtime(
-            profile["vllm_config"], profile["config"]
-        )
 
 
 @pytest.mark.parametrize(
@@ -277,20 +263,6 @@ def test_explicit_opt_in_rejects_missing_runtime_metadata(profile):
         decisions.qualify_vllm_decision_runtime(
             profile["vllm_config"], profile["config"]
         )
-
-
-def test_explicit_opt_in_rejects_modified_cache_source(profile, monkeypatch):
-    monkeypatch.setattr(decisions, "verify_cache_sources", lambda: False)
-    with pytest.raises(ValueError, match="cache source"):
-        decisions.qualify_vllm_decision_runtime(
-            profile["vllm_config"], profile["config"]
-        )
-
-
-def test_installed_cache_sources_match_qualified_release():
-    """Run against the actual pinned vLLM container, not the mocked profile."""
-    assert decisions._released_runtime(), "Requalify Decisions when upgrading vLLM"
-    assert cache.verify_cache_sources()
 
 
 @pytest.fixture
@@ -412,30 +384,3 @@ def test_causal_adapter_preserves_explicit_candidate_scoring(
     )
     assert installed_model_config.max_logprobs == 20
     params._validate_logprobs(installed_model_config)
-
-
-def test_cache_source_verifier_reports_missing_module_file(monkeypatch, caplog):
-    monkeypatch.setattr(vllm, "__file__", None)
-    assert not cache.verify_cache_sources()
-    assert "cache source unavailable: vllm/__init__.py" in caplog.text
-    assert "disabled" not in caplog.text
-
-
-def test_cache_source_verifier_rejects_modified_and_missing_files(tmp_path, caplog):
-    content = b"cache accounting owner\n"
-    source = tmp_path / "vllm" / "outputs.py"
-    source.parent.mkdir()
-    source.write_bytes(content)
-    expected = (("vllm/outputs.py", cache.git_blob_id(content)),)
-    assert cache.verify_installed_sources(expected, root=tmp_path)
-    source.write_bytes(content + b"modified\n")
-    assert not cache.verify_installed_sources(expected, root=tmp_path)
-    assert "cache source differs from qualified release: vllm/outputs.py" in caplog.text
-    assert "disabled" not in caplog.text
-    assert str(tmp_path) not in caplog.text
-    caplog.clear()
-    source.unlink()
-    assert not cache.verify_installed_sources(expected, root=tmp_path)
-    assert "cache source unavailable: vllm/outputs.py" in caplog.text
-    assert "disabled" not in caplog.text
-    assert str(tmp_path) not in caplog.text

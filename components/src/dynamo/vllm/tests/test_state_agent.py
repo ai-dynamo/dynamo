@@ -223,6 +223,8 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
     assert [item["raw_topic"] for item in captured["descriptors"]] == [topic] * 4
     assert [item["image_token_id"] for item in captured["descriptors"]] == [99] * 4
     assert [item["video_token_id"] for item in captured["descriptors"]] == [100] * 4
+    # No kvcr tier: the descriptor keeps the durable default.
+    assert not any(item["process_local_inventory"] for item in captured["descriptors"])
     assert [item["router_hint_source"] for item in captured["descriptors"]] == [
         {
             "source_control_endpoint": "tcp://cache-owner.example:23284",
@@ -266,6 +268,7 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
         "secondary_tiers"
     ] = [
         {
+            "type": "kvcr",
             "router_capabilities": ["router_hint"],
             "control_advertise_host": "cache-owner.example",
             "control_ports": ["23280"],
@@ -283,6 +286,10 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
         item["router_hint_source"]["topology_domains"]
         for item in captured["descriptors"]
     ] == [{"rdma-island": "island-1"}]
+    # An in-process kvcr tier (no service socket) owns process-local inventory.
+    assert [item["process_local_inventory"] for item in captured["descriptors"]] == [
+        True
+    ]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@
 /lib/sidecar/trtllm/
 /lib/sidecar/sglang/
 /lib/generate-formats/sglang/
+/lib/sidecar/triton/
 /lib/memory/
 /lib/tokens/
 /lib/kv-hashing/

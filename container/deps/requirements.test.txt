@@ -38,7 +38,10 @@ hf-xet>=1.5.2
 # instead of silently downgrading the hub underneath diffusers.
 # The ceiling keeps transformers importable in the TensorRT-LLM test image:
 # this file installs into /opt/dynamo/venv there, which shadows the system
-# site where transformers requires huggingface-hub>=1.5.0,<2.0.
+# site where transformers requires huggingface-hub>=1.5.0,<2.0. vLLM 0.34 requires
+# hub 2, so its test image runs hub 1.x. When trtllm's runtime_image_tag in
+# context.yaml moves, check its Transformers: from 5.18.0 it accepts hub 2, so
+# remove the ceiling and rerun the TensorRT-LLM tests.
 huggingface-hub>=1.23.0,<2.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
@@ -78,6 +81,12 @@ pytest-order==1.3.0
 pytest-rerunfailures==16.1
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
+# fakeredis through 2.40.0 cannot build a client on redis-py 8.2.0: it raises
+# AttributeError: 'method_descriptor' object has no attribute '__closure__'
+# (cunla/fakeredis-py#636, fixed on its master and in no release). The runtime
+# requirement is redis>=6.2.0,<9.0.0, so the cap is in this file, which pins fakeredis.
+# Remove it when fakeredis is raised to a release that has the fix.
+redis<8.2
 requests==2.33.1
 # Required by kr8s (not declared in kr8s's own dependencies)
 sniffio==1.3.1

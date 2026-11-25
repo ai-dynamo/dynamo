@@ -31,7 +31,10 @@
 /examples/backends/sglang/
 /lib/generate-formats/sglang/
 /components/src/dynamo/sglang/
+/lib/sidecar/triton/
 /components/src/dynamo/triton/**
+/lib/sidecar/AGENTS.md
+/lib/sidecar/CLAUDE.md
 /lib/memory/
 /lib/tokens/
 /lib/kv-hashing/
@@ -283,6 +286,7 @@ requirements.txt
 /tests/serve/trtllm/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /dev/nats-server.conf @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/testkit/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/error/src/http.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/sidecar/README.md @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/docker-compose.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/Dockerfile

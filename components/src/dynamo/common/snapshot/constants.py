@@ -17,6 +17,7 @@ SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
+SNAPSHOT_RESTORE_PROXY_BINARY = "snapshot-restore-proxy"
 
 # Must match the public file-name constants in
 # github.com/ai-dynamo/snapshot/api/podcontract.

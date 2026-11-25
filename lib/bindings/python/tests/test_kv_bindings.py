@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import asyncio
 import inspect
 import json
 import subprocess
@@ -22,6 +23,7 @@ import threading
 
 import pytest
 
+from dynamo import llm
 from dynamo.llm import RadixTree
 
 try:
@@ -298,6 +300,67 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         await service.shutdown_async()
 
 
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(10)
+@pytest.mark.asyncio
+async def test_worker_publisher_updates_reservation_load(monkeypatch, unused_tcp_port):
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
+    service = SelectionService(indexer_threads=1, replica_sync_port=unused_tcp_port)
+    publisher = llm.WorkerSequenceEventPublisher(
+        model_name="model",
+        routing_group="default",
+        worker_id=1,
+        bind_endpoint="tcp://127.0.0.1:*",
+    )
+
+    def load():
+        rank = service.loads(model_name="model")[0]["loads"][0]
+        return (
+            rank["active_requests"],
+            rank["potential_decode_blocks"],
+            rank["potential_prefill_tokens"],
+        )
+
+    async def wait_load(expected):
+        async with asyncio.timeout(3):
+            while load() != expected:
+                await asyncio.sleep(0.01)
+
+    try:
+        await service.upsert_worker(
+            {
+                "worker_id": 1,
+                "model_name": "model",
+                "endpoint": "http://worker",
+                "block_size": 4,
+            }
+        )
+        await service.register_worker_publisher(publisher.endpoint)
+        await service.select_and_reserve(
+            {"model_name": "model", "token_ids": [1, 2, 3, 4], "selection_id": "warmup"}
+        )
+        # Wait for the asynchronous subscription to connect.
+        async with asyncio.timeout(3):
+            while load() != (0, 0, 0):
+                publisher.free("warmup")
+                await asyncio.sleep(0.01)
+
+        await service.select_and_reserve(
+            {"model_name": "model", "token_ids": [5, 6, 7, 8], "selection_id": "target"}
+        )
+        assert load() == (1, 1, 4)
+        await asyncio.to_thread(publisher.mark_prefill_completed, "target")
+        await wait_load((1, 1, 0))
+        await asyncio.to_thread(publisher.free, "target")
+        await wait_load((0, 0, 0))
+    finally:
+        await asyncio.to_thread(publisher.close)
+        await service.shutdown_async()
+
+
 @pytest.fixture
 async def session_binding_services(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
@@ -450,7 +513,7 @@ async def test_selection_service_malformed_payload_raises_value_error(
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
 
-        for field in ("is_eagle", "engine_owned_mm_identity"):
+        for field in ("is_eagle", "engine_owned_mm_identity", "idempotent_stores"):
             with pytest.raises(ValueError, match="boolean"):
                 await service.upsert_worker({"worker_id": 1, field: "false"})
             with pytest.raises(ValueError, match="boolean"):

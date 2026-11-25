@@ -15,6 +15,7 @@ use dynamo_kv_hints::{
 };
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};

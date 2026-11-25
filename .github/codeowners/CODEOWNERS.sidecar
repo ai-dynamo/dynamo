@@ -1,8 +1,11 @@
+/lib/sidecar/AGENTS.md @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/CLAUDE.md @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/lpx/ @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/mocker/servers/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/common/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/sglang/ @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/triton/ @ai-dynamo/dynamo-backend-triton-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/testkit/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/README.md @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners

@@ -16,9 +16,9 @@ use std::ops::Range;
 pub struct SharedCacheHits {
     /// Ranges of block positions that exist in the shared cache.
     /// Half-open ranges [start, end), sorted and non-overlapping.
-    pub ranges: Vec<Range<u32>>,
+    ranges: Vec<Range<u32>>,
     /// Total number of hits (sum of range lengths).
-    pub total_hits: u32,
+    total_hits: u32,
     /// Shortest run, in blocks, the engine loads from the shared cache; it skips
     /// shorter runs. Zero sets no minimum.
     min_load_blocks: u32,
@@ -33,6 +33,19 @@ impl SharedCacheHits {
             total_hits,
             min_load_blocks: 0,
         }
+    }
+
+    /// The block positions the shared cache holds, as sorted, non-overlapping half-open
+    /// ranges.
+    #[inline]
+    pub fn ranges(&self) -> &[Range<u32>] {
+        &self.ranges
+    }
+
+    /// The number of block positions the shared cache holds: the sum of the range lengths.
+    #[inline]
+    pub fn total_hits(&self) -> u32 {
+        self.total_hits
     }
 
     /// Set the shortest run, in blocks, the engine loads from the shared cache.

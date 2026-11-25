@@ -109,6 +109,7 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /lib/mocker/servers/
 /lib/sidecar/common/
 /lib/sidecar/sglang/
+/lib/sidecar/triton/
 /lib/sidecar/trtllm/
 /tests/serve/trtllm/
 /container/deps/vllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners

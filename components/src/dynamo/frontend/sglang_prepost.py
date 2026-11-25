@@ -43,7 +43,7 @@ from .sglang_tool_call_markers import (
 )
 from .structural_tag_policy import (
     ToolChoiceKind,
-    effective_tool_strict,
+    guidance_tool_schema,
     should_attempt_structural_tag,
 )
 from .thinking import (
@@ -247,8 +247,14 @@ def convert_tools(
         if defer_loading is None:
             defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
+        parameters = func.get("parameters")
         if structural_tag_schema is not None:
-            strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
+            parameters, strict = guidance_tool_schema(
+                func.get("strict"),
+                structural_tag_schema,
+                parameters,
+                tool_name=func.get("name"),
+            )
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
@@ -256,7 +262,7 @@ def convert_tools(
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
-                    parameters=func.get("parameters"),
+                    parameters=parameters,
                     strict=strict,
                     defer_loading=defer_loading,
                 ),
@@ -333,14 +339,17 @@ def create_parsers(
     Shared by both the single-process preprocessing path and the pool path
     (which must recreate non-picklable parsers in the main process).
 
-    If ``sglang_tools`` is provided, reuses them; otherwise converts from
-    the request's ``tools`` field.
+    Output recognition uses the declared catalog when ``allowed_tools``
+    restricts generation. This lets the HTTP allowlist reject a parsed call
+    to a declared tool outside the subset.
 
     Required and named choices use the model-specific :class:`FunctionCallParser`
     when the effective guidance is a structural tag. Their JSON fallback keeps
     :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
     """
-    if sglang_tools is None:
+    if catalog := request.get("chat_template_tools"):
+        sglang_tools = convert_tools(catalog)
+    elif sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
     tool_choice = request.get("tool_choice", "auto")
 
@@ -851,9 +860,10 @@ def preprocess_chat_request(
             "structural_tag response format"
         )
 
+    catalog = request.get("chat_template_tools")
     template_tools = _filter_template_tools(
         request,
-        sglang_tools=sglang_tools,
+        sglang_tools=convert_tools(catalog) if catalog else sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         filter_named_choice=not kimi_k3_bridge,
     )

@@ -69,6 +69,11 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  # fern check and fern generate load every published version, which exceeds
+  # Node's default heap.
+  NODE_OPTIONS: --max-old-space-size=8192
+
 jobs:
   # Detect changed files for conditional job execution
   changed-files:

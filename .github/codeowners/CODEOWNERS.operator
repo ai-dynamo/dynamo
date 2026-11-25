@@ -48,8 +48,10 @@ requirements.txt
 /deploy/operator/internal/dynamo/lpx/
 /deploy/operator/internal/observability/
 /deploy/operator/internal/controller/lpx/
+/docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx @ai-dynamo/dynamo-operator-codeowners
 /recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json @ai-dynamo/dynamo-operator-codeowners
 /recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md @ai-dynamo/dynamo-operator-codeowners
 /tests/deploy/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/**/*lpx* @ai-dynamo/dynamo-operator-codeowners
 /deploy/power-agent/ @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners

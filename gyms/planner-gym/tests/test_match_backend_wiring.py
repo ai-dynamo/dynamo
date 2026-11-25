@@ -1232,7 +1232,7 @@ def test_rendered_ais_engine_role_reaches_native_perf_config(tmp_path, role):
                 "aggregate": {
                     "system": "b300_sxm",
                     "backend": "vllm",
-                    "backend_version": "0.24.0",
+                    "backend_version": "current",
                     "tp_size": 1,
                     "attention_dp_size": 8,
                     "moe_tp_size": 1,

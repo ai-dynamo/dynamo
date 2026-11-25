@@ -8,10 +8,12 @@
 pyproject.toml
 requirements.txt
 /docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+/docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx
 /docs/fern/pages/reference/components/pool-relay-configuration.md
 /docs/fern/pages/reference/components/global-discovery-service-configuration.md
 /docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+/docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
 /.lycheeignore @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /docs/fern/**/*sidecar* @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners

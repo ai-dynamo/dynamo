@@ -1051,6 +1051,7 @@ class VllmProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
+                request_id=context.id() if context is not None else request_id,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -1254,6 +1255,14 @@ class VllmProcessor:
                     "mm_processor_kwargs"
                 ] = request_for_sampling.mm_processor_kwargs
 
+            tool_catalog_names = None
+            if pre.uses_dynamo_json_tool_call_fallback and (
+                catalog := request.get("chat_template_tools")
+            ):
+                tool_catalog_names = frozenset(
+                    tool["function"]["name"] for tool in catalog
+                )
+
             def new_post_processor() -> StreamingPostProcessor:
                 # vLLM tool parsers keep mutable streaming state. Give every
                 # n>1 choice its own parser instead of reusing the parser that
@@ -1286,6 +1295,7 @@ class VllmProcessor:
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
                     ),
+                    tool_catalog_names=tool_catalog_names,
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so

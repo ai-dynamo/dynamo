@@ -66,6 +66,11 @@ The `ai-dynamo` distribution registers:
 | `aisim.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
 | `aisim.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
 
+To export selected recommendations as Kubernetes manifests or Kustomize bundles, follow
+[Generate a DGD with AISim](../../../../../kubernetes/auto-deployment/aisimulate-dgd.mdx).
+The `dgd` adapter is registered separately in `aisim.output_adapters` and enabled with
+`--output dgd`.
+
 ## Use the Python SDK
 
 Call the retained Sweeper Python API only when an application needs the legacy `SmartSearchConfig`

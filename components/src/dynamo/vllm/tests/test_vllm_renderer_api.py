@@ -382,6 +382,7 @@ class TestVllmRendererApi:
             "abort_immediately",
             "session_id",
             "kv_hints",
+            "block_hashes",
         )
         expected_output_fields = (
             "request_id",
@@ -403,6 +404,7 @@ class TestVllmRendererApi:
             "spec_decode_metrics",
             "prompt_token_id_logprobs",
             "error",
+            "watermarking",
         )
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
@@ -420,6 +422,7 @@ class TestVllmRendererApi:
                 "is_coalesced",
                 "stage_payload",
                 "stage_work",
+                "segment_generation",
             )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__

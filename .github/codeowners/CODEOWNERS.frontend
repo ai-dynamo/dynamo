@@ -48,6 +48,7 @@ requirements.txt
 /lib/llm/tests/test_reasoning_parser.rs @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/common/protocols/ @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/error/src/http.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/entrypoint.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-epp-codeowners
 /lib/llm/src/lora_routing.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/http-server/src/metrics.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners

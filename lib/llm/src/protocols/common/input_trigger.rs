@@ -152,6 +152,7 @@ mod tests {
         NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: "test".to_string(),
