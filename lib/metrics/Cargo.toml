@@ -3,7 +3,7 @@
 
 [package]
 name = "dynamo-metrics"
-description = "Prometheus metric names, typed helpers and the hierarchical registry Dynamo components share"
+description = "Prometheus metric names, the hierarchical registry and the frontend request metrics Dynamo components share"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
