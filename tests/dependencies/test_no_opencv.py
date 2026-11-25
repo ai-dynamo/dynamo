@@ -7,8 +7,7 @@ Upstream TRT-LLM made cv2 an optional video extra
 (https://github.com/NVIDIA/TensorRT-LLM/pull/16206) and its 1.3.x imports are
 already function-local, so nothing needs it at import time. Dynamo's
 trtllm_runtime.Dockerfile drops the preinstall (including the vendored media
-libraries under opencv_python_headless.libs/) in both the runtime_full stage and
-the pre_runtime whiteout, slimming the image. This test keeps a base-image bump
+libraries under opencv_python_headless.libs/), slimming the image. This test keeps a base-image bump
 or Dockerfile refactor from silently reintroducing it.
 """
 
@@ -36,7 +35,7 @@ def test_opencv_not_installed():
     assert spec is None, (
         f"opencv-python-headless is installed (cv2 at {spec.origin}); "
         "it must be removed from TRT-LLM images — see "
-        "trtllm_runtime.Dockerfile (uninstall RUN + pre_runtime whiteout)"
+        "trtllm_runtime.Dockerfile (opencv uninstall RUN)"
     )
 
 
@@ -49,5 +48,5 @@ def test_no_vendored_opencv_libs():
     )
     assert not leftovers, (
         f"vendored opencv artifacts still on disk: {leftovers}; "
-        "the pre_runtime whiteout in trtllm_runtime.Dockerfile must remove them"
+        "the opencv uninstall RUN in trtllm_runtime.Dockerfile must remove them"
     )

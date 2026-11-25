@@ -474,11 +474,11 @@ fn finish_reasons_map_and_unspecified_fails_closed() {
 }
 
 /// Both engines withhold the stop token they matched and name it in the finish
-/// event. The sidecar returns it when the frontend keeps its text, as it does
-/// for gpt-oss's `<|call|>` (200012), and counts it whether or not the engine
-/// counted it.
+/// event. The sidecar returns it once, so the frontend counts it: bare when the
+/// frontend keeps its text (gpt-oss's `<|call|>`, 200012), with empty
+/// pre-decoded text otherwise.
 #[test]
-fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
+fn a_matched_stop_token_is_returned_once_and_counted() {
     use pb::stop_match::Match;
 
     // 128009 and 7 are client stops, and 128009 and 128001 hidden ones.
@@ -518,6 +518,7 @@ fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
     ] {
         let terminal = terminal(&visible, reason, Match::StopTokenId(200012), reported);
         assert_eq!(terminal.token_ids, [200012]);
+        assert_eq!(terminal.text, None, "the frontend decodes a kept stop");
         assert_eq!(terminal.finish_reason, Some(finish));
         assert_eq!(terminal.stop_reason, Some(StopReason::Int(200012)));
         let usage = terminal.completion_usage.expect("usage");
@@ -533,22 +534,24 @@ fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
 
     let untrimmed = request_with(|r| r.output_options.no_stop_trim = Some(true));
     let retained = request_with(|r| r.output_options.retain_model_stop_token_text = Some(true));
-    for (request, matched, returned) in [
-        // The frontend trims hidden and client stops by default.
-        (&visible, Match::EosTokenId(128001), None),
-        (&visible, Match::StopTokenId(7), None),
-        (&visible, Match::StopText("done".into()), None),
-        // Keeping stop text needs every stop token; the frontend still trims
-        // the client's own under `retain_model_stop_token_text`.
-        (&untrimmed, Match::StopTokenId(7), Some(7)),
-        (&retained, Match::EosTokenId(128001), Some(128001)),
-        (&retained, Match::StopTokenId(7), Some(7)),
+    for (request, matched, sent, text) in [
+        // The frontend trims hidden and client stops by default: counted, with
+        // their text hidden.
+        (&visible, Match::EosTokenId(128001), Some(128001), Some("")),
+        (&visible, Match::StopTokenId(7), Some(7), Some("")),
+        (&visible, Match::StopText("done".into()), None, None),
+        // Keeping stop text needs every stop token as a bare ID; the frontend
+        // still trims the client's own under `retain_model_stop_token_text`.
+        (&untrimmed, Match::StopTokenId(7), Some(7), None),
+        (&retained, Match::EosTokenId(128001), Some(128001), None),
+        (&retained, Match::StopTokenId(7), Some(7), None),
     ] {
         let terminal = terminal(request, pb::FinishReason::Stop, matched, None);
-        assert_eq!(terminal.token_ids, Vec::from_iter(returned));
+        assert_eq!(terminal.token_ids, Vec::from_iter(sent));
+        assert_eq!(terminal.text.as_deref(), text);
         assert_eq!(
             terminal.completion_usage.expect("usage").completion_tokens,
-            1 + u32::from(returned.is_some())
+            1 + u32::from(sent.is_some())
         );
     }
 
@@ -559,6 +562,7 @@ fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
         .expect("finished")
         .expect("terminal");
     assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.text, None);
     assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
 }
 

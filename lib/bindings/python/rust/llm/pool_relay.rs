@@ -346,7 +346,7 @@ impl PoolRelay {
         let inner = self.started()?;
         crate::future_into_py(py, async move {
             let stats = inner.stats().await.map_err(to_pyerr)?;
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize::pythonize(py, &stats)
                     .map(|value| value.unbind())
                     .map_err(to_pyerr)
@@ -358,7 +358,7 @@ impl PoolRelay {
         let inner = self.started()?;
         crate::future_into_py(py, async move {
             let health = inner.health().await;
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize::pythonize(py, &health)
                     .map(|value| value.unbind())
                     .map_err(to_pyerr)
@@ -384,7 +384,7 @@ impl PoolRelay {
                 .diagnostic_snapshot(&endpoint)
                 .await
                 .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize::pythonize(py, &diagnostic)
                     .map(|value| value.unbind())
                     .map_err(to_pyerr)

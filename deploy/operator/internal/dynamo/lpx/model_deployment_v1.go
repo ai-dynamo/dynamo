@@ -8,51 +8,14 @@ package lpx
 import (
 	"fmt"
 	"math"
-	"slices"
 
 	"capnproto.org/go/capnp/v3"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
 const gbuildDeploymentV1CapnpFile = "deployment.v1.capnp.bin"
-
-// buildContractFormat selects a supported compiler contract and runtime entry file.
-type buildContractFormat uint8
-
-const (
-	buildContractUnknown buildContractFormat = iota
-	buildContractManifestV2
-	buildContractDeploymentV1
-)
-
-// selectBuildContract selects exactly one entry point from a normalized inventory.
-func selectBuildContract(inventory []string) (buildContractFormat, error) {
-	legacy := slices.Contains(inventory, gbuildManifestV2CapnpFile)
-	split := slices.Contains(inventory, gbuildDeploymentV1CapnpFile)
-	switch {
-	case legacy && split:
-		return buildContractUnknown, fmt.Errorf("ambiguous build contracts: both %s and %s", gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	case legacy:
-		return buildContractManifestV2, nil
-	case split:
-		return buildContractDeploymentV1, nil
-	default:
-		return buildContractUnknown, fmt.Errorf("missing build contract: require %s or %s", gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	}
-}
-
-// filename returns the selected runtime entry point; unknown formats are invalid.
-func (format buildContractFormat) filename() (string, error) {
-	switch format {
-	case buildContractManifestV2:
-		return gbuildManifestV2CapnpFile, nil
-	case buildContractDeploymentV1:
-		return gbuildDeploymentV1CapnpFile, nil
-	default:
-		return "", fmt.Errorf("unsupported build contract format %d", format)
-	}
-}
 
 // decodeGbuildDeploymentV1 reads the scheduler contract without execution/report schemas.
 func decodeGbuildDeploymentV1(data []byte) (deploymentcapnpv1.Deployment, error) {
@@ -67,8 +30,9 @@ func decodeGbuildDeploymentV1(data []byte) (deploymentcapnpv1.Deployment, error)
 	return deployment, nil
 }
 
-// buildFromGbuildDeploymentV1 validates compiler input using the acquired canonical build reference.
+// buildFromGbuildDeploymentV1 decodes supported compiler input using the acquired canonical build reference.
 func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Deployment) (*Build, error) {
+	// The operator reads contract revision 1 only.
 	if manifest.ContractRevision() != deploymentcapnpv1.CurrentContractRevision {
 		return nil, fmt.Errorf(
 			"%s contractRevision = %d, want %d",
@@ -77,6 +41,8 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 			deploymentcapnpv1.CurrentContractRevision,
 		)
 	}
+
+	// The config holds the units and the runtime I/O.
 	if !manifest.HasConfig() {
 		return nil, fmt.Errorf("%s is missing config", gbuildDeploymentV1CapnpFile)
 	}
@@ -84,40 +50,68 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 	if err != nil {
 		return nil, fmt.Errorf("reading %s config: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	if !deployment.HasProgram() {
-		return nil, fmt.Errorf("%s config.program is missing", gbuildDeploymentV1CapnpFile)
-	}
-	program, err := deployment.Program()
+
+	// Placement comes from the units alone; a bundle without units needs a recompile.
+	rawUnits, err := deployment.LpuUnits()
 	if err != nil {
-		return nil, fmt.Errorf("reading %s config.program: %w", gbuildDeploymentV1CapnpFile, err)
+		return nil, fmt.Errorf("reading %s config.lpuUnits: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	chains, err := selectedPropSyncChainsFromDeploymentV1(deployment)
-	if err != nil {
-		return nil, err
+	if rawUnits.Len() == 0 {
+		return nil, fmt.Errorf("%s config.lpuUnits is empty; recompile the model with LPU units", gbuildDeploymentV1CapnpFile)
 	}
+
+	// An invalid record of a remaining build fact fails the acquisition.
 	ioFPGACount, ioFanoutFactor, err := runtimeIOFromDeploymentV1(deployment)
 	if err != nil {
 		return nil, err
 	}
-
-	checkpoint, checkpointErr := checkpointFromDeploymentV1(manifest)
-
-	build := &Build{
-		path:                      buildRef,
-		selectedPropSyncChains:    chains,
-		standaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
-		supportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
-		ioFPGACount:               ioFPGACount,
-		ioFanoutFactor:            ioFanoutFactor,
-		checkpoint:                checkpoint,
-		checkpointErr:             checkpointErr,
-	}
-
-	// Complete the normalized build with scheduler-facing LPU artifacts.
-	if err := addLPUArtifactsFromDeploymentV1(manifest, build); err != nil {
+	checkpoint, err := checkpointFromDeploymentV1(manifest)
+	if err != nil {
 		return nil, err
 	}
-	return build, nil
+	architecture, devicesPerNode, hasCUDAPartitions, err := deviceMetadataFromDeploymentV1(manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	// Keep the generated unit list and its backing message until projection is complete.
+	return &Build{
+		path:              buildRef,
+		architecture:      architecture,
+		devicesPerNode:    devicesPerNode,
+		hasCUDAPartitions: hasCUDAPartitions,
+		lpuUnits:          rawUnits,
+		ioFPGACount:       ioFPGACount,
+		ioFanoutFactor:    ioFanoutFactor,
+		checkpoint:        checkpoint,
+	}, nil
+}
+
+func lpuConnectorFromDeploymentV1(raw deploymentcapnpv1.LpuConnector, subject string) (lpxv1alpha1.PropSyncConnectorRequirement, error) {
+	switch raw.Which() {
+	case deploymentcapnpv1.LpuConnector_Which_xt8888Gap:
+		offset := int64(0)
+		return lpxv1alpha1.PropSyncConnectorRequirement{Kind: lpxv1alpha1.PropSyncConnectorKindXt8888Gap, MaxInterPartitionOffset: &offset}, nil
+	case deploymentcapnpv1.LpuConnector_Which_hxPropSyncV1:
+		connector, err := raw.HxPropSyncV1()
+		if err != nil {
+			return lpxv1alpha1.PropSyncConnectorRequirement{}, fmt.Errorf("reading %s.hxPropSyncV1: %w", subject, err)
+		}
+		pairs, err := connector.Connections()
+		if err != nil {
+			return lpxv1alpha1.PropSyncConnectorRequirement{}, fmt.Errorf("reading %s.connections: %w", subject, err)
+		}
+
+		connections := make([]lpxv1alpha1.HxLogicalConnection, pairs.Len())
+		for i := range pairs.Len() {
+			pair := pairs.At(i)
+			connections[i] = lpxv1alpha1.HxLogicalConnection{FromLogicalDevice: int64(pair.FromDevice()), ToLogicalDevice: int64(pair.ToDevice())}
+		}
+		lanes := []int64{4, 2, 1}
+		return lpxv1alpha1.PropSyncConnectorRequirement{Kind: lpxv1alpha1.PropSyncConnectorKindHxPropSyncV1, Connections: &connections, AcceptableLaneMultiplicities: &lanes}, nil
+	default:
+		return lpxv1alpha1.PropSyncConnectorRequirement{}, fmt.Errorf("%s has unsupported variant %d", subject, raw.Which())
+	}
 }
 
 func runtimeIOFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) (int32, int32, error) {
@@ -141,104 +135,55 @@ func runtimeIOFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) (int
 	return int32(count), int32(fanoutFactor), nil
 }
 
-func selectedPropSyncChainsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) ([][]int, error) {
-	if !deployment.HasSelectedPropSyncChains() {
-		return nil, nil
-	}
-	rawChains, err := deployment.SelectedPropSyncChains()
-	if err != nil {
-		return nil, fmt.Errorf("reading %s config.selectedPropSyncChains: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	chains := make([][]int, 0, rawChains.Len())
-	for chainIndex := 0; chainIndex < rawChains.Len(); chainIndex++ {
-		rawChain := rawChains.At(chainIndex)
-		if !rawChain.HasPartitionIds() {
-			return nil, fmt.Errorf("%s config.selectedPropSyncChains[%d].partitionIds is missing", gbuildDeploymentV1CapnpFile, chainIndex)
-		}
-		rawIDs, err := rawChain.PartitionIds()
-		if err != nil {
-			return nil, fmt.Errorf("reading %s config.selectedPropSyncChains[%d].partitionIds: %w", gbuildDeploymentV1CapnpFile, chainIndex, err)
-		}
-
-		chainPath := fmt.Sprintf("%s config.selectedPropSyncChains[%d]", gbuildDeploymentV1CapnpFile, chainIndex)
-		chain, err := decodePropSyncChain(rawIDs, chainPath)
-		if err != nil {
-			return nil, err
-		}
-		chains = append(chains, chain)
-	}
-	return chains, nil
-}
-
-func addLPUArtifactsFromDeploymentV1(
-	artifacts deploymentcapnpv1.Deployment,
-	build *Build,
-) error {
+// deviceMetadataFromDeploymentV1 returns the LPU architecture and the device count per node of
+// the build, and whether the build has a CUDA partition. The compiler gives all LPU partitions
+// one architecture and one count, so the last LPU partition supplies the two values.
+func deviceMetadataFromDeploymentV1(artifacts deploymentcapnpv1.Deployment) (lpuArchitecture, int, bool, error) {
 	rawPartitions, err := artifacts.Partitions()
 	if err != nil {
-		return fmt.Errorf("reading %s partitions: %w", gbuildDeploymentV1CapnpFile, err)
+		return 0, 0, false, fmt.Errorf("reading %s partitions: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	partitions := make([]buildPartition, 0, rawPartitions.Len())
-	for index := 0; index < rawPartitions.Len(); index++ {
-		partition, err := buildPartitionFromDeploymentV1(rawPartitions.At(index))
+
+	// The device type of a partition selects the fact that the build keeps.
+	var (
+		architecture      lpuArchitecture
+		devicesPerNode    int
+		hasCUDAPartitions bool
+	)
+	for index := range rawPartitions.Len() {
+		raw := rawPartitions.At(index)
+		ref, err := raw.Partition()
 		if err != nil {
-			return err
+			return 0, 0, false, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
 		}
-		// Project LPU artifacts while retaining whether the build also requires CUDA.
-		if partition.partPath != "" {
-			partitions = append(partitions, partition)
-		} else {
-			ref, err := rawPartitions.At(index).Partition()
-			if err != nil {
-				return fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
+
+		switch ref.DeviceType() {
+		case commoncapnpv1.DeviceType_lpu:
+			// The generated accessor panics on a detail of a different device type.
+			if !raw.Detail().HasLpu() {
+				return 0, 0, false, fmt.Errorf("LPU partition %d has mismatched detail", ref.PartitionId())
 			}
-			build.hasCUDAPartitions = build.hasCUDAPartitions || ref.DeviceType() == commoncapnpv1.DeviceType_cuda
+			detail, err := raw.Detail().Lpu()
+			if err != nil {
+				return 0, 0, false, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
+			}
+
+			// Only LP20 and LP30 have a scheduler target family.
+			architecture = detail.Architecture()
+			switch architecture {
+			case lp20, lp30:
+			default:
+				return 0, 0, false, fmt.Errorf("unsupported LPU architecture %q", architecture.String())
+			}
+
+			devicesPerNode = int(detail.DevicesPerNode())
+		case commoncapnpv1.DeviceType_cuda:
+			hasCUDAPartitions = true
+		case commoncapnpv1.DeviceType_cpu:
+		default:
+			return 0, 0, false, fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
 		}
 	}
-	if len(partitions) == 0 {
-		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildDeploymentV1CapnpFile)
-	}
-	partialSelection := artifacts.HasPartSelect()
-	family, err := classifyManifestPartitions(gbuildDeploymentV1CapnpFile, partitions, partialSelection)
-	if err != nil {
-		return err
-	}
 
-	// Publish the scheduler-facing artifact projection.
-	build.partitions = partitions
-	build.family = family
-
-	return nil
-}
-
-func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (buildPartition, error) {
-	if !raw.HasPartition() {
-		return buildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildDeploymentV1CapnpFile)
-	}
-	ref, err := raw.Partition()
-	if err != nil {
-		return buildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	switch ref.DeviceType() {
-	case commoncapnpv1.DeviceType_cuda, commoncapnpv1.DeviceType_cpu:
-		return buildPartition{}, nil
-	case commoncapnpv1.DeviceType_lpu:
-		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_lpu || !raw.Detail().HasLpu() {
-			return buildPartition{}, fmt.Errorf("LPU partition %d has mismatched detail", ref.PartitionId())
-		}
-	default:
-		return buildPartition{}, fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
-	}
-	detail, err := raw.Detail().Lpu()
-	if err != nil {
-		return buildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
-	}
-	switch detail.Architecture() {
-	case deploymentcapnpv1.LpuArchitecture_lp20:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
-	case deploymentcapnpv1.LpuArchitecture_lp30:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
-	default:
-		return buildPartition{}, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
-	}
+	return architecture, devicesPerNode, hasCUDAPartitions, nil
 }

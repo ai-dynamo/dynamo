@@ -7,7 +7,8 @@
 pass each engine stage to ``await format(...)``. It dispatches on
 ``stage_output.final_output_type`` using this stage contract:
 
-* ``"text"`` reads ``request_output`` and the optional ``previous_text`` context.
+* ``"text"`` reads the stage's own ``outputs`` and the optional ``previous_text``
+  context.
 * ``"image"`` or ``"video"`` reads ``images``. Supply ``request_type`` to
   distinguish image, video, and chat-completion responses because a video
   diffusion stage may be labelled ``"image"``.
@@ -962,12 +963,13 @@ class AudioFormatter:
                 return None
             return self._error_response(request_id, "No audio generated")
 
-        # DELTA output drains the audio key but can retain sample-rate metadata.
+        # DELTA output drains the audio key but can retain sample-rate metadata
+        # and Qwen3-TTS's undrained running ``codec_frames`` (vllm-omni#8619).
         # It is not a media result or a failure. Aggregate completion and health
         # probes still require nonempty audio elsewhere in the response stream.
         if (
             isinstance(mm_output, Mapping)
-            and set(mm_output) == {"sr"}
+            and set(mm_output) <= {"sr", "codec_frames"}
             and (
                 stream_state is not None
                 or (aggregate_state is not None and not aggregate_state.cumulative)
@@ -1556,7 +1558,11 @@ def _build_completion_usage(request_output: Any) -> Dict[str, Any]:
         if prompt_token_ids is not None and not is_empty_payload(prompt_token_ids)
         else None
     )
-    completion_tokens = len(request_output.outputs[0].token_ids)
+    # Under DELTA, token_ids holds only the last step's tokens; vLLM-Omni keeps
+    # the full list in cumulative_token_ids.
+    output = request_output.outputs[0]
+    token_ids = getattr(output, "cumulative_token_ids", None)
+    completion_tokens = len(token_ids if token_ids is not None else output.token_ids)
 
     return {
         "prompt_tokens": prompt_tokens,
@@ -1638,13 +1644,13 @@ class OutputFormatter:
         if formatter is None:
             return None
 
-        # TextFormatter is sync and takes request_output, not stage_output.
+        # TextFormatter is sync. A text stage is itself the request output: since
+        # vLLM-Omni 0.28 OmniRequestOutput carries ``outputs`` directly.
         if fmt_type == "text":
-            ro = getattr(stage_output, "request_output", None)
-            if not ro:
+            if not getattr(stage_output, "outputs", None):
                 return None
             return formatter.format(
-                ro, request_id, previous_text=ctx.get("previous_text", "")
+                stage_output, request_id, previous_text=ctx.get("previous_text", "")
             )
 
         return await formatter.format(

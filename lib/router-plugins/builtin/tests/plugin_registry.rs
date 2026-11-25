@@ -3,12 +3,10 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
-};
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, RouterPlugins};
+use dynamo_kv_router::plugins::request_classifier::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 struct PassThrough;
 
@@ -17,8 +15,8 @@ impl RequestClassifier for PassThrough {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
-        Box::pin(async move { Ok(request) })
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        Ok(request)
     }
 }
 
@@ -48,7 +46,7 @@ fn builtin_default_does_not_opt_into_custom_frontend_restrictions() {
 
 #[test]
 fn builtin_registration_preserves_classifiers_and_resolves_mixed_pools() {
-    for selection in ["default", "named-default"] {
+    for selection in ["default", "dynamo-default-cost-fn"] {
         let mut registry = dynamo_router_policies::default_registry();
         registry
             .register_request_classifier(
@@ -64,9 +62,6 @@ request_classifier:
   type: pass-through
 worker_selection:
   prefill: {selection}
-  instances:
-    - name: named-default
-      type: dynamo-default-cost-fn
 "#
         ));
         let plugins = registry.resolve_plugins(&config).unwrap();
@@ -86,7 +81,11 @@ worker_selection:
             WorkerType::Decode,
             WorkerType::Encode,
         ] {
-            factory(&config, role, RoutingPartitionRef::new("model", "default"));
+            factory(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            ));
         }
     }
 }

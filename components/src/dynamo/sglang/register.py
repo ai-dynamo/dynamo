@@ -55,6 +55,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     per_rank_max_running_requests,
     runtime_capacity,
+    sglang_attention_tp_size,
     sglang_dp_layout,
 )
 from dynamo.sglang.engine_generate import (
@@ -84,15 +85,17 @@ def publish_sglang_structural_tag_reasoning_policy(
     engine: Optional[sgl.Engine],
     server_args: ServerArgs,
 ) -> None:
-    """Advertise the native gate that consumes reasoning before guided output."""
+    """Advertise whether a native gate can defer guided output until reasoning ends."""
     # vLLM also publishes grammar timing through runtime metadata.
     # SGLang's exclusion additionally depends on require_reasoning per request.
     parser = getattr(server_args, "reasoning_parser", None)
-    if (
-        engine is None
-        or not parser
-        or getattr(server_args, "skip_tokenizer_init", False)
-    ):
+    if not parser:
+        # Only a known absence proves that the native gate cannot defer JSON.
+        runtime_config.set_engine_specific(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, json.dumps(False)
+        )
+        return
+    if engine is None or getattr(server_args, "skip_tokenizer_init", False):
         return
     tokenizer = getattr(engine.tokenizer_manager, "tokenizer", None)
     if (
@@ -103,8 +106,8 @@ def publish_sglang_structural_tag_reasoning_policy(
         )
     ):
         return
-    # Match the scheduler's gate initialization, including disabled gates when
-    # the reasoning terminator cannot be encoded by the initialized tokenizer.
+    # SGLang rejects an unencodable reasoning terminator. Failure to verify it
+    # here must not advertise immediate grammar activation.
     reasoner = ReasoningParser(
         model_type=parser, stream_reasoning=False, tokenizer=tokenizer
     )
@@ -501,8 +504,21 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
             getattr(server_args, "hicache_storage_backend_extra_config", None)
         )
 
-    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    # The TP width SGLang's storage keys are built from.
+    tp_size = sglang_attention_tp_size(server_args)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
+    page_size = int(getattr(server_args, "page_size", 1) or 1)
+
+    prefetch_threshold = None
+    if not linker:
+        # SGLang loads nothing from Mooncake for a hit shorter than this.
+        raw_threshold = extra_config.get("prefetch_threshold", 256)
+        try:
+            prefetch_threshold = max(int(raw_threshold), page_size)
+        except (TypeError, ValueError):
+            logging.warning(
+                "Ignoring non-integer Mooncake prefetch_threshold=%r", raw_threshold
+            )
 
     try:
         is_mla_model = sglang_uses_mla_backend(server_args)
@@ -541,7 +557,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     return {
         "backend": "mooncake",
         "tenant_id": _mooncake_tenant_id(extra_config),
-        "page_size": int(getattr(server_args, "page_size", 1) or 1),
+        "page_size": page_size,
         "tp_size": tp_size,
         "pp_size": pp_size,
         "is_mla_model": is_mla_model,
@@ -555,6 +571,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         ),
         "key_layout": "linker" if linker else "hicache",
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
+        "prefetch_threshold": prefetch_threshold,
     }
 
 

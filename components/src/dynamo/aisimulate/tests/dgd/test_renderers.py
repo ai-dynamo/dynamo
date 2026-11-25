@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from aisimulate.generator.request.schema import ModelFacts
-from aisimulate.sweeper.config import Workload
+from aisim.generator.request.schema import ModelFacts
+from aisim.sweeper.config import Workload
 
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,

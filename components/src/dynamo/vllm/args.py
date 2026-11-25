@@ -9,18 +9,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
-from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import (
     AsyncEngineArgs,
     is_cloud_storage,
     maybe_override_with_speculators,
 )
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups.router_args import (
@@ -34,6 +29,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import (
     DynamoVllmArgGroup,
@@ -93,7 +89,65 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        self._resolve_realtime_endpoint_type()
         DynamoVllmConfig.validate(self)
+
+    def _validate_systemone_serial(self) -> None:
+        super()._validate_systemone_serial()
+        if not self.systemone_serial:
+            return
+        if _forward_pass_metrics_enabled(self):
+            setting = (
+                "DYN_FORWARDPASS_METRIC_PORT"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "--fpm-trace/DYN_FPM_TRACE"
+            )
+            raise ValueError(f"--systemone-serial is incompatible with {setting}")
+        engine = self.engine_args
+        for name, expected in (
+            ("max_num_seqs", 1),
+            ("logprobs_mode", "raw_logprobs"),
+            ("data_parallel_size", 1),
+        ):
+            if getattr(engine, name) != expected:
+                raise ValueError(
+                    f"--systemone-serial requires --{name.replace('_', '-')}={expected}"
+                )
+        for name in (
+            "enable_lora",
+            "speculative_config",
+            "kv_transfer_config",
+            "ec_transfer_config",
+        ):
+            if getattr(engine, name):
+                raise ValueError(
+                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
+                )
+        if engine.scheduler_cls not in (
+            None,
+            "vllm.v1.core.sched.scheduler.Scheduler",
+            "vllm.v1.core.sched.async_scheduler.AsyncScheduler",
+        ):
+            raise ValueError(
+                "--systemone-serial does not support custom --scheduler-cls"
+            )
+
+    def _resolve_realtime_endpoint_type(self) -> None:
+        """Move the vLLM-only ``realtime`` endpoint type onto ``realtime``.
+
+        The remaining endpoint types, or ``none``, are served by the same
+        engine. The deprecated ``--realtime`` flag serves realtime alone.
+        """
+        types = [t.strip().lower() for t in self.endpoint_types.split(",")]
+        if "realtime" in types:
+            self.realtime = True
+            types = [t for t in types if t and t != "realtime"]
+        elif self.realtime:
+            types = []
+        else:
+            return
+        self.endpoint_types = ",".join(types) or "none"
+        parse_endpoint_types(self.endpoint_types)
 
 
 @register_encoder(Config)
@@ -302,6 +356,15 @@ def update_dynamo_config_with_engine(
         dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
+        if dynamo_config.use_vllm_tokenizer:
+            raise ValueError(
+                "Cannot use --custom-jinja-template with --use-vllm-tokenizer: "
+                "the worker renders with the model's own chat template. Remove "
+                "--use-vllm-tokenizer. Then keep --custom-jinja-template to apply "
+                "the template in Dynamo's preprocessor, or start the frontend with "
+                "--dyn-chat-processor vllm --chat-template <file> to render it in "
+                "vLLM."
+            )
         expanded_template_path = os.path.expanduser(
             os.path.expandvars(dynamo_config.custom_jinja_template)
         )
@@ -407,6 +470,8 @@ def update_engine_config_with_dynamo(
             "block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend."
         )
 
+    _reject_dynamo_connector(engine_config)
+
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
@@ -415,8 +480,7 @@ def update_engine_config_with_dynamo(
         "disable_log_stats": False,
     }
 
-    if hasattr(engine_config, "runner"):
-        logger.debug(f"Using runner={engine_config.runner} from engine args")
+    logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
@@ -641,9 +705,6 @@ def create_kv_events_config(
 def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
     """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
     Dynamo's KV indexers hash only each block's own tokens."""
-    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
-    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
-        return
     spec = engine_config.speculative_config
     if (
         spec is None
@@ -714,25 +775,27 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     return False
 
 
-def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses DynamoConnector (KVBM).
+def _reject_dynamo_connector(engine_config: AsyncEngineArgs) -> None:
+    """Raise ValueError if --kv-transfer-config names the removed KVBM DynamoConnector.
 
-    Handles both direct usage and nested usage inside PdConnector.
+    Handles both direct usage and nested usage inside MultiConnector or PdConnector.
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
-        return False
-    if kv_cfg.kv_connector == "DynamoConnector":
-        return True
-    if kv_cfg.kv_connector == "PdConnector":
+        return
+    names = [kv_cfg.kv_connector]
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
-        for entry in extra.get("connectors", []):
-            if (
-                isinstance(entry, dict)
-                and entry.get("kv_connector") == "DynamoConnector"
-            ):
-                return True
-    return False
+        names.extend(
+            entry.get("kv_connector")
+            for entry in extra.get("connectors", [])
+            if isinstance(entry, dict)
+        )
+    if "DynamoConnector" in names:
+        raise ValueError(
+            "vLLM KVBM integration has been removed. Remove DynamoConnector "
+            "(kvbm.vllm_integration.connector) from --kv-transfer-config."
+        )
 
 
 def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str:
@@ -754,14 +817,6 @@ def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str
         elif c == "nixl":
             multi_connectors.append(
                 {"kv_connector": "NixlConnector", "kv_role": nixl_role}
-            )
-        elif c == "kvbm":
-            multi_connectors.append(
-                {
-                    "kv_connector": "DynamoConnector",
-                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
-                    "kv_role": "kv_both",
-                }
             )
 
     if len(multi_connectors) == 1:
@@ -802,6 +857,14 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
+    # Explicit KVBM configuration must fail with its own message, not a migration hint.
+    env_values = [v.strip().lower() for v in (env_connector or "").split() if v.strip()]
+    if "kvbm" in normalized or "kvbm" in env_values:
+        raise ValueError(
+            "vLLM KVBM integration has been removed. Remove --connector kvbm "
+            "or DYN_CONNECTOR=kvbm."
+        )
+
     if dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         nixl_role = "kv_producer"
     elif dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
@@ -820,7 +883,6 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
 
     # DYN_CONNECTOR env var set but parsed to empty list
     if env_connector is not None:
-        env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
         if env_values and not all(v in ("none", "null") for v in env_values):
             equiv = _connector_to_kv_transfer_json(env_values, nixl_role)
             raise ValueError(

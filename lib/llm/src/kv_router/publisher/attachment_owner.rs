@@ -13,11 +13,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::{
-    identity::{CacheOwnerId, IndexerDomainId},
-    indexer::KvStateProtocolVersion,
-    protocols::{RouterHintSourceMetadata, WorkerId, WorkerWithDpRank},
-};
+use dynamo_kv_indexer::host::{KvStateProtocolVersion, RouterHintSourceMetadata};
+use dynamo_router_protocol::identity::{CacheOwnerId, IndexerDomainId};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
     config::environment_names::llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS as HOST_DISCOVERY_TIMEOUT_ENV,
@@ -57,6 +55,7 @@ pub struct KvStateAttachmentDescriptor {
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
     pub engine_owned_mm_identity: bool,
+    pub process_local_inventory: bool,
     pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
@@ -152,6 +151,7 @@ fn materialize_intents(
                 image_token_id: descriptor.image_token_id,
                 video_token_id: descriptor.video_token_id,
                 engine_owned_mm_identity: descriptor.engine_owned_mm_identity,
+                process_local_inventory: descriptor.process_local_inventory,
                 router_hint_source: descriptor.router_hint_source,
             },
         );
@@ -506,7 +506,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use dynamo_kv_router::identity::{
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, PoolId, RoutingScopeId, StableDpSlotId,
     };
     use dynamo_runtime::{
@@ -640,6 +640,7 @@ mod tests {
                     image_token_id: Some(99),
                     video_token_id: Some(100),
                     engine_owned_mm_identity: rank == 7,
+                    process_local_inventory: rank == 7,
                     router_hint_source: None,
                 }
             })
@@ -667,6 +668,12 @@ mod tests {
         assert_eq!(selected.video_token_id, Some(100));
         assert!(selected.engine_owned_mm_identity);
         assert!(!intents[&4].engine_owned_mm_identity);
+        assert!(selected.has_process_local_inventory());
+        // A durable intent must stay byte-identical to what older agents expect.
+        let durable = serde_json::to_value(&intents[&4]).unwrap();
+        assert!(durable.get("process_local_inventory").is_none());
+        let durable: KvStateAttachmentIntent = serde_json::from_value(durable).unwrap();
+        assert!(!durable.has_process_local_inventory());
 
         let mut legacy = serde_json::to_value(selected).unwrap();
         legacy

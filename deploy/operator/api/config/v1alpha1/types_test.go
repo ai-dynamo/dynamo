@@ -60,3 +60,26 @@ func TestEffectiveSeccompProfile(t *testing.T) {
 		})
 	}
 }
+
+func TestKaiSchedulerNameDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured string
+		want       string
+	}{
+		{name: "omitted keeps existing scheduler", want: DefaultKaiSchedulerName},
+		{name: "custom scheduler survives defaulting", configured: "runai-scheduler", want: "runai-scheduler"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Default the operator configuration with the selected scheduler")
+			cfg := &OperatorConfiguration{}
+			cfg.Orchestrators.KaiScheduler.SchedulerName = tc.configured
+			SetDefaultsOperatorConfiguration(cfg)
+
+			t.Log("Verify defaulting preserves custom scheduler identity")
+			if got := cfg.Orchestrators.KaiScheduler.SchedulerName; got != tc.want {
+				t.Fatalf("schedulerName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

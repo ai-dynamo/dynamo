@@ -31,21 +31,22 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::{
-    identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
-    indexer::{
-        KvIndexerMetrics, KvStateAgentIdentity, KvStateAgentStatus, KvStateAttachmentStatus,
-        KvStateProtocolVersion, LocalKvIndexer,
-    },
-    protocols::{
-        KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
-    },
-    zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
+use dynamo_kv_events::zmq_wire::{
+    EventDedupFilter, EventDedupPolicy, KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer,
 };
+use dynamo_kv_indexer::host::{
+    CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
+    KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
+    RouterHintSourceMetadata,
+};
+use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
-    discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
+    discovery::{Discovery, DiscoveryInstance, DiscoverySpec, EventScope},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{EventPublisher, SharedZmqPublisherSocket},
@@ -72,7 +73,6 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    dedup::{EventDedupFilter, EventDedupPolicy},
     sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };
@@ -136,6 +136,8 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// The cache owner's inventory dies with the attached engine.
+    pub process_local_inventory: bool,
     /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
     pub sockets: KvStateAgentSockets,
 }
@@ -256,6 +258,8 @@ struct Coordinator<P> {
     local_indexer: Arc<LocalKvIndexer>,
     identity: KvStateAgentIdentity,
     slot_dp_rank: u32,
+    /// The cache owner's inventory dies with the attached engine.
+    process_local_inventory: bool,
     status: Arc<KvStateAgentStatusCell>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
@@ -389,14 +393,14 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     .context("failed to establish Worker reset barrier before attach");
             }
         };
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if self.process_local_inventory {
             barrier_cursor = match self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
             {
                 Ok(cursor) => cursor,
                 Err(error) => {
-                    self.fail_cache_owner(attachment.generation, "HiCache attach reset failed");
+                    self.fail_cache_owner(attachment.generation, "KVCR attach reset failed");
                     return Err(error).context("failed to reset process-local KVCR inventory");
                 }
             };
@@ -423,7 +427,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             anyhow::bail!("stale attachment generation {generation}");
         }
         attachment.ready = false;
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if self.process_local_inventory {
             self.cache_owner_domain_failed = true;
         }
         self.publish_status();
@@ -457,7 +461,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish final Worker detach barrier");
             }
         };
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if self.process_local_inventory {
             cursor = self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
@@ -581,7 +585,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         if self
             .attachment
             .as_ref()
-            .is_some_and(|attachment| attachment.ingress_protocol.has_process_local_inventory())
+            .is_some_and(|attachment| attachment.ingress_protocol.retires_source_on_cursor_gap())
         {
             tracing::error!(
                 generation = batch.generation,
@@ -626,11 +630,16 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         &mut self,
         placement_events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        let attachment_worker = self
+        let attachment = self
             .attachment
             .as_ref()
-            .context("KV state agent has no framework attachment")?
-            .worker;
+            .context("KV state agent has no framework attachment")?;
+        let attachment_worker = attachment.worker;
+        let worker_dedup_policy = if attachment.ingress_protocol.has_idempotent_stores() {
+            EventDedupPolicy::SetLike
+        } else {
+            EventDedupPolicy::RefCounted
+        };
         let mut coalescer = PlacementEventCoalescer::new(DEFAULT_MAX_BATCH_BLOCKS);
         let mut coalesced = Vec::with_capacity(placement_events.len());
         for placement_event in placement_events {
@@ -656,7 +665,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         for placement_event in coalesced {
             let domain = placement_event.placement.residency_domain;
             let dedup_policy = match domain {
-                ResidencyDomain::Worker => EventDedupPolicy::RefCounted,
+                ResidencyDomain::Worker => worker_dedup_policy,
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
@@ -804,8 +813,8 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         worker: WorkerWithDpRank,
         domain: ResidencyDomain,
     ) -> Result<u64> {
-        let placement = dynamo_kv_router::protocols::Placement {
-            owner: dynamo_kv_router::protocols::PlacementOwner::LocalWorker(worker),
+        let placement = dynamo_kv_events::placement::Placement {
+            owner: dynamo_kv_events::placement::PlacementOwner::LocalWorker(worker),
             tier: StorageTier::Device,
             residency_domain: domain,
         };
@@ -846,10 +855,13 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.status.store(KvStateAgentStatus {
             identity: self.identity.clone(),
             attachment: self.attachment.as_ref().map(Attachment::status),
+            // Process-local inventory exists only while its engine is attached.
             cache_owner_ready: !self.cache_owner_domain_failed
-                && self.attachment.as_ref().is_none_or(|attachment| {
-                    !attachment.ingress_protocol.has_process_local_inventory() || attachment.ready
-                }),
+                && (!self.process_local_inventory
+                    || self
+                        .attachment
+                        .as_ref()
+                        .is_some_and(|attachment| attachment.ready)),
             outbound_cursor: self.outbound_cursor(),
         });
     }
@@ -930,7 +942,7 @@ impl KvStateAgent {
         let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
-            cache_owner_ready: !config.ingress_protocol.has_process_local_inventory(),
+            cache_owner_ready: !config.process_local_inventory,
             outbound_cursor: 0,
         }));
 
@@ -1002,6 +1014,7 @@ impl KvStateAgent {
                 local_indexer,
                 identity: identity.clone(),
                 slot_dp_rank: config.slot.global_dp_rank,
+                process_local_inventory: config.process_local_inventory,
                 status: status.clone(),
                 withdrawal_tx,
                 control_rx,
@@ -1068,7 +1081,7 @@ impl KvStateAgent {
             .await
             .context("state-agent quarantine acknowledgement was dropped")?;
         unregister_required(
-            &self.component,
+            &*self.component.drt().discovery(),
             &self.attachment_source,
             "attachment advertisement",
             &self.cancel,
@@ -1211,7 +1224,7 @@ impl KvStateAgent {
             .context("state-agent detach begin was dropped")??;
 
         unregister_required(
-            &self.component,
+            &*self.component.drt().discovery(),
             &self.attachment_source,
             "attachment advertisement",
             &self.cancel,
@@ -1260,9 +1273,21 @@ impl KvStateAgent {
                 let _ = received.await;
             }
         }
+        // This agent's own token is cancelled below, so a withdrawal that has to
+        // be retried runs on the runtime's.
+        let discovery = self.component.drt().discovery();
+        let runtime = self.component.drt().runtime().secondary();
+        let runtime_cancel = self.component.drt().primary_token();
         // Withdraw readiness before stopping ingress or the coordinator. The
         // persistent source is removed later, after coordination is quiescent.
-        unregister_if_present(&self.component, &self.attachment_source).await;
+        withdraw_on_shutdown(
+            discovery.clone(),
+            &runtime,
+            &self.attachment_source,
+            "attachment advertisement",
+            runtime_cancel.clone(),
+        )
+        .await;
         if let Some(listener) = self.vllm_listener.lock().await.take() {
             listener.stop().await;
         }
@@ -1287,7 +1312,14 @@ impl KvStateAgent {
         }
 
         *self.attachment.lock().await = None;
-        unregister_if_present(&self.component, &self.persistent_source).await;
+        withdraw_on_shutdown(
+            discovery,
+            &runtime,
+            &self.persistent_source,
+            "persistent source advertisement",
+            runtime_cancel,
+        )
+        .await;
         if let Some(endpoint) = self.recovery_endpoint.lock().await.take() {
             endpoint.shutdown().await?;
         }
@@ -1458,21 +1490,30 @@ async fn register_advertisement<T: serde::Serialize>(
         .await
 }
 
-async fn unregister_if_present(
-    component: &Component,
+/// Withdraws a record whose agent is stopping. A failed first attempt is retried
+/// in the background until `cancel`: a record that outlives its agent stays
+/// advertised beside a replacement slot's, and the router then accepts neither.
+async fn withdraw_on_shutdown(
+    discovery: Arc<dyn Discovery>,
+    runtime: &tokio::runtime::Handle,
     instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
+    description: &'static str,
+    cancel: CancellationToken,
 ) {
     let current = instance.lock().await.clone();
     let Some(current) = current else {
         return;
     };
-    if let Err(error) = component
-        .drt()
-        .discovery()
-        .unregister(current.clone())
-        .await
-    {
-        tracing::warn!(%error, "Failed to unregister KV state-agent advertisement");
+    if let Err(error) = discovery.unregister(current.clone()).await {
+        tracing::warn!(%error, description, "Failed to withdraw on KV state-agent shutdown; retrying in the background");
+        let instance = instance.clone();
+        runtime.spawn(async move {
+            if let Err(error) =
+                unregister_required(&*discovery, &instance, description, &cancel).await
+            {
+                tracing::warn!(%error, description, "Abandoned KV state-agent discovery withdrawal");
+            }
+        });
         return;
     }
     let mut instance = instance.lock().await;
@@ -1517,7 +1558,7 @@ async fn unregister_attachment_generation(
 }
 
 async fn unregister_required(
-    component: &Component,
+    discovery: &dyn Discovery,
     instance: &Arc<Mutex<Option<DiscoveryInstance>>>,
     description: &str,
     cancel: &CancellationToken,
@@ -1528,12 +1569,7 @@ async fn unregister_required(
     };
     let mut delay = Duration::from_millis(100);
     loop {
-        match component
-            .drt()
-            .discovery()
-            .unregister(current.clone())
-            .await
-        {
+        match discovery.unregister(current.clone()).await {
             Ok(()) => break,
             Err(error) => {
                 tracing::warn!(%error, ?delay, description, "Retrying required discovery withdrawal");
@@ -1790,7 +1826,7 @@ struct NormalizedRawBatch {
 }
 
 fn normalize_raw_batch(
-    raw_events: Vec<dynamo_kv_router::zmq_wire::RawKvEvent>,
+    raw_events: Vec<dynamo_kv_events::zmq_wire::RawKvEvent>,
     worker: WorkerWithDpRank,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
@@ -1821,7 +1857,7 @@ fn normalize_raw_batch(
             )
             && !matches!(
                 raw_event,
-                dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
+                dynamo_kv_events::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
             )
         {
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
@@ -1845,7 +1881,7 @@ fn normalize_raw_batch(
             Err(_) => continue,
         };
         if ownership == KvEventOwnership::Kvcr
-            && let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+            && let dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored {
                 block_size,
                 group_idx,
                 kv_cache_spec_kind,
@@ -1935,17 +1971,18 @@ mod tests {
         },
     };
 
-    use dynamo_kv_router::{
-        identity::{
-            CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-            StableDpSlotId,
-        },
-        indexer::WorkerKvQueryResponse,
-        protocols::{
-            ExternalSequenceBlockHash, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
-            Placement, PlacementOwner,
-        },
-        zmq_wire::{BlockHashValue, RawKvEvent},
+    use async_trait::async_trait;
+    use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::placement::{Placement, PlacementOwner};
+    use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::WorkerKvQueryResponse;
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        StableDpSlotId,
+    };
+    use dynamo_runtime::discovery::{
+        DiscoveryQuery, DiscoveryStream, EventSourceQuery, MockDiscovery, SharedMockRegistry,
     };
 
     use super::*;
@@ -2116,7 +2153,7 @@ mod tests {
                 let RawKvEvent::BlockStored { token_ids, .. } = event else {
                     panic!("expected store");
                 };
-                token_ids.fill(dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE as u32);
+                token_ids.fill(dynamo_kv_hashing::multimodal::MM_PAD_SHIFT_VALUE as u32);
             }
             let normalized = normalize_raw_batch(
                 events,
@@ -2351,7 +2388,7 @@ mod tests {
             ZmqEventNormalizer::new(4)
                 .preprocess_with_reason(raw_store(Some("CPU"), Some("kvcr"), 107), worker)
                 .unwrap_err(),
-            dynamo_kv_router::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
+            dynamo_kv_events::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
         );
 
         let normalized = normalize_raw_batch(
@@ -2435,7 +2472,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let worker = WorkerWithDpRank::new(17, 3);
         let mut framework = ZmqEventNormalizer::new(4);
         let mut cache_owner = ZmqEventNormalizer::new(4);
@@ -2490,6 +2527,7 @@ mod tests {
             local_indexer: local_indexer.clone(),
             identity,
             slot_dp_rank: 3,
+            process_local_inventory: false,
             status,
             withdrawal_tx: mpsc::unbounded_channel().0,
             control_rx,
@@ -2556,7 +2594,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&boundary_wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let normalized = normalize_raw_batch(
             batch.events,
             worker,
@@ -2695,6 +2733,7 @@ mod tests {
                 local_indexer: local_indexer.clone(),
                 identity: identity.clone(),
                 slot_dp_rank: 3,
+                process_local_inventory: false,
                 status: status.clone(),
                 withdrawal_tx: mpsc::unbounded_channel().0,
                 control_rx,
@@ -2818,18 +2857,118 @@ mod tests {
         task.await.unwrap();
     }
 
+    /// Whether a slot on `protocol` publishes the only remove of a Worker-domain block it saw
+    /// stored twice.
+    async fn repeated_store_publishes_its_remove(protocol: KvStateIngressProtocol) -> bool {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: cache_owner_id(),
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+        };
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: None,
+            cache_owner_ready: true,
+            outbound_cursor: 0,
+        }));
+        let local_indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        ));
+        let sink = RecordingSink::default();
+        let output = sink.events.clone();
+        let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let mut coordinator = Coordinator {
+            publisher: sink,
+            local_indexer,
+            identity,
+            slot_dp_rank: 3,
+            process_local_inventory: protocol.has_process_local_inventory(),
+            status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
+            control_rx,
+            ingress_rx,
+            attachment: None,
+            ingress_generation: None,
+            next_outbound_id: 1,
+            next_attachment_generation: 1,
+            source_cursor: SourceCursorState::default(),
+            dedup: EventDedupFilter::new(),
+            worker_domain_failed: false,
+            cache_owner_domain_failed: false,
+            source_failed: false,
+        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        attachment.ingress_protocol = protocol;
+        coordinator.attach(&mut attachment).await.unwrap();
+
+        let mut removal = store(worker, ResidencyDomain::Worker, None, 101, 11);
+        removal.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(101)],
+        });
+        let events = [
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            removal,
+        ];
+        for (source_cursor, event) in (1..).zip(events) {
+            coordinator
+                .handle_ingress(IngressBatch {
+                    generation: attachment.generation,
+                    source_cursor,
+                    chunk_index: 0,
+                    final_chunk: true,
+                    events: vec![event],
+                    source_fault: None,
+                    cache_owner_fault: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let published = output.lock().unwrap();
+        published
+            .iter()
+            .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+    }
+
+    #[tokio::test]
+    async fn sglang_slot_publishes_the_only_remove_of_a_repeated_store() {
+        let protocol = KvStateIngressProtocol::SglangHiCacheV1;
+        assert!(repeated_store_publishes_its_remove(protocol).await);
+    }
+
+    #[tokio::test]
+    async fn vllm_slot_keeps_counting_repeated_stores() {
+        // vLLM emits a remove per store, so the first of two removes must not pass.
+        let protocol = KvStateIngressProtocol::VllmResidencyV1;
+        assert!(!repeated_store_publishes_its_remove(protocol).await);
+    }
+
     #[tokio::test]
     async fn detach_accepts_cache_owner_ingress_after_readiness_withdrawal() {
-        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1).await;
+        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1, false, false).await;
     }
 
     #[tokio::test]
     async fn sglang_inventory_is_cleared_on_detach_and_retires_on_gaps() {
-        check_detach_lifetime(KvStateIngressProtocol::SglangHiCacheV1).await;
+        check_detach_lifetime(KvStateIngressProtocol::SglangHiCacheV1, true, true).await;
     }
 
-    async fn check_detach_lifetime(protocol: KvStateIngressProtocol) {
-        let process_local = protocol == KvStateIngressProtocol::SglangHiCacheV1;
+    #[tokio::test]
+    async fn in_process_vllm_inventory_is_cleared_on_detach_and_tolerates_gaps() {
+        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1, true, false).await;
+    }
+
+    async fn check_detach_lifetime(
+        protocol: KvStateIngressProtocol,
+        process_local: bool,
+        retires_on_gap: bool,
+    ) {
         let owner = cache_owner_id();
         let worker = WorkerWithDpRank::new(17, 3);
         let identity = KvStateAgentIdentity {
@@ -2859,6 +2998,7 @@ mod tests {
             local_indexer: local_indexer.clone(),
             identity,
             slot_dp_rank: 3,
+            process_local_inventory: process_local,
             status,
             withdrawal_tx: mpsc::unbounded_channel().0,
             control_rx,
@@ -2972,7 +3112,7 @@ mod tests {
                 cache_owner_fault: None,
             })
             .await;
-        if process_local {
+        if retires_on_gap {
             assert!(result.is_err());
             assert_eq!(coordinator.outbound_cursor(), cursor_before_gap);
             assert!(!coordinator.status.load().cache_owner_ready);
@@ -2993,6 +3133,154 @@ mod tests {
             !process_local,
             "only Guard-backed inventory may outlive a detached engine"
         );
+    }
+
+    #[tokio::test]
+    async fn aborted_attach_leaves_process_local_inventory_unready() {
+        for process_local in [true, false] {
+            let identity = KvStateAgentIdentity {
+                cache_owner_id: cache_owner_id(),
+                publisher_id: 41,
+                protocol_version: KvStateProtocolVersion::V2,
+            };
+            let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
+                identity: identity.clone(),
+                attachment: None,
+                cache_owner_ready: !process_local,
+                outbound_cursor: 0,
+            }));
+            let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+            let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+            let mut coordinator = Coordinator {
+                publisher: RecordingSink::default(),
+                local_indexer: Arc::new(LocalKvIndexer::new(
+                    CancellationToken::new(),
+                    4,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                    32,
+                )),
+                identity,
+                slot_dp_rank: 3,
+                process_local_inventory: process_local,
+                status,
+                withdrawal_tx: mpsc::unbounded_channel().0,
+                control_rx,
+                ingress_rx,
+                attachment: None,
+                ingress_generation: None,
+                next_outbound_id: 1,
+                next_attachment_generation: 1,
+                source_cursor: SourceCursorState::default(),
+                dedup: EventDedupFilter::new(),
+                worker_domain_failed: false,
+                cache_owner_domain_failed: false,
+                source_failed: false,
+            };
+            let mut attachment = test_attachment(WorkerWithDpRank::new(17, 3), "tcp://framework");
+            coordinator.attach(&mut attachment).await.unwrap();
+            assert!(coordinator.status.load().cache_owner_ready);
+
+            // What `KvStateAgent::attach` sends when the raw listener fails to start.
+            let (response, aborted) = oneshot::channel();
+            coordinator
+                .handle_control(ControlCommand::AbortAttach {
+                    generation: attachment.generation,
+                    response,
+                })
+                .await;
+            aborted.await.unwrap();
+
+            let status = coordinator.status.load();
+            assert!(status.attachment.is_none());
+            assert_eq!(
+                status.cache_owner_ready, !process_local,
+                "process-local inventory needs an attached engine"
+            );
+        }
+    }
+
+    /// Fails the first `failures` withdrawals.
+    struct FlakyUnregisterDiscovery {
+        inner: MockDiscovery,
+        failures: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Discovery for FlakyUnregisterDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            let failed = self
+                .failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                });
+            if failed.is_ok() {
+                anyhow::bail!("injected withdrawal failure");
+            }
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel_token).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_withdrawal_is_retried_in_the_background() {
+        // The inline attempt and the first retry fail; the retry after the
+        // first backoff succeeds.
+        let discovery = Arc::new(FlakyUnregisterDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            failures: AtomicUsize::new(2),
+        });
+        let endpoint = EndpointId::from("ns.backend.generate");
+        let source = discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: endpoint.clone(),
+                },
+                topic: KV_STATE_SOURCE_TOPIC_V2.to_string(),
+                publisher_id: 41,
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        let sources = DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+            endpoint,
+            KV_STATE_SOURCE_TOPIC_V2,
+        ));
+        let record = Arc::new(Mutex::new(Some(source)));
+
+        withdraw_on_shutdown(
+            discovery.clone(),
+            &tokio::runtime::Handle::current(),
+            &record,
+            "persistent source advertisement",
+            CancellationToken::new(),
+        )
+        .await;
+        // Shutdown is not held up, and the record is kept for the retry.
+        assert!(record.lock().await.is_some());
+        assert_eq!(discovery.list(sources.clone()).await.unwrap().len(), 1);
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(record.lock().await.is_none());
+        assert!(discovery.list(sources).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3024,6 +3312,7 @@ mod tests {
             local_indexer: local_indexer.clone(),
             identity,
             slot_dp_rank: 3,
+            process_local_inventory: false,
             status: status.clone(),
             withdrawal_tx: mpsc::unbounded_channel().0,
             control_rx,

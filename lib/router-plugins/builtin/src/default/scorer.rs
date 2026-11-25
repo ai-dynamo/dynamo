@@ -4,14 +4,10 @@
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
 use super::parameters::PolicyParameters;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
-/// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
-/// prefixes) also omits range traversal code.
+/// each worker score. The shared-cache specialization also omits range traversal code.
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
@@ -27,7 +23,7 @@ pub(super) fn build(
     }
 }
 
-struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
+pub(super) struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     host_cache_hit_weight: f64,
@@ -40,15 +36,13 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
 
 /// Values shared by every worker score in one selection. Preparation keeps their conversions
 /// and role checks outside the per-worker calculation without changing floating-point arithmetic.
-struct PreparedRequest {
+pub(super) struct PreparedRequest {
     min_prefill: usize,
     block_size: IntegerDivisor,
     request_blocks: IntegerDivisor,
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
-    // The host supplies fetch inputs for every candidate or for none.
-    has_kv_transfer: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -97,24 +91,20 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
 impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
-    fn prepare(
+    pub(super) fn prepare(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
     ) -> Result<PreparedRequest, WorkerSelectionPolicyError> {
         let mut prepared = PreparedRequest {
             min_prefill: 0,
-            block_size: IntegerDivisor::new(u64::from(context.block_size())),
+            block_size: IntegerDivisor::new(u64::from(request.block_size())),
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
             // clamp so a worker at the load floor does not compute 0/0.
-            request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
+            request_blocks: IntegerDivisor::new(request.request_blocks().max(1)),
             overlap_credit: self.overlap_score_credit,
-            needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
-            needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
-            has_kv_transfer: SHARED_CREDIT
-                && candidates
-                    .get(0)
-                    .is_some_and(|candidate| candidate.kv_transfer().is_some()),
+            needs_decay: request.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
+            needs_decode_subtraction: self.is_decode && !request.tracks_prefill_tokens(),
         };
         if prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -129,11 +119,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         Ok(prepared)
     }
 
-    fn score_worker(
+    /// `copyable` counts toward the shared-cache credit; the default passes zero.
+    pub(super) fn score_worker(
         &self,
         prepared: &PreparedRequest,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
+        copyable: f64,
     ) -> Result<f64, WorkerSelectionPolicyError> {
         let load = candidate
             .load()
@@ -146,24 +138,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 estimated_overlap
             };
             let shared_credit = if SHARED_CREDIT {
-                let shared = cache
-                    .shared_hits()
-                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = if prepared.has_kv_transfer {
-                    candidate
-                        .kv_transfer()
-                        .and_then(|transfer| transfer.source_prefix_blocks())
-                        .map_or(0.0, |source| {
-                            let local = cache.device_overlap_blocks()
-                                + cache.host_overlap_blocks()
-                                + cache.disk_overlap_blocks();
-                            (f64::from(source) - local).max(0.0)
-                        })
-                } else {
-                    0.0
-                };
-                self.shared_cache_multiplier * (shared as f64 + fetchable)
+                // Host and disk blocks already earn their own tier credit; the
+                // shared cache extends the prefix from where the worker's ends.
+                let shared = cache.shared_hits().map_or(0, |hits| {
+                    let local = device + cache.host_overlap_blocks() + cache.disk_overlap_blocks();
+                    hits.loadable_beyond(local.round().max(0.0) as u32)
+                });
+                self.shared_cache_multiplier * (shared as f64 + copyable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
@@ -194,13 +175,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         let logit = if prepared.needs_decode_subtraction {
             (load.decode_cost_blocks() - credit).max(0.0) + request_cost
         } else {
-            let raw_tokens = if !context.tracks_prefill_tokens() {
+            let raw_tokens = if !request.tracks_prefill_tokens() {
                 0
             } else if load.is_available() {
-                let uncached = context.isl_tokens().saturating_sub(cached_tokens);
+                let uncached = request.info().isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens() + uncached).saturating_add(cached_tokens)
             } else {
-                context.isl_tokens()
+                request.info().isl_tokens()
             };
             let prefill = (prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
             self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost
@@ -215,10 +196,8 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if SHARED_CREDIT {
-            // The host builds fetch sources per selection only for policies that ask.
-            inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
-        } else if self.overlap_score_credit != 0.0
+        if SHARED_CREDIT
+            || self.overlap_score_credit != 0.0
             || self.host_cache_hit_weight != 0.0
             || self.disk_cache_hit_weight != 0.0
         {
@@ -230,13 +209,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        let prepared = self.prepare(context, candidates)?;
+        let prepared = self.prepare(request, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            *cost = self.score_worker(&prepared, context, candidate)?;
+            *cost = self.score_worker(&prepared, request, candidate, 0.0)?;
         }
         Ok(())
     }

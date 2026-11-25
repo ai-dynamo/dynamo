@@ -291,7 +291,7 @@ impl Harness {
                 let mut exchange = bound.exchange;
                 for value in values {
                     let output = LLMEngineOutput {
-                        engine_data: Some(json!({ crate::RESPONSE_KEY: value })),
+                        engine_data: Some(Box::new(json!({ crate::RESPONSE_KEY: value }))),
                         ..Default::default()
                     };
                     let _ = exchange.chunk(output, prefill, &mut |_| {});

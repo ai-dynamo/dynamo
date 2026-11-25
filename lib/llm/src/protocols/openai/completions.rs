@@ -391,7 +391,12 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
@@ -593,6 +598,14 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        self.validate_with_max_logprobs(validate::MAX_LOGPROBS)
+    }
+}
+
+impl NvCreateCompletionRequest {
+    /// [`ValidateRequest::validate`], with `logprobs` checked against
+    /// `max_logprobs` (the serving model's limit) instead of the default.
+    pub fn validate_with_max_logprobs(&self, max_logprobs: u8) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
@@ -627,7 +640,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         )?;
         // none for stream
         // none for stream_options
-        validate::validate_logprobs(self.inner.logprobs)?;
+        validate::validate_max_logprobs("Logprobs", self.inner.logprobs, max_logprobs)?;
         // none for echo
         validate::validate_stop(&self.inner.stop)?;
         validate::validate_presence_penalty(self.inner.presence_penalty)?;

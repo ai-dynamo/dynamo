@@ -13,10 +13,7 @@ import (
 	"strings"
 
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
-	corev1 "k8s.io/api/core/v1"
 )
-
-const cyborgWeightsPathEnv = "CYBORG_WEIGHTS_PATH"
 
 // Checkpoint is a Hugging Face model repository pinned to a commit. Only
 // checkpointFromDeploymentV1 constructs one, so its fields are validated.
@@ -25,6 +22,21 @@ type Checkpoint struct {
 	Model string
 	// Revision is the full 40-character commit SHA of the repository snapshot.
 	Revision string
+}
+
+// Key returns the download-status identity of a non-nil checkpoint.
+func (c Checkpoint) Key() string {
+	return c.Model + "@" + c.Revision
+}
+
+// SnapshotPath returns the directory that holds a non-nil validated
+// checkpoint's files. Model Express does not report local paths, so this
+// follows the Hugging Face cache layout that Model Express writes at the root
+// of model storage: models--<org>--<name>/snapshots/<commit>. Build-contract
+// validation restricts model and revision to safe path components.
+func (c Checkpoint) SnapshotPath(modelStoragePath string) string {
+	repository := "models--" + strings.ReplaceAll(c.Model, "/", "--")
+	return filepath.Join(modelStoragePath, repository, "snapshots", c.Revision)
 }
 
 // These follow the Hugging Face repository-ID and commit rules.
@@ -67,8 +79,7 @@ func checkpointFromDeploymentV1(manifest deploymentcapnpv1.Deployment) (*Checkpo
 }
 
 // WithoutBuildCheckpoints returns a registry whose builds record no checkpoint,
-// valid or not, so resolved workloads neither download, project, nor reject
-// one. registry is non-nil.
+// resolved workloads neither download nor project one. registry is non-nil.
 func WithoutBuildCheckpoints(registry ModelRegistry) ModelRegistry {
 	return withoutBuildCheckpoints{ModelRegistry: registry}
 }
@@ -79,44 +90,10 @@ type withoutBuildCheckpoints struct {
 
 func (r withoutBuildCheckpoints) AcquireBuild(ctx context.Context, id string) (*Build, error) {
 	build, err := r.ModelRegistry.AcquireBuild(ctx, id)
-	if err != nil || (build.checkpoint == nil && build.checkpointErr == nil) {
+	if err != nil || (build.checkpoint == nil) {
 		return build, err
 	}
 	stripped := *build
-	stripped.checkpoint, stripped.checkpointErr = nil, nil
+	stripped.checkpoint = nil
 	return &stripped, nil
-}
-
-// CheckpointKey returns the download-status identity of a non-nil checkpoint.
-func CheckpointKey(checkpoint *Checkpoint) string {
-	return checkpoint.Model + "@" + checkpoint.Revision
-}
-
-// checkpointSnapshotPath returns the directory that holds a non-nil validated
-// checkpoint's files. Model Express does not report local paths, so this
-// follows the Hugging Face cache layout that Model Express writes at the root
-// of model storage: models--<org>--<name>/snapshots/<commit>. Build-contract
-// validation restricts model and revision to safe path components.
-func checkpointSnapshotPath(checkpoint *Checkpoint, modelStoragePath string) string {
-	repository := "models--" + strings.ReplaceAll(checkpoint.Model, "/", "--")
-	return filepath.Join(modelStoragePath, repository, "snapshots", checkpoint.Revision)
-}
-
-func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) {
-	if projection.checkpoint == nil {
-		return
-	}
-
-	// Kubernetes expands environment references in order; publish the checkpoint before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	env = append(env, corev1.EnvVar{
-		Name:  cyborgWeightsPathEnv,
-		Value: checkpointSnapshotPath(projection.checkpoint, modelStoragePath),
-	})
-	for _, variable := range container.Env {
-		if variable.Name != cyborgWeightsPathEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
 }

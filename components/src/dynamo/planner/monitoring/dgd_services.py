@@ -27,13 +27,16 @@ from dynamo.planner.errors import (
     PowerAnnotationMissingError,
     SubComponentNotFoundError,
 )
+from dynamo.planner.monitoring.dgd_roles import (
+    V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+    match_role_components,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 V1BETA1_COMPONENT_TYPES = {"prefill", "decode"}
-V1BETA1_GENERIC_WORKER_COMPONENT_TYPE = "worker"
 
 # Per-GPU power-limit annotation key (watts, positive integer).
 #
@@ -173,7 +176,16 @@ def get_component_from_type_or_name(
     component_name: Optional[str] = None,
 ) -> Service:
     """
-    Get the current replicas for a component in a graph deployment
+    Get the component that serves a role in a live graph deployment
+
+    The planner scales what this returns, so it raises where the spec does not
+    settle the answer. Its policy on top of ``match_role_components``, in order:
+
+    1. The component typed as the role. Two or more are an error.
+    2. For decode only, the sole generic ``type: worker`` component, which is
+       how an aggregated deployment declares its worker.
+    3. The component called ``component_name``, if the spec has one and it is
+       untyped or a generic worker.
 
     Returns: Service object
 
@@ -182,38 +194,34 @@ def get_component_from_type_or_name(
         DuplicateSubComponentError: If multiple components have the same role
     """
     components = get_components_by_name(deployment)
+    candidates = match_role_components(
+        (
+            (curr_name, get_component_type(curr_component))
+            for curr_name, curr_component in components.items()
+        ),
+        component_type,
+    )
 
-    matching_components = []
+    if len(candidates.typed) > 1:
+        raise DuplicateSubComponentError(component_type.value, list(candidates.typed))
 
-    for curr_name, curr_component in components.items():
-        component_role = get_planner_component_role(curr_component)
-        if component_role == component_type.value:
-            matching_components.append((curr_name, curr_component))
-
-    # Check for duplicates
-    if len(matching_components) > 1:
-        component_names = [name for name, _ in matching_components]
-        raise DuplicateSubComponentError(component_type.value, component_names)
-
-    if not matching_components and component_type == SubComponentType.DECODE:
-        generic_workers = [
-            (name, component)
-            for name, component in components.items()
-            if get_component_type(component) == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
-        ]
-        if len(generic_workers) == 1:
-            matching_components = generic_workers
-
-    if not matching_components and component_name in components:
-        component = components[component_name]
-        if not _can_use_explicit_component_name(component, component_type):
+    if candidates.typed:
+        name = candidates.typed[0]
+    elif (
+        component_type == SubComponentType.DECODE
+        and candidates.sole_generic_worker is not None
+    ):
+        name = candidates.sole_generic_worker
+    elif component_name in components:
+        if not _can_use_explicit_component_name(
+            components[component_name], component_type
+        ):
             raise SubComponentNotFoundError(component_type.value)
-        matching_components.append((component_name, component))
-    elif not matching_components:
+        name = component_name
+    else:
         raise SubComponentNotFoundError(component_type.value)
 
-    name, component = matching_components[0]
-    return Service(name=name, service=component)
+    return Service(name=name, service=components[name])
 
 
 @dataclass(frozen=True)

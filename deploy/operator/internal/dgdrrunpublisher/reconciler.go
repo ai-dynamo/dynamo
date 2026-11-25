@@ -390,6 +390,7 @@ func observedStatus(run *v1beta2.DynamoGraphDeploymentRun) RunStatus {
 	observed.Publication = meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished).DeepCopy()
 	if progress := run.Status.Progress; progress != nil && progress.Candidates != nil {
 		observed.Published = progress.Candidates.Published
+		observed.ParetoFront = int32(progress.Candidates.ParetoFront)
 	}
 	if run.Status.LastProgressTime != nil {
 		observed.LastProgress = run.Status.LastProgressTime.UTC()

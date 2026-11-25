@@ -135,8 +135,8 @@ rule violation is a contract defect, not a style preference.
 18. **S1-S4.** For a change to an existing metric, decide its stability from its catalog entry
     (Operator Metrics for operator metrics) at the base revision, for example with
     `git show <base>:<catalog file>`, because a pull request that removes a metric may also
-    remove its entry. A table row with the Status `Current` is stable, `Experimental` is
-    experimental, and `Deprecated` is deprecated; a detailed entry is stable unless its
+    remove its entry. A table row whose Status is empty or `Current` is stable, `Experimental`
+    is experimental, and `Deprecated` is deprecated; a detailed entry is stable unless its
     description starts with `**Experimental.**` or it carries `deprecated={true}`. Report, on a
     stable metric, a rename, a type or unit change, or an added or removed label that does not
     add a new metric and deprecate the old one. Report a deprecation whose entry at the pull
@@ -202,7 +202,7 @@ and list every location. Put findings about names, types, units, labels, stabili
 unbounded series first, because they are hardest to change after release. For example:
 
 ```text
-lib/llm/src/http/service/metrics.rs:1412 (N2, N3)
+lib/http-server/src/metrics.rs:1412 (N2, N3)
 Problem: new IntCounterVec "prefill_wait_ms" exports dynamo_frontend_prefill_wait_ms{model}.
 Consequence: the unit is not base form and the counter has no _total, so rate() panels show
   milliseconds per second under a name that reads as a gauge; renaming after release breaks them.

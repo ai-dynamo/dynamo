@@ -3,9 +3,7 @@
 
 //! Catalog for the custom worker-selection policy examples.
 
-use dynamo_kv_router::services::selection::{
-    RouterPluginRegistry, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Register every policy type supplied by this example catalog.
 pub fn register(
