@@ -16,8 +16,7 @@
 //! An engine that stops serving ([`LLMEngine::engine_lost`]) leaves discovery and
 //! is probed again until it serves, then registered again. An engine whose
 //! configuration this frontend rejects is logged as an error and not probed
-//! again. On shutdown every engine keeps serving while the HTTP service drains
-//! the requests it has admitted, and is released after that.
+//! again.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -84,11 +83,9 @@ pub type DirectEngineFactory =
 #[derive(Default)]
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
-    /// One supervisor per engine; on runtime shutdown each keeps its engine
-    /// serving through the HTTP drain, then withdraws and releases it, after
-    /// any start still running returns. Nothing waits for them: an engine's
-    /// cleanup releases only this process's client, not the engine, which runs
-    /// elsewhere.
+    /// One supervisor per engine. Nothing waits for them on shutdown: an
+    /// engine's cleanup releases only this process's client, not the engine,
+    /// which runs elsewhere.
     supervisors: TaskTracker,
 }
 
@@ -396,8 +393,7 @@ impl DirectEngineHost {
     /// when it stops, withdraw it and probe again. Probes back off from
     /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`, and so do the returns of
     /// an engine that is lost again soon after it registers. A probe's start runs
-    /// to completion even on shutdown. On shutdown the engine keeps serving for
-    /// `shutdown_drain`, then is withdrawn and released. Stops probing,
+    /// to completion even on shutdown. Stops probing,
     /// with an error, when the engine cannot be built or its configuration is
     /// rejected, since every later probe would fail the same way.
     async fn supervise(self, engine: Arc<dyn LLMEngine>, shutdown: CancellationToken) {
@@ -454,9 +450,11 @@ impl DirectEngineHost {
 
             let serving_since = tokio::time::Instant::now();
             let serving = hosted.engine.clone();
+            // One `engine_lost` future per hosted engine, as the trait describes.
+            let mut engine_lost = serving.engine_lost();
             let lost = tokio::select! {
                 _ = shutdown.cancelled() => None,
-                lost = serving.engine_lost() => Some(lost),
+                lost = &mut engine_lost => Some(lost),
             };
             let Some(lost) = lost else {
                 // The same token starts the HTTP service's drain. The requests
@@ -465,7 +463,7 @@ impl DirectEngineHost {
                 // with no engine left to migrate to.
                 tokio::select! {
                     _ = tokio::time::sleep(self.shutdown_drain) => {}
-                    _ = serving.engine_lost() => {}
+                    _ = &mut engine_lost => {}
                 }
                 self.stop(hosted).await;
                 return;
@@ -695,8 +693,6 @@ mod tests {
         refuses: AtomicBool,
         /// Never open a response stream.
         stalls: AtomicBool,
-        /// The model directory the engine reports, when not `MODEL`.
-        model: Option<String>,
         /// The prompt tokens of the last request served.
         prompt: parking_lot::Mutex<Vec<u32>>,
         /// The most prompt tokens the router took as cached here for a request.
@@ -732,7 +728,7 @@ mod tests {
                 ));
             }
             Ok(EngineConfig {
-                model: self.state.model.as_deref().unwrap_or(MODEL).to_string(),
+                model: MODEL.to_string(),
                 served_model_name: Some("direct-test-model".to_string()),
                 llm: Some(LlmRegistration {
                     kv_cache_block_size: Some(BLOCK_SIZE as u32),

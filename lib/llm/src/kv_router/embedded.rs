@@ -268,9 +268,7 @@ impl EmbeddedSelection {
         )
         .worker_selection_policy_factory(args.policy_factory)
         .host_manages_request_lifecycle()
-        // Sizes an index the registry creates itself. Both of this frontend's
-        // ingresses bring their own, sized the same way.
-        .indexer_threads(args.kv_router_config.router_event_threads.max(1) as usize)
+        .indexer_threads(1)
         .host(SelectionHost {
             load: HostLoad {
                 prefill_estimator: args.prefill_load_estimator,
@@ -441,11 +439,6 @@ impl EmbeddedSelection {
     /// The partition's scheduler, for bookings and load queries.
     pub(crate) fn scheduler(&self) -> &SelectionScheduler {
         self.partition.scheduler()
-    }
-
-    /// The partition's index, as built by the ingress the router installed.
-    pub(crate) fn indexer(&self) -> &crate::kv_router::indexer::Indexer {
-        self.partition.indexer()
     }
 }
 

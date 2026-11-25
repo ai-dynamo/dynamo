@@ -2509,7 +2509,7 @@ impl ModelManager {
         // process-local discovery, so it never sees sidecar workers and one
         // answer per router is enough. A router that wants no events keeps the
         // runtime ingress, which then subscribes to nothing.
-        let direct_kv_events = endpoint
+        let has_direct_kv_events = endpoint
             .drt()
             .direct_dispatch::<
                 crate::protocols::common::preprocessor::PreprocessedRequest,
@@ -2520,7 +2520,7 @@ impl ModelManager {
             .is_some()
             && kv_event_source_requirement.should_subscribe();
         let kv_source_membership =
-            if !direct_kv_events && kv_event_source_requirement.should_subscribe() {
+            if !has_direct_kv_events && kv_event_source_requirement.should_subscribe() {
                 Some(
                     self.get_or_create_kv_source_membership_watch(&endpoint)
                         .await?,
@@ -2548,7 +2548,7 @@ impl ModelManager {
                 .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
-            direct_kv_events,
+            has_direct_kv_events,
         )
         .await?;
 
