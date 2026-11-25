@@ -59,6 +59,7 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 dynamo-router-policies = { workspace = true }
 # repo
+dynamo-http-server = { workspace = true }
 dynamo-global-discovery-client = { workspace = true }
 dynamo-admission = { workspace = true }
 dynamo-global-common = { workspace = true, features = ["grpc"] }
@@ -102,7 +103,6 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
-http-body = "1"
 http-body-util = "0.1"
 ipnet = { workspace = true }
 libc = { workspace = true }
@@ -160,7 +160,6 @@ indicatif = { version = "0.18.0", optional = true }
 # http-service
 axum = { workspace = true, features = ["multipart"] }
 mime = "0.3"
-hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }

@@ -39,7 +39,7 @@ fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedReque
     let py = obj.py();
     let token_ids_key = pyo3::intern!(py, "token_ids");
     let extra_args_key = pyo3::intern!(py, "extra_args");
-    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let dict = obj.cast_exact::<PyDict>().ok()?;
     let token_ids = py_convert::read_exact_u32_list(&dict.get_item(token_ids_key).ok()??)?;
     let extra_args = match dict.get_item(extra_args_key).ok()? {
         Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
@@ -62,7 +62,7 @@ pub fn _convert_preprocessed_request(
     py: Python<'_>,
     preprocessed: &Bound<'_, PyAny>,
     fast_path: bool,
-) -> PyResult<Option<PyObject>> {
+) -> PyResult<Option<Py<PyAny>>> {
     let request = if fast_path {
         fast_preprocessed_request(preprocessed)
     } else {
@@ -103,7 +103,7 @@ impl RoutedEngine {
     fn generate<'p>(
         &self,
         py: Python<'p>,
-        preprocessed: PyObject,
+        preprocessed: Py<PyAny>,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let preprocessed = preprocessed.bind(py);
@@ -150,7 +150,7 @@ impl RoutedEngine {
                     .await
                     .map_err(routed_error_to_pyerr)?;
                 let task_context = stream.context();
-                let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(32);
+                let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<Py<PyAny>>>(32);
 
                 tokio::spawn(async move {
                     loop {
@@ -166,7 +166,7 @@ impl RoutedEngine {
                             break;
                         };
 
-                        let py_response = Python::with_gil(|py| {
+                        let py_response = Python::attach(|py| {
                             response.map_data(|data| {
                                 pythonize(py, &data)
                                     .map(|obj| obj.unbind())

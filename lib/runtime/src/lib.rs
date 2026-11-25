@@ -39,6 +39,7 @@ pub mod logging;
 pub mod metrics;
 pub mod namespace;
 pub mod nvtx;
+mod otlp;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;
