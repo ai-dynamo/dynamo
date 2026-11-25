@@ -102,8 +102,10 @@ type InterconnectSpec struct {
 	// AISimulate's default engine.kv_transfer.bytes_per_token of auto, each transfer carries one
 	// GPU's KV shard for the prefill candidate's tensor- and pipeline-parallel shape, so the
 	// shards of a rank already move in parallel; an aggregate would count that parallelism
-	// twice. Concurrent transfers share the link. If inputOverrides sets bytes_per_token to a
-	// whole rank's KV size, set the rank's aggregate bandwidth instead.
+	// twice. If several GPUs share a NIC or switch uplink, measure the sustained per-GPU bandwidth
+	// with all of them transferring at once, because AISimulate does not model contention between
+	// ranks on a shared link. Concurrent transfers on one rank share its link. If inputOverrides
+	// sets bytes_per_token to a whole rank's KV size, set the rank's aggregate bandwidth instead.
 	// When omitted, AISimulate models the transfer as instantaneous, so disaggregated candidates
 	// report optimistic TTFT and goodput; admission warns when such candidates are searched
 	// without a bandwidth. Admission rejects the field when the effective search is

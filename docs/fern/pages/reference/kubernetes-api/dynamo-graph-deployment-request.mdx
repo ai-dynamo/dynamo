@@ -127,7 +127,11 @@ group. With AISimulate's default `engine.kv_transfer.bytes_per_token` of `auto`,
 transfer carries one GPU's KV shard for the prefill candidate's tensor- and
 pipeline-parallel shape, so the shards already move in parallel. An aggregate value, such
 as eight times the per-GPU bandwidth for a TP8 candidate, counts that parallelism twice and
-understates the transfer time. Concurrent transfers share the link. If `inputOverrides`
+understates the transfer time. A single GPU-pair measurement fits when each GPU has its own
+link. If several GPUs share a NIC or switch uplink, measure the sustained bandwidth per GPU
+while all of them transfer at once: AISimulate does not model contention between ranks on a
+shared link, and one pair benchmarked alone can use the whole link and make the predicted
+handoff too fast. Concurrent transfers on the same rank share its link. If `inputOverrides`
 sets `bytes_per_token` to a whole rank's KV size, enter the rank's aggregate bandwidth
 instead. Prefer a measured value to the nominal NIC rate. Setting `interconnect` does not
 opt out of hardware discovery.
