@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/components/planner"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -70,7 +71,7 @@ func TestRetuneTargetStatusThroughGroveController(t *testing.T) {
 		if assert.NotNil(c, ready) {
 			assert.Equal(c, metav1.ConditionFalse, ready.Status)
 		}
-		_, configuration, err := dynamo.RetuneConfiguration(source)
+		_, configuration, err := planner.ResolveRetuneConfiguration(source)
 		if assert.NoError(c, err) {
 			assert.Equal(c, &v1beta1.RetuneStatus{ConfigHash: configuration.ConfigHash}, source.Status.Components["optimizer"].Retune)
 		}
@@ -78,7 +79,7 @@ func TestRetuneTargetStatusThroughGroveController(t *testing.T) {
 
 	t.Log("The persisted Grove target contains the owned wiring, not mutations to the authored DGD")
 	pcsUID, pcsGeneration := pcs.UID, pcs.Generation
-	_, configuration, err := dynamo.RetuneConfiguration(source)
+	_, configuration, err := planner.ResolveRetuneConfiguration(source)
 	require.NoError(t, err)
 	capabilityJSON, err := json.Marshal(configuration)
 	require.NoError(t, err)
@@ -201,7 +202,7 @@ func TestRetuneTargetStatusWaitsForDCDLowering(t *testing.T) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), key, source)) {
 			return
 		}
-		_, configuration, err := dynamo.RetuneConfiguration(source)
+		_, configuration, err := planner.ResolveRetuneConfiguration(source)
 		if assert.NoError(c, err) {
 			assert.Equal(c, &v1beta1.RetuneStatus{ConfigHash: configuration.ConfigHash}, source.Status.Components["optimizer"].Retune)
 		}

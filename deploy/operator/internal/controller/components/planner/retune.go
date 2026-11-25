@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package dynamo
+package planner
 
 import (
 	"crypto/sha256"
@@ -46,10 +46,10 @@ type RetuneRouterConfiguration struct {
 	Temperature        float64 `json:"temperature"`
 }
 
-// RetuneConfiguration compiles semantic intent without reading workload recipes.
+// ResolveRetuneConfiguration compiles semantic intent without reading workload recipes.
 // Callers publish its hash only after both target lowerings are synchronized.
 // dgd must not be nil. A nil configuration means no Planner requested Retune.
-func RetuneConfiguration(dgd *v1beta1.DynamoGraphDeployment) (string, *RetuneLaunchConfiguration, error) {
+func ResolveRetuneConfiguration(dgd *v1beta1.DynamoGraphDeployment) (string, *RetuneLaunchConfiguration, error) {
 	var planner *v1beta1.DynamoComponentDeploymentSharedSpec
 	var frontend *v1beta1.DynamoComponentDeploymentSharedSpec
 	frontendCount := 0
@@ -121,19 +121,10 @@ func RetuneConfiguration(dgd *v1beta1.DynamoGraphDeployment) (string, *RetuneLau
 	return planner.ComponentName, configuration, nil
 }
 
-// applyDGDComponentRetune compiles graph-owned bindings into a component copy so
-// both direct rendering and the DGD-to-DCD boundary retain identical wiring.
-// component and dgd must not be nil; dgd is not mutated.
-func applyDGDComponentRetune(component *v1beta1.DynamoComponentDeploymentSharedSpec, dgd *v1beta1.DynamoGraphDeployment) error {
-	plannerName, configuration, err := RetuneConfiguration(dgd)
-	if err != nil || configuration == nil {
-		return err
-	}
-	isFrontend := component.ComponentName == configuration.FrontendComponentName
-	if !isFrontend && component.ComponentName != plannerName {
-		return nil
-	}
-
+// Apply configures an existing Pod and main container for the selected frontend
+// or Planner. It does not create templates or containers. All pointers must be
+// non-nil; only pod and main are modified, and main must belong to pod.
+func (configuration *RetuneLaunchConfiguration) Apply(component *v1beta1.DynamoComponentDeploymentSharedSpec, dgdName string, pod *corev1.PodSpec, main *corev1.Container) error {
 	// Later cache lowering must not hide any part of the shared trace tree.
 	if cache := component.CompilationCache; cache != nil {
 		mountPath := path.Clean(cache.MountPath)
@@ -147,31 +138,28 @@ func applyDGDComponentRetune(component *v1beta1.DynamoComponentDeploymentSharedS
 		return fmt.Errorf("encode Retune launch contract: %w", err)
 	}
 
-	// Compile only into private templates, leaving the authored DGD untouched.
-	for _, template := range EnsureComponentPodTemplates(component) {
-		main := ensureMainContainer(template)
-		if err := addRetuneTraceMount(&template.Spec, main, configuration.TraceStorage); err != nil {
-			return fmt.Errorf("component %q: %w", component.ComponentName, err)
-		}
-		var bindings []corev1.EnvVar
-		if isFrontend {
-			bindings = retuneFrontendEnvironment(dgd.Name, configuration)
-		} else {
-			// A launch-time binding prevents an old Planner from using a newer
-			// target contract with the PVC still mounted in its existing Pod.
-			bindings = []corev1.EnvVar{{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: string(capability)}}
-		}
-		owned := make(map[string]bool, len(bindings))
-		for _, binding := range bindings {
-			owned[binding.Name] = true
-		}
-		for _, binding := range main.Env {
-			if !owned[binding.Name] {
-				bindings = append(bindings, binding)
-			}
-		}
-		main.Env = bindings
+	// The lowering supplies the concrete Pod and container being configured.
+	if err := addRetuneTraceMount(pod, main, configuration.TraceStorage); err != nil {
+		return fmt.Errorf("component %q: %w", component.ComponentName, err)
 	}
+	var bindings []corev1.EnvVar
+	if component.ComponentName == configuration.FrontendComponentName {
+		bindings = retuneFrontendEnvironment(dgdName, configuration)
+	} else {
+		// A launch-time binding prevents an old Planner from using a newer
+		// target contract with the PVC still mounted in its existing Pod.
+		bindings = []corev1.EnvVar{{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: string(capability)}}
+	}
+	owned := make(map[string]bool, len(bindings))
+	for _, binding := range bindings {
+		owned[binding.Name] = true
+	}
+	for _, binding := range main.Env {
+		if !owned[binding.Name] {
+			bindings = append(bindings, binding)
+		}
+	}
+	main.Env = bindings
 	return nil
 }
 

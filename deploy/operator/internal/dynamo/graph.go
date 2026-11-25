@@ -37,6 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/components/planner"
 	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -455,9 +456,27 @@ func normalizeDGDComponent(
 		}
 	}
 
+	// The lowering creates a global template only when no authored source exists.
+	if len(ComponentPodTemplates(normalized)) == 0 {
+		normalized.PodTemplate = &corev1.PodTemplateSpec{}
+	}
 	applyDGDTemplateDefaults(normalized, parentDGD, nil, GetComponentDynamoSidecar(normalized) != nil)
-	if err := applyDGDComponentRetune(normalized, parentDGD); err != nil {
+	plannerName, retune, err := planner.ResolveRetuneConfiguration(parentDGD)
+	if err != nil {
 		return nil, err
+	}
+	if retune != nil && (normalized.ComponentName == plannerName || normalized.ComponentName == retune.FrontendComponentName) {
+		// Retune applies only after this lowering has selected and prepared its targets.
+		for _, template := range ComponentPodTemplates(normalized) {
+			main := GetMainContainerFromPodSpec(&template.Spec)
+			if main == nil {
+				template.Spec.Containers = append([]corev1.Container{{Name: commonconsts.MainContainerName}}, template.Spec.Containers...)
+				main = &template.Spec.Containers[0]
+			}
+			if err := retune.Apply(normalized, parentDGD.Name, &template.Spec, main); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	for _, podTemplate := range EnsureComponentPodTemplates(normalized) {
@@ -2375,9 +2394,28 @@ func generatePodSpecForComponent(
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
 		environment.ownKVTransferPolicy(component, nativeSidecar, KVTransferPolicyEnvironment(dynamoDeployment.Spec.Experimental.KvTransferPolicy))
 	}
+
+	// Direct rendering prepares its template before applying graph defaults or features.
+	if len(ComponentPodTemplates(component)) == 0 {
+		component.PodTemplate = &corev1.PodTemplateSpec{}
+	}
 	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, nativeSidecar)
-	if err := applyDGDComponentRetune(component, dynamoDeployment); err != nil {
+	plannerName, retune, err := planner.ResolveRetuneConfiguration(dynamoDeployment)
+	if err != nil {
 		return nil, err
+	}
+	if retune != nil && (component.ComponentName == plannerName || component.ComponentName == retune.FrontendComponentName) {
+		// Direct rendering owns the same explicit preparation as the child-DCD path.
+		for _, template := range ComponentPodTemplates(component) {
+			main := GetMainContainerFromPodSpec(&template.Spec)
+			if main == nil {
+				template.Spec.Containers = append([]corev1.Container{{Name: commonconsts.MainContainerName}}, template.Spec.Containers...)
+				main = &template.Spec.Containers[0]
+			}
+			if err := retune.Apply(component, dynamoDeployment.Name, &template.Spec, main); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if operatorConfig == nil {
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}

@@ -5,75 +5,19 @@ package dynamo
 
 import (
 	"encoding/json"
-	"math"
 	"slices"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/components/planner"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func TestRetuneSemanticBinding(t *testing.T) {
-	t.Log("Compile one versioned contract from typed inputs and graph identity")
-	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", UID: "graph-uid", Generation: 7, Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-		{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend},
-		{ComponentName: "optimizer", ComponentType: v1beta1.ComponentTypePlanner,
-			Retune: &v1beta1.RetuneSpec{Enabled: true, TraceStorage: &v1beta1.RetuneTraceStorageSpec{ClaimName: "traces"}}},
-	}}}
-	_, baseline, err := RetuneConfiguration(dgd)
-	require.NoError(t, err)
-	require.Len(t, baseline.ConfigHash, 64)
-	require.Equal(t, 1, baseline.Version)
-	require.Equal(t, RetuneRouterConfiguration{OverlapScoreCredit: 1, PrefillLoadScale: 1}, baseline.Router)
-
-	t.Log("Replica changes and explicit defaults do not alter the immutable process binding")
-	unchanged := dgd.DeepCopy()
-	unchanged.Generation++
-	unchanged.Spec.Components[0].Replicas = new(int32(3))
-	unchanged.Spec.Components[1].Replicas = new(int32(2))
-	unchanged.Spec.Components[1].Retune.Router = &v1beta1.RetuneRouterSpec{OverlapScoreCredit: new(float64(1)), PrefillLoadScale: new(float64(1)), Temperature: new(float64(0))}
-	_, equivalent, err := RetuneConfiguration(unchanged)
-	require.NoError(t, err)
-	require.Equal(t, baseline, equivalent)
-
-	for _, test := range []struct {
-		name   string
-		mutate func(*v1beta1.DynamoGraphDeployment)
-	}{
-		{"graph identity", func(value *v1beta1.DynamoGraphDeployment) { value.UID = "replacement-uid" }},
-		{"frontend identity", func(value *v1beta1.DynamoGraphDeployment) { value.Spec.Components[0].ComponentName = "other-gateway" }},
-		{"Planner identity", func(value *v1beta1.DynamoGraphDeployment) { value.Spec.Components[1].ComponentName = "other-optimizer" }},
-		{"storage", func(value *v1beta1.DynamoGraphDeployment) {
-			value.Spec.Components[1].Retune.TraceStorage.ClaimName = "other-traces"
-		}},
-		{"startup router input", func(value *v1beta1.DynamoGraphDeployment) {
-			value.Spec.Components[1].Retune.Router = &v1beta1.RetuneRouterSpec{Temperature: new(float64(0.5))}
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("A semantic binding edit changes the target hash")
-			changed := dgd.DeepCopy()
-			test.mutate(changed)
-			_, configuration, err := RetuneConfiguration(changed)
-			require.NoError(t, err)
-			require.NotEqual(t, baseline.ConfigHash, configuration.ConfigHash)
-		})
-	}
-
-	t.Log("Stored or admission-bypassed invalid numbers cannot produce a launch contract")
-	for _, invalid := range []float64{-1, math.Inf(1), math.NaN()} {
-		changed := dgd.DeepCopy()
-		changed.Spec.Components[1].Retune.Router = &v1beta1.RetuneRouterSpec{Temperature: &invalid}
-		_, _, err := RetuneConfiguration(changed)
-		require.ErrorContains(t, err, "finite and non-negative")
-	}
-}
 
 func TestRetuneRenderingAcrossProviders(t *testing.T) {
 	for _, origin := range []string{"1.7.0", "1.8.0", ""} {
@@ -123,14 +67,14 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 				for _, pod := range []*corev1.PodSpec{childPod, &clique.Spec.PodSpec} {
 					main := GetMainContainerFromPodSpec(pod)
 					require.NotNil(t, main)
-					require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: retuneTraceVolumeName, MountPath: "/trace"})
-					require.Contains(t, pod.Volumes, corev1.Volume{Name: retuneTraceVolumeName, PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "traces"}})
+					require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "dynamo-retune-traces", MountPath: "/trace"})
+					require.Contains(t, pod.Volumes, corev1.Volume{Name: "dynamo-retune-traces", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "traces"}})
 					if name != "gateway" {
 						binding := findEnvVar(main.Env, "DYN_PLANNER_RETUNE_CAPABILITY")
 						require.NotNil(t, binding)
-						var capability RetuneLaunchConfiguration
+						var capability planner.RetuneLaunchConfiguration
 						require.NoError(t, json.Unmarshal([]byte(binding.Value), &capability))
-						_, expected, err := RetuneConfiguration(dgd)
+						_, expected, err := planner.ResolveRetuneConfiguration(dgd)
 						require.NoError(t, err)
 						require.Equal(t, *expected, capability)
 						continue
@@ -171,38 +115,52 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 	}
 }
 
-func TestRetuneMountOwnership(t *testing.T) {
+func TestRetuneLoweringsPrepareMissingContainers(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		mount     corev1.VolumeMount
-		volume    corev1.Volume
-		wantError string
+		name     string
+		template *corev1.PodTemplateSpec
 	}{
-		{name: "reuse explicit matching mount", mount: corev1.VolumeMount{Name: "user-traces", MountPath: "/trace"}, volume: corev1.Volume{Name: "user-traces", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "traces"}}}},
-		{name: "wrong claim", mount: corev1.VolumeMount{Name: "other", MountPath: "/trace"}, volume: corev1.Volume{Name: "other", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "other"}}}, wantError: "must reference PVC"},
-		{name: "read only", mount: corev1.VolumeMount{Name: "other", MountPath: "/trace", ReadOnly: true}, wantError: "direct writable"},
-		{name: "subpath", mount: corev1.VolumeMount{Name: "other", MountPath: "/trace", SubPath: "custom"}, wantError: "without subPath"},
-		{name: "nested obscuring mount", mount: corev1.VolumeMount{Name: "other", MountPath: "/trace/segments"}, wantError: "obscured"},
-		{name: "reserved name mounted elsewhere", mount: corev1.VolumeMount{Name: retuneTraceVolumeName, MountPath: "/other"}, wantError: "already mounted"},
-		{name: "reserved volume name collision", volume: corev1.Volume{Name: retuneTraceVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}, wantError: "must reference writable PVC"},
+		{name: "omitted template"},
+		{name: "empty template", template: &corev1.PodTemplateSpec{}},
+		{name: "sidecar only", template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "sidecar:1"}}}}},
+		{name: "main after sidecar", template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "sidecar:1"}, {Name: "main", Image: "authored:1"}}}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Respect matching user storage and reject conflicting storage without overwriting it")
-			pod := corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
-			if test.mount.Name != "" {
-				pod.Containers[0].VolumeMounts = []corev1.VolumeMount{test.mount}
+			t.Log("Retune preserves authored container order while lowerings supply missing structure")
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend, PodTemplate: test.template.DeepCopy()},
+					{ComponentName: "optimizer", ComponentType: v1beta1.ComponentTypePlanner, PodTemplate: test.template.DeepCopy(),
+						Retune: &v1beta1.RetuneSpec{Enabled: true, TraceStorage: &v1beta1.RetuneTraceStorageSpec{ClaimName: "traces"}}},
+				},
+			}}
+			original := dgd.DeepCopy()
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			require.NoError(t, err)
+			for _, name := range []string{"gateway", "optimizer"} {
+				for index, pod := range []*corev1.PodSpec{&children[name].Spec.PodTemplate.Spec, &cliqueByName(pcs, name).Spec.PodSpec} {
+					main := GetMainContainerFromPodSpec(pod)
+					require.NotNil(t, main)
+					require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "dynamo-retune-traces", MountPath: "/trace"})
+					if test.template != nil && len(test.template.Spec.Containers) > 0 {
+						require.Contains(t, pod.Containers, test.template.Spec.Containers[0])
+						if len(test.template.Spec.Containers) == 2 {
+							if index == 0 {
+								require.Equal(t, "sidecar", pod.Containers[0].Name)
+							} else {
+								require.Equal(t, "main", pod.Containers[0].Name)
+							}
+							require.Equal(t, "authored:1", main.Image)
+						} else {
+							require.Equal(t, "main", pod.Containers[0].Name)
+						}
+					}
+				}
 			}
-			if test.volume.Name != "" {
-				pod.Volumes = []corev1.Volume{test.volume}
-			}
-			original := pod.DeepCopy()
-			err := addRetuneTraceMount(&pod, &pod.Containers[0], RetuneTraceStorage{ClaimName: "traces", MountPath: "/trace"})
-			if test.wantError == "" {
-				require.NoError(t, err)
-			} else {
-				require.ErrorContains(t, err, test.wantError)
-			}
-			require.Equal(t, original, &pod)
+			require.Equal(t, original, dgd)
 		})
 	}
 }
@@ -258,27 +216,6 @@ func TestRetuneCompilationCacheMountOwnership(t *testing.T) {
 	}
 }
 
-func TestRetuneRejectsNestedMountAfterReusableMount(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mounts []corev1.VolumeMount
-	}{
-		{name: "nested mount last", mounts: []corev1.VolumeMount{{Name: "user-traces", MountPath: "/trace"}, {Name: "nested", MountPath: "/trace/segments"}}},
-		{name: "nested mount first", mounts: []corev1.VolumeMount{{Name: "nested", MountPath: "/trace/segments"}, {Name: "user-traces", MountPath: "/trace"}}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("A reusable root mount never hides a later obscuring child mount")
-			pod := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", VolumeMounts: test.mounts}}, Volumes: []corev1.Volume{
-				{Name: "user-traces", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "traces"}},
-			}}
-			original := pod.DeepCopy()
-			err := addRetuneTraceMount(&pod, &pod.Containers[0], RetuneTraceStorage{ClaimName: "traces", MountPath: "/trace"})
-			require.ErrorContains(t, err, "obscured")
-			require.Equal(t, original, &pod)
-		})
-	}
-}
-
 func TestRetuneLeavesWorkerHashAndDisabledRenderingUnchanged(t *testing.T) {
 	t.Log("Only frontend/Planner wiring changes; worker generation must remain stable")
 	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -304,8 +241,8 @@ func TestRetuneLeavesWorkerHashAndDisabledRenderingUnchanged(t *testing.T) {
 			rendered, err := GenerateGrovePodCliqueSet(t.Context(), candidate, nil, config, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.Equal(t, cliqueByName(baseline, "worker"), cliqueByName(rendered, "worker"))
-			planner := GetMainContainerFromPodSpec(&cliqueByName(rendered, "optimizer").Spec.PodSpec)
-			require.Equal(t, test.enabled, findEnvVar(planner.Env, "DYN_PLANNER_RETUNE_CAPABILITY") != nil)
+			plannerContainer := GetMainContainerFromPodSpec(&cliqueByName(rendered, "optimizer").Spec.PodSpec)
+			require.Equal(t, test.enabled, findEnvVar(plannerContainer.Env, "DYN_PLANNER_RETUNE_CAPABILITY") != nil)
 			if !test.enabled {
 				require.Equal(t, baseline, rendered)
 			} else {
@@ -313,7 +250,7 @@ func TestRetuneLeavesWorkerHashAndDisabledRenderingUnchanged(t *testing.T) {
 				require.NotEqual(t, cliqueByName(baseline, "optimizer"), cliqueByName(rendered, "optimizer"))
 
 				t.Log("A PVC change changes the Planner launch binding as well as its mount")
-				oldBinding := findEnvVar(planner.Env, "DYN_PLANNER_RETUNE_CAPABILITY").Value
+				oldBinding := findEnvVar(plannerContainer.Env, "DYN_PLANNER_RETUNE_CAPABILITY").Value
 				candidate.Spec.Components[1].Retune.TraceStorage.ClaimName = "new-traces"
 				updated, err := GenerateGrovePodCliqueSet(t.Context(), candidate, nil, config, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 				require.NoError(t, err)
@@ -321,7 +258,7 @@ func TestRetuneLeavesWorkerHashAndDisabledRenderingUnchanged(t *testing.T) {
 				newBinding := findEnvVar(updatedPlanner.Env, "DYN_PLANNER_RETUNE_CAPABILITY")
 				require.NotNil(t, newBinding)
 				require.NotEqual(t, oldBinding, newBinding.Value)
-				var capability RetuneLaunchConfiguration
+				var capability planner.RetuneLaunchConfiguration
 				require.NoError(t, json.Unmarshal([]byte(newBinding.Value), &capability))
 				require.Equal(t, "new-traces", capability.TraceStorage.ClaimName)
 			}

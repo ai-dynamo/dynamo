@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/components/planner"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,7 +43,7 @@ func TestRetuneStatusAcknowledgesSemanticTarget(t *testing.T) {
 			}
 			result.applyRetuneStatus(dgd, test.targetsAcknowledged)
 			if test.published {
-				_, configuration, err := dynamo.RetuneConfiguration(dgd)
+				_, configuration, err := planner.ResolveRetuneConfiguration(dgd)
 				require.NoError(t, err)
 				require.Equal(t, &v1beta1.RetuneStatus{ConfigHash: configuration.ConfigHash}, result.Status.Components["optimizer"].Retune)
 			} else {

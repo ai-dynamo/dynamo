@@ -5,7 +5,7 @@ package controller
 
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/components/planner"
 )
 
 // applyRetuneStatus publishes the semantic target binding independently of
@@ -19,7 +19,7 @@ func (r *workloadProgramResult) applyRetuneStatus(dgd *v1beta1.DynamoGraphDeploy
 	if r.Status.ObservedGeneration != dgd.Generation || !targetsAcknowledged {
 		return
 	}
-	plannerName, configuration, err := dynamo.RetuneConfiguration(dgd)
+	plannerName, configuration, err := planner.ResolveRetuneConfiguration(dgd)
 	if err != nil || configuration == nil {
 		return
 	}
@@ -36,7 +36,7 @@ func (r *workloadProgramResult) applyRetuneStatus(dgd *v1beta1.DynamoGraphDeploy
 // retuneDCDTargetsAcknowledged observes the existing child-lowering boundary.
 // dgd and each child must be non-nil. Unrelated worker readiness is not a gate.
 func retuneDCDTargetsAcknowledged(dgd *v1beta1.DynamoGraphDeployment, children []*v1beta1.DynamoComponentDeployment) bool {
-	plannerName, configuration, err := dynamo.RetuneConfiguration(dgd)
+	plannerName, configuration, err := planner.ResolveRetuneConfiguration(dgd)
 	if err != nil || configuration == nil {
 		return false
 	}
