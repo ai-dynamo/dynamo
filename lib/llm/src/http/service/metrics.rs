@@ -539,7 +539,7 @@ pub(crate) fn router(
     path: Option<String>,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 ) -> (Vec<RouteDoc>, Router) {
-    let (path, route) = dynamo_http_server::metrics::scrape_router(registry, path, drt_metrics);
+    let (path, route) = dynamo_http_server::scrape::scrape_router(registry, path, drt_metrics);
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
     (vec![doc], route)
 }
