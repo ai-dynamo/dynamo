@@ -292,6 +292,16 @@ impl PublisherInput {
     }
 }
 
+/// Waits until the processor and index have finished every batch sent before it.
+async fn barrier(tx: &mpsc::UnboundedSender<PublisherInput>) -> Result<()> {
+    let (done, result) = tokio::sync::oneshot::channel();
+    tx.send(PublisherInput::Barrier(done))
+        .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
+    result
+        .await
+        .map_err(|_| anyhow::anyhow!("KV index barrier dropped"))?
+}
+
 /// A publisher of KV events.
 ///
 /// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
@@ -752,6 +762,12 @@ impl KvEventPublisher {
                         .event,
                 )
             })
+    }
+
+    /// Waits until the local index, if any, has applied every event published
+    /// before this call. An error means the publisher has stopped.
+    pub async fn flush(&self) -> Result<()> {
+        barrier(&self.tx).await
     }
 
     pub fn next_event_id(&self) -> u64 {

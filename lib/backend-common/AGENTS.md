@@ -379,6 +379,9 @@ Pick based on how the engine's KV event API is shaped:
   publisher and drives `publish_stored` / `publish_removed` from its
   own thread. The engine **must** stop that thread in `cleanup()`.
   `idempotent_stores` picks the publisher's dedup policy, as on `Zmq`.
+  With the local indexer on, events published inside `on_ready` are indexed
+  before the worker registers, so a router's first query of the worker
+  finds them.
 
 ### `SnapshotPublisher` (mirrors `KvEventSource::Push`)
 

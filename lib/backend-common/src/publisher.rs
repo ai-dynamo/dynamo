@@ -29,6 +29,9 @@ use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
 
+/// How long a worker's registration waits for the events an engine published in `on_ready`.
+const STARTUP_INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
 /// They keep the underlying publishers alive; there is no task to join during cleanup.
 pub(crate) struct PublisherHandles {
@@ -57,10 +60,7 @@ impl PublisherHandles {
     }
 }
 
-// Sync — `KvEventPublisher::new_with_local_indexer` doesn't await. The
-// snapshot router-publisher construction below is async because
-// `create_endpoint` does.
-fn setup_kv_publishers(
+async fn setup_kv_publishers(
     endpoint: &Endpoint,
     kv_state_endpoint: &EndpointId,
     sources: Vec<KvEventSource>,
@@ -120,6 +120,19 @@ fn setup_kv_publishers(
             on_ready(publisher.clone()).map_err(|e| {
                 publisher_err(format!("kv publisher on_ready (dp_rank={dp_rank}): {e}"))
             })?;
+            // A router queries a worker's index when the worker registers: index `on_ready`'s events first.
+            match tokio::time::timeout(STARTUP_INDEX_TIMEOUT, publisher.flush()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(dp_rank, %error, "KV event publisher stopped at startup; KV events are off for this rank");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        dp_rank,
+                        "KV events published at startup are still being indexed; registering now"
+                    );
+                }
+            }
         }
         publishers.push(publisher);
     }
@@ -182,7 +195,8 @@ pub(crate) async fn setup_publishers(
             kv_sources,
             block_size,
             enable_local_indexer,
-        )?
+        )
+        .await?
     } else {
         if !kv_sources.is_empty() {
             tracing::warn!(

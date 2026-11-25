@@ -14,12 +14,20 @@ use tokio::time::Instant;
 
 use super::*;
 
+// Only the conversions are used here.
+#[allow(dead_code)]
 mod vllm {
     crate::kv_event_proto!(vllm_proto);
 }
 
+#[allow(dead_code)]
 mod sglang {
     crate::kv_event_proto!(sglang_kv_types::kv::v1);
+}
+
+/// An engine that predates `GetKvSnapshot`.
+fn no_snapshot() -> GetSnapshot {
+    Box::new(|| Box::pin(future::ready(Err(tonic::Status::unimplemented("")))))
 }
 
 /// What the ZMQ decoder returns for the engine's msgpack `[ts, events, rank]`.
@@ -255,11 +263,18 @@ async fn subscription_failures_choose_zmq_or_no_feed() {
         let attempts = attempts.clone();
         (0..2).map(move |rank| {
             let attempts = attempts.clone();
-            let subscribe: Subscribe = Box::new(move || {
+            let subscribe: Subscribe = Box::new(move |_| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 Box::pin(future::ready(Err(tonic::Status::new(code, "injected"))))
             });
-            (rank, subscribe)
+            let snapshot = no_snapshot();
+            (
+                rank,
+                KvEventCalls {
+                    subscribe,
+                    snapshot,
+                },
+            )
         })
     };
     let zmq = || {
@@ -277,6 +292,44 @@ async fn subscription_failures_choose_zmq_or_no_feed() {
     let feeds = kv_event_feeds(failing(tonic::Code::FailedPrecondition), no_fallback).await;
     assert!(feeds.unwrap().is_empty());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_snapshot_the_engine_cannot_replay_from_is_followed_by_the_live_stream() {
+    let (cursors, mut subscribed) = mpsc::unbounded_channel();
+    let mut calls = KvEventCalls {
+        // An engine without a replay buffer refuses every cursor.
+        subscribe: Box::new(move |resume: Option<KvCursor>| {
+            let is_resume = resume.is_some();
+            cursors
+                .send(resume.map(|cursor| cursor.next_sequence_number))
+                .unwrap();
+            Box::pin(future::ready(if is_resume {
+                Err(tonic::Status::out_of_range(""))
+            } else {
+                Ok(stream::pending().boxed())
+            }))
+        }),
+        snapshot: Box::new(|| {
+            let resume = KvCursor {
+                stream_id: "stream".to_string(),
+                next_sequence_number: 7,
+            };
+            Box::pin(future::ready(Ok(KvSnapshot {
+                stores: Vec::new(),
+                resume,
+                is_complete: true,
+            })))
+        }),
+    };
+
+    let opened = open(&mut calls, 0).await.unwrap();
+    // One resume, then one live subscription that keeps the snapshot and expects no batch number.
+    assert_eq!(subscribed.recv().await, Some(Some(7)));
+    assert_eq!(subscribed.recv().await, Some(None));
+    assert!(subscribed.try_recv().is_err());
+    assert!(opened.snapshot.is_some());
+    assert_eq!(opened.next_sequence, None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -312,11 +365,20 @@ async fn an_ended_stream_is_reopened_at_once_unless_it_delivered_nothing() {
         image_token_id: None,
         idempotent_stores: false,
         feed: KvEventFeed::Grpc {
-            stream: batch(0),
-            resubscribe: Box::new(move || {
-                opened.send(Instant::now()).unwrap();
-                Box::pin(future::ready(Ok(reopened.next().unwrap())))
-            }),
+            opened: OpenedKvEvents {
+                snapshot: None,
+                next_sequence: None,
+                batches: batch(0),
+            },
+            calls: KvEventCalls {
+                subscribe: Box::new(move |resume| {
+                    // An engine without snapshots gives no cursor to resume from.
+                    assert!(resume.is_none());
+                    opened.send(Instant::now()).unwrap();
+                    Box::pin(future::ready(Ok(reopened.next().unwrap())))
+                }),
+                snapshot: no_snapshot(),
+            },
         },
     };
     let cancel = CancellationToken::new();

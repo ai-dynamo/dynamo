@@ -57,8 +57,9 @@ publisher and reports the endpoint through native engine discovery as one
 `kv_event_sources` entry at `tcp://127.0.0.1:<port>`, a node-local address like
 the Rust server's, so the sidecar must run on the Mocker's host. The same
 events are served as the `sglang.kv.v1.KvEvents` gRPC stream, listed in
-`grpc_kv_event_sources`, which the sidecar prefers. The sidecar forwards these
-events to Dynamo's router.
+`grpc_kv_event_sources`, which the sidecar prefers. The service also answers
+`GetKvSnapshot` with the device blocks the Mocker holds. The sidecar forwards
+these events to Dynamo's router.
 
 The event publisher binds a free port by default. For this gRPC server, an
 unset `zmq_kv_events_port` selects an automatic ZMQ port. Use a frontend with

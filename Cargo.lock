@@ -9472,7 +9472,7 @@ dependencies = [
 [[package]]
 name = "sglang-api-types"
 version = "0.1.1"
-source = "git+https://github.com/JulienDarve/sglang?rev=6e3d35dbe68aa45d4f721ac30e82248d312f8583#6e3d35dbe68aa45d4f721ac30e82248d312f8583"
+source = "git+https://github.com/JulienDarve/sglang?rev=420412bf23a4f093ea2da19a2cb79e22daaa9c8c#420412bf23a4f093ea2da19a2cb79e22daaa9c8c"
 dependencies = [
  "bytes",
  "prost 0.14.3",
@@ -9485,7 +9485,7 @@ dependencies = [
 [[package]]
 name = "sglang-kv-types"
 version = "0.1.0"
-source = "git+https://github.com/JulienDarve/sglang?rev=6e3d35dbe68aa45d4f721ac30e82248d312f8583#6e3d35dbe68aa45d4f721ac30e82248d312f8583"
+source = "git+https://github.com/JulienDarve/sglang?rev=420412bf23a4f093ea2da19a2cb79e22daaa9c8c#420412bf23a4f093ea2da19a2cb79e22daaa9c8c"
 dependencies = [
  "prost 0.14.3",
  "tonic 0.14.6",
@@ -11487,7 +11487,7 @@ dependencies = [
 [[package]]
 name = "vllm-proto"
 version = "0.7.0"
-source = "git+https://github.com/JulienDarve/vllm?rev=baac27efe56bbadf79a0d50b5977ea9efb21e067#baac27efe56bbadf79a0d50b5977ea9efb21e067"
+source = "git+https://github.com/JulienDarve/vllm?rev=958219c0c9172a1bcaac12371126cbf920adffd5#958219c0c9172a1bcaac12371126cbf920adffd5"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",

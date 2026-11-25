@@ -57,14 +57,14 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                         // Recovery applies events like live ingestion, then waits for the index to finish them.
                         let result = tokio::select! {
                             biased;
-                            _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during recovery")),
+                            _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during a barrier")),
                             result = flush_local_indexer(&local_indexer) => result,
                         };
                         if let Err(error) = &result {
                             if cancellation_token.is_cancelled() {
-                                tracing::debug!(%error, "KV recovery barrier cancelled");
+                                tracing::debug!(%error, "KV index barrier cancelled");
                             } else {
-                                tracing::error!(%error, "KV recovery barrier failed; stopping KV event publisher");
+                                tracing::error!(%error, "KV index barrier failed; stopping KV event publisher");
                             }
                         }
                         let has_failed = result.is_err();
@@ -197,10 +197,11 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
 }
 
 async fn flush_local_indexer(local_indexer: &Option<Arc<LocalKvIndexer>>) -> anyhow::Result<()> {
-    let indexer = local_indexer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
-    Ok(indexer.flush_and_wait().await?)
+    // Without a local index there is only the processor to wait for.
+    match local_indexer {
+        Some(indexer) => Ok(indexer.flush_and_wait().await?),
+        None => Ok(()),
+    }
 }
 
 async fn publish_output<P: RouterEventBatchSink>(

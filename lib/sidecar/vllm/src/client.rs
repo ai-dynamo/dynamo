@@ -8,7 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
-use dynamo_sidecar_common::kv_events::{Subscribe, grpc_batches};
+use dynamo_sidecar_common::kv_events::KvEventCalls;
 use dynamo_sidecar_common::v14::GrpcChannelPool;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::{Instant, sleep_until, timeout_at};
@@ -201,21 +201,9 @@ impl VllmClient {
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
 
-    /// Opens rank `dp_rank`'s `SubscribeKvEvents` stream on each call.
-    pub(crate) fn kv_event_subscription(&self, dp_rank: u32) -> Subscribe {
-        let channel = self.pool.next_channel();
-        Box::new(move || {
-            let mut client = pb::kv_events_client::KvEventsClient::new(channel.clone())
-                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
-            Box::pin(async move {
-                let request = pb::SubscribeKvEventsRequest {
-                    data_parallel_rank: dp_rank,
-                    resume: None,
-                };
-                let response = client.subscribe_kv_events(request).await?;
-                Ok(grpc_batches(response.into_inner(), kv_event_proto::batch))
-            })
-        })
+    /// Rank `dp_rank`'s `KvEvents` calls.
+    pub(crate) fn kv_event_calls(&self, dp_rank: u32) -> KvEventCalls {
+        kv_event_proto::calls(self.pool.next_channel(), dp_rank)
     }
 
     /// Abort by caller request ID. vLLM's GenerateStream producer does not

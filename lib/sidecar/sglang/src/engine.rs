@@ -648,8 +648,8 @@ impl SglangSidecarEngine {
         let grpc: Vec<_> = listeners
             .filter(|_| state.grpc_kv_events)
             .map(|listener| {
-                let subscription = listener.pool.kv_event_subscription(listener.dp_rank);
-                (listener.dp_rank, subscription)
+                let calls = listener.pool.kv_event_calls(listener.dp_rank);
+                (listener.dp_rank, calls)
             })
             .collect();
         let zmq = || {

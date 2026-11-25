@@ -36,7 +36,7 @@ mod kv_events {
     );
 }
 
-use kv_events::{KvEventResponses, KvEventStream};
+use kv_events::{KvEventResponses, KvEventStream, KvSnapshotResponses};
 use request::PreparedRequest;
 
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
@@ -294,6 +294,14 @@ impl SglangMockerService {
         }
     }
 
+    /// End every KV event subscriber's stream, as when the stream is lost.
+    #[doc(hidden)]
+    pub fn drop_kv_event_subscribers(&self) {
+        if let Some(kv_events) = &self.kv_events {
+            kv_events.drop_subscribers();
+        }
+    }
+
     pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
         self.engine.metrics_receiver()
     }
@@ -395,6 +403,18 @@ impl sglang_kv_types::kv::v1::kv_events_server::KvEvents for SglangMockerService
             Status::failed_precondition("the Mocker does not publish KV cache events")
         })?;
         kv_events.subscribe(request.into_inner()).map(Response::new)
+    }
+
+    type GetKvSnapshotStream = KvSnapshotResponses;
+
+    async fn get_kv_snapshot(
+        &self,
+        request: Request<sglang_kv_types::kv::v1::GetKvSnapshotRequest>,
+    ) -> Result<Response<Self::GetKvSnapshotStream>, Status> {
+        let kv_events = self.kv_events.as_ref().ok_or_else(|| {
+            Status::failed_precondition("the Mocker does not publish KV cache events")
+        })?;
+        kv_events.snapshot(request.into_inner()).map(Response::new)
     }
 }
 
