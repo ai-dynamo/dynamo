@@ -64,4 +64,22 @@ var (
 		Name:             "TRTLLMMpirunMapByNode",
 		MinOriginVersion: *semver.MustParse("1.7.0"),
 	}
+
+	// FrontendSidecarProbeReplacement makes an authored frontend-sidecar probe
+	// replace the operator default as a complete value, matching main and the
+	// runtime sidecar. The published 1.6 operator field-merged these probes with
+	// its defaults, so older workloads keep that merge to preserve their rendered
+	// pod template across an operator-only upgrade.
+	FrontendSidecarProbeReplacement = Gate{
+		Name:             "FrontendSidecarProbeReplacement",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
+	// OrderedEnvironmentVariables gates order-preserving environment variable
+	// composition. Enabled for DGDs originally created by operator >= 1.8.0 so
+	// an operator upgrade does not reorder existing workloads.
+	OrderedEnvironmentVariables = Gate{
+		Name:             "OrderedEnvironmentVariables",
+		MinOriginVersion: *semver.MustParse("1.8.0"),
+	}
 )

@@ -91,6 +91,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data,
             router_id: 7,
+            origin: Default::default(),
             lora_name: lora_name.map(str::to_string),
         }
     }

@@ -110,6 +110,9 @@ spec:
           - name: main
             image: vllm/vllm-openai:v0.32.0
             env:
+            # Required here too: vLLM reads it to skip GPU image normalization.
+            - name: VLLM_USE_RUST_FRONTEND
+              value: '1'
             - name: VLLM_ENGINE_READY_TIMEOUT_S
               value: '1800'
             resources:

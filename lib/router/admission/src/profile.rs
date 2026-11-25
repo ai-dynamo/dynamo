@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 
 /// The one class of a profile built from the flat router config alone.
 pub const SYNTHETIC_POLICY_CLASS: &str = "default";
@@ -184,11 +185,8 @@ impl PolicyProfile {
             quantum: 1,
             slo_ttft_ms: None,
             controlled_delay: false,
-            busy_thresholds: BusyThresholds {
-                prefill_busy_threshold: None,
-                prefill_busy_threshold_frac: router_queue_threshold,
-                decode_busy_threshold_frac: None,
-            },
+            busy_thresholds: BusyThresholds::default()
+                .with_prefill_busy_threshold_frac(router_queue_threshold),
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,
             cached_token_queue_limit_per_worker: None,

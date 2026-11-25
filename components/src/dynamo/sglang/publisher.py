@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
@@ -457,6 +458,7 @@ class DynamoSglangPublisher:
                     dp_rank=dp_rank,
                     kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
                     engine_owned_mm_identity=engine_owned_mm_identity,
+                    idempotent_stores=True,
                 )
                 self.kv_publishers.append(publisher)
 
@@ -538,12 +540,13 @@ def setup_prometheus_registry(
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
 
-    # Register callback for SGLang metrics (sglang:* prefixed)
+    # Register callback for SGLang metrics (sglang:* prefixed, plus any extra
+    # prefixes from DYN_EXTRA_METRIC_PREFIXES)
     # Auto-label injection: hierarchy labels are added automatically
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
-        metric_prefix_filters=["sglang:"],
+        metric_prefix_filters=["sglang:", *get_extra_metric_prefixes()],
         namespace_name=config.dynamo_args.namespace,
         component_name=config.dynamo_args.component,
         endpoint_name=config.dynamo_args.endpoint,
@@ -753,6 +756,7 @@ async def finish_worker_teardown(
 
 
 async def handle_non_leader_node(
+    runtime,
     engine: sgl.Engine,
     publisher: DynamoSglangPublisher,
     metrics_task: asyncio.Task,
@@ -762,15 +766,24 @@ async def handle_non_leader_node(
 
     Non-leader nodes run scheduler processes but don't handle requests directly.
     They still need:
-    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - KV event publishing for local DP-attention ranks
     - Metrics collection from local schedulers
     - Prometheus metrics exposure
+
+    Native SGLang starts the non-zero-rank dummy health server only after
+    scheduler initialization reports ready. Dynamo disables that dummy server via
+    ``SGLANG_BLOCK_NONZERO_RANK_CHILDREN=0`` so the Engine constructor can
+    return; reaching this function means that same scheduler-ready barrier has
+    already passed. Mark the Dynamo system health ready here to preserve the
+    native rank-local readiness contract.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
-        "Running with metrics and KV event publishing for local DP ranks."
+        "Non-leader node detected (node_rank=%s). "
+        "Running rank-local readiness and metrics.",
+        engine.server_args.node_rank,
     )
 
+    runtime.set_health_status(True)
     try:
         if publisher.dynamo_args.use_kv_events and publishes_kv_events(
             publisher.server_args
@@ -786,4 +799,9 @@ async def handle_non_leader_node(
 
         await asyncio.Event().wait()
     finally:
-        await finish_worker_teardown(metrics_task, publisher.cleanup, body_failed=True)
+        try:
+            await finish_worker_teardown(
+                metrics_task, publisher.cleanup, body_failed=True
+            )
+        finally:
+            runtime.set_health_status(False)

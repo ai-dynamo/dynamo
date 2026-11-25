@@ -4,7 +4,7 @@
 use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
-/// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
+/// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionRequest::request_blocks) reads 0.
 pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len())
 }
@@ -239,6 +239,8 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
+        // Stamped after selection, so a session-affinity wait counts too.
+        request.stamp_elapsed_since_arrival();
         guard.begin_dispatch(&phase_label, request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");

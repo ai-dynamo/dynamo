@@ -266,13 +266,13 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 
     use super::*;
 
     /// Custom picker that records the expected output length observed in the
-    /// worker-selection context so tests can assert the value propagated from
+    /// worker-selection request so tests can assert the value propagated from
     /// the EPP request into the scheduling policy.
     #[derive(Clone)]
     struct ExpectedOutputRecorder(Arc<Mutex<Option<u32>>>);
@@ -287,10 +287,10 @@ mod tests {
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
             &self,
-            context: &WorkerSelectionContext<'_>,
+            request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = context.expected_output_tokens();
+            *self.0.lock().unwrap() = request.expected_output_tokens();
             assert!(!input.candidates().is_empty());
             Ok(0)
         }
@@ -447,7 +447,7 @@ models:
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(!input.candidates().is_empty());
@@ -476,17 +476,15 @@ worker_selection:
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         provider_calls.fetch_add(1, Ordering::Relaxed);
                         let factory_calls = Arc::clone(&factory_calls);
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |config, worker_type, _partition| {
-                                factory_calls.fetch_add(1, Ordering::Relaxed);
-                                assert_eq!(worker_type, WorkerType::Aggregated);
-                                WorkerSelectionPolicy::new(
-                                    config.clone(),
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(FirstEligiblePicker),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            factory_calls.fetch_add(1, Ordering::Relaxed);
+                            assert_eq!(context.worker_type(), WorkerType::Aggregated);
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(FirstEligiblePicker),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),
@@ -742,9 +740,9 @@ worker_selection:
 
     /// Regression test for the scheduling-metadata propagation gap: a request
     /// that carries `expected_output_tokens` must forward the value all the way
-    /// into the worker-selection context, not silently drop it to `None`.
+    /// into the worker-selection request, not silently drop it to `None`.
     #[tokio::test]
-    async fn expected_output_tokens_reaches_worker_selection_context() {
+    async fn expected_output_tokens_reaches_worker_selection_request() {
         let (picker, recorded) = ExpectedOutputRecorder::new();
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
         std::fs::write(
@@ -764,15 +762,13 @@ worker_selection:
                     let picker = picker.clone();
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         let picker = picker.clone();
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |config, worker_type, _partition| {
-                                WorkerSelectionPolicy::new(
-                                    config.clone(),
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(picker.clone()),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(picker.clone()),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),
