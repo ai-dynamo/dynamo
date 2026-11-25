@@ -663,14 +663,9 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     fn check_transport(&self, instance: &Instance) -> Result<(), Error> {
-        use crate::{component::TransportType, distributed::RequestPlaneMode};
-
         let mode = self.drt.request_plane();
-        let foreign = match (mode, &instance.transport) {
-            (RequestPlaneMode::Velo, TransportType::Tcp(_)) => "tcp",
-            (RequestPlaneMode::Velo, TransportType::Nats(_)) => "nats",
-            (RequestPlaneMode::Tcp | RequestPlaneMode::Nats, TransportType::Velo(_)) => "velo",
-            _ => return Ok(()),
+        let Some(foreign) = foreign_request_plane(mode, &instance.transport) else {
+            return Ok(());
         };
         Err(DynamoError::builder()
             .error_type(ErrorType::Internal)
@@ -696,6 +691,23 @@ where
                 .build()
         })?;
         Ok(self.direct.get_or_init(|| dispatch))
+    }
+}
+
+/// Names the request plane of a worker this process cannot reach. Velo pools
+/// are strict: a Velo process routes only to Velo workers, and a TCP or NATS
+/// process never routes to one. `Direct` is not a request plane.
+fn foreign_request_plane(
+    mode: crate::distributed::RequestPlaneMode,
+    transport: &crate::component::TransportType,
+) -> Option<&'static str> {
+    use crate::{component::TransportType, distributed::RequestPlaneMode};
+
+    match (mode, transport) {
+        (RequestPlaneMode::Velo, TransportType::Tcp(_)) => Some("tcp"),
+        (RequestPlaneMode::Velo, TransportType::Nats(_)) => Some("nats"),
+        (RequestPlaneMode::Tcp | RequestPlaneMode::Nats, TransportType::Velo(_)) => Some("velo"),
+        _ => None,
     }
 }
 
@@ -3749,6 +3761,28 @@ mod tests {
         );
 
         rt.shutdown();
+    }
+
+    /// The pairing rule for every request plane and every transport a worker
+    /// can advertise.
+    #[test]
+    fn only_velo_and_non_velo_request_planes_are_foreign_to_each_other() {
+        use RequestPlaneMode::{Nats, Tcp, Velo};
+
+        let transports = [
+            TransportType::Tcp("127.0.0.1:9/AA/1/ns/c/e".to_string()),
+            TransportType::Nats("ns.c.e-1".to_string()),
+            TransportType::Velo("velo://x".to_string()),
+            TransportType::Direct("http://engine:30001".to_string()),
+        ];
+        let foreign = |mode| {
+            transports
+                .clone()
+                .map(|transport| foreign_request_plane(mode, &transport))
+        };
+        assert_eq!(foreign(Tcp), [None, None, Some("velo"), None]);
+        assert_eq!(foreign(Nats), [None, None, Some("velo"), None]);
+        assert_eq!(foreign(Velo), [Some("tcp"), Some("nats"), None, None]);
     }
 
     #[tokio::test]

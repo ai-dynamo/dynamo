@@ -258,3 +258,75 @@ fn peer_id(transport: &TransportType) -> Option<InstanceId> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        component::Instance,
+        error::ErrorType,
+        pipeline::network::velo_response::{ResponseTransport, VeloServiceOptions},
+    };
+
+    fn endpoint(transport: TransportType) -> DiscoveryEvent {
+        DiscoveryEvent::Added(DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".into(),
+            component: "worker".into(),
+            endpoint: "generate".into(),
+            instance_id: 1,
+            transport,
+            device_type: None,
+            request_plane_codec: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn in_place_plane_change_retires_and_restores_the_request_peer() {
+        let service = VeloResponseService::new_with_options(
+            ResponseTransport::Tcp,
+            "127.0.0.1:0".parse().unwrap(),
+            VeloServiceOptions {
+                request_plane_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let peer = InstanceId::new_v4();
+        let velo = || {
+            endpoint(TransportType::Velo(format!(
+                "velo://{peer}/AA/1/ns/worker/generate"
+            )))
+        };
+        let mut watch = PeerWatch {
+            service: Arc::downgrade(&service),
+            endpoints: HashMap::new(),
+        };
+        let count = || service.discovered_request_peers.lock().count(peer);
+
+        watch.apply(&service, velo());
+        assert_eq!(count(), 1);
+        assert!(service.reserve_request_peer(peer).is_ok());
+
+        // The same endpoint instance comes back on the tcp plane.
+        watch.apply(
+            &service,
+            endpoint(TransportType::Tcp(
+                "127.0.0.1:9/AA/1/ns/worker/generate".into(),
+            )),
+        );
+        assert_eq!(count(), 0);
+        assert_eq!(
+            service
+                .reserve_request_peer(peer)
+                .err()
+                .unwrap()
+                .error_type(),
+            ErrorType::WorkerUnavailable
+        );
+
+        watch.apply(&service, velo());
+        assert_eq!(count(), 1);
+        assert!(service.reserve_request_peer(peer).is_ok());
+    }
+}
