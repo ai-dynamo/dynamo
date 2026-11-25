@@ -14,6 +14,14 @@ use prost::Message;
 use crate::client;
 use crate::proto::encoder::{StageRequest, StagedMediaPolicy};
 
+/// Content types that say nothing about the modality of the bytes they label.
+const UNTYPED_MEDIA: [&str; 4] = [
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/mp4",
+    "application/ogg",
+];
+
 #[derive(Clone)]
 pub(crate) struct StagedMedia {
     policy: MediaFetcher,
@@ -112,9 +120,13 @@ impl StagedMedia {
             {
                 mime
             }
-            // Object stores commonly serve untyped bytes. The native decoder
-            // determines the media format from their contents.
-            None | Some("application/octet-stream") => "application/octet-stream",
+            // Object stores commonly serve untyped bytes, and some servers label
+            // containers as application/*. The native decoder determines the
+            // media format from the contents.
+            None => "application/octet-stream",
+            Some(mime) if UNTYPED_MEDIA.iter().any(|t| mime.eq_ignore_ascii_case(t)) => {
+                "application/octet-stream"
+            }
             _ => {
                 return Err(client::invalid_request(
                     "staged media response has an incompatible content type",
@@ -325,6 +337,14 @@ mod tests {
         assert!(prepare(&mut message, Some(&test_fetcher(2))).await.is_err());
         message.audio_urls = vec![serve(&reply.replace("audio/wav", "text/html")).await];
         assert!(prepare(&mut message, Some(&test_fetcher(3))).await.is_err());
+        for untyped in ["binary/octet-stream", "Application/OGG", "application/mp4"] {
+            message.audio_urls = vec![serve(&reply.replace("audio/wav", untyped)).await];
+            prepare(&mut message, Some(&test_fetcher(3))).await.unwrap();
+            assert_eq!(
+                message.audio_urls,
+                ["data:application/octet-stream;base64,YWJj"]
+            );
+        }
     }
 
     #[tokio::test]
