@@ -40,5 +40,9 @@ def test_list_parsers_rejects_a_missing_plugin():
     result = _frontend("--list-parsers", "--tool-parser-plugin", "/nonexistent/lib.so")
 
     assert result.returncode != 0
-    assert "--tool-parser-plugin" in result.stderr
-    assert "/nonexistent/lib.so" in result.stderr
+    # The loader's own error, not argparse rejecting flags it does not know.
+    assert (
+        "error: --tool-parser-plugin: parser plugin /nonexistent/lib.so"
+        in result.stderr
+    )
+    assert "Unknown arguments" not in result.stderr

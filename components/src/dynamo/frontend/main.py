@@ -34,7 +34,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.parser_plugins import (
     add_parser_plugin_argument,
-    load_parser_plugins_from_argv,
+    load_parser_plugin_paths,
 )
 from dynamo.llm import (
     AisPerfConfig,
@@ -312,7 +312,7 @@ def parse_args() -> (
 
     args, unknown = parser.parse_known_args()
     # Plugins register before any model card names their parsers.
-    load_parser_plugins_from_argv()
+    load_parser_plugin_paths(args.tool_parser_plugin)
     if args.list_parsers:
         print(json.dumps(json.loads(get_parser_registry_json()), indent=2))
         sys.exit(0)

@@ -268,6 +268,7 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
         allow_auto_truncate=False,
         context_length=4096,
         disaggregation_mode=disaggregation_mode,
+        grammar_backend="xgrammar",
         max_prefill_tokens=None,
         page_size=16,
         reasoning_parser="kimi_k3",
@@ -332,7 +333,34 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert (reasoning_gate in runtime_config.runtime_data) is reasoning_gate_expected
     if reasoning_gate in runtime_config.runtime_data:
         assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
+    structural_tag = register.TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY
+    assert json.loads(runtime_config.runtime_data[structural_tag]) is True
     assert "Failed to get runtime config" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "grammar_backend, skip_tokenizer_init, expected",
+    [
+        ("xgrammar", False, True),
+        ("xgrammar", True, False),
+        ("llguidance", False, False),
+        ("outlines", False, False),
+        ("none", False, False),
+    ],
+)
+def test_structural_tag_support_follows_the_grammar_backend(
+    register, grammar_backend, skip_tokenizer_init, expected
+):
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    server_args = SimpleNamespace(
+        grammar_backend=grammar_backend, skip_tokenizer_init=skip_tokenizer_init
+    )
+
+    register.publish_sglang_structural_tag_support(runtime_config, server_args)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        register.TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, json.dumps(expected)
+    )
 
 
 def test_hicache_publishes_native_offloading_capacity():
@@ -405,9 +433,11 @@ async def test_hicache_publish_failure_preserves_core_capacity(
         allow_auto_truncate=False,
         context_length=4096,
         disaggregation_mode=None,
+        grammar_backend="xgrammar",
         hicache_write_policy="write_back",
         max_prefill_tokens=None,
         page_size=16,
+        skip_tokenizer_init=False,
         speculative_algorithm="NONE",
         speculative_num_steps=None,
     )

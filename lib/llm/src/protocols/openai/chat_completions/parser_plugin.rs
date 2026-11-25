@@ -60,13 +60,23 @@ pub fn load_parser_plugins(paths: &[PathBuf]) -> Result<Vec<String>> {
         canonical_paths.push(canonical);
         entries.push(entry);
     }
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
     let families = entries
         .iter()
         .map(|entry| entry.descriptor.family.clone())
         .collect();
-    register_loaded_unified_parsers(entries)?;
+    admit(entries)?;
     loaded.extend(canonical_paths);
     Ok(families)
+}
+
+/// Register loaded parsers, then drop registry lookups memoized before they existed.
+fn admit(entries: Vec<UnifiedParserRegistration>) -> Result<()> {
+    register_loaded_unified_parsers(entries)?;
+    super::unified_parser::clear_registry_cache();
+    Ok(())
 }
 
 /// The effective parser registry, built-ins and plugins, as JSON for operators.
@@ -486,10 +496,7 @@ impl UnifiedParser for PluginParser {
     }
 
     fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()> {
-        ensure!(
-            self.features.input.text,
-            "parser plugin does not accept decoded text"
-        );
+        // `registration` admits only plugins that accept decoded text.
         self.advance(Command::Push(delta.into()), output)
     }
 
@@ -543,7 +550,7 @@ impl UnifiedParser for PluginParser {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! The fixture exports the SDK's v2 entry point from this test binary, so the
     //! adapter is exercised over the real C ABI without building a separate library.
 
@@ -554,7 +561,11 @@ mod tests {
     use super::*;
 
     const FAMILY: &str = "dis3562_abi_fixture";
-    const ALIAS: &str = "dis3562-abi-fixture";
+    pub(crate) const ALIAS: &str = "dis3562-abi-fixture";
+    /// A first tool with this name makes the fixture guide build no tag.
+    pub(crate) const NO_TAG_TOOL: &str = "no_tag";
+    /// A first tool with this name makes the fixture guide fail.
+    pub(crate) const FAILING_TAG_TOOL: &str = "failing_tag";
 
     /// `<<CALL name {json}>>` records; everything else is content.
     #[derive(Clone, Default)]
@@ -657,9 +668,14 @@ mod tests {
     }
 
     fn guide(request: GuidanceRequest) -> Result<Option<serde_json::Value>> {
-        Ok(Some(
-            serde_json::json!({ "fixture_tools": request.tools.len() }),
-        ))
+        match request.tools.first().map(|tool| tool.name.as_str()) {
+            Some(NO_TAG_TOOL) => Ok(None),
+            Some(FAILING_TAG_TOOL) => anyhow::bail!("fixture cannot constrain this tool"),
+            _ => Ok(Some(serde_json::json!({
+                "fixture_tools": request.tools.len(),
+                "choice": request.choice,
+            }))),
+        }
     }
 
     dynamo_parsers_v2::export_unified_parser_plugin_v2!(
@@ -717,7 +733,10 @@ mod tests {
             options: Default::default(),
         })
         .unwrap();
-        assert_eq!(tag, Some(serde_json::json!({ "fixture_tools": 1 })));
+        assert_eq!(
+            tag,
+            Some(serde_json::json!({ "fixture_tools": 1, "choice": "required" }))
+        );
     }
 
     #[test]
@@ -767,12 +786,20 @@ mod tests {
         assert!(error.to_string().contains("unfinished call record"));
     }
 
+    /// Admit the fixture to this process's registry. Call it in an isolated test process.
+    pub(crate) fn admit_fixture() {
+        admit(vec![fixture()]).unwrap();
+    }
+
     #[test]
     fn abi_version_mismatch_is_rejected() {
-        // The v2 entry point refuses a v1 request; the host never admits the parser.
-        assert!(
-            registration(dynamo_parser_plugin_v2, ABI_VERSION, "v1:test".into(), None).is_err()
-        );
+        // The v2 entry point refuses a v1 request and answers in the v2 reply shape,
+        // which carries no v1 manifest; the host never admits the parser.
+        let Err(error) = registration(dynamo_parser_plugin_v2, ABI_VERSION, "v1:test".into(), None)
+        else {
+            panic!("a v1 request to the v2 entry point was admitted");
+        };
+        assert_eq!(format!("{error:#}"), "missing parser manifest");
     }
 
     #[test]
@@ -799,7 +826,9 @@ mod tests {
         use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
         use dynamo_runtime::config::ParserVersion;
 
-        register_loaded_unified_parsers(vec![fixture()]).unwrap();
+        // A miss is memoized until admission clears it.
+        assert_eq!(unified_parser::canonical_family(ALIAS), None);
+        admit_fixture();
         assert!(tool_parser_v2::unified_family_names().contains(&ALIAS));
         assert_eq!(unified_parser::canonical_family(ALIAS), Some(FAMILY));
         assert_eq!(

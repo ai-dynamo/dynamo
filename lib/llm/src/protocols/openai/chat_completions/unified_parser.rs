@@ -35,7 +35,7 @@
 //! to preserve, so every [`UnifiedParserEvent`] becomes its own chunk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
@@ -105,8 +105,7 @@ fn uses_qwen_xml_grammar(family: &str) -> bool {
 /// Selector names that are not compile-time built-in literals: plugin families and
 /// legacy configuration selectors. Registrations are startup-only and add-only, so
 /// each distinct name is leaked at most once.
-static REGISTERED_NAMES: LazyLock<std::sync::RwLock<HashSet<&'static str>>> =
-    LazyLock::new(Default::default);
+static REGISTERED_NAMES: LazyLock<RwLock<HashSet<&'static str>>> = LazyLock::new(Default::default);
 
 fn registered_name(name: &str) -> &'static str {
     if let Some(name) = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
@@ -131,9 +130,33 @@ fn registered_name(name: &str) -> &'static str {
     name
 }
 
-/// Families resolved through the registry, so a request does not copy the catalog.
-static RESOLVED_SELECTORS: LazyLock<std::sync::RwLock<HashMap<String, &'static str>>> =
-    LazyLock::new(Default::default);
+/// Registry lookups memoized by selector, misses included, so a request never copies
+/// or sorts the parser catalog. Registration is startup-only and add-only;
+/// [`clear_registry_cache`] runs after parser plugins are admitted.
+#[derive(Default)]
+struct RegistryCache {
+    /// `canonical_family` for selectors outside the compile-time built-in table.
+    families: HashMap<String, Option<&'static str>>,
+    /// The family a mismatched `(tool, reasoning)` pair resolves to, keyed by tool.
+    pairs: HashMap<String, HashMap<String, Option<&'static str>>>,
+    /// The registration a selector resolves to.
+    registrations: HashMap<String, Option<Arc<dynamo_parsers_v2::UnifiedParserRegistration>>>,
+}
+
+static REGISTRY_CACHE: LazyLock<RwLock<RegistryCache>> = LazyLock::new(Default::default);
+
+fn registry_cache() -> std::sync::RwLockReadGuard<'static, RegistryCache> {
+    REGISTRY_CACHE.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn registry_cache_mut() -> std::sync::RwLockWriteGuard<'static, RegistryCache> {
+    REGISTRY_CACHE.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Forget memoized lookups after new registrations are admitted.
+pub(crate) fn clear_registry_cache() {
+    *registry_cache_mut() = RegistryCache::default();
+}
 
 /// Canonical family names and aliases share one route for registration, stream, and batch.
 /// The parser registry owns every name, alias, and legacy configuration selector,
@@ -142,23 +165,49 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
     if let Some(family) = dynamo_parsers_v2::canonical_unified_family(parser) {
         return Some(family);
     }
-    if let Some(family) = RESOLVED_SELECTORS
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(parser)
-    {
-        return Some(family);
+    if let Some(family) = registry_cache().families.get(parser) {
+        return *family;
     }
-    let family = registered_name(
-        &dynamo_parsers_v2::resolve_unified_parser_pair(Some(parser), None)?
-            .descriptor
-            .family,
-    );
-    RESOLVED_SELECTORS
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
+    let family = dynamo_parsers_v2::resolve_unified_parser_pair(Some(parser), None)
+        .map(|entry| registered_name(&entry.descriptor.family));
+    registry_cache_mut()
+        .families
         .insert(parser.to_owned(), family);
-    Some(family)
+    family
+}
+
+/// The registration `selector` names, shared rather than copied per request.
+pub(crate) fn registration(
+    selector: &str,
+) -> Option<Arc<dynamo_parsers_v2::UnifiedParserRegistration>> {
+    if let Some(entry) = registry_cache().registrations.get(selector) {
+        return entry.clone();
+    }
+    let entry = dynamo_parsers_v2::resolve_unified_parser(selector).map(Arc::new);
+    registry_cache_mut()
+        .registrations
+        .insert(selector.to_owned(), entry.clone());
+    entry
+}
+
+/// The family of two configured halves naming different families, e.g. a reasoning
+/// grammar that declares compatible tool selectors.
+fn paired_family(tool: &str, reasoning: &str) -> Option<&'static str> {
+    if let Some(family) = registry_cache()
+        .pairs
+        .get(tool)
+        .and_then(|pairs| pairs.get(reasoning))
+    {
+        return *family;
+    }
+    let family = dynamo_parsers_v2::resolve_unified_parser_pair(Some(tool), Some(reasoning))
+        .map(|entry| registered_name(&entry.descriptor.family));
+    registry_cache_mut()
+        .pairs
+        .entry(tool.to_owned())
+        .or_default()
+        .insert(reasoning.to_owned(), family);
+    family
 }
 
 /// The startup warning for a deprecated alias, or `None` for any other selector.
@@ -216,8 +265,7 @@ pub(crate) fn configured_family(
             }
             // A reasoning grammar may declare compatible tool selectors, e.g.
             // `qwen3_coder` + `nemotron_v3` is Nemotron over the shared XML grammar.
-            dynamo_parsers_v2::resolve_unified_parser_pair(Some(tool), Some(reasoning))
-                .map(|entry| registered_name(&entry.descriptor.family))
+            paired_family(tool, reasoning)
         }
         (Some(parser), None) | (None, Some(parser)) => canonical_family(parser),
         (None, None) => None,
@@ -263,7 +311,7 @@ pub(crate) fn selected_family_for_selection(
         || (selection == dynamo_runtime::config::ParserVersion::Auto
             && tool_call_parser.is_none()
             && reasoning_parser.is_some_and(|reasoning| {
-                dynamo_parsers_v2::resolve_unified_parser(reasoning).is_some_and(|entry| {
+                registration(reasoning).is_some_and(|entry| {
                     entry
                         .descriptor
                         .requires_tool_selector_in_auto(Some(reasoning))
@@ -307,8 +355,8 @@ pub(crate) fn parsers_v2_selected() -> bool {
 /// a Mistral vocabulary without it is pre-v11 and writes `[TOOL_CALLS]` followed by a
 /// JSON array, which `mistral_4` does not read.
 fn required_tokens(family: &str) -> Vec<dynamo_parsers_v2::RequiredVocabularyToken> {
-    dynamo_parsers_v2::resolve_unified_parser(family)
-        .map(|entry| entry.descriptor.required_tokens)
+    registration(family)
+        .map(|entry| entry.descriptor.required_tokens.clone())
         .unwrap_or_default()
 }
 

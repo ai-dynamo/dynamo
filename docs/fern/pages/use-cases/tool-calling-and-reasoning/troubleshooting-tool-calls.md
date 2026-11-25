@@ -203,7 +203,13 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
   --dyn-reasoning-parser acme_qwen
 ```
 
-Repeat `--tool-parser-plugin` to load several libraries. Plugins load before the worker builds its `--dyn-tool-call-parser` and `--dyn-reasoning-parser` choices. The library stays local to each process; the model card carries only the selector names. A frontend without the library rejects a model whose card names a plugin parser.
+Repeat `--tool-parser-plugin` to load several libraries. The flag has no environment variable. Every process that registers a model takes it:
+
+- The Python workers (`dynamo.vllm`, `dynamo.sglang`, `dynamo.trtllm`, `dynamo.tokenspeed`) load plugins before they build their `--dyn-tool-call-parser` and `--dyn-reasoning-parser` choices.
+- The Rust sidecar workers built on `dynamo-backend-common` load plugins before they register the model.
+- The ThunderAgent router loads plugins before it registers a model with `--dyn-tool-call-parser`.
+
+The library stays local to each process; the model card carries only the selector names. A frontend without the library rejects a model whose card names a plugin parser. Dynamo does not compare the libraries themselves, so a frontend and a worker that load *different* libraries registering the same name are not detected. Deploy the same file to both.
 
 To inspect the registry, run `python -m dynamo.frontend --list-parsers`, adding the same `--tool-parser-plugin` flags. It prints JSON and exits without starting the server. Each entry lists the family, aliases, input kinds, guidance, and `source` (`builtin` or `plugin`, with the library's `plugin_identity`).
 
@@ -213,7 +219,14 @@ Startup fails with an error naming the library when:
 - Its family or an alias is already registered by a built-in parser or another plugin.
 - It accepts only token IDs. Dynamo passes decoded text to plugin parsers.
 
-Plugins are Unified V2 parsers. Under `DYN_PARSER_VERSION=1`, a plugin name is rejected like any name missing from the V1 registry. A plugin that declares a structural-tag builder builds its forced `tool_choice` grammar through the plugin. When the plugin requires that tag for `required` or named choices and cannot build it, the request fails with HTTP 400 before generation. Whether the backend enforces the tag follows [Structural Tags](structural-tag.md).
+Plugins are Unified V2 parsers. Under `DYN_PARSER_VERSION=1`, a plugin name is rejected like any name missing from the V1 registry. A plugin that declares a structural-tag builder builds its forced `tool_choice` grammar through the plugin.
+
+A parser can declare that `required` or named choices need its structural tag (`require_tag_for_forced` or `require_tag_for_named`; built-in Muse Spark is one). For such a choice the request fails with HTTP 400 before generation when:
+
+- The parser cannot build the tag: its builder fails, or returns no tag.
+- The worker reports that its backend does not enforce `structural_tag`. vLLM reports enforcement for the `auto` and `xgrammar` structured-output backends only. SGLang reports it for `--grammar-backend xgrammar` without `--skip-tokenizer-init` only. TensorRT-LLM and the Rust sidecar workers report nothing, and a worker that reports nothing is treated as enforcing the tag.
+
+See [Structural Tags](structural-tag.md) for backend activation.
 
 ## Known limitations and follow-up
 

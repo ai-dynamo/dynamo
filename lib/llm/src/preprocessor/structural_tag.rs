@@ -12,6 +12,7 @@ use crate::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
@@ -136,7 +137,7 @@ fn validate_forced_tool_choice(
 /// Guidance the selected parser registration declares, including plugin registrations.
 fn registered_guidance(parser_name: Option<&str>) -> Option<dynamo_parsers_v2::Guidance> {
     let family = unified_parser::canonical_family(parser_name?)?;
-    dynamo_parsers_v2::resolve_unified_parser(family).map(|entry| entry.descriptor.guidance)
+    unified_parser::registration(family).map(|entry| entry.descriptor.guidance)
 }
 
 /// How a forced `tool_choice` is constrained on the selected parser's native wire.
@@ -191,9 +192,9 @@ fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &To
     // cannot use the generic JSON-schema fallback. Treat their structural tags as part
     // of implementing these standard OpenAI request shapes, not as an operator opt-in.
     // K3 required remains on its intentional prompt-level XTML path.
-    forced_choice_is_named(tool_choice)
-        .zip(forced_tool_guidance(parser_name))
-        .is_some_and(|(named, guidance)| guidance.prefers_tag(named))
+    forced_choice_is_named(tool_choice).is_some_and(|named| {
+        forced_tool_guidance(parser_name).is_some_and(|guidance| guidance.prefers_tag(named))
+    })
 }
 
 pub(super) fn requires_native_tool_call_format(
@@ -763,11 +764,24 @@ impl OpenAIPreprocessor {
         };
 
         // A forced choice whose registration requires its native tag cannot fall back
-        // to prompting.
-        let requires_tag = forced_choice_is_named(tool_choice)
-            .zip(forced_tool_guidance(Some(parser_name)))
-            .is_some_and(|(named, guidance)| guidance.requires_tag(named));
-        let built_tag = match builder.build(&request) {
+        // to prompting: without the tag the backend generates unconstrained and the
+        // forced choice ends with no tool call.
+        let requires_tag = forced_choice_is_named(tool_choice).is_some_and(|named| {
+            forced_tool_guidance(Some(parser_name))
+                .is_some_and(|guidance| guidance.requires_tag(named))
+        });
+        let built_tag = if requires_tag && !self.backend_enforces_structural_tags() {
+            Err(anyhow::anyhow!(
+                "this model's backend does not enforce structural tags"
+            ))
+        } else {
+            builder.build(&request)
+        };
+        let built_tag = match built_tag {
+            Ok(None) if requires_tag => Err(anyhow::anyhow!("the parser built no structural tag")),
+            result => result,
+        };
+        let built_tag = match built_tag {
             Err(error) if requires_tag => {
                 let tools = if is_muse_spark_parser(Some(parser_name)) {
                     "Muse Spark".to_string()
@@ -812,6 +826,25 @@ impl OpenAIPreprocessor {
                 reasoning_boundary == ResolvedReasoningBoundary::Backend;
         }
         Ok(applied)
+    }
+
+    /// Whether the worker's backend enforces `structural_tag`. Workers that publish
+    /// nothing predate the key and are treated as enforcing it.
+    fn backend_enforces_structural_tags(&self) -> bool {
+        match self
+            .runtime_config
+            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY)
+        {
+            Ok(supported) => supported.unwrap_or(true),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    key = TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
+                    "Ignoring invalid structural-tag support metadata"
+                );
+                true
+            }
+        }
     }
 
     fn structural_tag_reasoning_metadata(&self, key: &str) -> bool {
@@ -1354,6 +1387,145 @@ mod tests {
             error
                 .to_string()
                 .contains("cannot constrain native Muse Spark tools")
+        );
+    }
+
+    #[test]
+    fn muse_spark_forced_choices_are_rejected_when_the_backend_ignores_structural_tags() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        mdc.runtime_config
+            .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, false)
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "lookup".into(),
+            parameters: Some(serde_json::json!({"type": "object"})),
+            strict: None,
+        }];
+        for choice in [ToolChoice::Required, ToolChoice::Named("lookup".into())] {
+            let mut request = preprocessed_request();
+            let error = preprocessor
+                .apply_tool_choice_structural_tag(&choice, &tools, None, false, None, &mut request)
+                .unwrap_err();
+            assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+            assert!(
+                error.to_string().contains(
+                    "cannot constrain native Muse Spark tools: this model's backend does not \
+                     enforce structural tags"
+                ),
+                "{error}"
+            );
+            assert!(request.sampling_options.guided_decoding.is_none());
+        }
+        // `auto` keeps prompting; the backend flag gates only tag-required choices.
+        assert!(
+            !preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Auto,
+                    &tools,
+                    None,
+                    false,
+                    None,
+                    &mut preprocessed_request(),
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn plugin_forced_choices_without_their_required_tag_are_rejected() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::plugin_forced_choices_without_their_required_tag_are_rejected"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        use crate::protocols::openai::chat_completions::parser_plugin::tests::{
+            ALIAS, FAILING_TAG_TOOL, NO_TAG_TOOL, admit_fixture,
+        };
+        admit_fixture();
+        let preprocessor = |enforced: Option<bool>| {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = Some(ALIAS.into());
+            if let Some(enforced) = enforced {
+                mdc.runtime_config
+                    .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, enforced)
+                    .unwrap();
+            }
+            OpenAIPreprocessor::new(mdc).unwrap()
+        };
+        let tool = |name: &str| ToolDefinition {
+            name: name.into(),
+            parameters: Some(serde_json::json!({"type": "object"})),
+            strict: None,
+        };
+        let apply = |preprocessor: &OpenAIPreprocessor, tool_name: &str, choice: &ToolChoice| {
+            let mut request = preprocessed_request();
+            let result = preprocessor.apply_tool_choice_structural_tag(
+                choice,
+                &[tool(tool_name)],
+                None,
+                false,
+                None,
+                &mut request,
+            );
+            let tag = request
+                .sampling_options
+                .guided_decoding
+                .and_then(|guided| guided.structural_tag);
+            (result, tag)
+        };
+        let named = |name: &str| ToolChoice::Named(name.into());
+
+        // The plugin builds the tag through the ABI from the request's choice and tools.
+        let published = preprocessor(Some(true));
+        for (preprocessor, enforced) in [(preprocessor(None), "absent"), (published, "true")] {
+            for (choice, wire) in [
+                (ToolChoice::Required, serde_json::json!("required")),
+                (named("lookup"), serde_json::json!({"named": "lookup"})),
+            ] {
+                let (result, tag) = apply(&preprocessor, "lookup", &choice);
+                assert!(result.unwrap(), "support {enforced}");
+                assert_eq!(
+                    tag,
+                    Some(serde_json::json!({ "fixture_tools": 1, "choice": wire }))
+                );
+            }
+        }
+
+        let rejected = |preprocessor: &OpenAIPreprocessor, tool_name: &str, reason: &str| {
+            for choice in [ToolChoice::Required, named(tool_name)] {
+                let (result, tag) = apply(preprocessor, tool_name, &choice);
+                let error = result.unwrap_err();
+                assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                assert!(
+                    error.to_string().contains(&format!(
+                        "cannot constrain native '{ALIAS}' tools: {reason}"
+                    )),
+                    "{error}"
+                );
+                assert_eq!(tag, None);
+            }
+        };
+        let default = preprocessor(None);
+        rejected(&default, NO_TAG_TOOL, "the parser built no structural tag");
+        rejected(
+            &default,
+            FAILING_TAG_TOOL,
+            "fixture cannot constrain this tool",
+        );
+        rejected(
+            &preprocessor(Some(false)),
+            "lookup",
+            "this model's backend does not enforce structural tags",
         );
     }
 

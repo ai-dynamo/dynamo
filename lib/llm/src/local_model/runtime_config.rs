@@ -54,6 +54,13 @@ pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
+/// Runtime-data key indicating whether the backend enforces a `structural_tag`
+/// guided-decoding constraint. An explicit `false` makes the frontend reject a
+/// forced tool choice whose parser requires its native tag, before generation.
+/// Absence means `true`, so workers that predate the key keep working.
+pub const TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_supported";
+
 /// Runtime-data key indicating that the backend compiles a lark
 /// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
 /// `%json` schemas are valid. Absence means `false`.

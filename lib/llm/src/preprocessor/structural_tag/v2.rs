@@ -32,7 +32,7 @@ impl StructuralTagBuilder {
         if let Some(builder) = dynamo_parsers_v2::structural_tag_builder_for_family(family) {
             return Some(Self::Builtin(builder));
         }
-        dynamo_parsers_v2::resolve_unified_parser(family)?
+        crate::protocols::openai::chat_completions::unified_parser::registration(family)?
             .plugin_guidance()
             .map(Self::Plugin)
     }

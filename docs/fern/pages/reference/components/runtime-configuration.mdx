@@ -13,7 +13,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 ## How the config is loaded
 
-Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
+Unless a field is marked environment-only or CLI-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
 
 <Card>
 <Tabs>
@@ -277,6 +277,12 @@ address.
   Reasoning/chain-of-thought parser name for the model. When unset, no reasoning parsing is performed. Valid parser names are determined at runtime by the installed `dynamo._core` extension — run `python -m dynamo.vllm --help` to see the available choices on your installation.
 
   Environment variable: `DYN_REASONING_PARSER`
+</ParamField>
+
+<ParamField path="--tool-parser-plugin" type="path" default="null">
+  Native Rust parser plugin to load at startup: a shared library built against the `dynamo-parsers-v2` plugin SDK. Repeat the flag to load several. Plugins load before the `--dyn-tool-call-parser` and `--dyn-reasoning-parser` choices are built, so those flags can name the parsers a plugin registers. Pass the same library to the frontend. See [Native parser plugins](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#native-parser-plugins).
+
+  CLI-only. There is no environment variable.
 </ParamField>
 
 <ParamField path="--dyn-default-thinking-mode" type="string" default="null">

@@ -78,6 +78,26 @@ SGLANG_SYSTEMONE_SERIAL_V1 = "sglang_systemone_serial_v1"
 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
     "tool_call_structural_tag_reasoning_gate"
 )
+TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY = "tool_call_structural_tag_supported"
+
+
+def publish_sglang_structural_tag_support(
+    runtime_config: ModelRuntimeConfig, server_args: ServerArgs
+) -> None:
+    """Tell the frontend whether SGLang enforces Dynamo's `structural_tag` format.
+
+    Only the xgrammar backend compiles it (llguidance reads only the legacy
+    `structures`/`triggers` form), and SGLang builds no grammar backend when it
+    skips tokenizer initialization. The frontend refuses a forced tool choice
+    whose parser requires its tag when this is false.
+    """
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
+        json.dumps(
+            server_args.grammar_backend == "xgrammar"
+            and not server_args.skip_tokenizer_init
+        ),
+    )
 
 
 def publish_sglang_structural_tag_reasoning_policy(
@@ -689,6 +709,7 @@ async def get_runtime_config(
         dynamo_args.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag(dynamo_args.structural_tag)
+    publish_sglang_structural_tag_support(runtime_config, server_args)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (

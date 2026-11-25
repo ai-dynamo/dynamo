@@ -43,9 +43,18 @@ def load_parser_plugins_from_argv(argv: Optional[Sequence[str]] = None) -> list[
     bootstrap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     add_parser_plugin_argument(bootstrap)
     args, _ = bootstrap.parse_known_args(sys.argv[1:] if argv is None else argv)
-    if not args.tool_parser_plugin:
+    return load_parser_plugin_paths(args.tool_parser_plugin)
+
+
+def load_parser_plugin_paths(paths: Sequence[str]) -> list[str]:
+    """Load the ``--tool-parser-plugin`` values an argument parser already read.
+
+    Returns the parser families the libraries registered. Exits with an error
+    message when a library cannot be loaded or registered.
+    """
+    if not paths:
         return []
     try:
-        return load_parser_plugins(args.tool_parser_plugin)
+        return load_parser_plugins(list(paths))
     except ValueError as exc:
         raise SystemExit(f"error: {TOOL_PARSER_PLUGIN_FLAG}: {exc}") from exc
