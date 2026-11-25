@@ -1803,12 +1803,23 @@ class StreamingPostProcessor:
             if joined.startswith(delta_text[held_len:]):
                 break
         else:
-            held_len = len(delta_text)
-            # A large stop buffer can make the whole text held back from
-            # earlier tokens. Only accept that when their decoding ends with it.
-            if not delta_text or not self.tokenizer.decode(
+            # A large stop buffer can release text of earlier tokens a part at
+            # a time, so the chunk may carry none of its own tokens' text. The
+            # held-back text is what the earlier tokens decode to beyond the
+            # text already sent.
+            history = self.tokenizer.decode(
                 self.previous_token_ids, skip_special_tokens=skip_special_tokens
-            ).endswith(delta_text):
+            )
+            pending = (
+                history[len(self.previous_text) :]
+                if history.startswith(self.previous_text)
+                else ""
+            )
+            held_len = 0
+            limit = min(len(pending), len(delta_text))
+            while held_len < limit and pending[held_len] == delta_text[held_len]:
+                held_len += 1
+            if not held_len or not joined.startswith(delta_text[held_len:]):
                 # The pieces do not match the worker's text: keep it whole.
                 return "", [""] * (len(delta_token_ids) - 1) + [delta_text]
         budget = len(delta_text) - held_len

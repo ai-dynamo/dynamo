@@ -7280,13 +7280,33 @@ class TestOneTokenReasoningParserStreaming:
             return tokenizer.encode(text, add_special_tokens=False)
 
         chunks = [
-            ("", encode("<think>ABCDEFGHIJKLMN")),
+            ("<think>", encode("<think>ABCDEFGHIJKLMN")),
             ("ABCDEFGHIJKLMN", encode("</think>Answer")),
             ("Answer!", encode("!")),
         ]
         reasoning = "ABCDEFGHIJKLMN" if include_reasoning else ""
         assert self._deepseek_r1_stream(tokenizer, chunks, include_reasoning) == (
             "Answer!",
+            reasoning,
+        )
+
+    @pytest.mark.parametrize("include_reasoning", [True, False])
+    def test_partial_release_of_held_back_text_stays_reasoning(
+        self, tokenizer, include_reasoning
+    ):
+        """The stop buffer releases only part of the earlier tokens' text with
+        the chunk that ends reasoning."""
+
+        def encode(text):
+            return tokenizer.encode(text, add_special_tokens=False)
+
+        chunks = [
+            ("<think>", encode("<think>ABCDEFGHIJKLMN")),
+            ("ABCDEFGH", encode("</think>Answer")),
+        ]
+        reasoning = "ABCDEFGH" if include_reasoning else ""
+        assert self._deepseek_r1_stream(tokenizer, chunks, include_reasoning) == (
+            "",
             reasoning,
         )
 
