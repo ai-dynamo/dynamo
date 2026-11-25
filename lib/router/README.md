@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # lib/router
 
-The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features.
+The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features. The one stage-to-stage type is the worker rows: a request classifier in `dynamo-admission` reads worker selection's `WorkerCandidates`, so both plugin kinds read the same worker inputs.
 
 ## The thirteen crates
 
@@ -20,7 +20,7 @@ The Dynamo router as a set of small crates. Every arrow into a stage starts at t
 | `dynamo-slot-tracker` | Bookings per rank in, load and fullness out; owns its replication wire | protocol, kv-hashing |
 | `dynamo-session-affinity` | Session bindings in, constraints out; owns the affinity target and its replication wire | protocol |
 | `dynamo-worker-selection` | Pick one rank from a candidate table under a policy; owns the rows and the plugin API | protocol, slot-tracker, session-affinity |
-| `dynamo-admission` | Admit, hold, or reject now; owns the queue, the classifier API, `QueueRejection` | protocol, slot-tracker, session-affinity |
+| `dynamo-admission` | Admit, hold, or reject now; owns the queue, the classifier API, `QueueRejection` | protocol, slot-tracker, session-affinity, worker-selection (the candidate rows a classifier reads) |
 | `dynamo-scheduler` | Run the stages atomically for one request; owns the request, eligibility, the hook traits, the conversions, validated config, the one error conversion | protocol, kv-hashing, kv-hints, the five stages, dynamo-error |
 | `dynamo-metrics` | Names, factory, collector helper with monotonic baselines | prometheus |
 | `dynamo-kv-router` | Compose a router and be the one crate plugins name; flat config; every adapter behind a feature | scheduler, metrics; optional axum, reqwest, zmq, dynamo-kv-events |

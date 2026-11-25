@@ -998,7 +998,7 @@ mod tests {
             .check_blocks(&[1, 2, 3, 4], 4, None)
             .await
             .unwrap()
-            .total_hits
+            .total_hits()
     }
 
     #[test]
@@ -1075,7 +1075,7 @@ mod tests {
             .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
             .unwrap();
-        assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
+        assert_eq!(hits.ranges(), vec![Range { start: 0, end: 1 }]);
 
         // Losing any component makes the page unrestorable.
         cache.apply_batch(
@@ -1088,7 +1088,7 @@ mod tests {
             .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
             .unwrap();
-        assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.total_hits(), 0);
     }
 
     #[test]
@@ -1483,7 +1483,7 @@ mod tests {
                 .check_blocks(&[1, 2, 3, 4], config.page_size, None)
                 .await
                 .unwrap()
-                .total_hits,
+                .total_hits(),
             1
         );
 
@@ -1500,7 +1500,7 @@ mod tests {
                 .check_blocks(&[1, 2, 3, 4], 4, None)
                 .await
                 .unwrap()
-                .total_hits,
+                .total_hits(),
             0
         );
         assert!(cache.present_keys.is_empty());
@@ -1545,8 +1545,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
-        assert_eq!(hits.total_hits, 1);
+        assert_eq!(hits.ranges(), vec![Range { start: 0, end: 1 }]);
+        assert_eq!(hits.total_hits(), 1);
 
         cache.apply_batch(
             &"default".into(),
@@ -1564,7 +1564,7 @@ mod tests {
             .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
             .unwrap();
-        assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.total_hits(), 0);
     }
 
     #[test]
@@ -1617,7 +1617,7 @@ mod tests {
                 ),
             );
             let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
-            assert_eq!(hits.total_hits, sequence as u32);
+            assert_eq!(hits.total_hits(), sequence as u32);
             // One 4-token page is under the 5-token threshold; two pages clear it.
             let expected = if sequence == 1 { 0 } else { 2 };
             assert_eq!(hits.loadable_beyond(0), expected);
@@ -1627,7 +1627,7 @@ mod tests {
         tx.send(HashMap::from([(1, runtime(Some(5))), (2, runtime(None))]))
             .unwrap();
         let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
-        assert_eq!(hits.total_hits, 2);
+        assert_eq!(hits.total_hits(), 2);
         assert_eq!(hits.loadable_beyond(0), 0);
     }
 
@@ -1781,7 +1781,7 @@ mod tests {
         );
 
         let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
-        assert_eq!(hits.total_hits, 1);
+        assert_eq!(hits.total_hits(), 1);
         assert!(
             cache
                 .group_states
@@ -1821,7 +1821,7 @@ mod tests {
         );
 
         let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
-        assert_eq!(hits.total_hits, 1);
+        assert_eq!(hits.total_hits(), 1);
         assert!(
             cache
                 .group_states
@@ -1843,7 +1843,7 @@ mod tests {
         );
         assert!(cache.group_states.is_empty());
         let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
-        assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.total_hits(), 0);
     }
 
     #[tokio::test]
@@ -1875,7 +1875,7 @@ mod tests {
                 .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
                 .await
                 .unwrap()
-                .total_hits,
+                .total_hits(),
             2
         );
 
@@ -2140,7 +2140,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(hits.ranges.is_empty());
-        assert_eq!(hits.total_hits, 0);
+        assert!(hits.ranges().is_empty());
+        assert_eq!(hits.total_hits(), 0);
     }
 }

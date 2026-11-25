@@ -5166,7 +5166,6 @@ def test_make_steady_step_builds_production_shaped_output():
     assert output.scheduled_new_reqs == []
     cached = output.scheduled_cached_reqs
     assert cached.req_ids == ["__bench_0", "__bench_1"]
-    assert cached.resumed_req_ids == set()
     assert cached.new_token_ids == []
     assert cached.num_computed_tokens == [63, 64]
     assert cached.num_output_tokens == [1, 1]
@@ -6109,7 +6108,8 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
         stub.requests = {}
         stub.running = []
         stub.finished_req_ids = set()
-        stub.use_v2_model_runner = False
+        # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+        stub.use_v2_model_runner = True
         stub.needs_kv_cache_zeroing = False
         stub.connector = stub.ec_connector = None
         stub.sched_step_seq = 0
@@ -6247,7 +6247,7 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
     assert histories[0] == histories[1]
 
 
-def _kvwarm_native_resume_stub(use_v2):
+def _kvwarm_native_resume_stub():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._kvwarm_native = True
     stub._kvwarm_chain_ids = ["chain-a", "chain-b"]
@@ -6266,7 +6266,6 @@ def _kvwarm_native_resume_stub(use_v2):
     stub.requests = {request.request_id: request for request in requests}
     stub.running = []
     stub._bench_active_req_ids = set()
-    stub.use_v2_model_runner = use_v2
     stub._bench_random_kda = False
     stub._kvwarm_borrowed_ids = set()
     blocks = MagicMock()
@@ -6282,6 +6281,8 @@ def _kvwarm_native_resume_stub(use_v2):
     stub.sched_step_seq = 10
     stub._free_cow_retained_blocks = MagicMock()
     stub.num_lookahead_tokens = 0
+    # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+    stub.use_v2_model_runner = True
     stub.needs_kv_cache_zeroing = False
     stub.finished_req_ids = set()
     stub.connector = None
@@ -6291,19 +6292,15 @@ def _kvwarm_native_resume_stub(use_v2):
 
 @pytest.mark.core
 @pytest.mark.parametrize("with_state", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
 def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_state(
-    use_v2, with_state
+    with_state,
 ):
-    stub, requests = _kvwarm_native_resume_stub(use_v2)
-    tables = {"chain-a": ([1, 11], [2, 21]), "chain-b": ([3, 12], [4, 22])}
+    stub, requests = _kvwarm_native_resume_stub()
     delta = ([11], [21])
     if with_state:
         # Second group is a Mamba/KDA state group holding one live state block
         # per request; this decode step reuses it, so its delta is empty.
-        tables = {"chain-a": ([1, 11], [31]), "chain-b": ([3, 12], [32])}
         delta = ([11], [])
-        stub.kv_cache_manager.get_block_ids.side_effect = tables.__getitem__
         blocks = stub.kv_cache_manager.allocate_slots.return_value
         blocks.get_block_ids.return_value = delta
 
@@ -6319,17 +6316,8 @@ def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_st
     assert stub._kvwarm_borrowed_ids == set()
     cached = output.scheduled_cached_reqs
     assert cached.num_computed_tokens == [3, 4]
-    assert cached.all_token_ids == {
-        request.request_id: request.all_token_ids for request in requests
-    }
-    if use_v2:
-        # V2 keeps the parked tables and accepts only the appended delta.
-        assert cached.resumed_req_ids == set()
-        assert cached.new_block_ids == [delta, delta]
-    else:
-        # V1 re-adds the parked requests: every group's full table, unchanged.
-        assert cached.resumed_req_ids == {"chain-a", "chain-b"}
-        assert cached.new_block_ids == [tables["chain-a"], tables["chain-b"]]
+    # The runner keeps the parked tables and accepts only the appended delta.
+    assert cached.new_block_ids == [delta, delta]
     assert output.kv_cache_block_copies == [(8, 9)]
     stub._free_cow_retained_blocks.assert_called_once_with(["retained"], 11)
     assert stub._kvwarm_native_resume_ids == set()
@@ -6529,7 +6517,7 @@ def test_kvwarm_native_capacity_counts_mamba_state_blocks(modes):
 def test_kvwarm_native_failed_resume_remains_owned_for_cleanup(
     allocation_raises, after_admission
 ):
-    stub, _ = _kvwarm_native_resume_stub(False)
+    stub, _ = _kvwarm_native_resume_stub()
     if after_admission:
         stub._kvwarm_resume_native()
     stub.kv_cache_manager.allocate_slots.return_value = None
@@ -6559,7 +6547,7 @@ def test_kvwarm_native_failed_resume_remains_owned_for_cleanup(
 def test_kvwarm_synthetic_fallback_releases_copies_after_failed_steady_allocation(
     after_native,
 ):
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     if after_native:
         stub._kvwarm_resume_native()
         stub._bench_finish_requests = MagicMock()
@@ -6586,7 +6574,7 @@ def test_kvwarm_synthetic_fallback_releases_copies_after_failed_steady_allocatio
 
 @pytest.mark.core
 def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6617,7 +6605,7 @@ def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
 
 @pytest.mark.core
 def test_kvwarm_native_decode_records_stage_prompt_evidence():
-    stub, requests = _kvwarm_native_resume_stub(False)
+    stub, requests = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6654,7 +6642,7 @@ def test_kvwarm_native_decode_records_stage_prompt_evidence():
 
 def _kvwarm_uncovered_dispatch_stub(warm_eligible, skip_reason=None):
     """Native-layout decode dispatch of a point no warm-up stage covers."""
-    stub, _ = _kvwarm_native_resume_stub(False)
+    stub, _ = _kvwarm_native_resume_stub()
     point = BenchmarkPoint(
         point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
     )
@@ -6755,7 +6743,7 @@ def test_kvwarm_native_dp_dispatch_caps_repeats_by_negotiated_model_length(
     )
     dispatches = []
     for capacity in capacities:
-        stub, _ = _kvwarm_native_resume_stub(False)
+        stub, _ = _kvwarm_native_resume_stub()
         stub.max_model_len = capacity.max_model_len
         stub._bench_negotiated_capacity = negotiated
         stub.requests = {}
@@ -6870,8 +6858,9 @@ def test_kvwarm_native_capacity_fallback_saves_available_steady_samples(monkeypa
     stub.finished_req_ids = set()
     stub.connector = None
     stub.ec_connector = None
+    # Read on vLLM 0.33 (CPU, XPU, enterprise images); remove once they ship 0.34.
+    stub.use_v2_model_runner = True
     stub.needs_kv_cache_zeroing = False
-    stub.use_v2_model_runner = False
     stub.sched_step_seq = 0
     stub._bench_point_deadline = 0.0
     stub._schedule_times = deque()

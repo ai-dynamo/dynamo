@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo v1.6.0
-subtitle: Release notes for Dynamo v1.6.0 (GA Oct 22, 2026)
+subtitle: Release notes for Dynamo v1.6.0 (GA Oct 22, 2026), including patch releases v1.6.1 and v1.6.2
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
@@ -546,3 +546,92 @@ Between v1.5.1 and v1.6.0 the project merged 654 PRs from 148 contributors, 58 o
 - @Jianhong-Zhang upgraded SGLang XPU to v0.5.19 on oneAPI 2026.0 ([#16684](https://github.com/ai-dynamo/dynamo/pull/16684)).
 
 </Accordion>
+
+## Patch releases
+
+<a id="v162"></a>
+
+### v1.6.2 - Nov 5, 2026
+
+#### Summary
+
+Dynamo v1.6.2 is a patch release on top of [v1.6.1](#v161). It refreshes the **OS and Python packages** in the runtime images, moves the **SGLang image to CPython 3.12.16**, returns **HTTP 400 instead of HTTP 500** when a TensorRT-LLM prompt exceeds the engine token budget, and adds an opt-in **garbage-collection freeze** for SGLang workers.
+
+One change can affect existing workflows. See **Dependency Changes**.
+
+**Base Branch**: `release/1.6.2`
+
+#### Dependency Changes
+
+- **Runtime OS Package Refresh:** Upgraded `libgnutls30t64` in the Frontend, vLLM, and sidecar images ([#18064](https://github.com/ai-dynamo/dynamo/pull/18064)) and `libbrotli1` in the Frontend, SGLang, TensorRT-LLM, and vLLM images ([#17913](https://github.com/ai-dynamo/dynamo/pull/17913)) to the current Ubuntu patch releases.
+- **SGLang Image CPython 3.12.16:** Moved the SGLang runtime image from Ubuntu's Python 3.12.3 to a uv-installed CPython 3.12.16, which bundles OpenSSL 3.5.9 ([#18081](https://github.com/ai-dynamo/dynamo/pull/18081)). The Intel XPU image is unchanged.
+
+<Note>
+`cuda-gdb` in the SGLang image no longer supports Python scripting, because its Python front end links the Ubuntu `libpython3.12` that this change removes.
+</Note>
+
+- **Planner Python 3.13.18:** Moved the Planner image to `python:3.13.18-slim` for the build and the distroless Python `3.13-v4.1.10` base for the runtime ([#17915](https://github.com/ai-dynamo/dynamo/pull/17915)). The build now fails if the runtime base bundles an older pip.
+- **Mooncake 0.3.14:** Raised the Mooncake transfer engine floor from `0.3.13.post1` to `0.3.14` in the SGLang and vLLM images ([#18091](https://github.com/ai-dynamo/dynamo/pull/18091)). The TensorRT-LLM image does not ship Mooncake.
+- **PyNvVideoCodec 2.2.4:** Upgraded PyNvVideoCodec from 2.2.3 to 2.2.4 in the SGLang, TensorRT-LLM, and vLLM images ([#17960](https://github.com/ai-dynamo/dynamo/pull/17960)), a patch release with decoder fixes.
+- **pyasn1 0.6.5 Floor:** Floored pyasn1 at `>=0.6.5,<0.7` in the SGLang and vLLM images ([#17925](https://github.com/ai-dynamo/dynamo/pull/17925)), which otherwise kept the 0.6.4 copy from their upstream base.
+- **SGLang diffusers 0.40.0:** Pinned diffusers at 0.40.0 in the SGLang image ([#17926](https://github.com/ai-dynamo/dynamo/pull/17926)), matching the TensorRT-LLM and vLLM images. The Intel XPU build keeps SGLang's own pin.
+
+#### Bug Fixes
+
+- **Oversized Prompt Rejection on TensorRT-LLM:** A prompt longer than the engine's `max_num_tokens` now returns HTTP 400 `invalid_request_error` instead of HTTP 500 `api_error`, and the worker keeps running ([#16193](https://github.com/ai-dynamo/dynamo/pull/16193)). This fixes the v1.6.0 known issue for non-streaming `/v1/messages`.
+- **SGLang Garbage-Collection Stalls:** Added an opt-in `--freeze-gc-after-init` flag (`DYN_SGL_FREEZE_GC_AFTER_INIT`) that freezes garbage collection after startup on SGLang decode and aggregated workers, which reduces streaming stalls in long-running workers ([#15203](https://github.com/ai-dynamo/dynamo/pull/15203), [#16761](https://github.com/ai-dynamo/dynamo/pull/16761)). It is off by default. Check memory use against a control worker before enabling it widely.
+
+#### Build and Test
+
+- **Release Version Update:** Set the package versions, Helm charts, and image references across the repository to 1.6.2 ([#18157](https://github.com/ai-dynamo/dynamo/pull/18157)).
+- **Kubernetes 1.36 Warning Filter:** Scoped the pytest warning filter so the `kr8s` supported-version warning on Kubernetes 1.36 no longer fails the deploy tests ([#17285](https://github.com/ai-dynamo/dynamo/pull/17285)).
+
+#### Known Issues
+
+- **Carried Forward from v1.6.0:** The [v1.6.0 known issues](known-issues.mdx#v160) still apply, except the TensorRT-LLM HTTP 500 on oversized non-streaming `/v1/messages` requests, which this release fixes.
+
+Backend runtime versions (SGLang v0.5.21, TensorRT-LLM v1.3.0rc29, vLLM v0.31.0), NIXL refs and UCX v1.21.0 are unchanged from v1.6.0. CUDA variants are 13.0 for SGLang, 13.1 for TensorRT-LLM, and 13.0 for vLLM.
+
+<a id="v161"></a>
+
+### v1.6.1 - Oct 27, 2026
+
+#### Summary
+
+Dynamo v1.6.1 is a patch release on top of v1.6.0. It refreshes every **trust store** Dynamo ships, in the container images and in the `ai-dynamo-runtime` and `kvbm` wheels, so the updated bundles no longer include the **emSign ECC Root CA - G3** root. It moves every image to **Pillow 13**, refreshes the **image toolchain**, and fixes **crates.io publishing** for the KVBM crates.
+
+One change can affect existing deployments. See **Security**.
+
+**Base Branch**: `release/1.6.1`
+
+#### Security
+
+- **emSign ECC Root Removal:** Updated the system CA bundles in every container image and the Rust TLS roots compiled into the `ai-dynamo-runtime` and `kvbm` wheels, which now use `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 ([#17108](https://github.com/ai-dynamo/dynamo/pull/17108)). gRPC clients in the images now verify against the refreshed system CA bundle instead of the roots bundled with grpcio.
+
+<Warning>
+The updated bundles drop the emSign ECC Root CA - G3 root, so a TLS connection to an endpoint whose certificate chains to that root now fails verification.
+</Warning>
+
+#### Dependency Changes
+
+- **Pillow 13 Upgrade:** Upgraded Pillow to the 13.0 line (`pillow>=13.0.0,<14`) in every runtime image ([#17160](https://github.com/ai-dynamo/dynamo/pull/17160)). The Frontend and Planner images apply a uv override to stay on Pillow 13, because AIPerf v0.13.0 pins `pillow~=12.3.0`.
+- **Image Toolchain Refresh:** Upgraded uv to 0.13.5, pip to 26.2.2, and certifi to 2026.10.19 in the images, and rebuilt the bundled NATS and etcd v3.5.35 with Go 1.27.3 ([#17108](https://github.com/ai-dynamo/dynamo/pull/17108)). The Operator image moved to Go 1.27.3 on the distroless Go `v4.1.7` base, and the Planner image moved to the distroless Python 3.13 `v4.1.9` base.
+
+#### Bug Fixes
+
+- **KVBM Crate Publishing:** Restored the package `description` that `kvbm-kernels`, `kvbm-logical`, and `kvbm-physical` lost in v1.6.0 ([#17141](https://github.com/ai-dynamo/dynamo/pull/17141)). crates.io rejects a crate without one, so these three crates and `kvbm-engine`, which depends on them, were not published for v1.6.0. All four are on crates.io at 1.6.1.
+
+#### Documentation
+
+- **Kubernetes Image Tag Commands:** Fixed the `sed` commands in the Intel XPU quickstart and the Dynamo Snapshot guide so they replace any image tag instead of only the literal `1.6.1` ([#17220](https://github.com/ai-dynamo/dynamo/pull/17220)). Before the fix, a manifest that carried another tag, such as the `my-tag` placeholder in v1.6.0, kept it, and the deployment pointed at an image that could not be pulled.
+
+#### Build and Test
+
+- **Release Version Update:** Set the package versions, Helm charts, and image references across the repository to 1.6.1 ([#17152](https://github.com/ai-dynamo/dynamo/pull/17152)).
+- **Test Dependency Pin:** Pinned pandas below 3 in the test requirements, matching `main`, so the Profiler integration tests pass with AISimulate v0.13.0 ([#17171](https://github.com/ai-dynamo/dynamo/pull/17171)).
+
+#### Known Issues
+
+- **Carried Forward from v1.6.0:** The [v1.6.0 known issues](known-issues.mdx#v160) still apply.
+
+Backend runtime versions (SGLang v0.5.21, TensorRT-LLM v1.3.0rc29, vLLM v0.31.0), NIXL refs and UCX v1.21.0 are unchanged from v1.6.0. CUDA variants are 13.0 for SGLang, 13.1 for TensorRT-LLM, and 13.0 for vLLM.

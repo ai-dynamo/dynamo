@@ -86,30 +86,21 @@ pub const fn default_disk_cache_hit_weight() -> f64 {
 }
 
 /// Scoring and sampling parameters every worker-selection policy may read. Field names
-/// match the flat router configuration they come from.
+/// match the flat router configuration they come from. A plugin reads each value through
+/// the accessor of the same name; a host sets one through
+/// [`SelectionConfigHostExt`](crate::host::SelectionConfigHostExt).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectionConfig {
-    /// Credit per cached device block in the default cost function.
-    pub overlap_score_credit: f64,
-    /// Decay of that credit with the worker's normalized prefill load.
-    pub overlap_score_credit_decay: f64,
-    /// Weight of projected prefill load.
-    pub prefill_load_scale: f64,
-    /// Weight of active decode requests.
-    pub decode_active_request_weight: f64,
-    /// Credit per host-pinned cached block, relative to a device block.
-    pub host_cache_hit_weight: f64,
-    /// Credit per disk cached block, relative to a device block.
-    pub disk_cache_hit_weight: f64,
-    /// Softmax temperature of the picker; zero picks the best cost.
-    pub router_temperature: f64,
-    /// Credit for blocks the shared cache holds beyond the worker's device prefix; `None`
-    /// derives it from `shared_cache_type`.
-    pub shared_cache_multiplier: Option<f64>,
-    /// Which external shared cache answers block queries.
-    pub shared_cache_type: SharedCacheType,
-    /// Whether conditional disaggregation may leave a positive overlap credit on decode.
-    pub conditional_disagg_enabled: bool,
+    overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
+    prefill_load_scale: f64,
+    decode_active_request_weight: f64,
+    host_cache_hit_weight: f64,
+    disk_cache_hit_weight: f64,
+    router_temperature: f64,
+    shared_cache_multiplier: Option<f64>,
+    shared_cache_type: SharedCacheType,
+    conditional_disagg_enabled: bool,
 }
 
 impl Default for SelectionConfig {
@@ -130,6 +121,67 @@ impl Default for SelectionConfig {
 }
 
 impl SelectionConfig {
+    /// Credit per cached device block in the default cost function.
+    #[inline]
+    pub fn overlap_score_credit(&self) -> f64 {
+        self.overlap_score_credit
+    }
+
+    /// Decay of that credit with the worker's normalized prefill load.
+    #[inline]
+    pub fn overlap_score_credit_decay(&self) -> f64 {
+        self.overlap_score_credit_decay
+    }
+
+    /// Weight of projected prefill load.
+    #[inline]
+    pub fn prefill_load_scale(&self) -> f64 {
+        self.prefill_load_scale
+    }
+
+    /// Weight of active decode requests.
+    #[inline]
+    pub fn decode_active_request_weight(&self) -> f64 {
+        self.decode_active_request_weight
+    }
+
+    /// Credit per host-pinned cached block, relative to a device block.
+    #[inline]
+    pub fn host_cache_hit_weight(&self) -> f64 {
+        self.host_cache_hit_weight
+    }
+
+    /// Credit per disk cached block, relative to a device block.
+    #[inline]
+    pub fn disk_cache_hit_weight(&self) -> f64 {
+        self.disk_cache_hit_weight
+    }
+
+    /// Softmax temperature of the picker; zero picks the best cost.
+    #[inline]
+    pub fn router_temperature(&self) -> f64 {
+        self.router_temperature
+    }
+
+    /// Credit for blocks the shared cache holds beyond the worker's device prefix; `None`
+    /// derives it from `shared_cache_type`.
+    #[inline]
+    pub fn shared_cache_multiplier(&self) -> Option<f64> {
+        self.shared_cache_multiplier
+    }
+
+    /// Which external shared cache answers block queries.
+    #[inline]
+    pub fn shared_cache_type(&self) -> SharedCacheType {
+        self.shared_cache_type
+    }
+
+    /// Whether conditional disaggregation may leave a positive overlap credit on decode.
+    #[inline]
+    pub fn conditional_disagg_enabled(&self) -> bool {
+        self.conditional_disagg_enabled
+    }
+
     /// Rejects non-finite or negative weights and an out-of-range shared-cache multiplier,
     /// with the same messages the flat configuration reports.
     pub fn validate(&self) -> Result<(), String> {
@@ -150,5 +202,116 @@ impl SelectionConfig {
             validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
         }
         Ok(())
+    }
+}
+
+impl crate::host::SelectionConfigHostExt for SelectionConfig {
+    #[inline]
+    fn with_overlap_score_credit(mut self, overlap_score_credit: f64) -> Self {
+        self.overlap_score_credit = overlap_score_credit;
+        self
+    }
+
+    #[inline]
+    fn with_overlap_score_credit_decay(mut self, overlap_score_credit_decay: f64) -> Self {
+        self.overlap_score_credit_decay = overlap_score_credit_decay;
+        self
+    }
+
+    #[inline]
+    fn with_prefill_load_scale(mut self, prefill_load_scale: f64) -> Self {
+        self.prefill_load_scale = prefill_load_scale;
+        self
+    }
+
+    #[inline]
+    fn with_decode_active_request_weight(mut self, decode_active_request_weight: f64) -> Self {
+        self.decode_active_request_weight = decode_active_request_weight;
+        self
+    }
+
+    #[inline]
+    fn with_host_cache_hit_weight(mut self, host_cache_hit_weight: f64) -> Self {
+        self.host_cache_hit_weight = host_cache_hit_weight;
+        self
+    }
+
+    #[inline]
+    fn with_disk_cache_hit_weight(mut self, disk_cache_hit_weight: f64) -> Self {
+        self.disk_cache_hit_weight = disk_cache_hit_weight;
+        self
+    }
+
+    #[inline]
+    fn with_router_temperature(mut self, router_temperature: f64) -> Self {
+        self.router_temperature = router_temperature;
+        self
+    }
+
+    #[inline]
+    fn with_shared_cache_multiplier(mut self, shared_cache_multiplier: Option<f64>) -> Self {
+        self.shared_cache_multiplier = shared_cache_multiplier;
+        self
+    }
+
+    #[inline]
+    fn with_shared_cache_type(mut self, shared_cache_type: SharedCacheType) -> Self {
+        self.shared_cache_type = shared_cache_type;
+        self
+    }
+
+    #[inline]
+    fn with_conditional_disagg_enabled(mut self, conditional_disagg_enabled: bool) -> Self {
+        self.conditional_disagg_enabled = conditional_disagg_enabled;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::SelectionConfigHostExt;
+
+    #[test]
+    fn each_builder_sets_the_value_its_accessor_returns() {
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(2.0)
+            .with_overlap_score_credit_decay(0.5)
+            .with_prefill_load_scale(3.0)
+            .with_decode_active_request_weight(4.0)
+            .with_host_cache_hit_weight(0.6)
+            .with_disk_cache_hit_weight(0.1)
+            .with_router_temperature(0.7)
+            .with_shared_cache_multiplier(Some(0.4))
+            .with_shared_cache_type(SharedCacheType::Hicache)
+            .with_conditional_disagg_enabled(true);
+
+        // Names every field: a new one fails to compile here until it has an accessor, a
+        // host builder, and a line in `dynamo-kv-router`'s `From<&KvRouterConfig>`.
+        assert_eq!(
+            config,
+            SelectionConfig {
+                overlap_score_credit: 2.0,
+                overlap_score_credit_decay: 0.5,
+                prefill_load_scale: 3.0,
+                decode_active_request_weight: 4.0,
+                host_cache_hit_weight: 0.6,
+                disk_cache_hit_weight: 0.1,
+                router_temperature: 0.7,
+                shared_cache_multiplier: Some(0.4),
+                shared_cache_type: SharedCacheType::Hicache,
+                conditional_disagg_enabled: true,
+            }
+        );
+        assert_eq!(config.overlap_score_credit(), 2.0);
+        assert_eq!(config.overlap_score_credit_decay(), 0.5);
+        assert_eq!(config.prefill_load_scale(), 3.0);
+        assert_eq!(config.decode_active_request_weight(), 4.0);
+        assert_eq!(config.host_cache_hit_weight(), 0.6);
+        assert_eq!(config.disk_cache_hit_weight(), 0.1);
+        assert_eq!(config.router_temperature(), 0.7);
+        assert_eq!(config.shared_cache_multiplier(), Some(0.4));
+        assert_eq!(config.shared_cache_type(), SharedCacheType::Hicache);
+        assert!(config.conditional_disagg_enabled());
     }
 }
