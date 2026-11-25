@@ -28,20 +28,19 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 				Env: []corev1.EnvVar{
 					{Name: "DYN_REQUEST_TRACE", Value: "0"},
 					{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: "wrong-general-binding"},
-					{Name: "DYN_ROUTER_MODE", Value: "round-robin"},
+					{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: "wrong-general-binding"},
 				},
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: []corev1.EnvVar{
 							{Name: "DYN_REQUEST_TRACE", Value: "0"},
 							{Name: "DYN_REQUEST_TRACE_FILE_PATH", Value: "wrong"},
-							{Name: "DYN_ROUTER_MODE", Value: "round-robin"},
+							{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: "wrong-authored-binding"},
 							{Name: "UNRELATED", Value: "retained"},
 						}}},
 					}}},
 					{ComponentName: "optimizer", ComponentType: v1beta1.ComponentTypePlanner,
-						Retune: &v1beta1.RetuneSpec{Enabled: true, TraceStorage: &v1beta1.RetuneTraceStorageSpec{ClaimName: "traces"},
-							Router: &v1beta1.RetuneRouterSpec{OverlapScoreCredit: new(float64(0)), PrefillLoadScale: new(float64(2)), Temperature: new(float64(0.5))}},
+						Retune:      &v1beta1.RetuneSpec{Enabled: true, TraceStorage: &v1beta1.RetuneTraceStorageSpec{ClaimName: "traces"}},
 						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "planner:1.7.0", Env: []corev1.EnvVar{{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: "authored-wrong-binding"}}}}}},
 					},
 				},
@@ -77,9 +76,14 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 						_, expected, err := planner.ResolveRetuneConfiguration(dgd)
 						require.NoError(t, err)
 						require.Equal(t, *expected, capability)
+						frontend := GetMainContainerFromPodSpec(&cliqueByName(pcs, "gateway").Spec.PodSpec)
+						require.Equal(t, binding.Value, findEnvVar(frontend.Env, "DYN_FRONTEND_RETUNE_CAPABILITY").Value)
 						continue
 					}
-					require.Nil(t, findEnvVar(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY"))
+					frontendBinding := findEnvVar(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY")
+					require.NotNil(t, frontendBinding)
+					require.NotEqual(t, "wrong-general-binding", frontendBinding.Value)
+					require.NotEqual(t, "wrong-authored-binding", frontendBinding.Value)
 
 					t.Log("The Pod-name binding expands correctly even in legacy sorted environments")
 					env := slices.Clone(main.Env)
@@ -97,11 +101,6 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 					}
 					require.Equal(t, 1, podNameCount)
 					values := semanticenv.Replay(env)
-					require.Equal(t, semanticenv.Value{Known: true, Value: "kv"}, values["DYN_ROUTER_MODE"])
-					require.Equal(t, semanticenv.Value{Known: true, Value: "true"}, values["DYN_ROUTER_REPLICA_SYNC"])
-					require.Equal(t, semanticenv.Value{Known: true, Value: "0"}, values["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"])
-					require.Equal(t, semanticenv.Value{Known: true, Value: "2"}, values["DYN_ROUTER_PREFILL_LOAD_SCALE"])
-					require.Equal(t, semanticenv.Value{Known: true, Value: "0.5"}, values["DYN_ROUTER_TEMPERATURE"])
 					require.Equal(t, semanticenv.Value{Known: true, Value: "/trace/segments/graph/gateway-pod/req"}, values["DYN_REQUEST_TRACE_FILE_PATH"])
 					require.Equal(t, semanticenv.Value{Known: true, Value: "1"}, values["DYN_REQUEST_TRACE"])
 					require.Equal(t, semanticenv.Value{Known: true, Value: "8002"}, values["DYN_FRONTEND_ADMIN_PORT"])

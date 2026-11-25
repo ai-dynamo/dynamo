@@ -282,17 +282,20 @@ current target. After upgrading the operator, enable the setting before starting
 and reference an existing writable ReadWriteMany trace PVC in the DGD namespace.
 The graph must contain exactly one component of type `frontend` and at most one enabled Retune
 Planner. The operator mounts the claim at `/trace` in both components, owns the trace bindings and
-frontend admin listener, sets existing frontend router environment variables, and supplies the
-semantic contract to the Planner. Status publishes only the acknowledged target `configHash`;
-role-PodSpec status is not needed. The frontend uses its existing configuration API. Other router
-settings must remain at ordinary SDK defaults; contradictory command-line or policy-file overrides
-are not validated by this wiring. Existing explicit Planner trace-storage settings must agree
-with the launch binding. Restrict access to frontend admin
+frontend admin listener, and supplies the same contract to frontend and Planner processes. Status
+publishes only the acknowledged `configHash`; role-PodSpec status is not needed. The frontend must
+support the contract and acknowledge compatible effective router configuration. Older frontends
+without acknowledgment cannot be tuned. Existing explicit Planner trace-storage settings must
+agree with the launch binding. Restrict access to frontend admin
 port `8002`; the current listener is unauthenticated and no NetworkPolicy is created automatically.
 
 Retune state now checkpoints the previous wiring and router process identities in Lease format v2.
 The new Planner reads v1 state, but older Planners cannot read v2 state. Before downgrading,
 use the new Planner to finish rollback and cleanup, then remove its Retune Leases.
+
+The runtime-validated profile also requires cleanup before upgrading from the initial semantic
+wiring: saved launch bindings without a router profile cannot be read by the profile-aware
+Planner, even in Lease format v2. Finish rollback with the old Planner before removing its Leases.
 
 **Existing deployments:** An absent or disabled component setting leaves workload templates
 unchanged. Ordinary replica autoscaling needs no Retune setting. A new Planner image cannot activate

@@ -3001,7 +3001,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="retune" type="RetuneSpec">
-retune requests operator-owned live Retune wiring. It is valid only for a planner component; enabled Retune requires exactly one frontend component selected by type in the same graph, one enabled Planner owner, and traceStorage. The operator configures request-end trace recording, shared PVC mounts, and a reachable frontend admin listener, KV routing with replica synchronization, and typed router startup values. The Planner receives a semantic launch contract whose hash is acknowledged in status.components[name].retune. Generated environment bindings are operator-owned while enabled; explicit frontend CLI and router-policy settings retain their normal precedence. The current admin API has no authentication; restrict network access to it. This setting does not enable the Planner loop, alter search parameters, or enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
+retune requests operator-owned live Retune wiring. It is valid only for a planner component; enabled Retune requires exactly one frontend component selected by type in the same graph, one enabled Planner owner, and traceStorage. The operator configures request-end trace recording, shared PVC mounts, and a reachable frontend admin listener, and the versioned router profile. It injects one semantic contract into both processes and acknowledges its hash in status.components[name].retune. These bindings are operator-owned while enabled. The current admin API has no authentication; restrict network access to it. This setting does not enable the Planner loop, alter search parameters, or enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
 See [RetuneSpec](#retunespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3128,7 +3128,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="retune" type="RetuneSpec">
-retune requests operator-owned live Retune wiring. It is valid only for a planner component; enabled Retune requires exactly one frontend component selected by type in the same graph, one enabled Planner owner, and traceStorage. The operator configures request-end trace recording, shared PVC mounts, and a reachable frontend admin listener, KV routing with replica synchronization, and typed router startup values. The Planner receives a semantic launch contract whose hash is acknowledged in status.components[name].retune. Generated environment bindings are operator-owned while enabled; explicit frontend CLI and router-policy settings retain their normal precedence. The current admin API has no authentication; restrict network access to it. This setting does not enable the Planner loop, alter search parameters, or enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
+retune requests operator-owned live Retune wiring. It is valid only for a planner component; enabled Retune requires exactly one frontend component selected by type in the same graph, one enabled Planner owner, and traceStorage. The operator configures request-end trace recording, shared PVC mounts, and a reachable frontend admin listener, and the versioned router profile. It injects one semantic contract into both processes and acknowledges its hash in status.components[name].retune. These bindings are operator-owned while enabled. The current admin API has no authentication; restrict network access to it. This setting does not enable the Planner loop, alter search parameters, or enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
 See [RetuneSpec](#retunespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4601,7 +4601,7 @@ Search domains, intervals, scoring, and replica scaling remain Planner configura
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean">
-enabled configures the frontend selected by type in the same DGD and the Planner with shared trace storage, a reachable frontend admin listener, and KV routing with replica synchronization and the supplied startup values. It does not enable replica scaling or choose an optimization strategy. Omission or false leaves ordinary component rendering unchanged. Enabling, disabling, or changing semantic settings changes the affected Pod templates.
+enabled configures the frontend selected by type in the same DGD and the Planner with shared trace storage, a reachable frontend admin listener, and a versioned KV-router profile validated against the effective runtime. It does not enable replica scaling or choose an optimization strategy. Omission or false leaves ordinary component rendering unchanged. Enabling, disabling, or changing semantic settings changes the affected Pod templates.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4612,7 +4612,7 @@ See [RetuneTraceStorageSpec](#retunetracestoragespec).
 </ParamField>
 
 <ParamField path="router" type="RetuneRouterSpec">
-router supplies initial serving values, not Planner search domains. The operator injects these through existing frontend environment variables. Explicit CLI arguments and router-policy configuration retain their normal precedence; effective runtime validation is not provided by this setting. Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0.
+router supplies startup values for the versioned kv-v1 Retune profile. These are initial serving values, not Planner search domains. The profile pins the remaining replay-relevant router settings. Conflicting explicit frontend settings fail runtime validation instead of being silently replaced. Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0.
 See [RetuneRouterSpec](#retunerouterspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4628,7 +4628,7 @@ assert runtime readiness or the effective configuration of running processes.
 **Appears in:** [ComponentReplicaStatus](#componentreplicastatus), [ServiceReplicaStatus](#servicereplicastatus)
 
 <ParamField path="configHash" type="string" required={true}>
-configHash is the opaque binding of the operator-generated launch contract. Publication acknowledges that the frontend and Planner target lowerings have been applied, independently of readiness or optional role projections. The Planner also matches its immutable launch binding before starting tuning windows; this hash does not acknowledge effective runtime settings.
+configHash is the opaque binding of the operator-generated launch contract. Publication acknowledges that the frontend and Planner target lowerings have been applied, independently of readiness or optional role projections. The Planner must also match its immutable launch binding and obtain a compatible frontend runtime acknowledgment before starting tuning windows.
 **Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>

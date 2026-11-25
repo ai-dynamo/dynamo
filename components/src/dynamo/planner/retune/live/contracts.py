@@ -141,6 +141,7 @@ class RetuneCapability:
     windows_dir: str
     admin_port: int
     config_hash: str
+    profile: str
     overlap_score_credit: float
     prefill_load_scale: float
     temperature: float
@@ -158,6 +159,7 @@ class RetuneCapability:
             },
             "adminPort": self.admin_port,
             "router": {
+                "profile": self.profile,
                 "overlapScoreCredit": self.overlap_score_credit,
                 "prefillLoadScale": self.prefill_load_scale,
                 "temperature": self.temperature,
@@ -174,8 +176,8 @@ class RetuneCapability:
         if not isinstance(config_hash, str) or not config_hash:
             raise ValueError("Retune configHash must be a non-empty string")
         router = value.get("router")
-        if not isinstance(router, Mapping):
-            raise ValueError("Retune router settings are unavailable")
+        if not isinstance(router, Mapping) or router.get("profile") != "kv-v1":
+            raise ValueError("unsupported Retune router profile")
         parameters = []
         for name in ("overlapScoreCredit", "prefillLoadScale", "temperature"):
             parameter = router.get(name)
@@ -247,6 +249,7 @@ class RetuneCapability:
             windows,
             port,
             config_hash,
+            "kv-v1",
             *parameters,
         )
 
@@ -410,6 +413,7 @@ class PolicyCallResult:
     routers: tuple[RouterInfo, ...] = ()  # GET
     router: Optional[RouterInfo] = None  # PATCH/reset response, when 200
     error: Optional[str] = None
+    retune_config_hash: Optional[str] = None  # Validated runtime contract (GET).
 
 
 class RouterPolicyClient(Protocol):

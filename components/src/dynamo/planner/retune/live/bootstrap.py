@@ -387,6 +387,7 @@ def default_actuator_factory(
             frontend_component_name=(
                 None if capability is None else capability.frontend_component_name
             ),
+            config_hash=None if capability is None else capability.config_hash,
         )
 
     return factory

@@ -68,6 +68,7 @@ def retune_launch_contract(*, mount_path: str = "/trace") -> dict[str, Any]:
         },
         "adminPort": 8002,
         "router": {
+            "profile": "kv-v1",
             "overlapScoreCredit": 1.0,
             "prefillLoadScale": 1.0,
             "temperature": 0.0,

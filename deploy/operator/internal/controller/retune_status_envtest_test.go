@@ -94,12 +94,7 @@ func TestRetuneTargetStatusThroughGroveController(t *testing.T) {
 		require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "dynamo-retune-traces", MountPath: "/trace"})
 		if component == "gateway" {
 			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ENABLE_FRONTEND_ADMIN_API", Value: "1"})
-			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ROUTER_MODE", Value: "kv"})
-			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ROUTER_REPLICA_SYNC", Value: "true"})
-			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", Value: "1"})
-			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ROUTER_PREFILL_LOAD_SCALE", Value: "1"})
-			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_ROUTER_TEMPERATURE", Value: "0"})
-			require.Nil(t, findEnv(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY"))
+			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: string(capabilityJSON)})
 		} else {
 			require.Contains(t, main.Env, corev1.EnvVar{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: string(capabilityJSON)})
 		}
@@ -135,11 +130,7 @@ func TestRetuneTargetStatusThroughGroveController(t *testing.T) {
 				assert.Nil(c, findEnv(main.Env, "DYN_ENABLE_FRONTEND_ADMIN_API"))
 				assert.Nil(c, findEnv(main.Env, "DYN_REQUEST_TRACE_FILE_PATH"))
 				assert.Nil(c, findEnv(main.Env, "DYN_PLANNER_RETUNE_CAPABILITY"))
-				assert.Nil(c, findEnv(main.Env, "DYN_ROUTER_MODE"))
-				assert.Nil(c, findEnv(main.Env, "DYN_ROUTER_REPLICA_SYNC"))
-				assert.Nil(c, findEnv(main.Env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"))
-				assert.Nil(c, findEnv(main.Env, "DYN_ROUTER_PREFILL_LOAD_SCALE"))
-				assert.Nil(c, findEnv(main.Env, "DYN_ROUTER_TEMPERATURE"))
+				assert.Nil(c, findEnv(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY"))
 			}
 		}
 	}, 20*time.Second, 50*time.Millisecond)

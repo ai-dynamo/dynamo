@@ -95,8 +95,9 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   the frontend and Planner containers run as. The operator does not provision the claim. The
   Planner writes each window file with mode `0644`, so the Run Job, which reads it as UID 1000
   with supplemental group 65532, can read it whatever user the Planner runs as.
-- **Frontend admin API support.** The frontend must expose `/router_policy` for observing and
-  updating router parameters. See [Deployment rules](#deployment-rules).
+- **Matching frontend and Planner runtime support.** The frontend must implement the versioned
+  Retune launch contract and acknowledge compatible effective routers through `/router_policy`.
+  An older frontend without this acknowledgment cannot be tuned. See [Deployment rules](#deployment-rules).
 - **Operator-owned Retune wiring on the Planner component.** Enable the component's `retune`
   field and name the trace claim as shown below. This configures the frontend admin listener;
   restrict access to its unauthenticated port before enabling the feature.
@@ -141,29 +142,18 @@ This normal component API is not under `experimental`. It requests deployment wi
 search strategy or replica-scaling mode. Exactly one frontend and at most one enabled Retune
 Planner are supported. An enabled standalone DCD cannot provide this graph-wide wiring.
 
-The optional `router` fields must be finite, non-negative numbers. The operator supplies them
-through existing frontend environment variables, enables KV routing and replica synchronization,
-and passes the same values to the Planner. The remaining router settings use ordinary SDK
-defaults, not a version-pinned profile. These are startup values; the Planner's `retune.router`
-configuration below defines the search space instead.
-
-Use otherwise default router settings on the frontend and workers. Do not override these values
-through command-line arguments or router policy files. Normal frontend precedence still applies;
-this wiring does not validate the full effective runtime configuration. The Planner rejects
-directly specified unsupported flags, such as `--router-session-affinity-ttl-secs=60`, without
-evaluating environment lists, variable references, shell scripts, or policy files. The Planner
-also checks live policy parameters, but that does not prove agreement on other router settings.
+The optional `router` fields must be finite, non-negative numbers. Together with the versioned
+`kv-v1` profile they fix the complete supported router startup configuration. Frontend and Planner
+resolve the same profile through the runtime SDK. These are startup values; the Planner's
+`retune.router` configuration below defines the search space instead. Equivalent explicit
+frontend settings are accepted; contradictory CLI, policy-file, or runtime-resolved environment
+settings cause a frontend configuration error rather than silently changing the replay baseline.
 
 The operator mounts the claim at `/trace` in the frontend and Planner and owns these frontend
 bindings while enabled:
 
 | Binding | Operator-owned value |
 | --- | --- |
-| `DYN_ROUTER_MODE` | `kv` |
-| `DYN_ROUTER_REPLICA_SYNC` | `true` |
-| `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `retune.router.overlapScoreCredit` |
-| `DYN_ROUTER_PREFILL_LOAD_SCALE` | `retune.router.prefillLoadScale` |
-| `DYN_ROUTER_TEMPERATURE` | `retune.router.temperature` |
 | `DYN_POD_NAME` | The Pod name from the Downward API |
 | `DYN_REQUEST_TRACE` | `1` |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end` |
@@ -181,10 +171,10 @@ Compilation-cache mounts at `/trace` or below it also fail rendering, because th
 the shared trace storage.
 The trace writer and Planner create their required subdirectories; the claim must be writable.
 
-The operator supplies a versioned JSON launch contract through `DYN_PLANNER_RETUNE_CAPABILITY`
-in the Planner. It contains the selected frontend identity, trace layout, admin port, router
-startup values, and an opaque `configHash`. The unchanged frontend consumes its existing
-environment variables, not this contract. Do not set or override these operator-owned bindings.
+The operator supplies the same versioned JSON launch contract through
+`DYN_PLANNER_RETUNE_CAPABILITY` in the Planner and `DYN_FRONTEND_RETUNE_CAPABILITY` in the frontend.
+It contains the selected frontend identity, trace layout, admin port, router profile, startup
+settings, and an opaque `configHash`. Do not set or override these operator-owned bindings.
 
 After the target workloads acknowledge lowering, the operator publishes only the binding hash:
 
@@ -197,9 +187,9 @@ status:
         configHash: "<operator-generated>"
 ```
 
-Retune waits until its immutable launch hash matches the current target hash. Generic role
-status and a frontend runtime hash acknowledgment are not required. During a storage rollout,
-an old Planner still mounted to PVC A must not create replay
+Retune waits until its immutable launch hash matches the current target hash and each frontend
+runtime acknowledges compatible effective routers for that hash. Generic role status is not
+required. During a storage rollout, an old Planner still mounted to PVC A must not create replay
 requests referring to PVC B. Cleanup uses the historical binding checkpointed with the previous
 router process identities. Replica-only edits do not change this hash or roll the Planner.
 
@@ -378,12 +368,11 @@ configuration error at startup.
 | P5 | `retune.dgdr.engine` is all scalars, as in [Engine section](#engine-section) |
 | P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget). With scaling, the Planner points count as one more shard dimension, and the history before a window holds at most 1024 buckets of the shortest throughput interval |
 
-The Planner obtains its startup values from its immutable semantic launch contract and uses
-existing SDK defaults for other router settings. It also checks directly specified frontend and
-worker flags for unsupported settings. These checks do not evaluate Pod environment lists,
-ConfigMaps, Secrets, variable references, shell scripts, or policy-file contents. They do not
-prove the complete effective trace/admin/router runtime configuration. Keep the supported
-default configuration described above.
+The Planner reads its immutable semantic launch contract, not component Pod templates. The
+frontend validates its actual parsed configuration and the effective discovered routers, including
+worker-advertised settings. ConfigMap and Secret values are checked after runtime resolution,
+not guessed by the operator. `/router_policy` acknowledges the contract only for compatible
+effective configuration; an acknowledgment is not merely an echo of the injected environment.
 
 **Deployment**, checked at startup, when the DGD changes and before every router round. While one
 fails, the Planner launches no windows, resets the routers to their startup parameters, and
@@ -391,12 +380,12 @@ retries:
 
 | Rule | Requirement |
 |---|---|
-| P4 | The supported versioned launch contract resolves the three startup router values using existing SDK defaults; directly specified flags do not select unsupported router settings |
-| P7 | Known served-model projections do not disagree; the frontend is not an EPP or a `frontendSidecar` |
+| P4 | The supported versioned launch contract resolves to a complete `kv-v1` router configuration through the runtime SDK. The frontend validates actual settings and effective routers; incompatible or unsupported configurations are not acknowledged |
+| P7 | Known served-model projections do not disagree; the frontend is not an EPP or a `frontendSidecar` and has no TLS |
 | P8 | One frontend replica, or synchronized routers (`router_replica_sync`, which Retune enables by default) |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
-| P10 | A published target hash matches the immutable launch hash; pending publication pauses without rollback. Explicitly configured legacy trace-storage values agree with the launch contract |
-| P14 | Every router's startup policy parameters match the values resolved from the semantic launch contract |
+| P10 | A published `status.components.<planner>.retune.configHash` matches the immutable launch hash; pending publication pauses without rollback. Explicitly configured legacy trace-storage values agree with the launch contract |
+| P14 | Every relevant frontend acknowledges the same hash and every router's startup parameters match the shared semantic profile |
 
 **Health**, checked every round. While one fails, windows do not launch; nothing is reset:
 
@@ -464,6 +453,11 @@ v2, and can read v1 state. Before upgrading an active deployment from v1 state, 
 and cleanup with the old Planner, including removal of its Retune Leases. A legacy state that
 may still own router policies has no historical binding: the new Planner retains it and reports
 that cleanup is blocked rather than guessing that the current frontend is the old one.
+
+Before upgrading from the initial semantic wiring to the runtime-validated profile, also finish
+rollback and cleanup with the old Planner and remove its Retune Leases. Its saved launch bindings
+have no router profile and cannot be read by the profile-aware Planner, even in state format v2.
+Do not delete the saved state while router policies still need rollback.
 
 Before downgrading to an older Planner that cannot read v2, complete
 the rollback and cleanup above with the newer Planner, including removal of its Retune Leases.
