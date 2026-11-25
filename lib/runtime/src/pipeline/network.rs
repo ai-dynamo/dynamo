@@ -128,7 +128,7 @@ impl ResponsePlaneMode {
 
     /// Velo has no TLS, so a Velo selection gives way to tcp while any
     /// `DYN_TCP_TLS_*` setting is present.
-    pub(crate) fn tcp_under_tls(self) -> Self {
+    pub fn tcp_under_tls(self) -> Self {
         self.tcp_if_tls_set(&velo_response::tcp_tls_settings())
     }
 
