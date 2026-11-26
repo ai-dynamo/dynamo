@@ -158,10 +158,25 @@ conductor role: an LPU-only build serves from a `runtime` init container in its 
 
 4. Update each DGD manifest: set the new `buildId`, use runtime images that read placement from
    `lpuUnits`, and remove each `/configs` mount and its volume. For an LPU-only build, also
-   remove the conductor role and add the `runtime` init container to the agent template, as
-   [Hybrid LPX conductors require the runtime sidecar](#hybrid-lpx-conductors-require-the-runtime-sidecar)
-   describes for a conductor. Add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to its arguments: each
-   Agent Pod runs the sidecar, and without a rank every sidecar serves as rank 0.
+   move serving from the conductor to the agent:
+   - For an LPU-only component that serves its own endpoint, remove its conductor role and add
+     the `runtime` init container to its agent template, as
+     [Hybrid LPX conductors require the runtime sidecar](#hybrid-lpx-conductors-require-the-runtime-sidecar)
+     describes for a conductor.
+   - When two LPU-only components share one speculative engine, remove the target's conductor
+     role and add `runtime` only to the target's agent template, with
+     `--model-path $(LPX_TARGET_MODEL_PATH)/tokenizer`. Leave the draft's agent template without
+     `runtime`: a draft that has the sidecar becomes a second, independent engine.
+   - Add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to the arguments of the `runtime` init container:
+     each Agent Pod of a serving component runs the sidecar, and without a rank every sidecar
+     serves as rank 0.
+   - When `--model-path` points into the compiled model directory, mount the `model-storage`
+     volume of `main` read-only in `runtime`, at the same `mountPath` and `subPath`, in addition
+     to the volume that the two containers share to reach the engine.
+   - When the agent template sets `hostNetwork: true`, declare a `readinessProbe` on `runtime`
+     itself: an HTTP GET on the sidecar's system health path (`/health` by default), on the fixed
+     port in `DYN_SYSTEM_PORT`. The operator injects no probe into a host-network Pod, so without
+     this probe the Pod is ready before the sidecar serves.
 5. Apply the DGD manifests.
 
 A bundle that has no `lpuUnits` fails reconciliation with a message that contains
