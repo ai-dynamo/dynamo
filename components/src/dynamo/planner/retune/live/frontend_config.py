@@ -4,7 +4,8 @@
 """Retune's semantic launch settings and public graph constraints.
 
 The operator supplies an immutable process binding; status acknowledges its target
-hash. No function inspects Pod templates or reconstructs their launch semantics.
+hash. Remaining explicit flags are checked separately, without interpreting env
+or deriving startup settings from Pod templates.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from dynamo.planner.retune.live.contracts import (
     PremiseReport,
     RetuneCapability,
 )
+from dynamo.planner.retune.live.launch_flags import launch_flag_errors
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import (
@@ -213,6 +215,7 @@ def evaluate_premises(
     others: list[str] = []
     warnings: list[str] = []
     components = _components(dgd)
+    p4.extend(launch_flag_errors(components))
     models, unknown = served_model_names(dgd)
     if len(set(models.values())) > 1:
         others.append("P7: the DGD serves multiple models; live retune needs one")

@@ -103,8 +103,9 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 - **One Planner replica.**
 - **An acknowledged Retune target.** The operator publishes
   `status.components.<planner>.retune.configHash` with a global `status.observedGeneration` matching
-  `metadata.generation`. Retune does not consume role Pod templates, commands, arguments, or
-  environment lists from spec or status.
+  `metadata.generation`. Retune does not reconstruct environment values or obtain its startup
+  settings from Pod templates. It still checks directly specified launch flags for unsupported
+  router settings, as described in [Deployment rules](#deployment-rules).
 
 ## Enable Retune wiring
 
@@ -148,8 +149,10 @@ configuration below defines the search space instead.
 
 Use otherwise default router settings on the frontend and workers. Do not override these values
 through command-line arguments or router policy files. Normal frontend precedence still applies;
-this wiring does not validate the full effective runtime configuration. The Planner checks live
-policy parameters, but that does not prove agreement on other router settings.
+this wiring does not validate the full effective runtime configuration. The Planner rejects
+directly specified unsupported flags, such as `--router-session-affinity-ttl-secs=60`, without
+evaluating environment lists, variable references, shell scripts, or policy files. The Planner
+also checks live policy parameters, but that does not prove agreement on other router settings.
 
 The operator mounts the claim at `/trace` in the frontend and Planner and owns these frontend
 bindings while enabled:
@@ -375,10 +378,12 @@ configuration error at startup.
 | P5 | `retune.dgdr.engine` is all scalars, as in [Engine section](#engine-section) |
 | P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget). With scaling, the Planner points count as one more shard dimension, and the history before a window holds at most 1024 buckets of the shortest throughput interval |
 
-The Planner reads its immutable semantic launch contract, not component Pod templates. It uses
-the existing SDK defaults with the supplied router values. This does not validate arbitrary
-frontend or worker overrides, ConfigMap or Secret values, or complete trace/admin runtime
-configuration. Keep the supported default configuration described above.
+The Planner obtains its startup values from its immutable semantic launch contract and uses
+existing SDK defaults for other router settings. It also checks directly specified frontend and
+worker flags for unsupported settings. These checks do not evaluate Pod environment lists,
+ConfigMaps, Secrets, variable references, shell scripts, or policy-file contents. They do not
+prove the complete effective trace/admin/router runtime configuration. Keep the supported
+default configuration described above.
 
 **Deployment**, checked at startup, when the DGD changes and before every router round. While one
 fails, the Planner launches no windows, resets the routers to their startup parameters, and
@@ -386,7 +391,7 @@ retries:
 
 | Rule | Requirement |
 |---|---|
-| P4 | The supported versioned launch contract resolves the three startup router values using existing SDK defaults |
+| P4 | The supported versioned launch contract resolves the three startup router values using existing SDK defaults; directly specified flags do not select unsupported router settings |
 | P7 | Known served-model projections do not disagree; the frontend is not an EPP or a `frontendSidecar` |
 | P8 | One frontend replica, or synchronized routers (`router_replica_sync`, which Retune enables by default) |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
@@ -579,7 +584,8 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
 | Workers advertising router settings that differ from the supplied startup configuration | Live policy-parameter comparison is not a full compatibility check; other settings must retain ordinary SDK defaults |
-| Missing or unsupported Planner launch binding | P4/P10 cannot resolve the operator-provided settings; the Planner does not inspect role Pod templates, commands, shell values, or image entrypoints |
+| Missing or unsupported Planner launch binding | P4/P10 cannot resolve the operator-provided settings; inspecting launch flags cannot replace the binding |
+| Router overrides hidden in environment values, variable references, shell scripts, or image entrypoints | The remaining direct-flag checks do not reconstruct effective runtime configuration |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |
