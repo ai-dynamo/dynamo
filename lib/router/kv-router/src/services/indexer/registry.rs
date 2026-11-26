@@ -1791,20 +1791,39 @@ mod tests {
         OtherRank,
     }
 
+    /// What happens to the parked listener before it is deregistered.
+    #[derive(Clone, Copy, Debug)]
+    enum Before {
+        Nothing,
+        /// The paused attempt stays parked, so deregistration must join it.
+        Pause,
+        /// The new attempt waits for the parked one, so joining it must join both.
+        PauseResume,
+    }
+
     #[rstest::rstest]
-    #[case::single_worker(1, Deregistration::Worker)]
-    #[case::single_last_rank(1, Deregistration::LastRank)]
-    #[case::single_other_rank(1, Deregistration::OtherRank)]
-    #[case::concurrent_worker(2, Deregistration::Worker)]
+    #[case::single_worker(1, Deregistration::Worker, Before::Nothing)]
+    #[case::single_last_rank(1, Deregistration::LastRank, Before::Nothing)]
+    #[case::single_other_rank(1, Deregistration::OtherRank, Before::Nothing)]
+    #[case::concurrent_worker(2, Deregistration::Worker, Before::Nothing)]
+    #[case::paused(1, Deregistration::Worker, Before::Pause)]
+    #[case::paused_and_resumed(1, Deregistration::Worker, Before::PauseResume)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deregister_stops_listener_mid_batch(
         #[case] threads: usize,
         #[case] removal: Deregistration,
+        #[case] before: Before,
     ) {
         let sibling_rank = matches!(removal, Deregistration::OtherRank);
         let rank0 = TestPublisher::bind();
         let (registry, indexer, mut gate, _others) =
             registry_with_parked_listener(threads, sibling_rank, &rank0, None).await;
+        if matches!(before, Before::Pause | Before::PauseResume) {
+            registry.pause_listener(1, 0).unwrap();
+        }
+        if matches!(before, Before::PauseResume) {
+            registry.resume_listener(1, 0).await.unwrap();
+        }
 
         // The listener is parked mid-batch. A fix that cannot stop it makes this time out.
         let deregistration = tokio::time::timeout(WATCHDOG, async {
@@ -1848,47 +1867,6 @@ mod tests {
         );
         let watermark = registry.watermarks.get(&(1, 0)).unwrap().clone();
         assert_eq!(watermark.load(Ordering::Acquire), 1);
-        registry.root_cancel_token.cancel();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn deregister_joins_paused_listener() {
-        let rank0 = TestPublisher::bind();
-        let (registry, indexer, mut gate, _others) =
-            registry_with_parked_listener(1, false, &rank0, None).await;
-
-        registry.pause_listener(1, 0).unwrap();
-        tokio::time::timeout(WATCHDOG, registry.deregister(1, "test-model", "default"))
-            .await
-            .expect("deregistration did not finish")
-            .unwrap();
-        let stopped_before_return = gate.listener_exited();
-
-        gate.release_and_wait_for_exit().await;
-
-        assert_rank_gone(&indexer, false).await;
-        assert!(stopped_before_return);
-        registry.root_cancel_token.cancel();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pause_resume_deregister_while_batch_in_flight() {
-        let rank0 = TestPublisher::bind();
-        let (registry, indexer, mut gate, _others) =
-            registry_with_parked_listener(1, false, &rank0, None).await;
-
-        registry.pause_listener(1, 0).unwrap();
-        registry.resume_listener(1, 0).await.unwrap();
-        tokio::time::timeout(WATCHDOG, registry.deregister(1, "test-model", "default"))
-            .await
-            .expect("deregistration did not finish")
-            .unwrap();
-        let stopped_before_return = gate.listener_exited();
-
-        gate.release_and_wait_for_exit().await;
-
-        assert_rank_gone(&indexer, false).await;
-        assert!(stopped_before_return);
         registry.root_cancel_token.cancel();
     }
 
