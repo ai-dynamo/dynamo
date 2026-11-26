@@ -18,6 +18,7 @@ use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 
 use super::mooncake_lower_tier::derive_kvcr_layer;
+use super::mooncake_recurrent::{CheckpointPolicy, derive_checkpoint_layer};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +211,11 @@ pub(crate) enum WorkerTraceEntry {
         /// Published by the worker's KVCR cache owner rather than the worker itself.
         cache_owner: bool,
     },
+    /// A change to a hybrid worker's complete checkpoints.
+    Checkpoint {
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    },
 }
 
 /// A timestamped entry in a worker's benchmark trace, used to replay requests
@@ -262,6 +268,9 @@ pub(crate) struct MooncakeTraceTotals {
     pub(crate) cpu_tier: HostTierTotals,
     /// KVCR's DRAM tier, owned by the worker's KVCR cache owner.
     pub(crate) kvcr: HostTierTotals,
+    /// A hybrid worker's checkpoint stream, on every tier: one event per checkpoint change. The
+    /// live memberships are the checkpoints on device at the end.
+    pub(crate) checkpoints: HostTierTotals,
 }
 
 impl MooncakeTraceTotals {
@@ -292,6 +301,7 @@ impl MooncakeTraceTotals {
             removed_blocks: self.removed_blocks * factor,
             cpu_tier: self.cpu_tier.expanded(factor),
             kvcr: self.kvcr.expanded(factor),
+            checkpoints: self.checkpoints.expanded(factor),
         }
     }
 
@@ -418,6 +428,19 @@ impl MergedMooncakeBenchmark {
             block_size: self.block_size,
         })
     }
+
+    pub(crate) fn with_checkpoint_layer(self, policy: CheckpointPolicy) -> Self {
+        let worker_traces = self
+            .worker_traces
+            .into_inner()
+            .into_iter()
+            .map(|timeline| derive_checkpoint_layer(timeline, policy))
+            .collect();
+        Self {
+            worker_traces: WorkerTimelines::new(worker_traces),
+            block_size: self.block_size,
+        }
+    }
 }
 
 pub(crate) fn prepare_scaled_benchmark(
@@ -438,6 +461,7 @@ pub(crate) fn prepare_scaled_benchmark(
     for timeline in worker_traces.iter() {
         let mut cpu_tier_live = HashSet::new();
         let mut kvcr_live = HashSet::new();
+        let mut checkpoints_live = HashSet::new();
         for entry in timeline {
             match &entry.entry {
                 WorkerTraceEntry::Request(hashes) => {
@@ -481,10 +505,37 @@ pub(crate) fn prepare_scaled_benchmark(
                     }
                     KvCacheEventData::Cleared => totals.cleared_events += 1,
                 },
+                WorkerTraceEntry::Checkpoint {
+                    event,
+                    storage_tier,
+                } => {
+                    let counted = storage_tier.is_gpu();
+                    match &event.data {
+                        KvCacheEventData::Stored(store) => {
+                            totals.checkpoints.stored_events += 1;
+                            totals.checkpoints.stored_blocks += store.blocks.len();
+                            if counted {
+                                checkpoints_live
+                                    .extend(store.blocks.iter().map(|block| block.block_hash.0));
+                            }
+                        }
+                        KvCacheEventData::Removed(remove) => {
+                            totals.checkpoints.removed_events += 1;
+                            totals.checkpoints.removed_blocks += remove.block_hashes.len();
+                            if counted {
+                                for hash in &remove.block_hashes {
+                                    checkpoints_live.remove(&hash.0);
+                                }
+                            }
+                        }
+                        KvCacheEventData::Cleared => {}
+                    }
+                }
             }
         }
         totals.cpu_tier.live_memberships += cpu_tier_live.len();
         totals.kvcr.live_memberships += kvcr_live.len();
+        totals.checkpoints.live_memberships += checkpoints_live.len();
     }
 
     PreparedMooncakeBenchmark {

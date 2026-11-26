@@ -48,9 +48,27 @@ is not advertised. State-agent publication does not yet negotiate this capabilit
 and rejects the option explicitly.
 
 The upstream vLLM checkpoint payload stays small: one checkpoint hash and no
-copied token range. Dynamo adds the expected recurrent-group count and block
-alignment to its internal event tag. GPU reuse requires GPU checkpoints; offload
-reuse requires all recurrent groups at a common checkpoint in the restoring tier.
+copied token range. Dynamo adds the block alignment to its internal event tag.
+GPU reuse requires GPU checkpoints; offload reuse requires a checkpoint in the
+restoring tier, which the worker publishes only once all recurrent groups hold
+their state there.
 Only published checkpoint events create presence: reaching an attention boundary
 does not imply an SSM checkpoint was retained, including during decode under
 sparse checkpoint-retention policies.
+
+Predict-on-route is the one place where the router assumes a checkpoint before
+its event arrives. With `--router-predicted-ttl-secs` set, a routing decision
+predicts that the chosen hybrid worker will keep a checkpoint at the last full
+block of the prompt it was routed, for that TTL. A repeat or a continuation of
+that prompt is then credited up to that block. A request that shares only a
+shorter prefix is not, and neither is a query answered by a remote indexer.
+
+The router records checkpoint membership when events arrive. During an
+attention lookup it checks those memberships at each matched logical block; it
+does not scan backward through every boundary for each worker. The original
+attention matches remain available while a feasible GPU checkpoint seeds the
+continuous host, disk, and external-tier walks. After those walks and prediction
+merges, one evaluator selects the final resume boundary and splits credit across
+the tiers. Transfer hints also require a checkpoint belonging to their exact
+source and restoring tier. Remote replies carry device resume caps so a caller's
+prediction overlay cannot restore rejected hybrid credit.

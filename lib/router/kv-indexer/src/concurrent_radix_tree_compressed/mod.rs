@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     AnchorRef, AnchorTask, EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError,
-    MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
+    MatchDetails, MatchObserver, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::prelude::*;
 

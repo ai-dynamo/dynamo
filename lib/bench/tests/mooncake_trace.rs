@@ -11,6 +11,9 @@ mod mooncake_lower_tier;
 #[allow(dead_code)]
 #[path = "../kv_router/mooncake_open_loop.rs"]
 mod mooncake_open_loop;
+#[allow(dead_code)]
+#[path = "../kv_router/mooncake_recurrent.rs"]
+mod mooncake_recurrent;
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -34,8 +37,8 @@ use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::routing::TokensWithHashes;
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::host::{
-    ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, OverlapScores,
-    PruneConfig, ThreadPoolIndexer,
+    ConcurrentRadixTreeCompressed, Indexer, KvIndexerInterface, KvIndexerMetrics,
+    LowerTierIndexers, OverlapScores, PruneConfig, ThreadPoolIndexer,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
@@ -45,9 +48,10 @@ use dynamo_mocker::replay::{
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
-    MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
-    prepare_open_loop_trial, run_open_loop,
+    MooncakeOperationPayload, OpenLoopConfig, OpenLoopResult, PreparedMooncakeCorpus, RouterRun,
+    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop,
 };
+use mooncake_recurrent::CheckpointPolicy;
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, PreparedMooncakeBenchmark, WorkerTraceEntry,
     merge_worker_traces, prepare_scaled_benchmark,
@@ -1075,6 +1079,7 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
         "concurrent-radix-tree-compressed",
         indexer,
         None,
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
@@ -1233,6 +1238,7 @@ async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Res
         "concurrent-radix-tree-compressed",
         indexer,
         Some(LowerTierRun::crtc(2, BLOCK_SIZE, None, true)),
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
@@ -1264,6 +1270,160 @@ async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Res
     );
     assert_eq!(lower.kvcr_indexed_memberships, lower.kvcr.live_memberships);
     assert!(lower.query_service.max_ns > 0);
+    Ok(())
+}
+
+#[test]
+fn checkpoint_layer_follows_store_ends_and_removals() -> anyhow::Result<()> {
+    // Stores [1, 2, 3] and [4] put checkpoints on 3 and 4. Removing 3 takes its checkpoint;
+    // removing 2 takes none.
+    let device = |event_id: u64, data: KvCacheEventData, timestamp_us: u64| ReplayTimedKvEvent {
+        event: KvCacheEvent {
+            event_id,
+            data,
+            dp_rank: 0,
+        },
+        storage_tier: StorageTier::Device,
+        timestamp_us,
+    };
+    let stored = |hashes: &[u64]| host_store(0, None, 0, hashes, 0).event.data;
+    let removed = |hash: u64| {
+        KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(hash)],
+        })
+    };
+    let artifacts = vec![ReplayWorkerArtifacts {
+        requests: Vec::new(),
+        output_signals: Vec::new(),
+        kv_events: vec![
+            device(0, stored(&[1, 2, 3]), 10),
+            device(1, stored(&[4]), 20),
+            device(2, removed(3), 30),
+            device(3, removed(2), 40),
+        ],
+    }];
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?
+        .with_checkpoint_layer(CheckpointPolicy::StoreEnd);
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+
+    let checkpoints: Vec<(u64, bool)> = prepared
+        .worker_traces
+        .iter()
+        .next()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Checkpoint {
+                event,
+                storage_tier,
+            } if storage_tier.is_gpu() => Some(match &event.data {
+                KvCacheEventData::Stored(store) => (store.blocks[0].block_hash.0, true),
+                KvCacheEventData::Removed(remove) => (remove.block_hashes[0].0, false),
+                KvCacheEventData::Cleared => unreachable!(),
+            }),
+            _ => None,
+        })
+        .collect();
+    // One event per checkpoint change, as a worker publishes them.
+    assert_eq!(checkpoints, vec![(3, true), (4, true), (3, false)]);
+    let totals = prepared.totals.checkpoints;
+    assert_eq!(
+        (
+            totals.stored_events,
+            totals.removed_events,
+            totals.live_memberships
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        prepared.totals.events(),
+        4,
+        "checkpoint events stay out of the device totals"
+    );
+    Ok(())
+}
+
+/// The smoke replay through the router's lookup, with dense workers or hybrid ones.
+async fn routed_open_loop(policy: Option<CheckpointPolicy>) -> anyhow::Result<OpenLoopResult> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, 2, 42)?;
+    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let mut merged = merge_worker_traces(artifacts, BLOCK_SIZE)?;
+    if let Some(policy) = policy {
+        merged = merged.with_checkpoint_layer(policy);
+    }
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+    let corpus = prepare_mooncake_corpus(prepared, 1)?;
+    let trial = prepare_open_loop_trial(corpus, 2)?;
+    let indexer = Arc::new(ThreadPoolIndexer::new(
+        ConcurrentRadixTreeCompressed::new(),
+        2,
+        BLOCK_SIZE,
+    ));
+    let router = RouterRun {
+        indexer: Indexer::Concurrent {
+            primary: Arc::clone(&indexer),
+            lower_tier: LowerTierIndexers::new(2, BLOCK_SIZE),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        },
+        retain_kv_transfer_chain: false,
+        hybrid: policy.is_some(),
+    };
+    run_open_loop(
+        "concurrent-radix-tree-compressed",
+        indexer,
+        None,
+        Some(router),
+        trial,
+        OpenLoopConfig {
+            query_lanes: 2,
+            issuer_threads: 3,
+            spin_us: 50,
+            issue_lag_diagnostic_threshold_us: 250,
+            pre_run_quiescence_ms: 0,
+            issuer_cpus: Vec::new(),
+            query_issuer_cpu: None,
+            backend_cpus: Vec::new(),
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_hybrid_open_loop_credits_only_checkpointed_prefixes() -> anyhow::Result<()> {
+    // Dense workers are credited their attention match. Hybrid workers are credited up to a
+    // checkpoint, so with no checkpoint they are credited nothing.
+    for (policy, credited) in [
+        (None, true),
+        (Some(CheckpointPolicy::None), false),
+        (Some(CheckpointPolicy::StoreEnd), true),
+        (Some(CheckpointPolicy::EveryBlock), true),
+    ] {
+        let result = routed_open_loop(policy).await?;
+        assert!(
+            result.failure_reasons.is_empty(),
+            "{policy:?}: {:?}",
+            result.failure_reasons
+        );
+        let router = result
+            .router_lookup
+            .expect("a routed run reports its lookups");
+        assert_eq!(router.device_blocks > 0, credited, "{policy:?}");
+        assert_eq!(router.device_hit_queries > 0, credited, "{policy:?}");
+        let published = router
+            .checkpoints
+            .is_some_and(|checkpoints| checkpoints.stored_events > 0);
+        assert_eq!(
+            published,
+            matches!(
+                policy,
+                Some(CheckpointPolicy::StoreEnd | CheckpointPolicy::EveryBlock)
+            ),
+            "{policy:?}"
+        );
+    }
     Ok(())
 }
 
