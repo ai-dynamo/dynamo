@@ -40,9 +40,17 @@ are planned at the router.
 
 ## Backend
 
-Backend admission control supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
-its own gate, including separate prefill and decode workers in a disaggregated deployment. All
-endpoints of a worker share its gate.
+Backend admission control covers token-based workers: Dynamo Python workers, including unified
+backend `LLMEngine` workers, and the vLLM, SGLang, TensorRT-LLM, and LPX sidecars. Each of these
+workers has its own gate, including separate prefill and decode workers in a disaggregated
+deployment. All endpoints of a worker share its gate.
+
+> [!NOTE]
+> **Workers built on a unified backend
+> [`RawEngine`](../../../advanced-customizations/writing-custom-backends/writing-unified-backends.md)
+> have no admission gate.** This includes Python `DiffusionEngine` workers and the Triton sidecar.
+> These workers do not read the [settings below](#configuration), send requests straight to the
+> engine, and do not expose the `dynamo_backend_admission_*` metrics.
 
 ### Request Flow
 
@@ -70,9 +78,10 @@ flowchart LR
     E -->|"Request finishes"| F["Request capacity available"]
 ```
 
-Waiting ends at the first generated token or completion, whichever comes first, for every worker.
-A request can complete without generating a token. Once waiting ends, the request still counts toward
-the engine request limit until its response stream ends. Interim metadata does not end the wait.
+Waiting ends at the first generated token or completion, whichever comes first, for every worker
+role. A request can complete without generating a token. Once waiting ends, the request still counts
+toward the engine request limit until its response stream ends. Interim metadata does not end the
+wait.
 
 Cancelled queued requests are removed and free their queue space. Requests that finish, fail, or are
 cancelled at the engine free their remaining capacity. The gate does not preempt engine work or
@@ -101,8 +110,9 @@ apply to the whole worker.
 > **Backend admission control is disabled by default.** To enable it, apply the
 > [recommended starting limits](#best-practices), then tune them to your traffic shape and SLOs.
 
-Set these on the backend worker. All values apply **per DP rank**; the worker's total capacity is the
-combined capacity of its ranks. Restart the worker to change a setting.
+Set these on a gated backend worker (see [Backend](#backend)). All values apply **per DP rank**;
+the worker's total capacity is the combined capacity of its ranks. Restart the worker to change a
+setting.
 
 | Setting | Environment variable | Also configured by | Default |
 |---|---|---|---|
@@ -115,7 +125,8 @@ disables queueing, so requests that cannot enter immediately are rejected.
 
 Setting either engine limit enables admission control. An engine limit left unset stays unlimited, but
 the gate still reports its occupancy. With both engine limits unset, the gate is disabled: requests pass
-straight to the engine, and existing engine and transport behavior governs them.
+straight to the engine, and existing engine and transport behavior governs them. On a `RawEngine`
+worker, these settings have no effect, and the worker does not check the queue limit at startup.
 
 An explicit `--engine-request-limit` takes precedence over environment variables. Each canonical
 variable takes precedence over its alias. Invalid environment values log a warning and fall back to
@@ -190,8 +201,8 @@ requests across ranks, so it cannot provide a per-rank sizing estimate.
 
 ### Metrics
 
-Each worker exposes the following metrics. In the **Labels** column, `dp_rank` is the rank ID, such as
-`"4"`, or `"unspecified"` for unranked requests.
+Each gated worker exposes the following metrics; `RawEngine` workers do not. In the **Labels**
+column, `dp_rank` is the rank ID, such as `"4"`, or `"unspecified"` for unranked requests.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
