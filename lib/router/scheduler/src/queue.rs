@@ -127,7 +127,10 @@ impl QueuedRequest {
 }
 
 /// The view a dispatch gate is shown of `request` at the head of the `policy_class` queue,
-/// queued at `queued_at`. The queue builds each head through it.
+/// queued at `queued_at`. The queue builds each head through it. `host` exports it for one
+/// caller outside this crate, the `plugins::testing` harness of `dynamo-kv-router`, so that
+/// a gate's test sees the head the queue builds; [`classify_inputs`] is exported for the
+/// same harness. A routing host builds no head.
 pub fn dispatch_head_of<'a>(
     request: &'a SchedulingRequest,
     policy_class: &'a str,
