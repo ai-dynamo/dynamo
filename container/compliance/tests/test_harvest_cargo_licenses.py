@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(10),  # each case runs the helper once, in well under 1s
+]
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "harvest_cargo_licenses.sh"
 _SHELLS = [s for s in ("sh", "bash") if shutil.which(s)]
