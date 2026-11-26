@@ -349,6 +349,9 @@ impl DirectEngineHost {
         engine: Arc<dyn LLMEngine>,
         config: &WorkerConfig,
     ) -> Result<HostedEngine, ProbeError> {
+        // As the sidecar `Worker` checks: the engines are `LLMEngine`s, and only
+        // the token pipeline's requests have a direct dispatch to reach them.
+        validate_llm_model_input(config.model_input).map_err(ProbeError::NotRegistered)?;
         let records = match engine.start(self.instance_id).await {
             Ok(engine_config) => self
                 .discovery_records(&engine, config, &engine_config)
@@ -515,9 +518,6 @@ impl DirectEngineHost {
         config: &WorkerConfig,
         engine_config: &EngineConfig,
     ) -> Result<(DiscoveryInstance, DiscoveryInstance), DynamoError> {
-        // As the sidecar `Worker` checks: the engines are `LLMEngine`s, and only
-        // the token pipeline's requests have a direct dispatch to reach them.
-        validate_llm_model_input(config.model_input)?;
         let mut config = config.clone();
         if config.model_name.is_empty() {
             config.model_name = engine_config.model.clone();
@@ -1604,7 +1604,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), dispatch.stopped())
             .await
             .expect("a rejected engine must not be probed again");
-        assert_eq!(state.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
         drt.shutdown();
     }
 
