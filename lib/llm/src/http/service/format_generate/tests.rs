@@ -23,7 +23,7 @@ fn forwarded_router_metadata_reaches_the_tracker_and_leaves_the_payload() {
     let tracker = Arc::new(RequestTracker::new());
     let inflight = state.metrics_clone().create_inflight_guard(
         "model",
-        super::super::metrics::Endpoint::Generate,
+        dynamo_http_server::metrics::Endpoint::Generate,
         false,
         "router-metadata-test",
     );

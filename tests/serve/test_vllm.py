@@ -974,6 +974,18 @@ vllm_configs = {
     ),
 }
 
+# The embedding worker pool depends on vLLM internals; check it post-merge so a
+# vLLM change that breaks it fails main's CI without adding PR CI time.
+vllm_configs["embedding_agg_multiprocess"] = dataclasses.replace(
+    vllm_configs["embedding_agg"],
+    name="embedding_agg_multiprocess",
+    script_args=["--embedding-worker-processes", "2"],
+    marks=[
+        mark for mark in vllm_configs["embedding_agg"].marks if mark.name != "pre_merge"
+    ]
+    + [pytest.mark.post_merge],
+)
+
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):

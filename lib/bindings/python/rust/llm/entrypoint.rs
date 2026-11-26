@@ -71,7 +71,7 @@ fn apply_deprecated_overlap_score_weight(
     apply_deprecated_overlap_score_weight_override(value, overlap_score_credit, prefill_load_scale);
 }
 
-#[pyclass(eq, eq_int)]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 #[repr(i32)]
 pub enum EngineType {
@@ -80,7 +80,7 @@ pub enum EngineType {
     Mocker = 3,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Default, Clone, Debug)]
 pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
@@ -92,7 +92,7 @@ impl KvRouterConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AisPerfConfig {
     config: serde_json::Value,
@@ -116,7 +116,7 @@ pub(super) fn normalize_ais_perf_config(
     let canonical = py
         .import("aisim_core.sdk")?
         .getattr("ForwardPassPerfModelConfig")?
-        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+        .call((), Some(mapping.cast::<pyo3::types::PyDict>()?))?;
     Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
 }
 
@@ -411,7 +411,7 @@ impl KvRouterConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
     #[pyo3(get, set)]
@@ -496,19 +496,19 @@ impl From<RouterConfig> for RsRouterConfig {
 /// Wrapper to hold Python callback and its TaskLocals for async execution
 #[derive(Clone)]
 struct PyEngineFactory {
-    callback: Arc<PyObject>,
+    callback: Arc<Py<PyAny>>,
     locals: Arc<TaskLocals>,
 }
 
 impl std::fmt::Debug for PyEngineFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PyEngineFactory")
-            .field("callback", &"<PyObject>")
+            .field("callback", &"<Py<PyAny>>")
             .finish()
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub(crate) struct EntrypointArgs {
     engine_type: EngineType,
@@ -569,7 +569,7 @@ impl EntrypointArgs {
         is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
-        chat_engine_factory: Option<PyObject>,
+        chat_engine_factory: Option<Py<PyAny>>,
         ais_perf_config: Option<AisPerfConfig>,
         tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
@@ -712,7 +712,7 @@ impl EntrypointArgs {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub(crate) struct EngineConfig {
     inner: RsEngineConfig,
@@ -805,7 +805,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
             Box::pin(async move {
                 let runtime_config = card.runtime_config.clone();
                 // Acquire GIL to call Python callback and convert coroutine to future
-                let py_future = Python::with_gil(|py| {
+                let py_future = Python::attach(|py| {
                     let py_instance_id =
                         Py::new(py, crate::ModelCardInstanceId { inner: instance_id }).map_err(
                             |e| anyhow::anyhow!("Failed to create Python ModelCardInstanceId: {e}"),
@@ -836,7 +836,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     .map_err(|e| anyhow::anyhow!("chat_engine_factory callback failed: {}", e))?;
 
                 // Extract PythonAsyncEngine from the Python result and wrap in Arc
-                let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {
+                let engine: OpenAIChatCompletionsStreamingEngine = Python::attach(|py| {
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
@@ -869,7 +869,7 @@ async fn select_engine(
                 .ais_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
+                    Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -886,7 +886,7 @@ async fn select_engine(
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|config_json| {
-                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
+                        Python::attach(|py| Ok(mocker_config_from_json(py, &config_json)?))
                     })
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -902,7 +902,7 @@ async fn select_engine(
                 MockerConfig::default()
             };
 
-            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
+            mocker_args = Python::attach(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 
@@ -936,7 +936,7 @@ pub fn run_input<'p>(
     distributed_runtime: Bound<'p, super::DistributedRuntime>,
     input: &str,
     engine_config: EngineConfig,
-    frontend_route_extensions: Option<PyObject>,
+    frontend_route_extensions: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     // Route handlers see this same object as `ctx.runtime`.
@@ -988,7 +988,7 @@ pub fn run_input<'p>(
 }
 
 fn validate_router_plugin_input(
-    plugins: &dynamo_kv_router::plugins::RouterPlugins,
+    plugins: &dynamo_kv_router::plugins::host::RouterPlugins,
     input: &Input,
     is_kv_routing: bool,
 ) -> Result<(), &'static str> {
@@ -1013,7 +1013,7 @@ where
 #[cfg(test)]
 mod plugin_input_tests {
     use super::*;
-    use dynamo_kv_router::plugins::RouterPlugins;
+    use dynamo_kv_router::plugins::host::RouterPlugins;
 
     #[test]
     fn resolved_builtin_supports_stock_inputs_and_routing_modes() {

@@ -367,7 +367,7 @@ hash producer with the same algorithm, key, and key ID as the selector.
 
 Both `POST /select` and `POST /select_and_reserve` accept an optional `session_id` string. With `--session-affinity-ttl-secs` enabled, each model and routing group has its own binding table. `/select_and_reserve` binds a new session to the selected worker and holds its lease until the reservation is released or expires. The idle TTL starts when the last lease is released. `/select` can use an existing binding but does not create one.
 
-Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionContext::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
+Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it as `session_id()` on the value `WorkerSelectionRequest::info().session_context()` returns, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 The pending-selection cache keeps the session metadata, so a later `POST /reservations` for that selection binds the session to the booked worker, the same as `/select_and_reserve` does. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
 
@@ -392,7 +392,7 @@ present, the flat `session_id` field is ignored.
 }
 ```
 
-Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
+Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionRequest::info().session_context()`.
 
 The optional `agent_headers` map carries upstream-captured header names and ordered lists of string values to the policy's `SessionContext.agent_headers()` accessor. Both selection endpoints preserve these values without interpreting them. Supply the map in the request body; the selection API does not extract coding-agent metadata from its own HTTP headers.
 

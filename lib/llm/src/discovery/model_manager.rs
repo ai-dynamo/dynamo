@@ -13,6 +13,7 @@ use std::{
 use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
+use dynamo_http_server::load::ModelLoadView;
 use dynamo_kv_hints::KvTransferEnforcement;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
@@ -148,12 +149,6 @@ type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, Lora
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
-}
-
-pub(crate) struct CommittedModelView {
-    pub(crate) name: String,
-    pub(crate) is_ready: bool,
-    pub(crate) aliases: Vec<String>,
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -466,7 +461,7 @@ impl ModelManager {
     }
 
     /// Committed primary models with their aliases, sorted by name.
-    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+    pub(crate) fn committed_model_views(&self) -> Vec<ModelLoadView> {
         let catalog = self.catalog.load();
         let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
         for (alias, primary) in catalog.aliases.iter() {
@@ -482,7 +477,7 @@ impl ModelManager {
             .map(|(name, model)| {
                 let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
                 aliases.sort_unstable();
-                CommittedModelView {
+                ModelLoadView {
                     name: name.clone(),
                     is_ready: model.is_ready_to_serve(),
                     aliases,
@@ -1606,6 +1601,19 @@ impl ModelManager {
         Err(SystemOneSelectionError::NotFound)
     }
 
+    /// Largest log-probability count a request to `model` (a served name or
+    /// an alias) may ask for. The OpenAI limit for a model that is not
+    /// registered.
+    pub fn max_logprobs(&self, model: &str) -> u8 {
+        let catalog = self.catalog.load();
+        let canonical = catalog.aliases.get(model).map_or(model, String::as_str);
+        catalog
+            .models
+            .get(canonical)
+            .map(|model| model.max_logprobs())
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -2508,14 +2516,31 @@ impl ModelManager {
             &effective_kv_router_config,
             index_inputs,
         );
-        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
-            Some(
-                self.get_or_create_kv_source_membership_watch(&endpoint)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        // A frontend that dials its engines itself reaches them through the
+        // runtime's direct dispatch; they publish KV events on their own sockets
+        // and have no event-plane KV sources to track. Direct mode requires
+        // process-local discovery, so it never sees sidecar workers and one
+        // answer per router is enough. A router that wants no events keeps the
+        // runtime ingress, which then subscribes to nothing.
+        let has_direct_kv_events = endpoint
+            .drt()
+            .direct_dispatch::<
+                crate::protocols::common::preprocessor::PreprocessedRequest,
+                crate::protocols::Annotated<
+                    crate::protocols::common::llm_backend::LLMEngineOutput,
+                >,
+            >()
+            .is_some()
+            && kv_event_source_requirement.should_subscribe();
+        let kv_source_membership =
+            if !has_direct_kv_events && kv_event_source_requirement.should_subscribe() {
+                Some(
+                    self.get_or_create_kv_source_membership_watch(&endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
         let runtime_model_name = model_name.clone();
         let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
@@ -2536,6 +2561,7 @@ impl ModelManager {
                 .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
+            has_direct_kv_events,
         )
         .await?;
 
@@ -3729,6 +3755,28 @@ mod tests {
     }
 
     #[test]
+    fn max_logprobs_follows_the_published_limit_through_aliases() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use crate::protocols::openai::validate::MAX_TOP_LOGPROBS;
+
+        let mm = ModelManager::new();
+        assert_eq!(mm.max_logprobs("llama"), MAX_TOP_LOGPROBS);
+
+        let mut card = ModelDeploymentCard::default();
+        card.runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+        let mut worker_set = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
+        worker_set.chat_engine = Some(make_chat_engine());
+        assert!(mm.add_worker_set("llama", "ns1", worker_set));
+        assert!(mm.register_alias("llama-alias", "llama"));
+
+        assert_eq!(mm.max_logprobs("llama"), 32);
+        assert_eq!(mm.max_logprobs("llama-alias"), 32);
+        assert_eq!(mm.max_logprobs("other"), MAX_TOP_LOGPROBS);
+    }
+
+    #[test]
     fn committed_model_views_collapse_aliases_onto_the_primary() {
         let mm = ModelManager::new();
         let worker_set = Arc::new(make_worker_set("ns1", "abc"));
@@ -3759,7 +3807,7 @@ mod tests {
 
     #[test]
     fn alias_requests_publish_frontend_load_under_the_primary_model() {
-        use crate::http::service::metrics::{Endpoint, Metrics};
+        use dynamo_http_server::metrics::{Endpoint, Metrics};
 
         let mm = ModelManager::new();
         let worker_set = Arc::new(make_worker_set("ns1", "abc"));

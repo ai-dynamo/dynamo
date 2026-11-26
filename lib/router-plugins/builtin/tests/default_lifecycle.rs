@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::HashMap;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_kv_router::services::indexer::backend::test_util::flush;
 use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder, local_selection_core,
 };
 use dynamo_router_policies::{default_factory, default_registry, register};
+use dynamo_scheduler::host::RoutingConstraints;
 use dynamo_scheduler::host::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
 };
@@ -73,7 +75,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
@@ -96,7 +98,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
@@ -146,7 +148,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -156,7 +158,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     impl WorkerScorer for FailOnce {
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -171,7 +173,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     impl WorkerPicker for First {
         fn pick(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(0)
@@ -186,10 +188,9 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         1,
         Default::default(),
         SelectionCacheConfig::default(),
-        Arc::new(|config, role, _| {
+        Arc::new(|context| {
             WorkerSelectionPolicy::new(
-                config.clone(),
-                role.default_selector_label(),
+                context.worker_type().default_selector_label(),
                 vec![Box::new(FailOnce(AtomicBool::new(true)))],
                 Box::new(First),
             )
@@ -202,7 +203,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         .unwrap();
     assert!(matches!(
         partition.scheduler().policy_control().get().await,
-        Err(dynamo_kv_router::plugins::worker_selection::RuntimePolicyError::Unsupported)
+        Err(RuntimePolicyError::Unsupported)
     ));
     let error = core
         .select_and_reserve(reserve_request("request"))
