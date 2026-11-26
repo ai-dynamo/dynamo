@@ -2643,7 +2643,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "dynamo-protocols 10.0.1",
- "dynamo-structural-tag 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2660,11 +2660,11 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.10.11"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4#f4fe89926bc0a525a0bc6f62cd836d00d7267dd4"
+version = "0.10.3"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=47a0827ba31965c22e4cc2ba853055cf62040be8#47a0827ba31965c22e4cc2ba853055cf62040be8"
 dependencies = [
  "anyhow",
- "dynamo-structural-tag 0.1.2 (git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4)",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -3052,18 +3052,6 @@ name = "dynamo-structural-tag"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8350d3089f5f140c6f8dfcdbdf77b2c1e97b0bcc1b67b4d32a06a41426ea7085"
-dependencies = [
- "anyhow",
- "jsonschema",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dynamo-structural-tag"
-version = "0.1.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4#f4fe89926bc0a525a0bc6f62cd836d00d7267dd4"
 dependencies = [
  "anyhow",
  "jsonschema",

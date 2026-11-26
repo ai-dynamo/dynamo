@@ -120,8 +120,8 @@ dynamo-parsers = { version = "=11.0.11" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-# Draft: switch back to the crates.io release once UnifiedFamily is published.
-dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates", rev = "f4fe89926bc0a525a0bc6f62cd836d00d7267dd4" }
+# Draft: keep the 0.10.3 parser behavior while testing the unpublished registry API.
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates", rev = "47a0827ba31965c22e4cc2ba853055cf62040be8" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.8.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.8.0" }
 
