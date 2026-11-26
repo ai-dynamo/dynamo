@@ -74,6 +74,8 @@ COPY --from=dynamo deploy/inference-gateway/sidecar/ deploy/inference-gateway/si
 
 # Compliance: emits the CycloneDX SBOM for /epp in the build step below.
 COPY --from=dynamo container/compliance/cargo_sbom.py /tmp/cargo_sbom.py
+# Compliance: harvests crate license texts inside the registry cache mount below.
+COPY --from=dynamo container/compliance/harvest_cargo_licenses.sh /tmp/harvest_cargo_licenses.sh
 
 # Build the binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
@@ -95,16 +97,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
         --package dynamo-ext-proc \
         --target "$RUST_TARGET" \
         --output /sbom-rust-epp.cdx.json && \
-    mkdir -p /rust-licenses && \
-    find "${CARGO_HOME:-/usr/local/cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
-    | while IFS= read -r crate; do \
-        dest="/rust-licenses/$(basename "$crate")"; \
-        for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
-            [ -e "$lf" ] || continue; \
-            mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
-        done; \
-    done; \
-    echo "epp rust license harvest: $(find /rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files" && \
+    sh /tmp/harvest_cargo_licenses.sh --policy best-effort --out /rust-licenses \
+        "${CARGO_HOME:-/usr/local/cargo}/registry/src" && \
     if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "dynamo-ext-proc" || true; fi
 
 # =============================================================================
