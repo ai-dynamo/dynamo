@@ -30,9 +30,10 @@ use dynamo_parsers_v2::create_tool_parser_for_family;
 use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser};
 
 #[cfg(test)]
+use super::unified_parser::create_unified_parser_for_family;
+#[cfg(test)]
 use dynamo_parsers_v2::{
     UnifiedEvent, UnifiedParserEvent, UnifiedParserExt, UnifiedParserStartingState,
-    create_unified_parser_for_family,
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
@@ -130,16 +131,18 @@ fn validate_parser_version_for_mode(
     };
 
     if version == ParserVersion::Auto {
-        // Beam needs both selectors for its rendering, stop-token and reasoning handling.
-        let beam = crate::preprocessor::structural_tag::is_beam_parser;
-        if beam(tool_call_parser) != beam(reasoning_parser) {
-            anyhow::bail!(
-                "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser} / {reasoning_parser})",
-                env_llm::DYN_PARSER_VERSION,
-                tool_call_parser = selector_value(tool_call_parser),
-                reasoning_parser = selector_value(reasoning_parser),
-            );
-        }
+        dynamo_parsers_v2::validate_auto_unified_pair_in(
+            &super::unified_parser::PARSER_REGISTRY,
+            tool_call_parser,
+            reasoning_parser,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{error}; got {} / {}",
+                selector_value(tool_call_parser),
+                selector_value(reasoning_parser),
+            )
+        })?;
     }
     match version {
         ParserVersion::Auto
@@ -207,9 +210,27 @@ pub(crate) fn supports_family(family: &str) -> bool {
     v2_family(family).is_some()
 }
 
-/// Selectable unified parser names, including those of loaded parser plugins.
-pub fn unified_family_names() -> Vec<&'static str> {
+/// Selectable names in the linked unified parser registry.
+pub fn unified_family_names() -> &'static [&'static str] {
     super::unified_parser::family_names()
+}
+
+/// Describe the active parser registry without constructing parser state.
+pub fn parser_registry_json() -> serde_json::Result<String> {
+    let parsers = super::unified_parser::PARSER_REGISTRY
+        .iter()
+        .map(|entry| {
+            let mut descriptor = serde_json::to_value(&entry.descriptor)?;
+            descriptor["source"] = if entry.is_vendor() {
+                "vendor"
+            } else {
+                "builtin"
+            }
+            .into();
+            Ok(descriptor)
+        })
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    serde_json::to_string(&serde_json::json!({ "parsers": parsers }))
 }
 
 /// Resolve the configured family through the shared generation and pair policy.

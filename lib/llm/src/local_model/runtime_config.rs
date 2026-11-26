@@ -519,10 +519,11 @@ impl Default for ModelRuntimeConfig {
 impl ModelRuntimeConfig {
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
-        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        crate::protocols::openai::chat_completions::unified_parser::configured_registration(
             self.tool_call_parser.as_deref(),
             self.reasoning_parser.as_deref(),
-        ) == Some("muse_spark")
+        )
+        .is_some_and(|entry| entry.descriptor.preserve_message_phases)
     }
 
     /// Normalize older wire fields into the current policy and project it back for older readers
@@ -707,7 +708,7 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         let mut supported = get_available_tool_parsers();
         // Unified parser names live outside the v1 registry; normalize the union
         // for a stable error message.
-        supported.extend(unified_family_names());
+        supported.extend_from_slice(unified_family_names());
         supported.sort_unstable();
         supported.dedup();
         if !supported.contains(&parser) {
@@ -1573,7 +1574,7 @@ mod tests {
         };
 
         // Every v2 or unified parser must remain valid at registration.
-        for &parser in V2_FAMILIES.iter().chain(&unified_family_names()) {
+        for &parser in V2_FAMILIES.iter().chain(unified_family_names()) {
             assert!(validate(parser).is_ok(), "{parser} must be supported");
         }
         assert!(validate("").is_ok());

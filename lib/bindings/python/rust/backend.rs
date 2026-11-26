@@ -529,9 +529,6 @@ impl WorkerConfig {
                 custom_jinja_template: custom_jinja_template.map(PathBuf::from),
                 tool_call_parser,
                 reasoning_parser,
-                // Python workers load `--tool-parser-plugin` into this process's
-                // registry while they parse their arguments.
-                parser_plugins: Vec::new(),
                 default_thinking_mode,
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,

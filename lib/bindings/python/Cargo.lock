@@ -2601,7 +2601,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "11.0.13"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2625,7 +2625,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.10.9"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2662,7 +2662,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "10.0.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2738,7 +2738,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "10.5.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3013,7 +3013,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "anyhow",
  "jsonschema",
@@ -3025,7 +3025,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "4.3.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=649e9b769cb9f979e5026a2c0626858ce1fdf442#649e9b769cb9f979e5026a2c0626858ce1fdf442"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1740dd8a919168a67ea6da86f07ca3745e3631ff#1740dd8a919168a67ea6da86f07ca3745e3631ff"
 dependencies = [
  "aho-corasick",
  "anyhow",

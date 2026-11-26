@@ -10,10 +10,6 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
-from dynamo.common.parser_plugins import (
-    add_parser_plugin_argument,
-    load_parser_plugin_paths,
-)
 from dynamo.router.args import (
     DynamoRouterArgGroup,
     DynamoRouterConfig,
@@ -38,7 +34,6 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     scheduler_interval_seconds: float
     model_name: Optional[str] = None
     model_path: Optional[str] = None
-    tool_parser_plugin: list[str]
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     publish_sglang_generate: bool = False
@@ -226,7 +221,6 @@ class ThunderAgentArgGroup(ArgGroup):
             "is set.",
             arg_type=str,
         )
-        add_parser_plugin_argument(g)
         add_negatable_bool_argument(
             g,
             flag_name="--publish-sglang-generate",
@@ -246,8 +240,6 @@ def parse_args(argv: Optional[list[str]] = None) -> ThunderAgentRouterConfig:
     )
     ThunderAgentArgGroup().add_arguments(parser)
     args = parser.parse_args(argv)
-    # register_model validates the parser names against the registry plugins extend.
-    load_parser_plugin_paths(args.tool_parser_plugin)
     config = ThunderAgentRouterConfig.from_cli_args(args)
     config.validate()
     return config

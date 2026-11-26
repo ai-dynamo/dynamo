@@ -32,10 +32,6 @@ import uvloop
 from dynamo._core import get_parser_registry_json
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
-from dynamo.common.parser_plugins import (
-    add_parser_plugin_argument,
-    load_parser_plugin_paths,
-)
 from dynamo.llm import (
     AisPerfConfig,
     EngineType,
@@ -302,17 +298,13 @@ def parse_args() -> (
     )
 
     FrontendArgGroup().add_arguments(parser)
-    add_parser_plugin_argument(parser)
     parser.add_argument(
         "--list-parsers",
         action="store_true",
-        help="Print the parser registry (built-in parsers and loaded "
-        "--tool-parser-plugin libraries) as JSON and exit.",
+        help="Print the linked parser registry as JSON and exit.",
     )
 
     args, unknown = parser.parse_known_args()
-    # Plugins register before any model card names their parsers.
-    load_parser_plugin_paths(args.tool_parser_plugin)
     if args.list_parsers:
         if unknown:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")

@@ -596,7 +596,7 @@ async def parse_args(args: list[str]) -> Config:
     Raises:
         SystemExit: If arguments are invalid or incompatible.
     """
-    runtime_argspec = DynamoRuntimeArgGroup(args)
+    runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_sglang_argspec = DynamoSGLangArgGroup()
 
     parser = argparse.ArgumentParser(

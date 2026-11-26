@@ -191,7 +191,7 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
 
 def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
     """Split Dynamo and vLLM arguments while preserving the original model source."""
-    dynamo_runtime_argspec = DynamoRuntimeArgGroup(argv)
+    dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
     parser = argparse.ArgumentParser(

@@ -164,7 +164,13 @@ impl OpenAIPreprocessor {
         // `N.0`) or the answer — so forced choices are enforced and the response keeps
         // its reasoning. Dynamo only decides when it applies (`beam_turn_grammar_constraint`)
         // and from which channel the rendered prompt leaves open.
-        let beam_constraint = if self.is_beam() {
+        let turn_builder = unified_parser::configured_registration(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        )
+        .filter(|entry| entry.descriptor.guidance.whole_turn)
+        .and_then(|entry| entry.descriptor.structural_tag_builder);
+        let beam_constraint = if turn_builder.is_some() {
             beam_turn_grammar_constraint(request)
         } else {
             GuidedToolConstraint::None
@@ -206,7 +212,9 @@ impl OpenAIPreprocessor {
         // the first token that loses the reasoning and the channel structure.
         if !is_forced_tool_choice && beam_constraint.frames_structured_answer() {
             if let Some(schema) = request.get_guided_json()
-                && let Some(structural_tag) = beam_turn_structural_tag(
+                && let Some(builder) = turn_builder
+                && let Some(structural_tag) = whole_turn_structural_tag(
+                    builder,
                     tools,
                     &parser_tool_choice,
                     request.inner.parallel_tool_calls,
@@ -241,13 +249,16 @@ impl OpenAIPreprocessor {
             beam_constraint,
             GuidedToolConstraint::BeamTurnGrammar { .. }
         ) {
-            if let Some(structural_tag) = beam_turn_structural_tag(
-                tools,
-                &parser_tool_choice,
-                request.inner.parallel_tool_calls,
-                prompt_prefill.beam_channel,
-                None,
-            ) {
+            if let Some(builder) = turn_builder
+                && let Some(structural_tag) = whole_turn_structural_tag(
+                    builder,
+                    tools,
+                    &parser_tool_choice,
+                    request.inner.parallel_tool_calls,
+                    prompt_prefill.beam_channel,
+                    None,
+                )
+            {
                 install_structural_tag(common_request, structural_tag);
                 return Ok(beam_constraint);
             }
@@ -675,7 +686,29 @@ fn beam_turn_grammar_enabled() -> bool {
 /// `answer_schema`, holding the answer in the final channel to that JSON schema. `None`
 /// where the grammar derives nothing (see
 /// `dynamo_parsers_v2::structural_tag::builders::beam`).
+#[cfg(test)]
 fn beam_turn_structural_tag(
+    tools: &[ChatCompletionTool],
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+    prompt_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
+    answer_schema: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let builder = unified_parser::registration(unified_parser::BEAM_UNIFIED_FAMILY)?
+        .descriptor
+        .structural_tag_builder?;
+    whole_turn_structural_tag(
+        builder,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        prompt_channel,
+        answer_schema,
+    )
+}
+
+fn whole_turn_structural_tag(
+    builder: &dynamo_parsers_v2::structural_tag::StructuralTagBuilder,
     tools: &[ChatCompletionTool],
     tool_choice: &ToolChoice,
     parallel_tool_calls: Option<bool>,
@@ -686,9 +719,6 @@ fn beam_turn_structural_tag(
     use dynamo_parsers_v2::structural_tag::{
         PromptChannel, StructuralTagContext, StructuralTagSchemaMode, StructuralTagToolChoice,
     };
-    let builder = dynamo_parsers_v2::structural_tag_builder_for_family(
-        crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-    )?;
     let v2_tools: Vec<dynamo_parsers_v2::Tool> = tools
         .iter()
         .map(|tool| dynamo_parsers_v2::Tool {
@@ -723,7 +753,7 @@ fn beam_turn_structural_tag(
     match builder.build_turn(&context, channel) {
         Ok(tag) => tag,
         Err(error) => {
-            tracing::warn!(%error, "Beam turn grammar failed to build; leaving the turn unconstrained");
+            tracing::warn!(%error, "Whole-turn grammar failed to build; leaving the turn unconstrained");
             None
         }
     }
@@ -941,7 +971,9 @@ fn forced_choice_keeps_native_format(
     requires_native_tool_call_format(tool_call_parser, tool_choice)
         || requires_native_tool_call_format(reasoning_parser, tool_choice)
         || (matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))
-            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY))
+            && unified_family
+                .and_then(unified_parser::registration)
+                .is_some_and(|entry| entry.descriptor.guidance.mistral_lark))
 }
 
 /// Whether either configured parser selects the Muse Spark native grammar.
@@ -949,10 +981,11 @@ pub(super) fn uses_muse_spark_parser(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> bool {
-    crate::protocols::openai::chat_completions::unified_parser::configured_family(
+    crate::protocols::openai::chat_completions::unified_parser::configured_registration(
         tool_call_parser,
         reasoning_parser,
-    ) == Some("muse_spark")
+    )
+    .is_some_and(|entry| entry.descriptor.preserve_message_phases)
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.

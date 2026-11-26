@@ -107,7 +107,7 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
     )
 
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    DynamoRuntimeArgGroup(argv).add_arguments(parser)
+    DynamoRuntimeArgGroup().add_arguments(parser)
     args, _ = parser.parse_known_args(argv)
     config = DynamoRuntimeConfig.from_cli_args(args)
     config.validate()

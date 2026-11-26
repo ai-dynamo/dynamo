@@ -1,11 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
-
 use dynamo_llm::preprocessor::structural_tag_parser_names;
-use dynamo_llm::protocols::openai::chat_completions::parser_plugin;
-use dynamo_llm::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use dynamo_llm::protocols::openai::chat_completions::tool_parser_v2::{
+    parser_registry_json, unified_family_names,
+};
 use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 use pyo3::prelude::*;
@@ -13,7 +12,7 @@ use pyo3::prelude::*;
 /// Expose unified families and aliases in both selector lists, including families
 /// absent from the V1 registry. Model validation checks the selected generation.
 fn with_unified_families(mut names: Vec<&'static str>) -> Vec<&'static str> {
-    for name in unified_family_names() {
+    for &name in unified_family_names() {
         if !names.contains(&name) {
             names.push(name);
         }
@@ -39,25 +38,15 @@ pub fn get_structural_tag_parser_names() -> Vec<&'static str> {
     structural_tag_parser_names()
 }
 
-/// Load native parser plugin libraries into this process's parser registry.
-///
-/// Call before parser names are listed or validated. Returns the families the
-/// libraries registered; a repeated path is loaded once.
+/// The effective linked parser registry as a JSON string.
 #[pyfunction]
-pub fn load_parser_plugins(paths: Vec<PathBuf>) -> PyResult<Vec<String>> {
-    parser_plugin::load_parser_plugins(&paths)
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(format!("{error:#}")))
-}
-
-/// The effective parser registry (built-ins and loaded plugins) as a JSON string.
-#[pyfunction]
-pub fn get_parser_registry_json() -> String {
-    parser_plugin::parser_registry_json().to_string()
+pub fn get_parser_registry_json() -> PyResult<String> {
+    parser_registry_json()
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Add parsers module functions to the Python module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(load_parser_plugins, m)?)?;
     m.add_function(wrap_pyfunction!(get_parser_registry_json, m)?)?;
     m.add_function(wrap_pyfunction!(get_tool_parser_names, m)?)?;
     m.add_function(wrap_pyfunction!(get_reasoning_parser_names, m)?)?;

@@ -221,7 +221,6 @@ impl DiscoveredEngine {
             reasoning_parser: common
                 .dyn_reasoning_parser
                 .or_else(|| self.reasoning_parser.clone()),
-            parser_plugins: common.tool_parser_plugin,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             // An LPX engine publishes no KV events and hosts no KV indexer, so
             // this starts only the router's load and first-token publishers.

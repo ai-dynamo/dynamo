@@ -683,14 +683,8 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
   Environment variable: `DYN_KV_CACHE_BLOCK_SIZE`
 </ParamField>
 
-<ParamField path="--tool-parser-plugin" type="path" default="null">
-  Native Rust parser plugin to load before any model is admitted. Repeat the flag to load several. A worker whose model card names a plugin parser needs the frontend to load the same library. See [Native parser plugins](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#native-parser-plugins).
-
-  CLI-only. There is no environment variable.
-</ParamField>
-
 <ParamField path="--list-parsers" type="boolean" default="false">
-  Print the parser registry, built-in parsers and any `--tool-parser-plugin` libraries, as JSON and exit without starting the server.
+  Print the statically linked parser registry as JSON and exit without starting the server.
 
   CLI-only. There is no environment variable.
 </ParamField>

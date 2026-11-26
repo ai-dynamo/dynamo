@@ -36,21 +36,8 @@ def test_list_parsers_prints_the_registry_and_exits():
 
 
 @pytest.mark.timeout(30)
-def test_list_parsers_rejects_a_missing_plugin():
-    result = _frontend("--list-parsers", "--tool-parser-plugin", "/nonexistent/lib.so")
-
-    assert result.returncode != 0
-    # The loader's own error, not argparse rejecting flags it does not know.
-    assert (
-        "error: --tool-parser-plugin: parser plugin /nonexistent/lib.so"
-        in result.stderr
-    )
-    assert "Unknown arguments" not in result.stderr
-
-
-@pytest.mark.timeout(30)
 def test_list_parsers_rejects_a_mistyped_flag():
-    result = _frontend("--list-parsers", "--tool-parser-plugn", "./fixture.so")
+    result = _frontend("--list-parsers", "--list-parsr")
 
     assert result.returncode != 0
-    assert "unrecognized arguments: --tool-parser-plugn ./fixture.so" in result.stderr
+    assert "unrecognized arguments: --list-parsr" in result.stderr

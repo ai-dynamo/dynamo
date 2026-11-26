@@ -836,10 +836,13 @@ impl DeltaAggregator {
                             }
                         }
                     }
-                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                    Err(error)
+                        if super::unified_parser::registration(family)
+                            .is_some_and(|entry| entry.descriptor.errors_are_fatal) =>
+                    {
                         return Err(DynamoError::builder()
                             .class(dynamo_runtime::error::ErrorClass::Internal)
-                            .diagnostic(format!("Invalid Beam tool output: {error}"))
+                            .diagnostic(format!("Invalid {family} tool output: {error}"))
                             .build());
                     }
                     Err(error) => {

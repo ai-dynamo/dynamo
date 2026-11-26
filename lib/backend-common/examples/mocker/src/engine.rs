@@ -282,7 +282,6 @@ impl MockerBackend {
             served_model_name: Some(args.model_name),
             tool_call_parser,
             reasoning_parser,
-            parser_plugins: args.common.tool_parser_plugin,
             exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
             structural_tag,
             ..Default::default()

@@ -45,17 +45,8 @@ def get_structural_tag_parser_names() -> list[str]:
     """Get selectable parser names with registered structural-tag builders."""
     ...
 
-def load_parser_plugins(paths: List[str]) -> list[str]:
-    """Load native Rust parser plugin libraries into this process's parser registry.
-
-    Call before parser names are listed or validated. Returns the parser families
-    the libraries registered. Raises ValueError when a library cannot be loaded,
-    declares an unsupported capability, or claims a name that is already registered.
-    """
-    ...
-
 def get_parser_registry_json() -> str:
-    """The effective parser registry, built-in parsers and loaded plugins, as JSON."""
+    """The effective linked parser registry as JSON."""
     ...
 
 def run_kv_indexer(args: List[str]) -> None:

@@ -260,42 +260,6 @@ pub struct PromptReasoningPrefill {
     beam_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
 }
 
-// Harmony suppresses generated body text if initialization restores a non-assistant role.
-fn gpt_oss_assistant_prefill(prompt: &str, header_search_end: Option<usize>) -> Option<&str> {
-    const START: &str = "<|start|>";
-    let start = prompt[..header_search_end.unwrap_or(prompt.len())].rfind(START)?;
-    let prefix = &prompt[start..];
-    let role = prefix[START.len()..]
-        .split(|c: char| c.is_whitespace() || c == '<')
-        .next()?;
-    (role == "assistant").then_some(prefix)
-}
-
-fn gpt_oss_prefill_has_reasoning(message: &str) -> bool {
-    message
-        .split_once("<|message|>")
-        .is_some_and(|(header, _)| {
-            header
-                .split_once("<|channel|>")
-                .is_some_and(|(_, channel)| channel.split_whitespace().next() == Some("analysis"))
-        })
-}
-
-/// Plain response/reasoning text does not affect parser continuation state.
-fn compact_gpt_oss_prefill(prefix: &str) -> &str {
-    const MESSAGE: &str = "<|message|>";
-    let Some((header, body)) = prefix.split_once(MESSAGE) else {
-        return prefix;
-    };
-    if header.contains("to=") || body.contains("<|") {
-        // Recipient-owned bodies may contain a partially consumed JSON argument.
-        // TODO: Validate argument prefixes incrementally so released bytes no longer
-        // need to remain in the shared per-request continuation body.
-        return prefix;
-    }
-    &prefix[..header.len() + MESSAGE.len()]
-}
-
 impl std::fmt::Debug for PromptReasoningPrefill {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -329,27 +293,6 @@ impl From<bool> for PromptReasoningPrefill {
             response: false,
             beam_channel: None,
         }
-    }
-}
-
-/// Which Beam channel the rendered prompt leaves open after its last `<|start|>assistant`
-/// header: `None` for the bare header slot (the model opens its own channel), `Reasoning`
-/// for an open analysis message, `Response` for an open final message (assistant prefill).
-fn beam_prompt_open_channel(prompt: &str) -> Option<dynamo_parsers_v2::UnifiedParserStartingState> {
-    use dynamo_parsers_v2::UnifiedParserStartingState as State;
-    let tail = &prompt[prompt.rfind("<|start|>assistant")? + "<|start|>assistant".len()..];
-    let open = |opener: &str, closers: &[&str]| {
-        tail.rfind(opener).is_some_and(|at| {
-            let rest = &tail[at + opener.len()..];
-            !closers.iter().any(|closer| rest.contains(closer))
-        })
-    };
-    if open("<|channel|>final<|message|>", &["<|return|>", "<|end|>"]) {
-        Some(State::Response)
-    } else if open("<|channel|>analysis<|message|>", &["<|end|>"]) {
-        Some(State::Reasoning)
-    } else {
-        Some(State::None)
     }
 }
 
@@ -2664,7 +2607,9 @@ impl OpenAIPreprocessor {
 
     /// Families verified to have no supported non-thinking generation mode.
     fn reasoning_is_mandatory(family: Option<&str>) -> bool {
-        matches!(family, Some("beam"))
+        family
+            .and_then(crate::protocols::openai::chat_completions::unified_parser::registration)
+            .is_some_and(|entry| entry.descriptor.reasoning_mandatory)
     }
 
     /// Validate the client's effective reasoning toggle against the model's policy.
@@ -3186,7 +3131,9 @@ impl OpenAIPreprocessor {
                 mdc.runtime_config.reasoning_parser.as_deref(),
             )?;
         let mistral_tool_call_grammar = if mdc.model_type.supports_chat()
-            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY)
+            && unified_family
+                .and_then(unified_parser::registration)
+                .is_some_and(|entry| entry.descriptor.guidance.mistral_lark)
         {
             match mistral_grammar::MistralToolCallGrammar::for_model(
                 &mdc.runtime_config,
@@ -3207,14 +3154,13 @@ impl OpenAIPreprocessor {
         };
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
+            // TODO(frontend-crates): expose GLM47's legacy tool-argument JSON-object
+            // normalization policy in UnifiedParserDescriptor.
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
         let beam_route = mdc.model_type.supports_chat()
-            && crate::protocols::openai::chat_completions::unified_parser::selected_family(
-                tool_call_parser.as_deref(),
-                mdc.runtime_config.reasoning_parser.as_deref(),
-            ) == Some(
-                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-            );
+            && unified_family
+                .and_then(unified_parser::registration)
+                .is_some_and(|entry| entry.descriptor.guidance.whole_turn);
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -4303,7 +4249,8 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             formatted_prompt.as_ref().map(RenderedPrompt::as_str),
             header_search_end,
-        );
+        )
+        .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
         // tail cannot establish the template's reasoning state: keep the
@@ -6273,7 +6220,8 @@ impl OpenAIPreprocessor {
             let prefill = policy.resolve_stream_prefill(
                 family,
                 unified_parser::StreamPrefill {
-                    starting_state: if *family == unified_parser::BEAM_UNIFIED_FAMILY
+                    starting_state: if unified_parser::registration(family)
+                        .is_some_and(|entry| entry.descriptor.guidance.whole_turn)
                         && (prompt_prefill.response || self.beam_output_is_bare_guidance(request))
                     {
                         dynamo_parsers_v2::UnifiedParserStartingState::Response
@@ -7565,11 +7513,13 @@ impl OpenAIPreprocessor {
     ) -> Result<bool> {
         if let Some(family) = unified_family {
             // The unified grammar owns token preservation, including native tool markers.
-            return dynamo_parsers_v2::create_unified_parser_for_family(family, &[])
+            use crate::protocols::openai::chat_completions::unified_parser::registration;
+            return registration(family)
+                .ok_or_else(|| anyhow::anyhow!("no unified parser for family '{family}'"))
+                .and_then(|entry| entry.preserves_special_tokens())
                 .with_context(|| {
                     format!("Failed to resolve special-token requirements for {family}")
-                })
-                .map(|parser| parser.preserve_special_tokens());
+                });
         }
         // Parsers in this allow-list match against special tokens that the
         // tokenizer would otherwise strip when `skip_special_tokens=true`
@@ -7849,10 +7799,13 @@ impl OpenAIPreprocessor {
             }
             Some("muse" | "muse_glimmer") => prompt.ends_with("assistant to=self<|message|>"),
             Some("gpt_oss") => {
+                use dynamo_parsers_v2::unified::prefill::{
+                    gpt_oss_assistant_prefill, gpt_oss_prefill_has_reasoning,
+                };
                 gpt_oss_assistant_prefill(prompt, None).is_some_and(gpt_oss_prefill_has_reasoning)
             }
             Some("beam") => {
-                beam_prompt_open_channel(prompt)
+                dynamo_parsers_v2::unified::prefill::beam_prompt_open_channel(prompt)
                     == Some(dynamo_parsers_v2::UnifiedParserStartingState::Reasoning)
             }
             _ => prompt.ends_with("<think>"),
@@ -7864,12 +7817,16 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         formatted_prompt: Option<&str>,
     ) -> bool {
-        let parser = crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            tool_call_parser,
-            reasoning_parser,
+        use crate::protocols::openai::chat_completions::unified_parser;
+        unified_parser::configured_registration(tool_call_parser, reasoning_parser).map_or_else(
+            || Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt),
+            |entry| {
+                entry
+                    .descriptor
+                    .resolve_prompt(formatted_prompt, None)
+                    .explicit_reasoning
+            },
         )
-        .or(reasoning_parser);
-        Self::prompt_injected_reasoning_start(parser, formatted_prompt)
     }
 
     #[cfg(test)]
@@ -7884,6 +7841,7 @@ impl OpenAIPreprocessor {
             formatted_prompt,
             None,
         )
+        .expect("test prompt can be inspected")
     }
 
     fn prompt_reasoning_prefill_at_boundary(
@@ -7891,48 +7849,38 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         formatted_prompt: Option<&str>,
         header_search_end: Option<usize>,
-    ) -> PromptReasoningPrefill {
-        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            tool_call_parser,
-            reasoning_parser,
-        );
-        let assistant_prefill = (family == Some("gpt_oss"))
-            .then(|| {
-                formatted_prompt
-                    .and_then(|prompt| gpt_oss_assistant_prefill(prompt, header_search_end))
-            })
-            .flatten();
-        let unified = if family == Some("gpt_oss") {
-            assistant_prefill.is_some_and(gpt_oss_prefill_has_reasoning)
-        } else {
-            Self::prompt_injected_reasoning_start_for_parsers(
-                tool_call_parser,
-                reasoning_parser,
-                formatted_prompt,
-            )
-        };
+    ) -> anyhow::Result<PromptReasoningPrefill> {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        use dynamo_parsers_v2::UnifiedParserStartingState;
+
+        if let Some(entry) =
+            unified_parser::configured_registration(tool_call_parser, reasoning_parser)
+        {
+            let state = entry.inspect_prompt(formatted_prompt, header_search_end)?;
+            let legacy = if matches!(reasoning_parser, Some("muse" | "muse_glimmer")) {
+                // V1 uses Basic for Muse, whose prefill marker is <think>.
+                Self::prompt_injected_reasoning_start(None, formatted_prompt)
+            } else {
+                state.explicit_reasoning
+            };
+            return Ok(PromptReasoningPrefill {
+                legacy,
+                unified: state.reasoning,
+                unified_starting_state: state.starting_state,
+                prefix: state.prefix.map(Arc::from),
+                reasoning_closed_by_prompt: reasoning_parser.and(state.reasoning_closed),
+                response: state.channel == Some(UnifiedParserStartingState::Response),
+                beam_channel: state.channel,
+            });
+        }
+
+        let unified = Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt);
         let legacy = if matches!(reasoning_parser, Some("muse" | "muse_glimmer")) {
             // The legacy crate falls back to Basic for Muse, so only its generic
             // opener may seed reasoning. Native Muse prefill would swallow tool JSON.
             Self::prompt_injected_reasoning_start(None, formatted_prompt)
         } else {
             unified
-        };
-        let prefix = match family {
-            Some("gemma4") => {
-                const HEADER: &str = "<|channel>thought\n";
-                formatted_prompt.and_then(|raw| {
-                    ("<|channel>".len()..HEADER.len())
-                        .rev()
-                        .map(|end| &HEADER[..end])
-                        .find(|prefix| raw.ends_with(prefix))
-                        .map(Arc::from)
-                })
-            }
-            Some("gpt_oss") => {
-                assistant_prefill.map(|prefix| Arc::from(compact_gpt_oss_prefill(prefix)))
-            }
-            _ => None,
         };
         // MiniMax M3: the request's `thinking_mode` is what the client asked for;
         // the rendered prompt is what the model was told. A chat template that
@@ -7951,31 +7899,11 @@ impl OpenAIPreprocessor {
                 .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
                 .flatten()
         };
-        let beam_channel = (family
-            == Some(
-                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-            ))
-        .then(|| {
-            formatted_prompt
-                .map(str::trim_end)
-                .and_then(beam_prompt_open_channel)
-        })
-        .flatten();
-        let response =
-            beam_channel == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response);
-        PromptReasoningPrefill {
-            legacy,
-            unified: unified || family == Some("gemma4") && prefix.is_some(),
-            // A bare None state synthesizes an unfinished assistant header in ChoiceState.
-            unified_starting_state: (family == Some("gpt_oss")
-                && prefix.is_none()
-                && formatted_prompt.is_some_and(|prompt| prompt.contains("<|start|>")))
-            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
-            prefix,
+        Ok(PromptReasoningPrefill {
             reasoning_closed_by_prompt,
-            response,
-            beam_channel,
-        }
+            legacy,
+            ..unified.into()
+        })
     }
 
     fn prompt_injected_reasoning_ended_arg(
@@ -8043,27 +7971,22 @@ impl OpenAIPreprocessor {
         );
         // Unified owns both channels even when only a tool selector was configured.
         // The legacy split path retains its existing request-control behavior.
-        if let Some(family) = unified_family {
+        if let Some(entry) = unified_family
+            .and_then(crate::protocols::openai::chat_completions::unified_parser::registration)
+        {
+            use dynamo_parsers_v2::unified::ReasoningControl;
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
-            return match family {
-                // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
-                "gpt_oss" => false,
-                // Thinking controls govern generation; keep emitted GLM reasoning separate.
-                "glm47" => false,
-                "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
-                // Spark's template cannot disable reasoning, so keep generated
-                // reasoning separate instead of folding it into visible content.
-                // `muse_spark_open` resolves to the canonical `muse_spark` family here.
-                "muse_spark" => false,
-                "deepseek_v4" | "deepseek_v41" => {
+            let descriptor = &entry.descriptor;
+            return match descriptor.reasoning_control {
+                ReasoningControl::AlwaysParse => false,
+                ReasoningControl::OptInUnlessToolSelected => {
+                    thinking != Some(true)
+                        && !tool_parser.is_some_and(|selector| descriptor.accepts(selector))
+                }
+                ReasoningControl::DeepSeek => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
                 }
-                // Mistral output starts in content and only `[THINK]` opens
-                // reasoning; disabling would fold an emitted thought into `content`.
-                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY => {
-                    false
-                }
-                _ => thinking == Some(false),
+                ReasoningControl::Request => thinking == Some(false),
             };
         }
         Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
@@ -22539,23 +22462,27 @@ mod beam_route_tests {
         use dynamo_parsers_v2::UnifiedParserStartingState as State;
         const HISTORY: &str = "<|start|>user<|message|>q<|end|><|start|>assistant<|channel|>final<|message|>Hi<|return|><|start|>user<|message|>q2<|end|>";
         assert_eq!(
-            beam_prompt_open_channel(&format!("{HISTORY}<|start|>assistant")),
+            dynamo_parsers_v2::unified::prefill::beam_prompt_open_channel(&format!(
+                "{HISTORY}<|start|>assistant"
+            )),
             Some(State::None)
         );
         assert_eq!(
-            beam_prompt_open_channel(&format!(
+            dynamo_parsers_v2::unified::prefill::beam_prompt_open_channel(&format!(
                 "{HISTORY}<|start|>assistant<|channel|>analysis<|message|>Let me"
             )),
             Some(State::Reasoning)
         );
         assert_eq!(
-            beam_prompt_open_channel(&format!(
+            dynamo_parsers_v2::unified::prefill::beam_prompt_open_channel(&format!(
                 "{HISTORY}<|start|>assistant<|channel|>final<|message|>The planet is"
             )),
             Some(State::Response)
         );
         assert_eq!(
-            beam_prompt_open_channel("<|start|>user<|message|>q<|end|>"),
+            dynamo_parsers_v2::unified::prefill::beam_prompt_open_channel(
+                "<|start|>user<|message|>q<|end|>"
+            ),
             None
         );
 

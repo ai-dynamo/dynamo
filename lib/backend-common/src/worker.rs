@@ -184,9 +184,6 @@ pub struct WorkerConfig {
     pub tool_call_parser: Option<String>,
     /// Optional reasoning parser name written to model runtime metadata.
     pub reasoning_parser: Option<String>,
-    /// Native parser plugin libraries (`--tool-parser-plugin`) loaded before the
-    /// model is registered, so the parser names above may select their parsers.
-    pub parser_plugins: Vec<PathBuf>,
     /// Whether templates should omit tools when `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Whether this worker should keep an in-process KV indexer.
@@ -259,7 +256,6 @@ impl Default for WorkerConfig {
             custom_jinja_template: None,
             tool_call_parser: None,
             reasoning_parser: None,
-            parser_plugins: Vec::new(),
             exclude_tools_when_tool_choice_none: true,
             enable_local_indexer: true,
             enable_kv_routing: true,
@@ -2294,17 +2290,6 @@ async fn build_local_model(
 
     crate::topology::apply_topology_config(&mut rt_cfg).await?;
 
-    // Model setup validates the parser names against the registry plugins extend.
-    dynamo_llm::protocols::openai::chat_completions::parser_plugin::load_parser_plugins(
-        &config.parser_plugins,
-    )
-    .map_err(|e| {
-        err(
-            ErrorType::Backend(BackendError::InvalidArgument),
-            format!("--tool-parser-plugin: {e:#}"),
-        )
-    })?;
-
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
@@ -2808,27 +2793,6 @@ mod tests {
         )
         .await
         .expect("a weights-free cache must be enough to register");
-    }
-
-    #[tokio::test]
-    async fn build_local_model_rejects_a_parser_plugin_it_cannot_load() {
-        let config = WorkerConfig {
-            parser_plugins: vec!["/nonexistent/libparser.so".into()],
-            ..WorkerConfig::default()
-        };
-        let error = build_local_model(&config, &EngineConfig::default(), true, None)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::InvalidArgument)
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("--tool-parser-plugin: parser plugin /nonexistent/libparser.so"),
-            "{error}"
-        );
     }
 
     #[test]

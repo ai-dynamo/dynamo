@@ -69,13 +69,6 @@ pub struct CommonArgs {
     #[arg(long = "dyn-reasoning-parser", env = "DYN_REASONING_PARSER")]
     pub dyn_reasoning_parser: Option<String>,
 
-    /// Native Rust parser plugin (a shared library built against the
-    /// dynamo-parsers-v2 plugin SDK) to load before the model is registered, so
-    /// `--dyn-tool-call-parser` and `--dyn-reasoning-parser` can name its parsers.
-    /// Repeat to load several. The frontend needs the same library.
-    #[arg(long = "tool-parser-plugin", value_name = "PATH")]
-    pub tool_parser_plugin: Vec<PathBuf>,
-
     /// Exclude tools from the chat template when tool_choice is none.
     #[arg(
         long = "exclude-tools-when-tool-choice-none",

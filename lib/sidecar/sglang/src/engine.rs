@@ -198,7 +198,6 @@ impl SglangSidecarEngine {
             tool_call_parser: common
                 .dyn_tool_call_parser
                 .or_else(|| discovery.tool_call_parser.clone()),
-            parser_plugins: common.tool_parser_plugin,
             structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
