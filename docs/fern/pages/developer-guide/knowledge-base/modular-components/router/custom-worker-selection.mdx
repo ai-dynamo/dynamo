@@ -669,7 +669,7 @@ For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    RequestClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 
 struct InspectPrefixes;

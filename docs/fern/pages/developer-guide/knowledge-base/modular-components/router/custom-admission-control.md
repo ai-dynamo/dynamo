@@ -75,7 +75,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    RequestClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -243,7 +243,7 @@ A classifier reads workers through `WorkerCandidates`, the view a [worker-select
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    RequestClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 use dynamo_kv_router::plugins::WorkerInputs;
 
