@@ -13,6 +13,7 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
+use dynamo_bench::kv_router_common::issuer::validate_cpu_partition;
 use dynamo_bench::kv_router_common::replay::{
     generate_replay_artifacts, generate_replay_artifacts_with_args, host_offload_mock_engine_args,
 };
@@ -24,7 +25,7 @@ use dynamo_kv_indexer::host::{
 use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RouterRun, RunProvenance, parse_cpu_list,
-    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
+    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop,
 };
 use mooncake_recurrent::CheckpointPolicy;
 use mooncake_shared::{

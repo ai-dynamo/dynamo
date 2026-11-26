@@ -8,23 +8,26 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::plugins::worker_selection::selection_config::{SelectionConfig, SharedCacheType};
-use crate::plugins::worker_selection::selection_config::{
-    default_decode_active_request_weight, default_disk_cache_hit_weight,
-    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
-    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+use crate::plugins::worker_selection::config::{
+    WorkerSelectionConfig, WorkerSelectionPolicySelection,
 };
-use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionPolicySelection};
 use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::BlockHashOptions;
 use dynamo_router_protocol::WorkerType;
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 pub use dynamo_worker_selection::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
+pub use dynamo_worker_selection::{SelectionConfig, SharedCacheType};
 use dynamo_worker_selection::{
     default_conditional_disagg_eff_isl_ratio_threshold,
     default_conditional_disagg_eff_isl_threshold,
+};
+use dynamo_worker_selection::{
+    default_decode_active_request_weight, default_disk_cache_hit_weight,
+    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
+    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
 };
 
 pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
@@ -867,6 +870,17 @@ impl KvRouterConfig {
         Ok(())
     }
 
+    /// Apply the policy file's `router` settings for the last time: later
+    /// [`Self::apply_policy_config`] calls leave this config alone. For a caller that
+    /// overrides one of those settings and hands the config to code that applies again.
+    pub fn finalize_policy_config(&mut self) -> Result<(), String> {
+        self.apply_policy_config()?;
+        if let Some(policy) = self.policy_config_cache.get_mut() {
+            policy.drop_router_settings();
+        }
+        Ok(())
+    }
+
     fn loaded_policy_config(
         &self,
     ) -> Result<
@@ -904,10 +918,7 @@ impl KvRouterConfig {
     /// Return the custom worker-selection configuration from `router_policy_config`, if any.
     pub fn worker_selection_config(
         &self,
-    ) -> Result<
-        Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
-        super::policy_config::RouterPolicyConfigError,
-    > {
+    ) -> Result<Option<&WorkerSelectionConfig>, super::policy_config::RouterPolicyConfigError> {
         Ok(self
             .loaded_policy_config()?
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
@@ -917,7 +928,7 @@ impl KvRouterConfig {
     pub fn request_classifier_config(
         &self,
     ) -> Result<
-        Option<&crate::plugins::request_classifier::RequestClassifierConfig>,
+        Option<&crate::plugins::request_classifier::config::RequestClassifierConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self
@@ -1254,18 +1265,18 @@ impl From<&KvRouterConfig> for dynamo_kv_indexer::IndexerConfig {
 
 impl From<&KvRouterConfig> for SelectionConfig {
     fn from(config: &KvRouterConfig) -> Self {
-        Self {
-            overlap_score_credit: config.overlap_score_credit,
-            overlap_score_credit_decay: config.overlap_score_credit_decay,
-            prefill_load_scale: config.prefill_load_scale,
-            decode_active_request_weight: config.decode_active_request_weight,
-            host_cache_hit_weight: config.host_cache_hit_weight,
-            disk_cache_hit_weight: config.disk_cache_hit_weight,
-            router_temperature: config.router_temperature,
-            shared_cache_multiplier: config.shared_cache_multiplier,
-            shared_cache_type: config.shared_cache_type,
-            conditional_disagg_enabled: config.conditional_disagg_enabled,
-        }
+        // One builder per `SelectionConfig` field, in declaration order.
+        Self::default()
+            .with_overlap_score_credit(config.overlap_score_credit)
+            .with_overlap_score_credit_decay(config.overlap_score_credit_decay)
+            .with_prefill_load_scale(config.prefill_load_scale)
+            .with_decode_active_request_weight(config.decode_active_request_weight)
+            .with_host_cache_hit_weight(config.host_cache_hit_weight)
+            .with_disk_cache_hit_weight(config.disk_cache_hit_weight)
+            .with_router_temperature(config.router_temperature)
+            .with_shared_cache_multiplier(config.shared_cache_multiplier)
+            .with_shared_cache_type(config.shared_cache_type)
+            .with_conditional_disagg_enabled(config.conditional_disagg_enabled)
     }
 }
 
@@ -2618,6 +2629,34 @@ models:
                 );
             }
         }
+    }
+
+    #[test]
+    fn selection_config_carries_every_selection_field() {
+        let config = KvRouterConfig {
+            overlap_score_credit: 2.0,
+            overlap_score_credit_decay: 0.5,
+            prefill_load_scale: 3.0,
+            decode_active_request_weight: 4.0,
+            host_cache_hit_weight: 0.6,
+            disk_cache_hit_weight: 0.1,
+            router_temperature: 0.7,
+            shared_cache_multiplier: Some(0.4),
+            shared_cache_type: SharedCacheType::Hicache,
+            conditional_disagg_enabled: true,
+            ..Default::default()
+        };
+        let selection = SelectionConfig::from(&config);
+        assert_eq!(selection.overlap_score_credit(), 2.0);
+        assert_eq!(selection.overlap_score_credit_decay(), 0.5);
+        assert_eq!(selection.prefill_load_scale(), 3.0);
+        assert_eq!(selection.decode_active_request_weight(), 4.0);
+        assert_eq!(selection.host_cache_hit_weight(), 0.6);
+        assert_eq!(selection.disk_cache_hit_weight(), 0.1);
+        assert_eq!(selection.router_temperature(), 0.7);
+        assert_eq!(selection.shared_cache_multiplier(), Some(0.4));
+        assert_eq!(selection.shared_cache_type(), SharedCacheType::Hicache);
+        assert!(selection.conditional_disagg_enabled());
     }
 
     #[test]

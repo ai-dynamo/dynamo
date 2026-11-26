@@ -61,7 +61,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::http::service::metrics::RequestMetrics;
+use crate::discovery::RuntimeConfigWatch;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -83,6 +83,7 @@ use crate::protocols::common::preprocessor::{
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
+use dynamo_http_server::metrics::RequestMetrics;
 
 use dynamo_parsers::{
     ReasoningParser, ReasoningParserType, reasoning::ParserResult,
@@ -851,6 +852,26 @@ impl ReasoningUsageEstimator {
                 .values()
                 .fold(0u32, |sum, held| sum.saturating_add(*held));
             details.reasoning_tokens = Some(self.total.saturating_add(unsettled));
+        }
+    }
+}
+
+/// Tell the request classifier, if one left its handle on `tracker`, how each choice that
+/// finishes in `response` ended.
+fn record_reply_end(
+    tracker: &RequestTracker,
+    response: &Annotated<NvCreateChatCompletionStreamResponse>,
+) {
+    let finished = response
+        .data
+        .iter()
+        .flat_map(|data| &data.inner.choices)
+        .filter_map(|choice| choice.finish_reason);
+    for finish_reason in finished {
+        if let Some(progress) = tracker.classifier_progress() {
+            progress.record_reply_end(
+                finish_reason == dynamo_protocols::types::FinishReason::ToolCalls,
+            );
         }
     }
 }
@@ -2046,6 +2067,21 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+struct ResponseGrammarContext {
+    require_reasoning: bool,
+    tracker: Option<Arc<RequestTracker>>,
+}
+
+impl Default for ResponseGrammarContext {
+    fn default() -> Self {
+        // Without a preprocessed request, a conditional gate may still be active.
+        Self {
+            require_reasoning: true,
+            tracker: None,
+        }
+    }
+}
+
 struct EmbeddingTokenizerState {
     model_card: ModelDeploymentCard,
     with_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
@@ -2105,6 +2141,8 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// Resolve grammar timing against the selected worker during mixed-version serving.
+    runtime_configs: Option<RuntimeConfigWatch>,
     structural_tag_reasoning_boundary: structural_tag::ResolvedReasoningBoundary,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
@@ -3010,6 +3048,7 @@ impl OpenAIPreprocessor {
             Some(embedding_tokenizers),
             None,
             false,
+            None,
         )
     }
 
@@ -3018,7 +3057,7 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false, None)
     }
 
     pub fn new_with_parts(
@@ -3043,9 +3082,33 @@ impl OpenAIPreprocessor {
             None,
             speculative_prefill_cancel,
             true,
+            None,
         )
     }
 
+    /// Build a discovered-worker pipeline with per-worker grammar timing metadata.
+    pub fn new_with_parts_and_runtime_configs(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+            Some(runtime_configs),
+        )
+    }
+
+    /// Assemble preprocessing state for the requested OpenAI surface.
+    ///
+    /// Embedding and completion constructors skip chat-parser validation while
+    /// preserving the deployment card's identity and decode defaults.
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
@@ -3053,6 +3116,7 @@ impl OpenAIPreprocessor {
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
         validate_chat_parsers: bool,
+        runtime_configs: Option<RuntimeConfigWatch>,
     ) -> Result<Arc<Self>> {
         let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
         use crate::protocols::openai::chat_completions::unified_parser;
@@ -3472,6 +3536,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            runtime_configs,
             structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
@@ -6057,6 +6122,41 @@ impl OpenAIPreprocessor {
         Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
     }
 
+    /// Whether the worker contract proves that bare JSON starts in the answer phase.
+    ///
+    /// A request gate defers grammar activation only when `require_reasoning` is set.
+    /// Missing, malformed, or conflicting metadata is unknown and must keep parsing.
+    fn json_grammar_is_immediate(
+        config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+        require_reasoning: bool,
+    ) -> bool {
+        use crate::local_model::runtime_config::{
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+        };
+        let Ok(native_gate) = config
+            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+        else {
+            return false;
+        };
+        let Ok(request_gate) =
+            config.get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY)
+        else {
+            return false;
+        };
+        match (native_gate, request_gate) {
+            (Some(false), None) => true,
+            (None, Some(gate)) => !gate || !require_reasoning,
+            // Older workers, invalid or conflicting contracts cannot prove that
+            // JSON-shaped output is an answer rather than reasoning.
+            _ => false,
+        }
+    }
+
+    /// Parse a standalone response stream without final preprocessing context.
+    ///
+    /// Conditional worker gates are treated as active. Discovered pipelines use
+    /// the internal entry point with their effective gate state and request tracker.
     pub fn postprocessor_parsing_stream<S>(
         &self,
         stream: S,
@@ -6084,9 +6184,17 @@ impl OpenAIPreprocessor {
             prompt_injected_reasoning.into(),
             guided_tool_constraint,
             tool_processing_route,
+            ResponseGrammarContext {
+                require_reasoning: true,
+                tracker: None,
+            },
         )
     }
 
+    /// Apply the selected parser route using final request and worker grammar timing.
+    ///
+    /// Resolve the decode worker after its first semantic chunk, then apply shared
+    /// response policies after either native JSON pass-through or parsing.
     fn postprocessor_parsing_stream_with_constraint<S>(
         &self,
         stream: S,
@@ -6094,6 +6202,7 @@ impl OpenAIPreprocessor {
         prompt_injected_reasoning: PromptReasoningPrefill,
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
         tool_processing_route: ToolProcessingRoute,
+        grammar_context: ResponseGrammarContext,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
@@ -6101,6 +6210,10 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         use crate::protocols::openai::chat_completions::unified_parser;
+        let ResponseGrammarContext {
+            require_reasoning,
+            tracker,
+        } = grammar_context;
         let prompt_prefill = prompt_injected_reasoning;
         let prompt_injected_reasoning = prompt_prefill.for_route(&tool_processing_route);
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
@@ -6191,7 +6304,66 @@ impl OpenAIPreprocessor {
                         )
                 },
             );
-            let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
+            let family = *family;
+            let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
+            // Some models emit native tool calls without a separate tool constraint.
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = if policy.structured_response
+                && !tool_call_parsing_enabled
+                && matches!(
+                    guided_tool_constraint,
+                    crate::protocols::openai::GuidedToolConstraint::None
+                ) {
+                let runtime_configs = self.runtime_configs.clone();
+                // Only in-process, single-engine constructors have no worker watch.
+                let static_immediate = runtime_configs.is_none()
+                    && Self::json_grammar_is_immediate(&self.runtime_config, require_reasoning);
+                Box::pin(async_stream::stream! {
+                    let mut stream = Box::pin(stream);
+                    // Split routers report the actual worker on their first data
+                    // chunk. Forward leading metadata without waiting for output.
+                    let first = loop {
+                        let Some(chunk) = stream.next().await else { break None; };
+                        if chunk.is_error() {
+                            yield chunk;
+                            return;
+                        }
+                        let semantic = chunk.data.as_ref().is_some_and(|data| {
+                            data.inner.choices.iter().any(|choice| {
+                                choice.delta.content.is_some()
+                                    || choice.delta.reasoning_content.is_some()
+                                    || choice.delta.tool_calls.is_some()
+                                    || choice.finish_reason.is_some()
+                            })
+                        });
+                        if semantic { break Some(chunk); }
+                        yield chunk;
+                    };
+                    let immediate = runtime_configs.as_ref().map_or(static_immediate, |configs| {
+                        if configs.has_changed().is_err() { return false; }
+                        tracker.as_ref().and_then(|tracker| tracker.decode_worker_id())
+                            .and_then(|id| configs.borrow().get(&id).map(|config| {
+                                Self::json_grammar_is_immediate(config, require_reasoning)
+                            }))
+                            .unwrap_or(false)
+                    });
+                    let stream = stream::iter(first).chain(stream);
+                    let mut parsed: Pin<Box<dyn Stream<Item = _> + Send>> = if immediate {
+                        // A native grammar owns bare JSON from token zero. Model
+                        // parsers would reinterpret literal markers inside strings.
+                        Box::pin(stream)
+                    } else {
+                        Box::pin(unified_parser::apply_stream_with_policy(
+                            stream, tool_definitions, guided_tool_constraint, prefill,
+                            family, guided_tool_streaming, policy,
+                        ))
+                    };
+                    while let Some(chunk) = parsed.next().await {
+                        let terminal_error = chunk.is_error();
+                        yield chunk;
+                        if terminal_error { return; }
+                    }
+                })
+            } else {
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
@@ -6200,10 +6372,11 @@ impl OpenAIPreprocessor {
                     family,
                     guided_tool_streaming,
                     policy,
-                ));
+                ))
+            };
             return Ok(Self::apply_unified_response_policies(
                 unified,
-                Self::tool_call_parsing_enabled(request),
+                tool_call_parsing_enabled,
                 defer_reasoning_for_nonempty_content,
                 reasoning_disabled,
             ));
@@ -8955,8 +9128,10 @@ impl
         let trace_finish_reason_metadata =
             crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
+        let reply_tracker = tracker.clone();
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = tracker;
+        common_request.tracker = tracker.clone();
+        let require_reasoning = common_request.require_reasoning;
 
         // Capture media counts before `common_request` is moved into the context.
         let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
@@ -9007,7 +9182,19 @@ impl
             prompt_injected_reasoning,
             guided_tool_constraint,
             tool_processing_route,
+            ResponseGrammarContext {
+                require_reasoning,
+                tracker,
+            },
         )?;
+        // After tool-call parsing, which is what turns `stop` into `tool_calls`. The router
+        // leaves its handle before `next.generate` returns, so one check here is enough.
+        let reply_tracker = reply_tracker.filter(|tracker| tracker.classifier_progress().is_some());
+        let transformed_stream = edit::edit_items(transformed_stream, move |response| {
+            if let Some(tracker) = &reply_tracker {
+                record_reply_end(tracker, response);
+            }
+        });
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Request payload capture is a pass-through: every chunk reaches the HTTP
@@ -10430,6 +10617,7 @@ mod tests {
                             prefill.clone(),
                             constraint,
                             route,
+                            ResponseGrammarContext::default(),
                         )
                         .unwrap()
                         .collect::<Vec<_>>()
@@ -10698,6 +10886,7 @@ mod tests {
                 prefill,
                 constraint,
                 route,
+                ResponseGrammarContext::default(),
             )
             .unwrap()
             .collect::<Vec<_>>()
@@ -10942,6 +11131,7 @@ mod tests {
                         prefill,
                         constraint,
                         route,
+                        ResponseGrammarContext::default(),
                     )
                     .unwrap()
                     .collect::<Vec<_>>()
@@ -11181,6 +11371,7 @@ mod tests {
                                 preprocessor
                                     .tool_processing_route(&request, &constraint)
                                     .unwrap(),
+                                ResponseGrammarContext::default(),
                             )
                             .unwrap()
                             .collect::<Vec<_>>()
@@ -11255,6 +11446,7 @@ mod tests {
                     false.into(),
                     crate::protocols::openai::GuidedToolConstraint::None,
                     ToolProcessingRoute::Unified(unified_parser::KIMI_K2_UNIFIED_FAMILY),
+                    ResponseGrammarContext::default(),
                 )
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -11501,6 +11693,7 @@ mod tests {
                         prefill.clone(),
                         crate::protocols::openai::GuidedToolConstraint::None,
                         ToolProcessingRoute::Unified("gemma4"),
+                        ResponseGrammarContext::default(),
                     )
                     .unwrap()
                     .collect::<Vec<_>>()
@@ -11613,6 +11806,7 @@ mod tests {
                     false.into(),
                     constraint,
                     route,
+                    ResponseGrammarContext::default(),
                 )?;
             Ok(ResponseStream::new(Box::pin(parsed), context.context()))
         }
@@ -12289,7 +12483,8 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
-responses_tools: None,
+            responses_tools: None,
+            chat_template_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -12778,11 +12973,11 @@ responses_tools: None,
                 .message()
                 .contains("requires the v1 tool-call jail")
         );
-        match crate::http::service::error::http_action_for_error(dynamo_error) {
-            crate::http::service::error::ClientErrorAction::Respond { status, .. } => {
+        match dynamo_error::http::http_action_for_error(dynamo_error) {
+            dynamo_error::http::ClientErrorAction::Respond { status, .. } => {
                 assert_eq!(status.as_u16(), 400);
             }
-            crate::http::service::error::ClientErrorAction::NoDelivery => {
+            dynamo_error::http::ClientErrorAction::NoDelivery => {
                 panic!("invalid parser-route requests must return an HTTP response");
             }
         }
@@ -13325,6 +13520,46 @@ responses_tools: None,
         choice.delta.content = None;
         choice.finish_reason = Some(FinishReason::Stop);
         chunk
+    }
+
+    #[test]
+    fn a_tool_call_on_any_choice_marks_the_reply() {
+        fn chunk(
+            finish_reasons: &[Option<FinishReason>],
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut chunk = chat_stream_chunk(0, None);
+            let choices = &mut chunk.data.as_mut().unwrap().inner.choices;
+            let choice = choices.pop().unwrap();
+            choices.extend(
+                finish_reasons
+                    .iter()
+                    .zip(0..)
+                    .map(|(&finish_reason, index)| ChatChoiceStream {
+                        index,
+                        finish_reason,
+                        ..choice.clone()
+                    }),
+            );
+            chunk
+        }
+        fn recorded(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Option<bool> {
+            let (progress, updater) = dynamo_admission::host::request_progress(0);
+            let tracker = RequestTracker::new();
+            tracker.set_classifier_progress(updater);
+            for chunk in chunks {
+                record_reply_end(&tracker, chunk);
+            }
+            progress.reply_tool_call()
+        }
+        use FinishReason::{Stop, ToolCalls};
+
+        let both = chunk(&[Some(Stop), Some(ToolCalls)]);
+        assert_eq!(recorded(&[both]), Some(true));
+        // A choice that stops later does not clear it.
+        let then_stop = [chunk(&[Some(ToolCalls)]), chunk(&[Some(Stop)])];
+        assert_eq!(recorded(&then_stop), Some(true));
+        assert_eq!(recorded(&[chunk(&[Some(Stop)])]), Some(false));
+        assert_eq!(recorded(&[chunk(&[None])]), None);
     }
 
     fn glm47_stream_chunk(
@@ -16753,8 +16988,8 @@ responses_tools: None,
                 };
                 let error = error.downcast_ref::<DynamoError>().unwrap();
                 assert!(matches!(
-                    crate::http::service::error::http_action_for_error(error),
-                    crate::http::service::error::ClientErrorAction::Respond {
+                    dynamo_error::http::http_action_for_error(error),
+                    dynamo_error::http::ClientErrorAction::Respond {
                         status: axum::http::StatusCode::BAD_REQUEST,
                         ..
                     }
@@ -16933,6 +17168,95 @@ responses_tools: None,
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
+    /// Replies with one chunk that finishes with `stop`. Leaves a classifier handle on the
+    /// request's tracker as the router does at dispatch, and replaces it while the reply
+    /// streams as a retry's dispatch does.
+    struct RepliesWith {
+        text: &'static str,
+        classifier_progress: dynamo_admission::host::RequestProgressUpdater,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RepliesWith
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            let tracker = request.tracker.clone().unwrap();
+            tracker.set_classifier_progress(dynamo_admission::host::request_progress(0).1);
+            let classifier_progress = self.classifier_progress.clone();
+            let output = BackendOutput {
+                token_ids: vec![],
+                tokens: vec![],
+                text: Some(self.text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            };
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move {
+                    tracker.set_classifier_progress(classifier_progress);
+                    Annotated::from_data(output)
+                })),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_operator_tells_the_classifier_a_reply_ended_in_a_tool_call() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto",
+        }))
+        .unwrap();
+        let (progress, classifier_progress) = dynamo_admission::host::request_progress(0);
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(RepliesWith {
+            text: r#"<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>"#,
+            classifier_progress,
+        });
+
+        let mut stream =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                .await
+                .unwrap();
+        while stream.next().await.is_some() {}
+
+        // The worker finished with `stop`; only the tool-call parser makes that `tool_calls`.
+        assert_eq!(progress.reply_tool_call(), Some(true));
+    }
+
     /// Records dispatched requests, then fails before any output.
     #[derive(Default)]
     struct PromptRecordingBackend {
@@ -16986,10 +17310,10 @@ responses_tools: None,
             "model": "test-model", "input": [[1, 2, 3], [4, 5]],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::Embeddings,
+            dynamo_http_server::metrics::Endpoint::Embeddings,
             false,
             "",
         );
@@ -17007,8 +17331,8 @@ responses_tools: None,
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
     }
 
-    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
-        let view = crate::discovery::CommittedModelView {
+    fn awaiting_first_token_input_tokens(metrics: &dynamo_http_server::metrics::Metrics) -> u64 {
+        let view = dynamo_http_server::load::ModelLoadView {
             name: "test-model".to_string(),
             is_ready: true,
             aliases: Vec::new(),
@@ -17035,10 +17359,10 @@ responses_tools: None,
             "messages": [{"role": "user", "content": "What is the weather?"}],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::ChatCompletions,
+            dynamo_http_server::metrics::Endpoint::ChatCompletions,
             false,
             "",
         );
@@ -21329,6 +21653,417 @@ responses_tools: None,
             image,
             video(2)
         ]));
+    }
+    /// Retain raw metadata types so malformed contracts reach the production validator.
+    fn glm_json_timing_config(
+        native_gate: Option<serde_json::Value>,
+        request_gate: Option<serde_json::Value>,
+    ) -> crate::local_model::runtime_config::ModelRuntimeConfig {
+        use crate::local_model::runtime_config::{
+            ModelRuntimeConfig, TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+        };
+        let mut config = ModelRuntimeConfig::new();
+        config.reasoning_parser = Some("glm45".into());
+        config.tool_call_parser = Some("glm47".into());
+        for (key, value) in [
+            (
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                native_gate,
+            ),
+            (
+                TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+                request_gate,
+            ),
+        ] {
+            if let Some(value) = value {
+                config.set_engine_specific(key, value).unwrap();
+            }
+        }
+        config
+    }
+
+    /// Build independently releasable payload and terminal chunks for ordering checks.
+    fn glm_json_chunk(
+        text: &str,
+        terminal: bool,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content =
+            (!text.is_empty()).then(|| ChatCompletionMessageContent::Text(text.into()));
+        choice.finish_reason = terminal.then_some(FinishReason::Stop);
+        chunk
+    }
+
+    /// Workers sharing a model identity can advertise opposite grammar timing;
+    /// parser initialization must follow the actual decode worker.
+    #[tokio::test]
+    async fn glm_json_stream_uses_the_selected_worker_contract() {
+        use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+        use crate::protocols::openai::GuidedToolConstraint;
+        use std::time::Duration;
+
+        let native_immediate = || glm_json_timing_config(Some(serde_json::json!(false)), None);
+        let native_deferred = || glm_json_timing_config(Some(serde_json::json!(true)), None);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "stream": true,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": false},
+        }))
+        .unwrap();
+        enum Selection {
+            Config(Box<crate::local_model::runtime_config::ModelRuntimeConfig>),
+            MissingWorker,
+            MissingId,
+            MissingTracker,
+            ClosedWatch,
+        }
+        use Selection::*;
+        let with_config = |config| Config(Box::new(config));
+        // Each case specifies the actual worker contract, require_reasoning, and
+        // whether JSON may arrive before the reasoning boundary or terminal chunk.
+        let cases = [
+            (
+                "selected native immediate",
+                with_config(native_immediate()),
+                true,
+                true,
+            ),
+            (
+                "selected native deferred",
+                with_config(native_deferred()),
+                true,
+                false,
+            ),
+            ("selected worker absent", MissingWorker, true, false),
+            (
+                "selected metadata absent",
+                with_config(glm_json_timing_config(None, None)),
+                true,
+                false,
+            ),
+            (
+                "selected metadata malformed",
+                with_config(glm_json_timing_config(
+                    Some(serde_json::json!("false")),
+                    None,
+                )),
+                true,
+                false,
+            ),
+            (
+                "selected contracts conflict",
+                with_config(glm_json_timing_config(
+                    Some(serde_json::json!(false)),
+                    Some(serde_json::json!(true)),
+                )),
+                false,
+                false,
+            ),
+            ("watch closed", ClosedWatch, true, false),
+            ("worker id missing", MissingId, true, false),
+            ("tracker missing", MissingTracker, true, false),
+            (
+                "SGLang gate without reasoning",
+                with_config(glm_json_timing_config(None, Some(serde_json::json!(true)))),
+                false,
+                true,
+            ),
+            (
+                "SGLang gate with reasoning",
+                with_config(glm_json_timing_config(None, Some(serde_json::json!(true)))),
+                true,
+                false,
+            ),
+            (
+                "SGLang immediate",
+                with_config(glm_json_timing_config(None, Some(serde_json::json!(false)))),
+                true,
+                true,
+            ),
+        ];
+        for (name, selection, require_reasoning, immediate) in cases {
+            let closed = matches!(&selection, ClosedWatch);
+            let has_tracker = !matches!(&selection, MissingTracker);
+            let record_worker = !matches!(&selection, MissingId | MissingTracker);
+            let selected = match selection {
+                Config(config) => Some(*config),
+                MissingWorker => None,
+                _ => Some(native_immediate()),
+            };
+            let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+            // The representative model card deliberately advertises the opposite
+            // timing, so using it for a discovered worker breaks either expectation.
+            preprocessor.runtime_config = if immediate {
+                native_deferred()
+            } else {
+                native_immediate()
+            };
+            preprocessor.tool_call_parser = Some("glm47".into());
+            let mut configs = HashMap::from([(7, preprocessor.runtime_config.clone())]);
+            if let Some(config) = selected {
+                configs.insert(42, config);
+            }
+            let (watch_tx, watch_rx) = tokio::sync::watch::channel(configs);
+            let _watch_tx = (!closed).then_some(watch_tx);
+            preprocessor.runtime_configs = Some(watch_rx);
+            let tracker = has_tracker.then(|| Arc::new(RequestTracker::new()));
+            let upstream_tracker = tracker.clone();
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let input = rx.inspect(
+                move |chunk: &Annotated<NvCreateChatCompletionStreamResponse>| {
+                    let has_content = chunk.data.as_ref().is_some_and(|data| {
+                        data.inner
+                            .choices
+                            .iter()
+                            .any(|choice| choice.delta.content.is_some())
+                    });
+                    if record_worker
+                        && has_content
+                        && let Some(tracker) = &upstream_tracker
+                    {
+                        tracker.record_worker(42, None, WORKER_TYPE_DECODE);
+                    }
+                },
+            );
+            let output = preprocessor
+                .postprocessor_parsing_stream_with_constraint(
+                    input,
+                    &request,
+                    true.into(),
+                    GuidedToolConstraint::None,
+                    ToolProcessingRoute::Unified("glm47"),
+                    ResponseGrammarContext {
+                        require_reasoning,
+                        tracker,
+                    },
+                )
+                .unwrap();
+            tokio::pin!(output);
+            let mut observed = Vec::new();
+            // The worker is still unknown while processing this role-only chunk.
+            let mut role = chat_stream_chunk(0, Some(Role::Assistant));
+            role.data.as_mut().unwrap().inner.choices[0].delta.content = None;
+            tx.unbounded_send(role).unwrap();
+            let prefix = if immediate {
+                r#"{"answer":"hello"}"#
+            } else {
+                r#"{"plan":"check"}"#
+            };
+            tx.unbounded_send(glm_json_chunk(prefix, false)).unwrap();
+            if immediate {
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while gpt_oss_stream_text(&observed).0 != prefix {
+                        let chunk = output.next().await.expect("input remains open");
+                        if let Some(data) = &chunk.data {
+                            assert!(
+                                data.inner
+                                    .choices
+                                    .iter()
+                                    .all(|choice| choice.finish_reason.is_none()),
+                                "{name}"
+                            );
+                        }
+                        observed.push(chunk);
+                        let (content, reasoning) = gpt_oss_stream_text(&observed);
+                        assert!(prefix.starts_with(&content), "{name}: {content:?}");
+                        assert!(reasoning.is_empty(), "{name}: {reasoning:?}");
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("{name}: JSON must arrive before the terminal chunk"));
+            } else {
+                let pending = tokio::time::timeout(Duration::from_millis(50), async {
+                    loop {
+                        observed.push(output.next().await.expect("input remains open"));
+                        assert!(
+                            gpt_oss_stream_text(&observed).0.is_empty(),
+                            "{name}: private JSON leaked before </think>"
+                        );
+                    }
+                })
+                .await;
+                assert!(pending.is_err(), "{name}: input must remain open");
+                tx.unbounded_send(glm_json_chunk(r#"</think>{"answer":"hello"}"#, false))
+                    .unwrap();
+            }
+            tx.unbounded_send(glm_json_chunk("", true)).unwrap();
+            drop(tx);
+            observed.extend(
+                tokio::time::timeout(Duration::from_secs(1), output.collect::<Vec<_>>())
+                    .await
+                    .expect("stream finishes after EOF"),
+            );
+            assert_eq!(
+                gpt_oss_stream_text(&observed),
+                (
+                    r#"{"answer":"hello"}"#.into(),
+                    if immediate {
+                        String::new()
+                    } else {
+                        prefix.into()
+                    }
+                ),
+                "{name}"
+            );
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter_map(|chunk| chunk.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>(),
+                vec![FinishReason::Stop],
+                "{name}"
+            );
+        }
+    }
+
+    /// Prompt-prefilled reasoning can coexist with a disabled native gate when
+    /// only a tool selector is configured; use the final preprocessing decision.
+    #[tokio::test]
+    async fn glm_tool_only_json_uses_the_preprocessed_sglang_gate() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.runtime_config = glm_json_timing_config(None, Some(serde_json::json!(true)));
+        preprocessor.runtime_config.reasoning_parser = None;
+        preprocessor.tool_call_parser = Some("glm47".into());
+        preprocessor.formatter = test_prompt_formatter("<|assistant|><think>\n");
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "stream": true,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": false},
+        }))
+        .unwrap();
+        let (common, _, prefill) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        assert!(prefill.unified, "the rendered GLM reasoning prefix is open");
+        assert!(
+            !common.require_reasoning,
+            "no native reasoning parser is configured"
+        );
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let output = preprocessor
+            .postprocessor_parsing_stream_with_constraint(
+                rx,
+                &request,
+                prefill,
+                GuidedToolConstraint::None,
+                ToolProcessingRoute::Unified("glm47"),
+                ResponseGrammarContext {
+                    require_reasoning: common.require_reasoning,
+                    tracker: None,
+                },
+            )
+            .unwrap();
+        tokio::pin!(output);
+        let answer = r#"{"answer":"hello"}"#;
+        tx.unbounded_send(glm_json_chunk(answer, false)).unwrap();
+        let mut observed = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while gpt_oss_stream_text(&observed).0 != answer {
+                observed.push(output.next().await.expect("input remains open"));
+                assert!(gpt_oss_stream_text(&observed).1.is_empty());
+            }
+        })
+        .await
+        .expect("the actual preprocessed gate must allow early JSON");
+        tx.unbounded_send(glm_json_chunk("", true)).unwrap();
+        drop(tx);
+        observed.extend(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                output.collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            gpt_oss_stream_text(&observed),
+            (answer.into(), String::new())
+        );
+    }
+
+    /// Selecting a grammar policy must neither hold metadata behind the first
+    /// token nor expose queued content after a backend error.
+    #[tokio::test]
+    async fn glm_json_stream_forwards_leading_metadata_and_stops_at_errors() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use std::time::Duration;
+        for after_content in [false, true] {
+            let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+            preprocessor.runtime_config =
+                glm_json_timing_config(Some(serde_json::json!(false)), None);
+            preprocessor.tool_call_parser = Some("glm47".into());
+            let request = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "JSON"}],
+                "response_format": {"type": "json_object"}, "stream": true
+            }))
+            .unwrap();
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let output = preprocessor
+                .postprocessor_parsing_stream_with_constraint(
+                    rx,
+                    &request,
+                    true.into(),
+                    GuidedToolConstraint::None,
+                    ToolProcessingRoute::Unified("glm47"),
+                    ResponseGrammarContext {
+                        require_reasoning: true,
+                        tracker: None,
+                    },
+                )
+                .unwrap();
+            tokio::pin!(output);
+            let mut role = chat_stream_chunk(0, Some(Role::Assistant));
+            role.data.as_mut().unwrap().inner.choices[0].delta.content = None;
+            tx.unbounded_send(role).unwrap();
+            let role = tokio::time::timeout(Duration::from_secs(1), output.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                role.data.unwrap().inner.choices[0].delta.role,
+                Some(Role::Assistant)
+            );
+            tx.unbounded_send(Annotated::from_annotation("test", &42).unwrap())
+                .unwrap();
+            let annotation = tokio::time::timeout(Duration::from_secs(1), output.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(annotation.event.as_deref(), Some("test"));
+            if after_content {
+                tx.unbounded_send(glm_json_chunk("{}", false)).unwrap();
+                let chunk = tokio::time::timeout(Duration::from_secs(1), output.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(gpt_oss_stream_text(&[chunk]).0, "{}");
+            }
+            tx.unbounded_send(Annotated::from_error("worker failed"))
+                .unwrap();
+            tx.unbounded_send(glm_json_chunk("must not escape", false))
+                .unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(1), output.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(error.is_error());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), output.next())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 }
 

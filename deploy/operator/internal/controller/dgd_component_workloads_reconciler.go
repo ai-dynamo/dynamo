@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -107,6 +108,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 				return dcd, false, nil
 			},
+			commoncontroller.WithPreservedListOrder(compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)),
 		)
 		if err != nil {
 			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)

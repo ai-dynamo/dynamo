@@ -13,24 +13,22 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::request_classifier::RequestClassifierContext;
-use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInfo};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::plugins::{WorkerCapacity, WorkerInfo};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::config::RouterQueuePolicy;
-use dynamo_kv_router::scheduling::overlap_refresh::NoopOverlapScoresRefresh;
-use dynamo_kv_router::scheduling::selector::DefaultWorkerSelector;
 use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, KvSchedulerError, LocalScheduler, OverlapSignals, PolicyProfile,
-    RequestLifecycle, ScheduleMode, ScheduleRequest, SessionContext,
+    AdmittedSchedulingResponse, KvSchedulerError, PolicyProfile, RequestLifecycle, ScheduleMode,
+    ScheduleRequest, SessionContext,
 };
-use dynamo_kv_router::test_utils::SimpleWorkerConfig;
-use dynamo_kv_router::{ActiveSequencesMultiWorker, KvRouterConfig, NoopSequencePublisher};
-use tokio::sync::watch;
+use dynamo_kv_router::test_utils::{
+    SimpleWorkerConfig, TestScheduler as Scheduler, local_test_scheduler, test_schedule_request,
+};
 use tokio_util::sync::CancellationToken;
 
-type Scheduler = LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>;
 type Admission =
     Pin<Box<dyn Future<Output = Result<AdmittedSchedulingResponse, KvSchedulerError>>>>;
 
@@ -56,35 +54,15 @@ fn scheduler_with_threshold(
         total_kv_blocks: Some(kv_blocks),
         ..Default::default()
     };
-    let slots = Arc::new(ActiveSequencesMultiWorker::new(
-        NoopSequencePublisher,
-        BLOCK_SIZE as usize,
-        HashMap::from([(0, (0, 1))]),
-        false,
-        0,
-        "test",
-    ));
-    let (_configs, config_rx) = watch::channel(HashMap::from([(0, config)]));
-    // Keep the sender alive for the scheduler's lifetime.
-    std::mem::forget(_configs);
     let cancel = CancellationToken::new();
-    let scheduler = Arc::new(LocalScheduler::new(
-        slots,
-        config_rx,
+    let (scheduler, configs) = local_test_scheduler(
+        HashMap::from([(0, config)]),
         PolicyProfile::synthetic(busy_threshold, RouterQueuePolicy::Fcfs),
         BLOCK_SIZE,
-        DefaultWorkerSelector::new(None, "test"),
-        None,
-        None::<Arc<NoopOverlapScoresRefresh>>,
-        None,
-        None,
-        None,
-        Duration::from_secs(60),
-        true,
         cancel.clone(),
-        "test",
-        false,
-    ));
+    );
+    // Keep the sender alive for the scheduler's lifetime.
+    std::mem::forget(configs);
 
     let policy = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
@@ -123,34 +101,17 @@ worker_selection:
 }
 
 fn turn(request_id: &str, session_id: &str, isl_tokens: usize, last: bool) -> ScheduleRequest {
+    let mode = ScheduleMode::TrackedWithLifecycle {
+        request_id: request_id.into(),
+    };
     ScheduleRequest {
-        mode: ScheduleMode::TrackedWithLifecycle {
-            request_id: request_id.into(),
-        },
-        token_seq: None,
-        block_hashes: None,
-        isl_tokens,
-        lora_name: None,
-        expected_output_tokens: None,
-        affinity_target: None,
-        pinned_worker: None,
-        allowed_worker_ids: None,
-        routing_constraints: RoutingConstraints::default(),
-        router_config_override: None,
-        accounting_attribution: Default::default(),
-        priority_jump: 0.0,
-        strict_priority: 0,
-        policy_class: None,
         session_context: Some(SessionContext::new(
             session_id.into(),
             None,
             Some(last),
             None,
         )),
-        overlap: OverlapSignals::default(),
-        kv_transfer_candidates: None,
-        retain_kv_transfer_chain: false,
-        shared_cache_hits: None,
+        ..test_schedule_request(mode, isl_tokens)
     }
 }
 

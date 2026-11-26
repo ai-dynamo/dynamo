@@ -202,6 +202,13 @@ def plot_prefill_interpolation(
     plt.close()
 
 
+def _save_3d_surface_plot(plot_path: str) -> None:
+    # matplotlib 3.11 overflows projecting undrawn 3D padding (matplotlib#32272);
+    # ignoring it leaves the image unchanged. Removal: Dynamo#19281 (matplotlib#32310).
+    with np.errstate(over="ignore"):
+        plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+
+
 def plot_decode_3d_surface(
     x_kv_usage: list[float],
     y_context_length: list[float],
@@ -270,7 +277,7 @@ def plot_decode_3d_surface(
 
     plot_path = f"{work_dir}/decode_itl_interpolation.png"
     logger.info(f"Saving ITL surface plot to {plot_path}")
-    plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    _save_3d_surface_plot(plot_path)
     plt.close()
 
     # Plot Throughput surface
@@ -306,7 +313,7 @@ def plot_decode_3d_surface(
 
     thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
     logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
-    plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
+    _save_3d_surface_plot(thpt_plot_path)
     plt.close()
 
 

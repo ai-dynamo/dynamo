@@ -118,6 +118,8 @@ hops.
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
+- Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
+  set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's
@@ -194,7 +196,10 @@ releasing it.
    release. `finish()` waits for the scheduler to acknowledge it.
 5. **Expire.** The reaper scans once per active-request expiry interval with a second-chance
    clock: one scan marks an idle lease quiet and the next reclaims it. A lease is reclaimed one
-   to two intervals after its last progress.
+   to two intervals after its last progress. With replica sync on, a second timer runs every
+   half interval and re-sends the prefill-complete event for each booking this router made
+   that is past prefill. Peer routers count that event as progress on their mirrored lease, so
+   a long stream is not reclaimed there. A booking still in prefill gets no keepalive.
 
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.
