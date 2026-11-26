@@ -23,7 +23,7 @@ pub use reference::DefaultWorkerSelector;
 
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use dynamo_worker_selection::DefaultWorkerPicker;
-use dynamo_worker_selection::{WorkerInputs, WorkerLoadInput, WorkerSelectionRequest};
+use dynamo_worker_selection::{RequestInfo, WorkerInputs, WorkerLoadInput, WorkerSelectionRequest};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use reference::{DefaultWorkerScorer, pick_default_worker};
 
@@ -583,6 +583,21 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     }
 }
 
+/// The facts about `request` that every stage reads, with `pinned_worker` as its pin. The
+/// selection request and a queue head's dispatch view are both built from it.
+pub(crate) fn request_info_of(
+    request: &SchedulingRequest,
+    pinned_worker: Option<WorkerWithDpRank>,
+) -> RequestInfo<'_> {
+    request_info(
+        request.mode.request_id(),
+        request.isl_tokens,
+        request.session_context.as_ref(),
+        pinned_worker,
+        &request.caller_hints,
+    )
+}
+
 /// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them,
 /// with `pinned_worker` as its pin.
 fn worker_selection_request(
@@ -590,13 +605,7 @@ fn worker_selection_request(
     block_size: u32,
     pinned_worker: Option<WorkerWithDpRank>,
 ) -> WorkerSelectionRequest<'_> {
-    let info = request_info(
-        request.mode.request_id(),
-        request.isl_tokens,
-        request.session_context.as_ref(),
-        pinned_worker,
-    );
-    WorkerSelectionRequest::new(info, block_size)
+    WorkerSelectionRequest::new(request_info_of(request, pinned_worker), block_size)
         .with_prefill_tracking(request.track_prefill_tokens)
         .with_router_temperature_override(
             request
@@ -605,8 +614,6 @@ fn worker_selection_request(
                 .and_then(|config| config.router_temperature),
         )
         .with_affinity_target(request.affinity_target)
-        .with_expected_output_tokens(request.expected_output_tokens)
-        .with_priority(request.priority_jump, request.strict_priority)
         .with_shared_cache_hits(request.shared_cache_hits.as_ref())
         .with_tier_matches(request.has_tier_matches())
 }
@@ -1042,11 +1049,9 @@ mod test_support {
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: Default::default(),
             policy_class: None,
             session_context: None,
-            expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,

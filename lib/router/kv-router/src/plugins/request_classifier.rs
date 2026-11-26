@@ -18,8 +18,8 @@ pub(crate) mod registry;
 // The trait, the request it classifies, and the lifecycle events it receives. The workers it
 // reads are the shared `WorkerCandidates`, below.
 pub use dynamo_admission::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestProgress,
+    AbortCause, ClassifyEvent, ClassifyRequest, RequestClassifier, RequestClassifierContext,
+    RequestClassifierError, RequestProgress,
 };
 
 // The router-wide busy thresholds a classifier reads from `ClassifyRequest::reject_thresholds`;

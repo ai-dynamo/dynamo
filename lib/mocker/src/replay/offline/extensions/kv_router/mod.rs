@@ -50,6 +50,7 @@ use dynamo_slot_tracker::host::{
     WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::host::CallerHints;
 use futures::executor::block_on;
 use futures::future::try_join_all;
 use rustc_hash::FxHashMap;
@@ -592,14 +593,16 @@ impl PendingRequest {
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             lora_name: None,
-            priority_jump: self.priority_jump,
-            strict_priority: self.strict_priority,
+            caller_hints: CallerHints {
+                expected_output_tokens: self.expected_output_tokens,
+                priority_jump: self.priority_jump,
+                strict_priority: self.strict_priority,
+            },
             policy_class: self.policy_class.clone(),
             session_context: self
                 .session_id
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None)),
-            expected_output_tokens: self.expected_output_tokens,
             affinity_target: self.affinity_hold.as_ref().and_then(Hold::target),
             pinned_worker: self
                 .affinity_hold

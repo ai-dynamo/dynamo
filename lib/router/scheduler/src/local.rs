@@ -43,6 +43,7 @@ use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
 use dynamo_worker_selection::WorkerInputs;
+use dynamo_worker_selection::host::CallerHints;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -118,15 +119,19 @@ where
             isl_tokens,
             lora_name,
             accounting_attribution,
-            expected_output_tokens,
+            // Every hint is named, so one added to `CallerHints` fails to compile here until
+            // the request supplies it.
+            caller_hints: CallerHints {
+                expected_output_tokens,
+                priority_jump,
+                strict_priority,
+            },
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
             router_config_override,
             track_prefill_tokens,
-            priority_jump,
-            strict_priority,
             policy_class,
             session_context,
             overlap,
@@ -880,7 +885,7 @@ mod tests {
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig, local_test_scheduler_with};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::{
-        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+        DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, RequestClassifierError,
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
@@ -1338,7 +1343,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             Ok(key_by_session(request))
         }
     }
@@ -1350,7 +1355,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             Ok(key_by_session(request))
         }
 
@@ -1620,7 +1625,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(workers.is_empty());
             Ok(request)
@@ -1714,7 +1719,7 @@ mod tests {
                 &mut self,
                 mut request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 assert_eq!(request.ingress_at(), self.0);
                 request.set_due_at(self.0 + Duration::from_secs(1));
                 Ok(request)
@@ -1763,7 +1768,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
                 let thresholds =
                     BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5));
