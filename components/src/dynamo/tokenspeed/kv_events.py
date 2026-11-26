@@ -85,6 +85,11 @@ def kv_event_sources(config: dict[str, Any], dp_size: int = 1) -> list[ZmqSource
             "endpoint: each rank publishes on PORT + its rank"
         )
     base, port = endpoint.rsplit(":", 1)
+    if int(port) + dp_size - 1 > 65535:
+        raise ValueError(
+            f"TokenSpeed KV event port {port} leaves no room for {dp_size} "
+            f"attention-DP ranks (PORT + rank must stay at or below 65535)"
+        )
     return [
         ZmqSource(endpoint=f"{base}:{int(port) + rank}", topic=topic, dp_rank=rank)
         for rank in range(dp_size)

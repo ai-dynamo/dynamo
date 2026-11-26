@@ -911,6 +911,22 @@ async def test_kv_events_with_attention_dp_reject_ipc(native, tmp_path):
         await engine.cleanup()
 
 
+async def test_kv_events_with_attention_dp_reject_port_overflow(native):
+    engine = make_engine(
+        kv_block_size=64,
+        kv_events_config=json.dumps(
+            {"enable_kv_cache_events": True, "endpoint": "tcp://*:65535"}
+        ),
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+    )
+    try:
+        with pytest.raises(ValueError, match="65535"):
+            await engine.start(worker_id=1)
+        assert native.launches == []
+    finally:
+        await engine.cleanup()
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

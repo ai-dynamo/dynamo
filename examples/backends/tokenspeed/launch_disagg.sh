@@ -27,7 +27,7 @@ fi
 if [[ "$role" == prefill ]]; then
     : "${DYN_TOKENSPEED_BOOTSTRAP_HOST:?Set this to an address reachable by decode workers}"
 fi
-# KV events require attention DP=1; set KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' otherwise.
+# KV events work with attention DP > 1 on one node; across nodes set KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}'.
 default_kv_events='{"enable_kv_cache_events":true}'
 kv_events_config="${KV_EVENTS_CONFIG:-$default_kv_events}"
 extra=()
