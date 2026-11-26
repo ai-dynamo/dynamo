@@ -44,7 +44,8 @@ Backend admission control covers Dynamo Python workers that register a model, in
 backend `LLMEngine` workers, and the vLLM, SGLang, TensorRT-LLM, and LPX sidecars. The TensorRT-LLM
 and SGLang image and video diffusion workers register a model with `register_model`, so they are
 covered too. Each of these workers has its own gate, including separate prefill and decode workers
-in a disaggregated deployment. All endpoints of a worker share its gate.
+in a disaggregated deployment. The model-serving endpoints of a worker share its gate. Other
+endpoints, such as control and indexer RPCs and generic Python endpoints, do not go through it.
 
 > [!NOTE]
 > **Workers built on a unified backend
