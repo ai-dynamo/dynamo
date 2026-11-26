@@ -50,7 +50,7 @@ In direct mode (`python -m dynamo.frontend --direct --engine-url HOST:PORT`) the
 
 - The frontend subscribes to each engine's ZMQ KV-event publisher itself. The publisher must be reachable from the frontend: an engine on another host must publish on a routable address, not `127.0.0.1` or `ipc://`.
 - The frontend subscribes to every topic on a publisher's socket, not only the engine's topic.
-- A prefill engine's bootstrap host is `SGLANG_DISAGGREGATION_BOOTSTRAP_HOST` when it is set in the frontend's environment, then a routable host the engine reports, then the host in its `--engine-url`. List a prefill engine by an address its decode engines can reach.
+- A prefill engine's bootstrap host is a routable host the engine reports, then the host in its `--engine-url`. List a prefill engine by an address its decode engines can reach. `SGLANG_DISAGGREGATION_BOOTSTRAP_HOST` in the frontend's environment is not read, because it would name one host for every prefill engine.
 - The engines are registered in the frontend's own in-process discovery, so other components, such as the planner, do not see them.
 
 ## Operational limits

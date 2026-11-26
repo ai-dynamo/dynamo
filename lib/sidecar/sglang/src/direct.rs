@@ -33,11 +33,8 @@ pub fn direct_engine_factory(options: DirectEngineOptions) -> DirectEngineFactor
             let endpoint = &args.sidecar.grpc_endpoint;
             let discovery =
                 client::bootstrap_discover(endpoint, &args.sidecar.grpc.config(), false).await?;
-            args.bootstrap_host = Some(direct_bootstrap_host(
-                args.bootstrap_host.as_deref(),
-                endpoint,
-                &discovery,
-            ));
+            // Also replaces a `--bootstrap-host` from the frontend's environment.
+            args.bootstrap_host = Some(direct_bootstrap_host(endpoint, &discovery));
             let (engine, mut config) = SglangSidecarEngine::from_discovered(args, discovery)?;
             options.apply(&mut config);
             Ok((Arc::new(engine) as Arc<dyn LLMEngine>, config))

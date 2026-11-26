@@ -676,24 +676,18 @@ fn resolve_bootstrap_host(
 }
 
 /// The bootstrap host of a prefill engine a frontend dials with no sidecar
-/// beside it: a host the operator or the engine names, as for a sidecar, and
+/// beside it: a routable host the engine reports, as for a sidecar, and
 /// otherwise the host the engine is dialed at. A sidecar falls back to its own
-/// address, which in the frontend is not the engine's.
-pub(crate) fn direct_bootstrap_host(
-    explicit: Option<&str>,
-    endpoint: &GrpcEndpoint,
-    discovery: &EngineInfo,
-) -> String {
-    named_bootstrap_host(explicit, discovery)
-        .unwrap_or_else(|| endpoint.authority_host().to_string())
+/// address, which in the frontend is not the engine's. `--bootstrap-host` is
+/// not consulted: a sidecar's names the host of its one engine, and the
+/// frontend's would name one host for every prefill engine it lists.
+pub(crate) fn direct_bootstrap_host(endpoint: &GrpcEndpoint, discovery: &EngineInfo) -> String {
+    reported_bootstrap_host(discovery).unwrap_or_else(|| endpoint.authority_host().to_string())
 }
 
-/// The bootstrap host the operator names, or else a routable one the engine
-/// reports: its `host`, then its `dist_init_addr`.
-fn named_bootstrap_host(explicit: Option<&str>, discovery: &EngineInfo) -> Option<String> {
-    if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
-        return Some(host.trim().to_string());
-    }
+/// A routable bootstrap host the engine reports: its `host`, then its
+/// `dist_init_addr`.
+fn reported_bootstrap_host(discovery: &EngineInfo) -> Option<String> {
     let from_server = discovery
         .host
         .as_deref()
@@ -714,7 +708,10 @@ fn resolve_bootstrap_host_with_local(
     discovery: &EngineInfo,
     local_host: &str,
 ) -> Result<Option<String>, DynamoError> {
-    if let Some(host) = named_bootstrap_host(explicit, discovery) {
+    if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
+        return Ok(Some(host.trim().to_string()));
+    }
+    if let Some(host) = reported_bootstrap_host(discovery) {
         return Ok(Some(host));
     }
     if is_routable_host(local_host) {
@@ -1606,16 +1603,12 @@ mod tests {
     #[test]
     fn a_directly_dialed_engine_falls_back_to_the_host_it_is_dialed_at() {
         let dialed = GrpcEndpoint::parse("[fd00::7]:30001", "--engine-url").unwrap();
-        let host = |explicit, info: EngineInfo| direct_bootstrap_host(explicit, &dialed, &info);
-        // A host the operator or the engine names wins, as for a sidecar.
-        assert_eq!(
-            host(Some("prefill.example"), hosts("10.0.0.1", None)),
-            "prefill.example"
-        );
-        assert_eq!(host(None, hosts("10.0.0.1", None)), "10.0.0.1");
-        assert_eq!(host(None, hosts("", Some("10.0.0.2:20000"))), "10.0.0.2");
+        let host = |info: EngineInfo| direct_bootstrap_host(&dialed, &info);
+        // A routable host the engine reports wins, as for a sidecar.
+        assert_eq!(host(hosts("10.0.0.1", None)), "10.0.0.1");
+        assert_eq!(host(hosts("", Some("10.0.0.2:20000"))), "10.0.0.2");
         // Otherwise the dialed host, in the bracketed form the sidecar keeps.
-        assert_eq!(host(None, hosts("0.0.0.0", None)), "[fd00::7]");
+        assert_eq!(host(hosts("0.0.0.0", None)), "[fd00::7]");
     }
 
     #[test]
