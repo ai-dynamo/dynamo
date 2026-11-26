@@ -1277,7 +1277,7 @@ mod tests {
     /// The engine's own constructor contacts it, so a build fails while the
     /// engine is down, or while it reports a setting its sidecar would not
     /// run with. A restart of the engine changes either, so it is built again.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_engine_that_cannot_be_built_yet_is_built_again() {
         let drt = DistributedRuntime::new(
             Runtime::from_current().unwrap(),
