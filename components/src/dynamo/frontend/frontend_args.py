@@ -250,6 +250,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    retune_capability: Optional[str] = None
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -263,6 +264,16 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
 
     def validate(self) -> None:
+        if self.retune_capability is not None and (
+            self.interactive
+            or self.kserve_grpc_server
+            or self.tls_cert_path is not None
+            or self.tls_key_path is not None
+            or self.discovery_backend not in ("etcd", "kubernetes")
+        ):
+            raise ValueError(
+                "Retune requires the HTTP frontend with etcd or Kubernetes discovery and without TLS"
+            )
         if (
             self.chat_processor_config is not None
             and self.chat_processor in BUILTIN_CHAT_PROCESSORS
@@ -1061,6 +1072,15 @@ class FrontendArgGroup(ArgGroup):
                 "Trust remote code when loading the tokenizer. Required for models "
                 "that ship custom tokenizer code (e.g. Qwen, Falcon)."
             ),
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--frontend-retune-capability",
+            env_var="DYN_FRONTEND_RETUNE_CAPABILITY",
+            dest="retune_capability",
+            default=None,
+            help="Operator-provided Retune binding for runtime compatibility validation.",
             env=self.env,
         )
 

@@ -144,6 +144,25 @@ def test_unknown_worker_model_status_remains_optional():
     assert any("cannot determine the served model" in item for item in report.warnings)
 
 
+def test_peer_launch_syntax_is_not_a_runtime_compatibility_interface():
+    graph = deployment()
+    graph["spec"]["components"][0]["podTemplate"] = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "main",
+                    "args": ["--router-session-affinity-ttl-secs=60"],
+                    "env": [{"name": "DYN_ROUTER_MODE", "value": "round-robin"}],
+                }
+            ]
+        }
+    }
+    report = fc.evaluate_premises(
+        graph, planner_config=live_config(), capability=capability()
+    )
+    assert report.spec_ok and report.p4_ok
+
+
 def test_missing_launch_disables_only_retune():
     report = fc.evaluate_premises(deployment(), planner_config=live_config())
     assert not report.p4_ok and not report.spec_ok

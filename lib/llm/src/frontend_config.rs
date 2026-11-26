@@ -242,7 +242,7 @@ fn default_reasoning_field() -> ReasoningField {
 /// the frontend CLI/env contract. `EntrypointArgs` builds this from flat Python
 /// kwargs, `LocalModel` carries it, and `HttpServiceConfig` installs it into
 /// request-handler state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FrontendApiConfig {
     anthropic: AnthropicApiConfig,
     systemone_enabled: bool,
@@ -250,6 +250,7 @@ pub struct FrontendApiConfig {
     reasoning_field: ReasoningField,
     media_rejection: MediaRejectionConfig,
     chat_template_defaults: ChatTemplateDefaults,
+    retune: Option<crate::retune::RetuneContract>,
 }
 
 impl FrontendApiConfig {
@@ -266,6 +267,7 @@ impl FrontendApiConfig {
             reasoning_field,
             media_rejection: MediaRejectionConfig::default(),
             chat_template_defaults: ChatTemplateDefaults::default(),
+            retune: None,
         }
     }
 
@@ -287,6 +289,7 @@ impl FrontendApiConfig {
             reasoning_field,
             media_rejection: MediaRejectionConfig::default(),
             chat_template_defaults: ChatTemplateDefaults::default(),
+            retune: None,
         }
     }
 
@@ -368,6 +371,14 @@ impl FrontendApiConfig {
     pub fn set_chat_template_defaults(&mut self, chat_template_defaults: ChatTemplateDefaults) {
         self.chat_template_defaults = chat_template_defaults;
     }
+
+    pub fn retune(&self) -> Option<&crate::retune::RetuneContract> {
+        self.retune.as_ref()
+    }
+
+    pub fn set_retune(&mut self, retune: crate::retune::RetuneContract) {
+        self.retune = Some(retune);
+    }
 }
 
 impl Default for FrontendApiConfig {
@@ -379,6 +390,7 @@ impl Default for FrontendApiConfig {
             reasoning_field: default_reasoning_field(),
             media_rejection: Default::default(),
             chat_template_defaults: ChatTemplateDefaults::default(),
+            retune: None,
         }
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use dynamo_runtime::protocols::EndpointId;
@@ -26,6 +26,7 @@ pub(crate) struct RouterPolicyTarget {
 struct Entry {
     target: RouterPolicyTarget,
     control: Weak<RuntimePolicyControl>,
+    config: Option<dynamo_kv_router::config::KvRouterConfig>,
 }
 
 #[derive(Default)]
@@ -40,6 +41,7 @@ impl RouterPolicyRegistry {
         endpoint: EndpointId,
         worker_type: WorkerType,
         control: &Arc<RuntimePolicyControl>,
+        config: Option<dynamo_kv_router::config::KvRouterConfig>,
     ) -> Uuid {
         let id = Uuid::new_v4();
         let mut entries = self.entries.lock();
@@ -57,9 +59,40 @@ impl RouterPolicyRegistry {
                     worker_type,
                 },
                 control: Arc::downgrade(control),
+                config,
             },
         );
         id
+    }
+
+    pub(crate) fn matches_retune(
+        &self,
+        contract: &crate::retune::RetuneContract,
+        model: Option<&str>,
+        returned_router_ids: &HashSet<Uuid>,
+    ) -> bool {
+        let entries = self.entries.lock();
+        let mut matched = 0;
+        for entry in entries.values().filter(|entry| {
+            entry.control.strong_count() != 0
+                && model.is_none_or(|model| entry.target.model == model)
+        }) {
+            if !returned_router_ids.contains(&entry.target.router_id) {
+                return false;
+            }
+            let Some(config) = &entry.config else {
+                return false;
+            };
+            if contract
+                .router
+                .validate(config, Some(entry.target.worker_type))
+                .is_err()
+            {
+                return false;
+            }
+            matched += 1;
+        }
+        matched != 0 && matched == returned_router_ids.len()
     }
 
     pub(crate) fn get(&self, id: Uuid) -> Option<(RouterPolicyTarget, Arc<RuntimePolicyControl>)> {

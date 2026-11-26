@@ -136,7 +136,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     </ParamField>
   </Indent>
   <ParamField path="router" type="RetuneRouterSpec">
-    Optional startup values for the three router parameters, not Planner search domains. All fields must be finite and non-negative. The operator sets existing frontend environment variables and passes the same values to the Planner, which uses ordinary SDK defaults for other router settings. Conflicting command-line or policy-file overrides are not validated by this wiring.
+    Optional router startup values, not Planner search domains. All three fields must be finite and non-negative. The operator supplies them to frontend and Planner. Other replay-relevant settings must match ordinary router defaults; the frontend validates effective configuration, including explicit overrides, before acknowledging Retune support.
   </ParamField>
   <Indent>
     <ParamField path="overlapScoreCredit" type="number" default="1.0">

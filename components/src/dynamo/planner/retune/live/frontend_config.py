@@ -3,9 +3,9 @@
 
 """Retune's semantic launch settings and public graph constraints.
 
-The operator supplies an immutable process binding; status acknowledges its target
-hash. Remaining explicit flags are checked separately, without interpreting env
-or deriving startup settings from Pod templates.
+The operator supplies the immutable process binding. Status acknowledges only
+its target hash; the frontend separately acknowledges compatible running routers.
+No function inspects Pod templates or reconstructs their launch semantics.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from dynamo.planner.retune.live.contracts import (
     PremiseReport,
     RetuneCapability,
 )
-from dynamo.planner.retune.live.launch_flags import launch_flag_errors
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import (
@@ -215,7 +214,6 @@ def evaluate_premises(
     others: list[str] = []
     warnings: list[str] = []
     components = _components(dgd)
-    p4.extend(launch_flag_errors(components))
     models, unknown = served_model_names(dgd)
     if len(set(models.values())) > 1:
         others.append("P7: the DGD serves multiple models; live retune needs one")
@@ -284,7 +282,7 @@ def _startup_errors(
     try:
         startup_router_domain(retune, startup.router_config, worker_types(planner_mode))
     except ValueError as error:
-        return [f"P4: retune.router does not fit the launch profile: {error}"]
+        return [f"P4: retune.router does not fit the launch contract: {error}"]
     return []
 
 

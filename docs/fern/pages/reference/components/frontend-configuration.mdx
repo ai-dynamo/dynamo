@@ -1098,6 +1098,11 @@ When frontend TLS is configured, the admin listener uses the same certificate an
 settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
 routes; `generate-frontend-openapi` does.
 
+Live Retune requires the HTTP frontend with a reachable admin listener, etcd or Kubernetes
+discovery, and no TLS. The frontend fails at startup if Retune is enabled together with TLS,
+interactive mode, the KServe gRPC server, or another discovery backend. The HTTPS guidance above
+applies only to frontends without Retune.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
@@ -1119,6 +1124,32 @@ routes; `generate-frontend-openapi` does.
   Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
   frontend fails to start. A value that is not a valid port number falls back to `8002`.
 </ParamField>
+
+<ParamField path="--frontend-retune-capability" type="JSON object" default="null">
+  Operator-owned, versioned semantic launch contract for
+  [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md). Omitted by
+  default. Configure `retune` on the DGD's Planner component instead of authoring this binding.
+  It carries `version`, an opaque `configHash`, selected frontend identity, trace storage/layout,
+  admin port, and three typed router startup values. Its environment variable is
+  `DYN_FRONTEND_RETUNE_CAPABILITY`.
+
+  The binding validates configuration; it does not rewrite parser defaults. The operator
+  separately supplies the existing KV-routing, replica-synchronization, and startup-value
+  environment variables. Other replay-relevant settings must match ordinary router defaults.
+  Equivalent explicit frontend settings are accepted; conflicting parsed settings, including
+  session affinity, fail startup. Effective discovered routers, including worker-advertised
+  overrides, must also be compatible before the runtime acknowledges the contract. This opt-in
+  does not change ordinary frontend startup when absent.
+</ParamField>
+
+With a supported Retune contract, `GET /router_policy` adds a top-level
+`retune: {"configHash": "<binding>"}` acknowledgment only after validating compatible effective
+router configuration. Missing acknowledgment, including responses from older runtimes, is not
+permission to tune. The existing `routers` list and policy-update protocol remain unchanged.
+Acknowledgment requires committed discovery state and a consistent router snapshot; a changing
+router set is not acknowledged.
+The Planner separately checks its immutable launch binding against the operator's target hash;
+runtime acknowledgment does not assert that a target rollout has completed.
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables

@@ -3127,6 +3127,7 @@ class EntrypointArgs:
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        frontend_retune_capability: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.

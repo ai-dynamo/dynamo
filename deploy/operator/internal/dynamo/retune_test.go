@@ -29,6 +29,7 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 					{Name: "DYN_REQUEST_TRACE", Value: "0"},
 					{Name: "DYN_PLANNER_RETUNE_CAPABILITY", Value: "wrong-general-binding"},
 					{Name: "DYN_ROUTER_MODE", Value: "round-robin"},
+					{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: "wrong-general-binding"},
 				},
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -36,6 +37,7 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 							{Name: "DYN_REQUEST_TRACE", Value: "0"},
 							{Name: "DYN_REQUEST_TRACE_FILE_PATH", Value: "wrong"},
 							{Name: "DYN_ROUTER_MODE", Value: "round-robin"},
+							{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: "wrong-authored-binding"},
 							{Name: "UNRELATED", Value: "retained"},
 						}}},
 					}}},
@@ -77,9 +79,14 @@ func TestRetuneRenderingAcrossProviders(t *testing.T) {
 						_, expected, err := planner.ResolveRetuneConfiguration(dgd)
 						require.NoError(t, err)
 						require.Equal(t, *expected, capability)
+						frontend := GetMainContainerFromPodSpec(&cliqueByName(pcs, "gateway").Spec.PodSpec)
+						require.Equal(t, binding.Value, findEnvVar(frontend.Env, "DYN_FRONTEND_RETUNE_CAPABILITY").Value)
 						continue
 					}
-					require.Nil(t, findEnvVar(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY"))
+					frontendBinding := findEnvVar(main.Env, "DYN_FRONTEND_RETUNE_CAPABILITY")
+					require.NotNil(t, frontendBinding)
+					require.NotEqual(t, "wrong-general-binding", frontendBinding.Value)
+					require.NotEqual(t, "wrong-authored-binding", frontendBinding.Value)
 
 					t.Log("The Pod-name binding expands correctly even in legacy sorted environments")
 					env := slices.Clone(main.Env)

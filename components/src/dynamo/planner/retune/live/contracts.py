@@ -352,7 +352,7 @@ class RetuneKube(Protocol):
 
 @dataclass(frozen=True)
 class FrontendStartup:
-    """The frontend startup configuration resolved from the launch profile.
+    """The frontend startup configuration resolved from the launch contract.
 
     ``router_config`` is the complete startup ``KvRouterConfig`` JSON;
     ``startup_maps`` is ``policy_parameters(wt)`` for each
@@ -410,6 +410,7 @@ class PolicyCallResult:
     routers: tuple[RouterInfo, ...] = ()  # GET
     router: Optional[RouterInfo] = None  # PATCH/reset response, when 200
     error: Optional[str] = None
+    retune_config_hash: Optional[str] = None  # Validated runtime contract (GET).
 
 
 class RouterPolicyClient(Protocol):

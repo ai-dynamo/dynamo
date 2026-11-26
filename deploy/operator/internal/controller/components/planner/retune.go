@@ -20,8 +20,8 @@ import (
 
 const retuneTraceVolumeName = "dynamo-retune-traces"
 
-// RetuneLaunchConfiguration supplies semantic startup configuration to the
-// Planner, not a projection of the frontend's workload launch syntax.
+// RetuneLaunchConfiguration is the versioned semantic contract shared by the
+// frontend and Planner, not a projection of their workload launch syntax.
 type RetuneLaunchConfiguration struct {
 	Version               int                       `json:"version"`
 	ConfigHash            string                    `json:"configHash,omitempty"`
@@ -145,6 +145,7 @@ func (configuration *RetuneLaunchConfiguration) Apply(component *v1beta1.DynamoC
 	var bindings []corev1.EnvVar
 	if component.ComponentName == configuration.FrontendComponentName {
 		bindings = retuneFrontendEnvironment(dgdName, configuration)
+		bindings = append(bindings, corev1.EnvVar{Name: "DYN_FRONTEND_RETUNE_CAPABILITY", Value: string(capability)})
 	} else {
 		// A launch-time binding prevents an old Planner from using a newer
 		// target contract with the PVC still mounted in its existing Pod.
