@@ -2998,6 +2998,7 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
+ "gguf-rs-lib",
  "half",
  "hf-hub 0.4.3",
  "http-body-util",
@@ -3035,7 +3036,9 @@ dependencies = [
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
+ "rustix 1.1.4",
  "rustls",
+ "safetensors",
  "serde",
  "serde_json",
  "serial_test",
@@ -4640,6 +4643,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gguf-rs-lib"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "493761d28524d1a1cf5afcc9a438ce64372d6364e7b1c139ba240a9f243a2ccf"
+dependencies = [
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4983,6 +4998,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4990,6 +5007,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -9277,6 +9297,19 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safetensors"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79b079b829cb27a1c3c374341345ed2e8b2c0c839034522cee576c140bd7f846"
+dependencies = [
+ "hashbrown 0.16.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "same-file"

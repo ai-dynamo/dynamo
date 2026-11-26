@@ -883,7 +883,31 @@ async fn resolve_uri(
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
     if dest.exists() {
-        if CheckedFile::from_disk(dest).is_ok_and(|cf| cf.checksum() == expected.checksum()) {
+        if let Ok(actual) = CheckedFile::from_disk(dest)
+            && actual.checksum() == expected.checksum()
+        {
+            if parsed.scheme() == "hf"
+                && let Some(declared) = expected.size()
+            {
+                let mut size = actual
+                    .size()
+                    .context("Cached HF blob has no recorded size")?;
+                if size != declared {
+                    // A concurrent repair may have replaced the blob between stat and hash.
+                    let file = std::fs::File::open(dest)?;
+                    size = file.metadata()?.len();
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update_reader(file)?;
+                    anyhow::ensure!(
+                        hasher.finalize().to_hex().as_str() == expected.checksum().hash(),
+                        "checksum mismatch for cached {uri}"
+                    );
+                }
+                anyhow::ensure!(
+                    size == declared,
+                    "size mismatch for {uri}: expected {declared} bytes, cached blob has {size} bytes"
+                );
+            }
             return Ok(());
         }
         tracing::warn!(dest = %dest.display(), "MDC cache blob failed re-verification; refetching");
@@ -901,9 +925,9 @@ async fn resolve_uri(
             }
             "hf" => {
                 let (repo, filename) = parse_hf_uri(uri)?;
-                let snapshot = hf_snapshots
-                    .get(&repo)
-                    .with_context(|| format!("hf snapshot not pre-resolved for {repo}"))?;
+                let snapshot = hf_snapshots.get(&repo).with_context(|| {
+                    format!("no matching HF snapshot or verified MDC blob for {uri}")
+                })?;
                 copy_to_tmp(&snapshot.join(&filename), &tmp, cap).await?;
             }
             scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
@@ -917,6 +941,17 @@ async fn resolve_uri(
                 "checksum mismatch for {uri}: expected {}, got {}",
                 expected.checksum(),
                 actual.checksum()
+            );
+        }
+        if parsed.scheme() == "hf"
+            && let Some(declared) = expected.size()
+        {
+            let size = actual
+                .size()
+                .context("Staged HF blob has no recorded size")?;
+            anyhow::ensure!(
+                size == declared,
+                "size mismatch for {uri}: expected {declared} bytes, staged blob has {size} bytes"
             );
         }
         Ok(())
@@ -1585,16 +1620,6 @@ impl ModelDeploymentCard {
         struct Version {
             version: String,
         }
-        fn sentencepiece_version(path: &Path) -> Option<u32> {
-            let name = path.file_name()?.to_str()?;
-            let version = name
-                .strip_prefix("tokenizer.model.v")
-                .or_else(|| name.strip_prefix("tokenizer.mm.model.v"))?
-                .parse::<u32>()
-                .ok()?;
-            (version < 11).then_some(version)
-        }
-
         let directories = [self.local_dir(), PathBuf::from(self.source_path())];
         let tekken = self
             .tokenizer
@@ -1639,7 +1664,7 @@ impl ModelDeploymentCard {
             .extra_files
             .iter()
             .filter_map(CheckedFile::path)
-            .find_map(sentencepiece_version)
+            .find_map(crate::hub::mistral_sentencepiece_version)
         {
             return Some(version);
         }
@@ -1649,7 +1674,7 @@ impl ModelDeploymentCard {
             };
             if let Some(version) = entries
                 .flatten()
-                .find_map(|entry| sentencepiece_version(&entry.path()))
+                .find_map(|entry| crate::hub::mistral_sentencepiece_version(&entry.path()))
             {
                 return Some(version);
             }
@@ -2123,19 +2148,44 @@ impl ModelDeploymentCard {
             entries.push((uri, cf.clone()));
         }
 
-        // Pre-resolve hf:// repos once per unique repo; otherwise the
-        // resolve loop would call hub::from_hf N times for one model.
-        let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
-            std::collections::HashMap::new();
-        for (uri, _) in &entries {
+        // Each card's HF files and their untyped siblings must come from one revision.
+        let mut hf_repos = std::collections::HashMap::<_, Vec<_>>::new();
+        for (uri, expected) in &entries {
             if uri.starts_with("hf://") {
-                let (repo, _) = parse_hf_uri(uri)?;
-                if let std::collections::hash_map::Entry::Vacant(e) = hf_snapshots.entry(repo) {
-                    let repo_name = e.key().clone();
-                    let snap = crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
-                        .await
-                        .with_context(|| format!("hub::from_hf({repo_name})"))?;
-                    e.insert(snap);
+                let (repo, filename) = parse_hf_uri(uri)?;
+                hf_repos
+                    .entry(repo)
+                    .or_default()
+                    .push((filename, expected.clone()));
+            }
+        }
+        let mut hf_snapshots = std::collections::HashMap::new();
+        for (repo, files) in hf_repos {
+            let blob_paths: Vec<_> = files
+                .iter()
+                .map(|(_, f)| blobs.join(f.checksum().hash()))
+                .collect();
+            let matches = move |snapshot: &Path| {
+                files.iter().all(|(name, expected)| {
+                    let path = snapshot.join(name);
+                    path.metadata().is_ok_and(|m| {
+                        m.is_file()
+                            && m.len() <= ABSOLUTE_MAX_METADATA_BYTES
+                            && expected.size().is_none_or(|size| size == m.len())
+                    }) && expected.checksum_matches(&path)
+                })
+            };
+            match crate::hub::from_hf_filtered(&repo, true, Some(Arc::new(matches))).await {
+                Ok(snapshot) => {
+                    hf_snapshots.insert(repo, snapshot);
+                }
+                // resolve_uri verifies each blob before use. Without a matching snapshot
+                // there are no new untyped siblings to harvest for this card.
+                Err(error) if blob_paths.iter().all(|p| p.is_file()) => {
+                    tracing::debug!(%repo, %error, "Checking existing MDC blobs");
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("resolving HF metadata for {repo}"));
                 }
             }
         }
@@ -2880,48 +2930,16 @@ impl TokenizerKind {
     /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
     /// layouts or filesystem failures that should be treated as hard errors.
     pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
-        // Helper: probe a single well-known file.  Returns Ok(None) when the
-        // file simply does not exist, Ok(Some(..)) on success, and Err for
-        // anything else (unreadable file, checksum failure, etc.).
-        fn probe(path: std::path::PathBuf) -> Result<Option<CheckedFile>> {
-            if !path.exists() {
-                return Ok(None);
-            }
-            Ok(Some(CheckedFile::from_disk(path)?))
-        }
-
-        // 1. Try tokenizer.json (HuggingFace)
-        if let Some(f) = probe(directory.join("tokenizer.json"))? {
-            return Ok(Some(Self::HfTokenizerJson(f)));
-        }
-
-        // 2. Try tiktoken.model
-        if let Some(f) = probe(directory.join("tiktoken.model"))? {
-            return Ok(Some(Self::TikTokenModel(f)));
-        }
-
-        // 3. Search for any *.tiktoken file
-        let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
-            .with_context(|| format!("Failed to read directory {}", directory.display()))?
-            .collect::<std::io::Result<Vec<_>>>()
-            .with_context(|| format!("Failed to iterate directory {}", directory.display()))?
-            .into_iter()
-            .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
-            .collect();
-
-        if tiktoken_files.len() == 1 {
-            let f = CheckedFile::from_disk(tiktoken_files[0].path())?;
-            return Ok(Some(Self::TikTokenModel(f)));
-        } else if tiktoken_files.len() > 1 {
-            let names: Vec<_> = tiktoken_files
-                .iter()
-                .map(|e| e.path().display().to_string())
-                .collect();
-            anyhow::bail!(
-                "Multiple .tiktoken files found in {}: {:?}. Cannot determine which to use.",
-                directory.display(),
-                names
-            );
+        if let Some(path) = crate::hub::hf_tokenizer_file(directory)? {
+            let is_hf = path
+                .file_name()
+                .is_some_and(|name| name == "tokenizer.json");
+            let file = CheckedFile::from_disk(path)?;
+            return Ok(Some(if is_hf {
+                Self::HfTokenizerJson(file)
+            } else {
+                Self::TikTokenModel(file)
+            }));
         }
 
         tracing::warn!(
@@ -3446,6 +3464,61 @@ mod tests {
 
         let after = std::fs::read(&dest).unwrap();
         assert_eq!(after, body, "blob should have been replaced");
+    }
+
+    #[tokio::test]
+    async fn resolve_uri_checks_declared_hf_blob_size_without_removing_blob() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let dest = dir.path().join("blob");
+        std::fs::write(&dest, b"cached bytes")?;
+        let actual = super::CheckedFile::from_disk(&dest)?;
+        let uri = "hf://org/model/generation_config.json";
+        let client = reqwest::Client::new();
+        for declared in [None, actual.size(), Some(5)] {
+            let mut wire = serde_json::to_value(&actual)?;
+            if let Some(size) = declared {
+                wire["size"] = size.into();
+            } else {
+                wire.as_object_mut().unwrap().remove("size");
+            }
+            let expected = serde_json::from_value(wire)?;
+            let result =
+                super::resolve_uri(&client, uri, &expected, &dest, &Default::default()).await;
+            if declared == Some(5) {
+                assert!(result.unwrap_err().to_string().contains("size mismatch"));
+            } else {
+                result?;
+            }
+            assert_eq!(std::fs::read(&dest)?, b"cached bytes");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_uri_checks_staged_hf_blob_size_before_publishing() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("generation_config.json");
+        std::fs::write(&source, b"{}")?;
+        let actual = super::CheckedFile::from_disk(&source)?;
+        let mut wire = serde_json::to_value(&actual)?;
+        wire["size"] = 3.into();
+        let expected = serde_json::from_value(wire)?;
+        let snapshots =
+            std::collections::HashMap::from([("org/model".to_owned(), dir.path().to_owned())]);
+        let dest = dir.path().join("blob");
+        let error = super::resolve_uri(
+            &reqwest::Client::new(),
+            "hf://org/model/generation_config.json",
+            &expected,
+            &dest,
+            &snapshots,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("size mismatch"));
+        assert!(!dest.exists());
+        Ok(())
     }
 
     /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
