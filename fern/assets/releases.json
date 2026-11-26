@@ -20,6 +20,7 @@
   "releases": [
     {
       "version": "v1.7.0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-7-0",
       "date": "Nov 23, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.7.0",
@@ -38,7 +39,7 @@
       "notesSummary": "Cross-pool routing through the Global Router, batch scheduling, pool-priority GPU budgets and live retuning in the Planner, deadline-ordered queues and KV fetch hints in the Router, speech-to-text and the Batch API in the Frontend, image editing for diffusion, simulation-backed deployment search on Kubernetes, and multinode engines with engine-failure recovery behind the Dynamo Sidecar.",
       "dateIso": "2026-11-23",
       "enterpriseIso": "2026-11-23",
-      "notesUrl": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.7.0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-7-0"
     },
     {
       "version": "v1.6.2",
@@ -2773,6 +2774,13 @@
     }
   ],
   "releaseStats": {
+    "v1.7.0": {
+      "prs": 763,
+      "contributors": 150,
+      "firstTimers": 38,
+      "breaking": 40,
+      "knownIssues": 25
+    },
     "v1.6.2": {
       "breaking": 0,
       "knownIssues": 0
