@@ -19,7 +19,7 @@ use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTok
 use crate::protocols::TokenIdType;
 use crate::tokenizers::traits::Tokenizer as RuntimeTokenizer;
 
-use super::{glm5_next, nemotron};
+use super::{glm5_next, inkling2, nemotron};
 
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
@@ -205,6 +205,12 @@ impl ImageRoutingProcessor {
                 model_id: model_id.to_string(),
             });
         }
+        if inkling2::supports_model_type(model_type) {
+            return Ok(Self {
+                processor: Box::new(inkling2::Inkling2ImageRoutingBackend::try_new(model_dir)?),
+                model_id: model_id.to_string(),
+            });
+        }
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
             format!(
@@ -380,7 +386,8 @@ impl ImageRoutingProcessor {
 /// instead of two).
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
-    resolve_model_token_with_config(model_id, model_dir, &config).map(|resolved| resolved.token_id)
+    resolve_model_token_with_config(model_id, model_dir, &config, None)
+        .map(|resolved| resolved.token_id)
 }
 
 struct ResolvedModelToken {
@@ -391,6 +398,7 @@ fn resolve_model_token_with_config(
     model_id: &str,
     model_dir: &Path,
     config: &serde_json::Value,
+    tokenizer_config: Option<&serde_json::Value>,
 ) -> Option<ResolvedModelToken> {
     if nemotron::is_nemotron_config(config) {
         let token_id = match nemotron::image_context_token_id(config) {
@@ -410,6 +418,29 @@ fn resolve_model_token_with_config(
             model_id = %model_id,
             image_token_id = token_id,
             spec = "nemotron-nano-omni",
+            "resolved image-placeholder token id"
+        );
+        return Some(ResolvedModelToken { token_id });
+    }
+
+    if inkling2::is_inkling2_config(config) {
+        let token_id = match inkling2::resolve_image_token_id(model_dir, config, tokenizer_config) {
+            Ok(token_id) => token_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model_id = %model_id,
+                    %error,
+                    "mm-routing: invalid Inkling 2 image prompt contract"
+                );
+                return None;
+            }
+        };
+        tracing::debug!(
+            target: "mm_routing",
+            model_id = %model_id,
+            image_token_id = token_id,
+            spec = "inkling2",
             "resolved image-placeholder token id"
         );
         return Some(ResolvedModelToken { token_id });
@@ -537,9 +568,9 @@ pub fn resolve_routing_tokens(
     let config = read_json(model_dir, "config.json");
     let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
 
-    let resolved = config
-        .as_ref()
-        .and_then(|c| resolve_model_token_with_config(model_id, model_dir, c));
+    let resolved = config.as_ref().and_then(|c| {
+        resolve_model_token_with_config(model_id, model_dir, c, tokenizer_config.as_ref())
+    });
     let image_token_id = resolved.as_ref().map(|r| r.token_id);
     let chat_placeholder_token_id = config
         .as_ref()
@@ -998,7 +1029,8 @@ mod tests {
                 resolve_model_token_with_config(
                     "/models/internal-checkpoint",
                     model_dir.path(),
-                    &config
+                    &config,
+                    None,
                 )
                 .is_none()
             );

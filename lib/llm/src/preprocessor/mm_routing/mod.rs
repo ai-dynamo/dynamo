@@ -11,6 +11,7 @@
 mod config;
 pub(super) mod glm5_next;
 pub mod image;
+pub(super) mod inkling2;
 pub(super) mod nemotron;
 mod qwen3;
 
