@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP client for TileRT's decode server.
+//! HTTP client for TileRT's decode server, versions 0.1.8 and 0.2.
 //!
-//! The server takes one request at a time. `/pd/decode` claims the KV the
-//! prefill pushed for `rid` and answers with newline-delimited JSON: token
-//! batches `{"t":[...]}`, then one `{"done":true,...}` or `{"error":...}`.
+//! `/pd/decode` claims the KV the prefill pushed for `rid` and answers with
+//! newline-delimited JSON: token batches `{"t":[...]}`, then one
+//! `{"done":true,...}` or `{"error":...}`. A 0.1.8 server takes one request at
+//! a time; a 0.2 server takes up to the `max_concurrency` it reports.
 
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tokio_util::io::StreamReader;
 
-use crate::error::{backend_error, is_kind};
+use crate::error::{backend_error, is_kind, is_transport_failure};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the server may take to answer `/pd/decode` beyond its own wait
@@ -26,6 +27,10 @@ const RESPONSE_SLACK: Duration = Duration::from_secs(10);
 /// How long a release waits for KV that is still landing. KV that arrives
 /// later is discarded by the server, which remembers the id a claim gave up on.
 const RELEASE_WAIT: Duration = Duration::from_secs(1);
+/// A 0.2 server may still count a request whose terminal line we have read,
+/// so a 429 right after one ends is retried, as TileRT's own router does.
+const BUSY_RETRIES: u32 = 4;
+const BUSY_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_LINE_BYTES: usize = 1 << 20;
 
 #[derive(Serialize, Clone, Debug)]
@@ -35,6 +40,10 @@ pub(crate) struct DecodeBody {
     pub max_tokens: u32,
     pub sampling: serde_json::Map<String, serde_json::Value>,
     pub timeout_s: f64,
+    /// The prompt length. A 0.2 server refuses KV filed under `rid` that has
+    /// another length; 0.1.8 ignores the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq_len: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -77,9 +86,36 @@ pub(crate) struct DecodeCapabilities {
     pub ignore_eos: bool,
 }
 
+/// The decode server's HTTP API. The two differ in how many requests a
+/// server takes and in how a request's KV is let go.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DecodeApi {
+    /// TileRT 0.1.8: one request at a time; unclaimed KV is kept for two
+    /// minutes, and `/pd/cancel` reaches only a decode that has claimed it.
+    #[default]
+    V018,
+    /// TileRT 0.2: `/pd/cancel` stops a decode, drops parked KV and refuses KV
+    /// that arrives later for the same id, whatever state the request is in.
+    V02,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DecodeServer {
+    pub api: DecodeApi,
+    pub capabilities: DecodeCapabilities,
+    pub max_concurrency: u32,
+}
+
 #[derive(Deserialize)]
-struct CapabilitiesReply {
+struct CapabilitiesV018 {
     capabilities: DecodeCapabilities,
+}
+
+#[derive(Deserialize)]
+struct CapabilitiesV02 {
+    #[serde(flatten)]
+    capabilities: DecodeCapabilities,
+    max_concurrency: u32,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +124,7 @@ struct RawLine {
     done: Option<bool>,
     n: Option<u64>,
     finish_reason: Option<String>,
+    #[serde(alias = "timing_ms")]
     phase_ms: Option<serde_json::Value>,
     error: Option<serde_json::Value>,
     error_type: Option<String>,
@@ -96,7 +133,7 @@ struct RawLine {
 #[derive(Deserialize)]
 struct BlockingReply {
     token_ids: Vec<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "timing_ms")]
     phase_ms: Option<serde_json::Value>,
 }
 
@@ -139,20 +176,35 @@ pub(crate) fn parse_line(line: &str) -> Result<Option<DecodeEvent>, DynamoError>
     Ok(None)
 }
 
-/// TileRT 0.2 replaced 0.1.8's decode API, and its `/capabilities` is the
-/// first reply where the two differ, so a 0.2 server fails startup here.
-fn parse_capabilities(body: &[u8]) -> Result<DecodeCapabilities, DynamoError> {
-    serde_json::from_slice::<CapabilitiesReply>(body)
-        .map(|reply| reply.capabilities)
-        .map_err(|error| {
-            backend_error(
-                BackendError::Unknown,
-                format!(
-                    "TileRT decode /capabilities reply is not TileRT 0.1.8's ({error}); \
-                     this sidecar works with TileRT 0.1.8 only"
-                ),
-            )
-        })
+/// `/capabilities` tells the versions apart: 0.1.8 nests the capabilities,
+/// 0.2 lists them at the top level with `max_concurrency`.
+fn parse_capabilities(body: &[u8]) -> Result<DecodeServer, DynamoError> {
+    if let Ok(reply) = serde_json::from_slice::<CapabilitiesV018>(body) {
+        return Ok(DecodeServer {
+            api: DecodeApi::V018,
+            capabilities: reply.capabilities,
+            max_concurrency: 1,
+        });
+    }
+    match serde_json::from_slice::<CapabilitiesV02>(body) {
+        Ok(reply) if reply.max_concurrency > 0 => Ok(DecodeServer {
+            api: DecodeApi::V02,
+            capabilities: reply.capabilities,
+            max_concurrency: reply.max_concurrency,
+        }),
+        Ok(_) => Err(backend_error(
+            BackendError::Unknown,
+            "TileRT decode reports max_concurrency 0",
+        )),
+        Err(error) => Err(backend_error(
+            BackendError::Unknown,
+            format!(
+                "TileRT decode /capabilities reply is neither TileRT 0.1.8's nor 0.2's ({error}): \
+                 {:.200}",
+                String::from_utf8_lossy(body)
+            ),
+        )),
+    }
 }
 
 fn node_error(error_type: Option<&str>, error: &serde_json::Value) -> DynamoError {
@@ -175,6 +227,10 @@ fn status_error(status: reqwest::StatusCode, body: &str) -> DynamoError {
         400 | 501 => invalid_argument(message),
         // The KV for this rid never arrived.
         504 => connection_timeout(message),
+        // 0.2: the request was cancelled while its KV was on the way.
+        499 => backend_error(BackendError::Cancelled, message),
+        // 0.2: every decode slot stayed busy through the retries.
+        429 => backend_error(BackendError::WorkerOverloaded, message),
         _ => backend_error(BackendError::Unknown, message),
     }
 }
@@ -204,6 +260,7 @@ fn transport_error(what: &str, error: reqwest::Error) -> DynamoError {
 pub(crate) struct DecodeClient {
     http: reqwest::Client,
     base: HttpEndpoint,
+    api: DecodeApi,
 }
 
 impl DecodeClient {
@@ -220,7 +277,27 @@ impl DecodeClient {
                     format!("cannot build the TileRT decode HTTP client: {error}"),
                 )
             })?;
-        Ok(Self { http, base })
+        Ok(Self {
+            http,
+            base,
+            api: DecodeApi::default(),
+        })
+    }
+
+    /// The client for the API `/capabilities` reported.
+    pub(crate) fn with_api(self, api: DecodeApi) -> Self {
+        Self { api, ..self }
+    }
+
+    pub(crate) fn api(&self) -> DecodeApi {
+        self.api
+    }
+
+    /// Whether a refusal from `/pd/decode` means the server has let the
+    /// request's KV go. A 0.2 server can refuse with 429 or 409 while the KV
+    /// stays parked, so there only `/pd/cancel` makes sure.
+    pub(crate) fn refusal_frees_kv(&self, error: &DynamoError) -> bool {
+        self.api == DecodeApi::V018 && !is_transport_failure(error)
     }
 
     pub(crate) async fn wait_healthy(
@@ -250,7 +327,7 @@ impl DecodeClient {
         }
     }
 
-    pub(crate) async fn capabilities(&self) -> Result<DecodeCapabilities, DynamoError> {
+    pub(crate) async fn describe(&self) -> Result<DecodeServer, DynamoError> {
         let path = "/capabilities";
         let response = self
             .http
@@ -271,8 +348,9 @@ impl DecodeClient {
         parse_capabilities(&body)
     }
 
-    /// Stops a decode the server has already started. A request it has not
-    /// claimed yet has nothing to cancel and answers 404.
+    /// Stops a decode the server has started. On 0.1.8 a request it has not
+    /// claimed yet has nothing to cancel and answers 404; on 0.2 this also
+    /// drops the request's KV, landed or not.
     pub(crate) async fn cancel(&self, rid: &str) {
         let result = self
             .http
@@ -290,11 +368,15 @@ impl DecodeClient {
         }
     }
 
-    /// Frees the KV of a request that will not be decoded, and returns whether
-    /// there was any. The server holds unclaimed KV for two minutes and
-    /// refuses every other request's KV meanwhile, so a one-token decode
-    /// claims it and lets it go.
+    /// Frees the KV of a request that will not be decoded. A 0.1.8 server
+    /// holds unclaimed KV for two minutes and refuses every other request's
+    /// KV meanwhile, so a one-token decode claims it and lets it go; the
+    /// return value says whether there was any. On 0.2 `/pd/cancel` does it.
     pub(crate) async fn release(&self, rid: &str) -> bool {
+        if self.api == DecodeApi::V02 {
+            self.cancel(rid).await;
+            return true;
+        }
         let released = self
             .decode_blocking(DecodeBody {
                 rid: rid.to_string(),
@@ -302,6 +384,7 @@ impl DecodeClient {
                 max_tokens: 1,
                 sampling: serde_json::Map::new(),
                 timeout_s: RELEASE_WAIT.as_secs_f64(),
+                seq_len: None,
             })
             .await;
         match released {
@@ -350,29 +433,38 @@ impl DecodeClient {
         body: &DecodeBody,
         stream: bool,
     ) -> Result<reqwest::Response, DynamoError> {
-        let send = self
-            .http
-            .post(self.base.with_path("/pd/decode"))
-            .json(&DecodeRequest { body, stream })
-            .send();
-        let response = tokio::time::timeout(body.response_deadline(), send)
-            .await
-            .map_err(|_| {
-                backend_error(
-                    BackendError::ResponseTimeout,
-                    format!(
-                        "TileRT decode did not answer /pd/decode within {:?}",
-                        body.response_deadline()
-                    ),
-                )
-            })?
-            .map_err(|error| transport_error("/pd/decode", error))?;
-        let status = response.status();
-        if !status.is_success() {
+        let mut retries = 0;
+        loop {
+            let send = self
+                .http
+                .post(self.base.with_path("/pd/decode"))
+                .json(&DecodeRequest { body, stream })
+                .send();
+            let response = tokio::time::timeout(body.response_deadline(), send)
+                .await
+                .map_err(|_| {
+                    backend_error(
+                        BackendError::ResponseTimeout,
+                        format!(
+                            "TileRT decode did not answer /pd/decode within {:?}",
+                            body.response_deadline()
+                        ),
+                    )
+                })?
+                .map_err(|error| transport_error("/pd/decode", error))?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && retries < BUSY_RETRIES {
+                retries += 1;
+                tracing::debug!(rid = body.rid, retries, "TileRT decode busy; retrying");
+                tokio::time::sleep(BUSY_RETRY_DELAY).await;
+                continue;
+            }
             let text = error_text(response).await;
             return Err(status_error(status, &text));
         }
-        Ok(response)
     }
 
     pub(crate) async fn decode_blocking(
@@ -440,18 +532,21 @@ mod tests {
             Some(DecodeEvent::Tokens(vec![5, 6, 7]))
         );
         assert_eq!(parse_line("  ").unwrap(), None);
-        let done = parse_line(
-            r#"{"done":true,"n":3,"seq_len":10,"finish_reason":"length","phase_ms":{"decode":1.5}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            done,
-            Some(DecodeEvent::Done {
-                finish: DecodeFinish::Length,
-                declared_tokens: Some(3),
-                phases: Some(serde_json::json!({"decode": 1.5})),
-            })
-        );
+        // 0.1.8 names the timings `phase_ms`, 0.2 `timing_ms`.
+        for field in ["phase_ms", "timing_ms"] {
+            let done = parse_line(&format!(
+                r#"{{"done":true,"n":3,"seq_len":10,"finish_reason":"length","{field}":{{"decode":1.5}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                done,
+                Some(DecodeEvent::Done {
+                    finish: DecodeFinish::Length,
+                    declared_tokens: Some(3),
+                    phases: Some(serde_json::json!({"decode": 1.5})),
+                })
+            );
+        }
         for (line, expected) in [
             (
                 r#"{"done":true,"finish_reason":"stop"}"#,
@@ -492,6 +587,8 @@ mod tests {
         }
         for (status, kind) in [
             (400, BackendError::InvalidArgument),
+            (429, BackendError::WorkerOverloaded),
+            (499, BackendError::Cancelled),
             (501, BackendError::InvalidArgument),
             (504, BackendError::ConnectionTimeout),
             (500, BackendError::Unknown),
@@ -503,17 +600,37 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_from_any_tilert_but_0_1_8_are_refused() {
+    fn capabilities_tell_the_versions_apart() {
         let v018 = br#"{"profile":"dsv41","engine":"E","capabilities":{"penalties":true,"ignore_eos":true,"logprobs":false}}"#;
         assert_eq!(
             parse_capabilities(v018).unwrap(),
-            DecodeCapabilities {
-                penalties: true,
-                ignore_eos: true
+            DecodeServer {
+                api: DecodeApi::V018,
+                capabilities: DecodeCapabilities {
+                    penalties: true,
+                    ignore_eos: true
+                },
+                max_concurrency: 1,
             }
         );
-        let v02 = br#"{"penalties":false,"ignore_eos":true,"max_concurrency":8,"logprobs":false}"#;
-        let error = parse_capabilities(v02).unwrap_err();
-        assert!(error.to_string().contains("TileRT 0.1.8 only"), "{error}");
+        let v02 = br#"{"penalties":false,"ignore_eos":true,"max_concurrency":8,"logprobs":false,"grammar":false}"#;
+        assert_eq!(
+            parse_capabilities(v02).unwrap(),
+            DecodeServer {
+                api: DecodeApi::V02,
+                capabilities: DecodeCapabilities {
+                    penalties: false,
+                    ignore_eos: true
+                },
+                max_concurrency: 8,
+            }
+        );
+        for other in [
+            &br#"{"penalties":false}"#[..],
+            br#"{"max_concurrency":0}"#,
+            b"[]",
+        ] {
+            assert!(parse_capabilities(other).is_err());
+        }
     }
 }
