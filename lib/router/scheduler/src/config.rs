@@ -54,8 +54,8 @@ impl From<&SelectionConfig> for CacheHitWeights {
     #[inline]
     fn from(config: &SelectionConfig) -> Self {
         Self {
-            host: config.host_cache_hit_weight,
-            disk: config.disk_cache_hit_weight,
+            host: config.host_cache_hit_weight(),
+            disk: config.disk_cache_hit_weight(),
         }
     }
 }

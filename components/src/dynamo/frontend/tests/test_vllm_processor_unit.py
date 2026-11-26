@@ -1604,6 +1604,7 @@ async def test_chat_factory_forwards_renderer_and_mm_cache_options(
         tokenizer_mode="auto",
         config_format="auto",
         trust_remote_code=False,
+        max_logprobs=-1,
         **expected_options,
     )
 

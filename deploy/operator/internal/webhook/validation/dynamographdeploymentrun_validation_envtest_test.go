@@ -73,6 +73,30 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "interconnect-only hardware is not an empty hardware opt-out",
+			test: admissionTestCase{
+				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+					run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm"}}`, nil)
+					run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
+						Interconnect: &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(27.7)},
+					}
+					return run
+				}(),
+				wantCELError: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+			},
+		},
+		{
+			name: "KV-transfer bandwidth stays valid whatever the input overrides set",
+			test: admissionTestCase{object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := schemaRunForAdmission(`{"engine":{"mode":"aggregated"}}`, nil)
+				run.Spec.Hardware.Interconnect = &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(27.7)}
+				return run
+			}()},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				assertKVTransferBandwidth(t, result, 27.7)
+			},
+		},
+		{
 			name: "partial static workload is rejected",
 			test: admissionTestCase{
 				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
