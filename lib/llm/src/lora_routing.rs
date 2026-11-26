@@ -703,6 +703,7 @@ mod tests {
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: Some(WorkerWithDpRank::new(2, 0)),
+            caller_pinned_worker: None,
             allowed_worker_ids: Some(HashSet::from([1, 2])),
             routing_constraints: Default::default(),
             router_config_override: None,

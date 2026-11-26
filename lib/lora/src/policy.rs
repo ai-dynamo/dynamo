@@ -99,7 +99,12 @@ impl RequestPolicy {
             return Ok(allowed);
         }
         let name = name.ok_or_else(Self::capability_error)?;
-        let eligible = Self::runtime_eligible(allowed, live, Some(configs), constraints)?;
+        let mut eligible = Self::runtime_eligible(allowed, live, Some(configs), constraints)?;
+        // Without a pin the hash below commits to one worker before the scheduler runs, so a
+        // held worker must not be a candidate. A pin may still name one.
+        if pins.is_empty() {
+            eligible.retain(|worker| configs.get(worker).is_some_and(|config| !config.is_held()));
+        }
         Self::pin_workers(filter, name, &eligible, pins.iter().copied()).map(Some)
     }
 

@@ -204,6 +204,7 @@ DISAGG_STARTUP_CASES = (
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: TCP round-robin mocker router path timed out"
 )
+HELD_TAINT = "dynamo.routing/held"
 COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
     "model": "counter",
     "messages": [{"role": "user", "content": "test"}],
@@ -255,7 +256,6 @@ class CounterWorkerProcess:
         router_mode: str = "device-aware-weighted",
         initial_taints: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
         system_ports: tuple[int, int] | None = None,
-        worker_env: tuple[dict[str, str], dict[str, str]] | None = None,
     ):
         if initial_taints is not None and len(initial_taints) != 2:
             raise ValueError(
@@ -275,7 +275,6 @@ class CounterWorkerProcess:
         self._router_mode = router_mode
         self._initial_taints = initial_taints or ((), ())
         self._system_ports = system_ports
-        self._worker_env = worker_env or ({}, {})
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -320,7 +319,6 @@ class CounterWorkerProcess:
         self, worker_index: int
     ) -> tuple[dict[str, str], list[int], list[str]]:
         env = os.environ.copy()
-        env.update(self._worker_env[worker_index])
         if self._system_ports is None:
             return env, [], []
 
@@ -1892,7 +1890,7 @@ def test_update_model_taints_replaces_worker_routing_constraints(
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_not_ready_worker_is_held_until_released(
+def test_held_worker_serves_only_pinned_requests_until_released(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
@@ -1900,7 +1898,7 @@ def test_not_ready_worker_is_held_until_released(
     event_plane,
     num_system_ports,
 ):
-    """A worker started not-ready serves only pinned requests until its taint is removed."""
+    """A worker published with the held taint serves only pinned requests until released."""
     assert event_plane == "zmq"
     assert num_system_ports == 2
     system_ports = tuple(dynamo_dynamic_ports.system_ports)
@@ -1909,9 +1907,9 @@ def test_not_ready_worker_is_held_until_released(
     def read_count(path: str) -> int:
         try:
             value = Path(path).read_text().strip()
-            return int(value) if value else 0
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return 0
+        return int(value) if value else 0
 
     async def run_test(workers: CounterWorkerProcess) -> None:
         frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
@@ -2000,7 +1998,7 @@ def test_not_ready_worker_is_held_until_released(
         request_plane=request_plane,
         router_mode="kv",
         system_ports=system_ports,
-        worker_env=({"DYN_ETCD_START_NOT_READY": "true"}, {}),
+        initial_taints=((HELD_TAINT,), ()),
     ) as workers:
         with FrontendRouterProcess(
             request=request,

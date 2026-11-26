@@ -34,6 +34,7 @@ pub fn fixture(
         expected_output_tokens: None,
         affinity_target: None,
         pinned_worker: None,
+        caller_pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
         router_config_override: None,

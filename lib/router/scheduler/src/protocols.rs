@@ -48,6 +48,13 @@ pub trait WorkerConfigLike {
         &EMPTY_WORKER_TAINTS
     }
 
+    /// Whether the worker is held: discovered, but kept out of automatic selection until it
+    /// is released. Only a worker the caller names reaches it. This is read for every
+    /// candidate, so implementations should return a stored value.
+    fn is_held(&self) -> bool {
+        false
+    }
+
     /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
     /// Topology-aware routing turns these labels into canonical worker taints such as
     /// `dynamo.topology/zone=us-east-1a`.
@@ -74,17 +81,6 @@ pub trait WorkerConfigLike {
         Cow::Owned(WorkerKvTransferKeys::of(self))
     }
 }
-
-/// Taint a worker publishes while it is discovered but not yet ready for ordinary traffic.
-///
-/// Other taints only attract requests that require them. This one repels: the router never
-/// selects a worker carrying it, and only a worker ID the caller supplied reaches it. Removing
-/// the taint makes the worker an ordinary member of its set.
-///
-/// [`RoutingEligibility`](crate::RoutingEligibility) enforces the rule.
-/// [`RoutingConstraints::is_compatible_with_worker_taints`] does not, so callers that
-/// pre-filter workers keep a pinned not-ready worker eligible.
-pub const NOT_READY_TAINT: &str = "dynamo.routing/not-ready";
 
 /// Request-level taint constraints evaluated against each worker's published taints.
 ///

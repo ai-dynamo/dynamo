@@ -1035,6 +1035,7 @@ mod test_support {
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
+            caller_pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

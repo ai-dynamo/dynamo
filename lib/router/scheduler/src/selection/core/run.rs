@@ -97,6 +97,7 @@ impl SelectionCore {
                 // A wire pin is caller-supplied, not derived from session affinity.
                 affinity_target: req.affinity_target.filter(|_| req.pinned_worker.is_none()),
                 pinned_worker: req.pinned_worker,
+                caller_pinned_worker: req.pinned_worker.map(|worker| worker.worker_id),
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
                 admission,
@@ -141,6 +142,7 @@ impl SelectionCore {
                 // A wire pin is caller-supplied, not derived from session affinity.
                 affinity_target: req.affinity_target.filter(|_| req.pinned_worker.is_none()),
                 pinned_worker: req.pinned_worker,
+                caller_pinned_worker: req.pinned_worker.map(|worker| worker.worker_id),
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
                 admission: SelectionAdmission::Book {
@@ -291,6 +293,7 @@ impl SelectionCore {
             session,
             affinity_target,
             pinned_worker,
+            caller_pinned_worker,
             allowed_worker_ids,
             routing_constraints,
             admission,
@@ -462,6 +465,7 @@ impl SelectionCore {
             expected_output_tokens,
             affinity_target,
             pinned_worker,
+            caller_pinned_worker,
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits,

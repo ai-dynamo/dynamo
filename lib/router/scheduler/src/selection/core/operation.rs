@@ -42,6 +42,9 @@ pub struct SelectionOperation<'a> {
     pub session: SessionBinding,
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
+    /// The worker the caller named. Unlike `pinned_worker`, never set from session affinity
+    /// or a planned worker; only this worker can be selected while held.
+    pub caller_pinned_worker: Option<WorkerId>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub admission: SelectionAdmission,

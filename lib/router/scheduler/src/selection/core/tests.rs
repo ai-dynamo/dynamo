@@ -180,6 +180,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
+        held: false,
         topology_domains: HashMap::new(),
         kv_transfer_domain: None,
         kv_transfer_enforcement: None,
@@ -306,6 +307,7 @@ fn lease_operation<'a>(
         session: SessionBinding::None,
         affinity_target: None,
         pinned_worker: None,
+        caller_pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
         admission: SelectionAdmission::Lease {
@@ -4039,6 +4041,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
+        held: false,
         topology_domains: HashMap::new(),
         kv_transfer_domain: None,
         kv_transfer_enforcement: None,

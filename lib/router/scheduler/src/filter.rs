@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::types::{KvSchedulerError, WorkerIdSet};
-use crate::protocols::{NOT_READY_TAINT, RoutingConstraints, WorkerConfigLike};
+use crate::protocols::{RoutingConstraints, WorkerConfigLike};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::FullRankCounts;
@@ -48,8 +48,7 @@ pub struct RoutingEligibility<'a> {
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     available_worker_ids: Option<&'a WorkerIdSet>,
     pinned_worker: Option<WorkerWithDpRank>,
-    /// Whether the pin came from session affinity rather than from the caller.
-    pin_is_affinity_derived: bool,
+    caller_pinned_worker: Option<WorkerId>,
     affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
     reject: Option<RejectCheck<'a>>,
@@ -68,18 +67,18 @@ impl<'a> RoutingEligibility<'a> {
             overloaded_worker_ids,
             available_worker_ids: None,
             pinned_worker,
-            pin_is_affinity_derived: false,
+            caller_pinned_worker: None,
             affinity_target: None,
             routing_constraints,
             reject: None,
         }
     }
 
-    /// Mark the pin as chosen by session affinity. Only a pin the caller supplied may reach
-    /// a not-ready worker; an affinity-derived pin is automatic selection.
+    /// The worker the caller named, if any. Only this worker can be selected while held;
+    /// a pin chosen by session affinity or a planned worker does not count.
     #[inline]
-    pub fn with_affinity_derived_pin(mut self) -> Self {
-        self.pin_is_affinity_derived = true;
+    pub fn with_caller_pin(mut self, worker_id: Option<WorkerId>) -> Self {
+        self.caller_pinned_worker = worker_id;
         self
     }
 
@@ -165,25 +164,13 @@ impl<'a> RoutingEligibility<'a> {
             && !self.is_worker_overloaded(worker_id)
     }
 
-    /// Taint compatibility for one worker. A not-ready worker is eligible only when the
-    /// caller pinned it; every other rule applies to pinned and unpinned workers alike.
+    /// Taint and hold checks for one worker. A held worker is eligible only when the caller
+    /// named it; every other rule applies to pinned and unpinned workers alike.
     #[inline]
     fn taints_allow<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
-        let taints = config.taints();
-        if !self
-            .routing_constraints
-            .is_compatible_with_worker_taints(taints)
-        {
-            return false;
-        }
-        // Most workers carry no taints, so keep the lookup off that path.
-        if taints.is_empty() || !taints.contains(NOT_READY_TAINT) {
-            return true;
-        }
-        !self.pin_is_affinity_derived
-            && self
-                .pinned_worker
-                .is_some_and(|pinned| pinned.worker_id == worker_id)
+        self.routing_constraints
+            .is_compatible_with_worker_taints(config.taints())
+            && (!config.is_held() || self.caller_pinned_worker == Some(worker_id))
     }
 
     #[inline]
@@ -469,6 +456,9 @@ mod tests {
         taints: HashSet<String>,
     }
 
+    /// Stands in for the host's hold representation in these tests.
+    const TEST_HELD_TAINT: &str = "test/held";
+
     impl Default for TestWorkerConfig {
         fn default() -> Self {
             Self {
@@ -498,6 +488,10 @@ mod tests {
 
         fn taints(&self) -> &HashSet<String> {
             &self.taints
+        }
+
+        fn is_held(&self) -> bool {
+            self.taints.contains(TEST_HELD_TAINT)
         }
     }
 
@@ -676,116 +670,77 @@ mod tests {
         );
     }
 
-    fn not_ready_workers() -> HashMap<WorkerId, TestWorkerConfig> {
-        HashMap::from([(
-            7,
-            TestWorkerConfig {
-                dp_start: 2,
-                dp_size: 3,
-                taints: HashSet::from([
-                    "zone-a".to_string(),
-                    crate::protocols::NOT_READY_TAINT.to_string(),
-                ]),
-            },
-        )])
-    }
-
+    /// A held worker is selected only when the caller names it, and every other rule still
+    /// applies to it.
     #[test]
-    fn not_ready_worker_is_never_selected_for_an_unpinned_request() {
-        let workers = not_ready_workers();
-
-        // An ordinary request, one whose other required taints all match, and one that
-        // names the not-ready taint itself: none of them is a pin.
-        for required in [
-            HashSet::new(),
-            HashSet::from(["zone-a".to_string()]),
-            HashSet::from([crate::protocols::NOT_READY_TAINT.to_string()]),
-        ] {
-            let constraints = RoutingConstraints {
-                required_taints: required,
-                preferred_taints: HashMap::new(),
-            };
-            let eligibility = RoutingEligibility::new(None, None, None, &constraints);
-
-            assert!(!eligibility.allows_worker(7, &workers[&7]));
-            assert!(!eligibility.has_eligible_worker(workers.iter().map(|(id, c)| (*id, c))));
-            assert_eq!(
-                eligibility
-                    .validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3))
-                    .err(),
-                Some(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
-            );
-        }
-    }
-
-    #[test]
-    fn request_pinned_to_a_not_ready_worker_reaches_it() {
-        let workers = not_ready_workers();
+    fn held_worker_is_eligible_only_for_its_caller_pin() {
+        let held = TestWorkerConfig {
+            dp_start: 2,
+            dp_size: 3,
+            taints: HashSet::from(["zone-a".to_string(), TEST_HELD_TAINT.to_string()]),
+        };
+        let workers = HashMap::from([(7, held.clone()), (8, held)]);
         let pin = WorkerWithDpRank::new(7, 3);
-        let constraints = RoutingConstraints::default();
-        let eligibility = RoutingEligibility::new(None, None, Some(pin), &constraints);
-
-        assert!(eligibility.allows_worker(7, &workers[&7]));
-        assert!(eligibility.validate_worker_rank(&workers, pin).is_ok());
-    }
-
-    #[test]
-    fn affinity_derived_pin_does_not_reach_a_not_ready_worker() {
-        let workers = not_ready_workers();
-        let pin = WorkerWithDpRank::new(7, 3);
-        let constraints = RoutingConstraints::default();
-        let eligibility = RoutingEligibility::new(None, None, Some(pin), &constraints)
-            .with_affinity_derived_pin();
-
-        assert!(!eligibility.allows_worker(7, &workers[&7]));
-        assert_eq!(
-            eligibility.validate_worker_rank(&workers, pin).err(),
-            Some(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
-        );
-    }
-
-    #[test]
-    fn pin_to_a_not_ready_worker_still_honours_required_taints() {
-        let workers = not_ready_workers();
-        let pin = WorkerWithDpRank::new(7, 3);
-        let constraints = RoutingConstraints {
-            required_taints: HashSet::from(["zone-b".to_string()]),
+        let zone = |zone: &str| RoutingConstraints {
+            required_taints: HashSet::from([zone.to_string()]),
             preferred_taints: HashMap::new(),
         };
-        let eligibility = RoutingEligibility::new(None, None, Some(pin), &constraints);
+        let any = RoutingConstraints::default();
 
-        assert_eq!(
-            eligibility.validate_worker_rank(&workers, pin).err(),
-            Some(WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 })
-        );
-    }
+        // (case, constraints, pinned worker, caller pin, worker 7 eligible, worker 8 eligible)
+        for (case, constraints, pinned, caller, allows_7, allows_8) in [
+            ("unpinned", &any, None, None, false, false),
+            (
+                "matching required taints",
+                &zone("zone-a"),
+                None,
+                None,
+                false,
+                false,
+            ),
+            (
+                "pin not from the caller",
+                &any,
+                Some(pin),
+                None,
+                false,
+                false,
+            ),
+            ("caller pin", &any, Some(pin), Some(7), true, false),
+            (
+                "caller pin, required taint missing",
+                &zone("zone-b"),
+                Some(pin),
+                Some(7),
+                false,
+                false,
+            ),
+        ] {
+            let eligibility =
+                RoutingEligibility::new(None, None, pinned, constraints).with_caller_pin(caller);
 
-    #[test]
-    fn pin_does_not_open_other_not_ready_workers() {
-        let mut workers = not_ready_workers();
-        workers.insert(8, workers[&7].clone());
-        let constraints = RoutingConstraints::default();
-        let eligibility =
-            RoutingEligibility::new(None, None, Some(WorkerWithDpRank::new(7, 3)), &constraints);
+            assert_eq!(
+                eligibility.allows_worker(7, &workers[&7]),
+                allows_7,
+                "{case}"
+            );
+            assert_eq!(
+                eligibility.allows_worker(8, &workers[&8]),
+                allows_8,
+                "{case}"
+            );
+            assert_eq!(
+                eligibility.validate_worker_rank(&workers, pin).is_ok(),
+                allows_7,
+                "{case}"
+            );
+        }
 
-        assert!(eligibility.allows_worker(7, &workers[&7]));
-        assert!(!eligibility.allows_worker(8, &workers[&8]));
-    }
-
-    #[test]
-    fn worker_serves_ordinary_requests_once_the_not_ready_taint_is_removed() {
-        let mut workers = not_ready_workers();
-        let constraints = RoutingConstraints::default();
-        let eligibility = RoutingEligibility::new(None, None, None, &constraints);
-        assert!(!eligibility.allows_worker(7, &workers[&7]));
-
-        workers
-            .get_mut(&7)
-            .unwrap()
-            .taints
-            .remove(crate::protocols::NOT_READY_TAINT);
-
-        assert!(eligibility.allows_worker(7, &workers[&7]));
+        // Released, the worker is an ordinary member of its set.
+        let mut released = workers[&7].clone();
+        released.taints.remove(TEST_HELD_TAINT);
+        let eligibility = RoutingEligibility::new(None, None, None, &any);
+        assert!(eligibility.allows_worker(7, &released));
     }
 
     #[test]

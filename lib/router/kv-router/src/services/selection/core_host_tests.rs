@@ -103,6 +103,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
+        held: false,
         topology_domains: HashMap::new(),
         kv_transfer_domain: None,
         kv_transfer_enforcement: None,

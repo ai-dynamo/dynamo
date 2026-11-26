@@ -348,6 +348,9 @@ pub struct ScheduleRequest {
     /// target as advisory context and may select another eligible worker.
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
+    /// The worker the caller named, kept apart from `pinned_worker`, which can also come from
+    /// session affinity or a planned worker. Only this worker can be selected while held.
+    pub caller_pinned_worker: Option<WorkerId>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
@@ -380,6 +383,9 @@ pub struct SchedulingRequest {
     /// [`ScheduleRequest::affinity_target`].
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
+    /// The worker the caller named, kept apart from `pinned_worker`, which can also come from
+    /// session affinity or a planned worker. Only this worker can be selected while held.
+    pub caller_pinned_worker: Option<WorkerId>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
@@ -473,18 +479,13 @@ impl SchedulingRequest {
         &'a self,
         overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     ) -> RoutingEligibility<'a> {
-        let eligibility = RoutingEligibility::new(
+        RoutingEligibility::new(
             self.allowed_worker_ids.as_ref(),
             overloaded_worker_ids,
             self.pinned_worker,
             &self.routing_constraints,
-        );
-        // A pin that arrives with an affinity target was chosen by the session binding.
-        if self.affinity_target.is_some() {
-            eligibility.with_affinity_derived_pin()
-        } else {
-            eligibility
-        }
+        )
+        .with_caller_pin(self.caller_pinned_worker)
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
@@ -651,6 +652,7 @@ mod tests {
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
+            caller_pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             router_config_override: None,
@@ -711,9 +713,9 @@ mod tests {
         }
     }
 
-    struct NotReadyWorker(HashSet<String>);
+    struct HeldWorker;
 
-    impl crate::protocols::WorkerConfigLike for NotReadyWorker {
+    impl crate::protocols::WorkerConfigLike for HeldWorker {
         fn data_parallel_start_rank(&self) -> u32 {
             0
         }
@@ -730,24 +732,23 @@ mod tests {
             None
         }
 
-        fn taints(&self) -> &HashSet<String> {
-            &self.0
+        fn is_held(&self) -> bool {
+            true
         }
     }
 
     #[test]
-    fn only_a_caller_pin_reaches_a_not_ready_worker() {
+    fn only_the_caller_pinned_worker_reaches_a_held_worker() {
         let worker = WorkerWithDpRank::new(1, 0);
-        let config = NotReadyWorker(HashSet::from([crate::NOT_READY_TAINT.to_string()]));
         let mut request = request_with_decode_load(16, None, 0, 0, worker);
-        assert!(!request.eligibility().allows_worker(1, &config));
+        assert!(!request.eligibility().allows_worker(1, &HeldWorker));
 
+        // Session affinity and planned workers set `pinned_worker` without naming the caller.
         request.pinned_worker = Some(worker);
-        assert!(request.eligibility().allows_worker(1, &config));
+        assert!(!request.eligibility().allows_worker(1, &HeldWorker));
 
-        // Session affinity forwards its choice as both the pin and the affinity target.
-        request.affinity_target = Some(worker.into());
-        assert!(!request.eligibility().allows_worker(1, &config));
+        request.caller_pinned_worker = Some(1);
+        assert!(request.eligibility().allows_worker(1, &HeldWorker));
     }
 
     #[test]

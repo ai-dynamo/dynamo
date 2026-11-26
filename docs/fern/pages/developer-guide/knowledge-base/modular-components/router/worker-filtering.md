@@ -15,30 +15,26 @@ The router applies these hard eligibility checks before worker scoring:
 - **Pinned worker and DP rank**: Direct routing, phase-specific routing, and session affinity resolve to an exact `worker_id` and optional `dp_rank`. The router validates that the worker exists and that the requested DP rank belongs to that worker.
 - **DP-rank bounds**: For unpinned KV routing, each eligible worker expands into the ranks in `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`. Ranks outside that range are never considered.
 - **Required taints**: `required_taints` are hard topology constraints. A worker missing a required taint is filtered out.
-- **Not-ready workers**: A worker whose card carries the `dynamo.routing/not-ready` taint is never selected automatically. Only a worker ID supplied by the caller reaches it. See [Not-Ready Workers](#not-ready-workers).
+- **Held workers**: A worker whose card carries the `dynamo.routing/held` taint is never selected automatically. Only a worker ID supplied by the caller reaches it. See [Held Workers](#held-workers).
 - **Busy-threshold overload**: When busy thresholds mark a worker overloaded, the router removes that worker from the scheduling candidate set. A pinned overloaded worker returns `PinnedWorkerOverloaded`; if every otherwise eligible worker is overloaded, the scheduler returns `AllEligibleWorkersOverloaded`.
 
 These checks are centralized in the router's routing eligibility path so selection, pinned validation, and queue admission all use the same worker and DP-rank rules.
 
-## Not-Ready Workers
+## Held Workers
 
 A worker can publish itself to discovery while staying out of ordinary routing. This lets a check send requests through a frontend to that exact worker before it takes client traffic.
 
-Set `DYN_ETCD_START_NOT_READY=true` on the worker. It then registers its model with the `dynamo.routing/not-ready` taint. The setting is off by default.
-
-The setting applies to etcd and the other key-value discovery backends. Under Kubernetes discovery it does nothing: Pod readiness already keeps the worker out of routing there, and nothing would remove the taint once the Pod is ready.
+A worker is held while its base model card carries the `dynamo.routing/held` taint. The router reads routing taints from the base card only, so the hold covers every LoRA adapter the worker serves. A worker can publish the taint in its runtime config when it registers its model, or add it later through its taint update route.
 
 While the taint is present:
 
 - **Automatic selection skips the worker.** This includes requests whose `required_taints` all match, and requests routed by session affinity.
-- **A caller-supplied worker ID reaches it.** Use `nvext.backend_instance_id` or `nvext.decode_worker_id` for decode and aggregated workers, `nvext.prefill_worker_id` for prefill workers, or the equivalent `x-dynamo-worker-instance-id` and `x-dynamo-prefill-instance-id` headers. The pin overrides only the not-ready hold: `required_taints`, allowed worker IDs, DP-rank bounds, and overload checks still apply.
+- **A caller-supplied worker ID reaches it.** Use `nvext.backend_instance_id` or `nvext.decode_worker_id` for decode and aggregated workers, `nvext.prefill_worker_id` for prefill workers, or the equivalent `x-dynamo-worker-instance-id` and `x-dynamo-prefill-instance-id` headers. The pin overrides only the hold: `required_taints`, allowed worker IDs, DP-rank bounds, and overload checks still apply.
 - **A pinned request does not fall back.** If the pinned worker is ineligible, routing fails instead of choosing another worker.
 
-If every worker for a model is not ready, unpinned requests fail with no endpoint.
+If every worker for a model is held, unpinned requests fail with no endpoint.
 
-Nothing releases a held worker automatically. It stays out of ordinary routing until its taint is removed.
-
-To release the worker, update its taints without `dynamo.routing/not-ready`. The worker's `POST /engine/update/model_taints` route replaces the caller-managed taint set, so send the taints the worker should keep:
+Nothing releases a held worker automatically. To release it, update its taints without `dynamo.routing/held`. The worker's `POST /engine/update/model_taints` route replaces the caller-managed taint set, so send the taints the worker should keep:
 
 ```bash
 curl -X POST http://<worker-system-address>/engine/update/model_taints \
@@ -46,11 +42,12 @@ curl -X POST http://<worker-system-address>/engine/update/model_taints \
   -d '{"taints": []}'
 ```
 
-Because the route replaces the whole set, any update that omits `dynamo.routing/not-ready` releases the worker. A caller that manages other taints on a held worker must include it until the worker should serve.
+Because the route replaces the whole set, any update that omits `dynamo.routing/held` releases the worker. A caller that manages other taints on a held worker must include it until the worker should serve.
 
-A restarted worker registers a new instance and starts held again.
+### Limitations
 
-This applies to the KV router. The round-robin, random, least-loaded, device-aware, and direct router modes do not read worker taints, so a worker started with `DYN_ETCD_START_NOT_READY=true` receives traffic from frontends in those modes.
+- **Only the KV router enforces the hold.** The round-robin, random, least-loaded, device-aware, and direct router modes do not read it, so a held worker receives traffic from frontends in those modes.
+- **Held workers still count above the router.** Worker-set weight, model readiness (`/v1/models/{model}/ready`), and the multimodal encode hop count discovered instances without reading the hold. A pool made only of held workers in its own namespace or component therefore still draws a share of unpinned traffic, which then fails, and a model whose workers are all held reports ready.
 
 ## Busy Thresholds
 

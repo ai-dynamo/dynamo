@@ -56,6 +56,9 @@ pub struct SelectionWorkerConfig {
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
+    /// Held: kept out of automatic selection, and reachable only by a caller that names it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
     pub kv_transfer_domain: Option<String>,
@@ -101,6 +104,10 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
+    }
+
+    fn is_held(&self) -> bool {
+        self.held
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -165,6 +172,9 @@ pub struct WorkerCatalogRecord {
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
+    /// Held: kept out of automatic selection, and reachable only by a caller that names it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
     pub kv_transfer_domain: Option<String>,
@@ -208,6 +218,7 @@ impl WorkerCatalogRecord {
             stable_routing_id: req.stable_routing_id,
             is_eagle: req.is_eagle,
             taints: req.taints,
+            held: req.held,
             topology_domains: req.topology_domains,
             kv_transfer_domain: req.kv_transfer_domain,
             kv_transfer_enforcement: req.kv_transfer_enforcement,
@@ -250,6 +261,7 @@ impl WorkerCatalogRecord {
             stable_routing_id: self.stable_routing_id.clone(),
             is_eagle: self.is_eagle,
             taints: self.taints.clone(),
+            held: self.held,
             topology_domains: self.topology_domains.clone(),
             kv_transfer_domain: self.kv_transfer_domain.clone(),
             kv_transfer_enforcement: self.kv_transfer_enforcement,
@@ -313,6 +325,7 @@ impl Default for WorkerRequest {
             stable_routing_id: None,
             is_eagle: None,
             taints: HashSet::new(),
+            held: false,
             topology_domains: HashMap::new(),
             kv_transfer_domain: None,
             kv_transfer_enforcement: None,
@@ -350,6 +363,9 @@ pub struct WorkerRequest {
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
+    /// Held: kept out of automatic selection, and reachable only by a caller that names it.
+    #[serde(default)]
+    pub held: bool,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
     pub kv_transfer_domain: Option<String>,
@@ -389,6 +405,8 @@ pub struct WorkerPatchRequest {
     #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
     pub taints: Option<HashSet<String>>,
+    #[serde(default, deserialize_with = "strict_bool")]
+    pub held: Option<bool>,
     pub topology_domains: Option<HashMap<String, String>>,
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
@@ -445,6 +463,9 @@ impl WorkerCatalogRecord {
         }
         if let Some(taints) = patch.taints {
             self.taints = taints;
+        }
+        if let Some(held) = patch.held {
+            self.held = held;
         }
         if let Some(topology_domains) = patch.topology_domains {
             self.topology_domains = topology_domains;

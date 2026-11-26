@@ -108,20 +108,13 @@ struct BestMatchArgs<'a> {
     needs_uncached_prefill: bool,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
+    caller_pinned_worker: Option<WorkerId>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
     admission: FindBestMatchAdmission,
 }
 
 impl RoutingHost {
-    fn worker_is_not_ready(&self, worker_id: u64) -> bool {
-        self.kv_router()
-            .workers_with_configs
-            .borrow()
-            .get(&worker_id)
-            .is_some_and(|config| config.taints.contains(dynamo_scheduler::NOT_READY_TAINT))
-    }
-
     pub(super) fn check_current_kv_candidate(
         &self,
         request: &PreprocessedRequest,
@@ -175,6 +168,7 @@ impl RoutingHost {
                 args.expected_output_tokens,
                 args.affinity_target,
                 args.pinned_worker,
+                args.caller_pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
@@ -227,6 +221,9 @@ impl RoutingHost {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
+        // Only the worker the caller named can be selected while held. Record it before the
+        // session binding is merged into the pin.
+        let caller_pinned_worker = explicit_pin.map(|(worker_id, _)| worker_id);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
@@ -271,10 +268,10 @@ impl RoutingHost {
             let workers = self.kv_router().workers_with_configs.borrow();
             let eligible =
                 allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
+            let eligibility = RoutingEligibility::new(None, None, None, &routing_constraints);
             eligible.retain(|worker_id| {
                 workers.get(worker_id).is_some_and(|config| {
-                    routing_constraints.is_compatible_with_worker_taints(&config.taints)
-                        && !config.taints.contains(dynamo_scheduler::NOT_READY_TAINT)
+                    eligibility.allows_worker_ignoring_overload(*worker_id, config)
                 }) && !migration_excluded_worker_ids.contains(worker_id)
             });
             if eligible.is_empty()
@@ -308,10 +305,8 @@ impl RoutingHost {
             }
         }
         let explicit_pin = match (explicit_pin, worker_only_affinity) {
-            // A not-ready worker is reachable only through the caller's pin, so keep it.
             (Some((worker_id, None)), Some(affinity_target))
-                if worker_id == affinity_target.worker_id
-                    && !self.worker_is_not_ready(worker_id) =>
+                if worker_id == affinity_target.worker_id =>
             {
                 // A worker-only session binding allows the KV scheduler to select this
                 // request's rank, so do not turn a matching worker-only request hint into an
@@ -376,6 +371,7 @@ impl RoutingHost {
                     affinity_target: affinity_target
                         .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
                     pinned_worker: None,
+                    caller_pinned_worker,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
                     admission,
@@ -411,12 +407,8 @@ impl RoutingHost {
                 None,
                 Some(pinned_worker),
                 &routing_constraints,
-            );
-            let eligibility = if pin_is_affinity_only {
-                eligibility.with_affinity_derived_pin()
-            } else {
-                eligibility
-            };
+            )
+            .with_caller_pin(caller_pinned_worker);
             if let Err(error) = eligibility.validate_worker_rank(&configs, pinned_worker) {
                 return Err(anyhow::anyhow!(
                     "Pinned worker {} dp_rank {} is not eligible: {error}",
@@ -451,6 +443,7 @@ impl RoutingHost {
             needs_uncached_prefill,
             affinity_target: pin_is_affinity_only.then(|| pinned_worker.into()),
             pinned_worker: Some(pinned_worker),
+            caller_pinned_worker,
             allowed_worker_ids,
             routing_constraints,
             admission,
@@ -539,7 +532,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{HELD_TAINT, ModelRuntimeConfig},
         lora::{
             filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
         },
@@ -587,29 +580,56 @@ mod tests {
         assert_eq!(eligible, Some(HashSet::from([2])));
     }
 
-    /// The runtime-LoRA pre-filter runs before the caller's pin is considered, so it must
-    /// keep a not-ready worker for the scheduler filter to judge.
+    /// Without a pin, runtime-LoRA placement hashes to one worker before the scheduler runs,
+    /// so it must skip a held worker. A caller pin can still name it.
     #[test]
-    fn runtime_lora_keeps_a_not_ready_worker_for_a_caller_pin() {
+    fn runtime_lora_places_unpinned_requests_on_ready_workers_only() {
         let capability = "dynamo.runtime-lora/v2".to_string();
         let mut held = runtime_config(&capability, "wandb-artifact");
-        held.taints
-            .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
-        let workers = HashMap::from([(2, held)]);
+        held.taints.insert(HELD_TAINT.to_string());
+        held.refresh_hold();
+        let workers = HashMap::from([
+            (1, runtime_config(&capability, "wandb-artifact")),
+            (2, held),
+        ]);
         let constraints = RoutingConstraints {
             required_taints: HashSet::from([capability]),
             ..Default::default()
         };
-        let live = HashSet::from([2]);
+        let live = HashSet::from([1, 2]);
+        let filter = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
+        let policy = dynamo_lora::policy::RequestPolicy::new(Some(2));
+        // An adapter whose hash ranks the held worker first.
+        let adapter = (0..)
+            .map(|i| format!("adapter-{i}"))
+            .find(|name| {
+                pin_runtime_lora_workers(&filter, name, &HashSet::from([1, 2]), std::iter::empty())
+                    .unwrap()
+                    .contains(&2)
+            })
+            .unwrap();
+        let restrict = |pins: &[u64]| {
+            policy
+                .restrict_workers(
+                    &filter,
+                    Some(&adapter),
+                    &workers,
+                    &live,
+                    None,
+                    &constraints,
+                    pins,
+                )
+                .unwrap()
+        };
 
-        let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
-        assert_eq!(eligible, Some(HashSet::from([2])));
+        assert_eq!(restrict(&[]), Some(HashSet::from([1])));
+        assert_eq!(restrict(&[2]), Some(HashSet::from([2])));
 
         let pin = WorkerWithDpRank::new(2, 0);
         let caller_pinned =
-            RoutingEligibility::new(eligible.as_ref(), None, Some(pin), &constraints);
+            RoutingEligibility::new(None, None, Some(pin), &constraints).with_caller_pin(Some(2));
         assert!(caller_pinned.validate_worker_rank(&workers, pin).is_ok());
-        let automatic = RoutingEligibility::new(eligible.as_ref(), None, None, &constraints);
+        let automatic = RoutingEligibility::new(None, None, None, &constraints);
         assert!(!automatic.allows_worker(2, &workers[&2]));
     }
 

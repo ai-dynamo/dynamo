@@ -518,6 +518,7 @@ pub(crate) fn worker_request_from_runtime_config(
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
         taints: config.taints().clone(),
+        held: config.is_held(),
         topology_domains: config.topology_domains.clone(),
         kv_transfer_domain: config.kv_transfer_domain.clone(),
         kv_transfer_enforcement: config.kv_transfer_enforcement,

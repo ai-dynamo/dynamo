@@ -1019,6 +1019,7 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
                 session: SessionBinding::None,
                 affinity_target: None,
                 pinned_worker: None,
+                caller_pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: Default::default(),
                 admission: SelectionAdmission::Lease { request_id },

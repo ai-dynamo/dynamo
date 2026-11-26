@@ -261,6 +261,7 @@ fn fixture_with_preferred_taints(
         expected_output_tokens: Some(256),
         affinity_target: None,
         pinned_worker: None,
+        caller_pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints {
             required_taints: HashSet::new(),

@@ -28,9 +28,11 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
-/// Makes a worker register its model with [`dynamo_scheduler::NOT_READY_TAINT`]. Honoured
-/// under etcd and the other key-value discovery backends, ignored under Kubernetes discovery.
-pub const START_NOT_READY_ENV: &str = "DYN_ETCD_START_NOT_READY";
+/// Taint that holds a worker: frontends discover it, but the KV router never selects it
+/// automatically, and only a worker ID the caller supplies reaches it. Removing the taint
+/// releases the worker. Unlike other taints, which attract only requests that require them,
+/// this one repels.
+pub const HELD_TAINT: &str = "dynamo.routing/held";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
@@ -400,6 +402,12 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub taints: HashSet<String>,
 
+    /// Whether `taints` contains [`HELD_TAINT`]. Derived, not published: the frontend sets it
+    /// with [`Self::refresh_hold`] when it receives the card or a taint update, so the router
+    /// reads a field instead of hashing a string per candidate. Do not set it directly.
+    #[serde(skip)]
+    pub held: bool,
+
     /// Stable routing identity, set via the `DYN_STABLE_ROUTING_ID` env var. Used as
     /// the rendezvous-hash key so cache assignments survive a new ephemeral
     /// `worker_id`. `None` if unset.
@@ -496,6 +504,7 @@ impl Default for ModelRuntimeConfig {
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
+            held: false,
             stable_routing_id: None,
             topology_domains: HashMap::new(),
             kv_transfer_domain: None,
@@ -611,6 +620,10 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
+    }
+
+    fn is_held(&self) -> bool {
+        self.held
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -858,6 +871,13 @@ impl ModelRuntimeConfig {
         self
     }
 
+    /// Recompute [`WorkerConfigLike::is_held`](dynamo_scheduler::host::WorkerConfigLike::is_held)
+    /// from `taints`. Call after receiving or replacing a worker's taints.
+    pub fn refresh_hold(&mut self) -> &mut Self {
+        self.held = self.taints.contains(HELD_TAINT);
+        self
+    }
+
     /// Rebuild canonical topology taints derived from `topology_domains`.
     ///
     /// Existing caller-provided taints outside the reserved topology prefix are preserved; generated
@@ -898,23 +918,6 @@ impl ModelRuntimeConfig {
         if let Some(value) = candidate {
             tracing::info!(stable_routing_id = %value, "populated stable_routing_id from DYN_STABLE_ROUTING_ID");
             self.stable_routing_id = Some(value);
-        }
-        self
-    }
-
-    /// Hold this worker out of ordinary routing at startup when
-    /// [`START_NOT_READY_ENV`] is truthy.
-    ///
-    /// Adds [`dynamo_scheduler::NOT_READY_TAINT`], so frontends discover the worker but only
-    /// a caller pin reaches it until the taint is removed from its discovery record.
-    ///
-    /// Kubernetes discovery ignores the setting: Pod readiness already holds the worker
-    /// there, and nothing would remove the taint once the Pod is ready.
-    pub fn add_startup_not_ready_taint(&mut self, kubernetes_discovery: bool) -> &mut Self {
-        if !kubernetes_discovery && dynamo_runtime::config::env_is_truthy(START_NOT_READY_ENV) {
-            tracing::info!("publishing worker with the not-ready taint ({START_NOT_READY_ENV})");
-            self.taints
-                .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
         }
         self
     }
@@ -1395,32 +1398,6 @@ mod tests {
         assert!(config.kv_transfer_domain.is_none());
         assert!(config.kv_transfer_enforcement.is_none());
         assert!(config.kv_transfer_preferred_weight.is_none());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn startup_not_ready_taint_follows_the_setting_and_the_discovery_backend() {
-        let caller_taints = || ModelRuntimeConfig {
-            taints: HashSet::from(["caller/taint=value".to_string()]),
-            ..Default::default()
-        };
-        for (setting, kubernetes_discovery, held) in [
-            (Some("true"), false, true),
-            (Some("true"), true, false),
-            (Some("false"), false, false),
-            (None, false, false),
-        ] {
-            temp_env::with_var(START_NOT_READY_ENV, setting, || {
-                let mut config = caller_taints();
-                config.add_startup_not_ready_taint(kubernetes_discovery);
-                assert_eq!(
-                    config.taints.contains(dynamo_scheduler::NOT_READY_TAINT),
-                    held,
-                    "setting {setting:?}, kubernetes discovery {kubernetes_discovery}"
-                );
-                assert!(config.taints.contains("caller/taint=value"));
-            });
-        }
     }
 
     #[test]

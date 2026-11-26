@@ -134,6 +134,7 @@ fn turn(request_id: &str, session_id: &str, isl_tokens: usize, last: bool) -> Sc
         expected_output_tokens: None,
         affinity_target: None,
         pinned_worker: None,
+        caller_pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
         router_config_override: None,

@@ -558,6 +558,7 @@ impl PendingRequest {
                         .dp_rank
                         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
                 }),
+            caller_pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,

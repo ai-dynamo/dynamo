@@ -70,7 +70,9 @@ fn base_runtime_config_watch(
                         );
                         configs.remove(&id.instance_id);
                     } else {
-                        configs.insert(id.instance_id, card.runtime_config);
+                        let mut config = card.runtime_config;
+                        config.refresh_hold();
+                        configs.insert(id.instance_id, config);
                     }
                 }
                 Ok(DiscoveryEvent::ModelTaintsUpdated(update)) => {
@@ -89,6 +91,7 @@ fn base_runtime_config_watch(
                         continue;
                     }
                     config.taints = taints;
+                    config.refresh_hold();
                 }
                 Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(id))) => {
                     if id.model_suffix.is_none() {
