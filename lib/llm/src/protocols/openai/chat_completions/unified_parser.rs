@@ -10571,7 +10571,7 @@ pub(crate) mod tests {
             message_boundaries: Vec::new(),
             native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,
-            family: "test".to_string(),
+            descriptor: &registration(QWEN3_UNIFIED_FAMILY).unwrap().descriptor,
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),
             }),
