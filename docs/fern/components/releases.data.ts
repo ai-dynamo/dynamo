@@ -1745,7 +1745,7 @@ export interface ReleaseStats {
    published 930/603/896, missing in both directions, so it cannot be trusted
    to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
-  "v1.7.0": { prs: 763, contributors: 150, firstTimers: 38, breaking: 33, knownIssues: 25 },
+  "v1.7.0": { prs: 763, contributors: 150, firstTimers: 38, breaking: 40, knownIssues: 25 },
   "v1.6.2": { breaking: 0, knownIssues: 0 },
   "v1.6.1": { breaking: 1, knownIssues: 0 },
   "v1.6.0": { prs: 654, contributors: 148, firstTimers: 45, breaking: 41, knownIssues: 15 },
