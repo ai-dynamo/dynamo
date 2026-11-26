@@ -188,7 +188,7 @@ spec:
           containers:
           - args:
             - --experimental-external-draft-endpoint
-            - $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/backend/generate
+            - $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/lpx/generate
             command:
             - python
             - -m
