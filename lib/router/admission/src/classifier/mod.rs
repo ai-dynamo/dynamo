@@ -385,7 +385,8 @@ impl<'a> DispatchHead<'a> {
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
-    /// and the pinned worker, which a `Go` target cannot override.
+    /// the pinned worker, which a `Go` target cannot override, and the caller's expected
+    /// output length and priorities.
     pub fn info(&self) -> RequestInfo<'a> {
         self.info
     }

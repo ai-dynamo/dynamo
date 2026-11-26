@@ -89,6 +89,9 @@ impl RequestClassifier for ContractClassifier {
         let info: RequestInfo<'_> = request.info();
         let _: Option<&str> = info.request_id();
         let _: usize = info.isl_tokens();
+        let _: Option<u32> = info.expected_output_tokens();
+        let _: f64 = info.priority_jump();
+        let _: u32 = info.strict_priority();
         let _: Option<&[u64]> = request.sequence_hashes();
         let _: &RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
@@ -99,7 +102,11 @@ impl RequestClassifier for ContractClassifier {
         struct Open;
         impl DispatchGate for Open {
             fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
-                let _: Option<&str> = head.info().request_id();
+                let info: RequestInfo<'_> = head.info();
+                let _: Option<&str> = info.request_id();
+                let _: Option<u32> = info.expected_output_tokens();
+                let _: f64 = info.priority_jump();
+                let _: u32 = info.strict_priority();
                 DispatchDecision::Go { target: None }
             }
         }
