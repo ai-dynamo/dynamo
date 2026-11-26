@@ -1039,7 +1039,11 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
     {
-        let mut candidates = self.weighted_candidates(extract, count_workers);
+        let mut candidates = self.weighted_candidates(
+            extract,
+            count_workers,
+            *crate::frontend_config::ENABLE_PAIRED_CAPACITY_WEIGHTING,
+        );
         if candidates.len() > 1 {
             let total_weight: f64 = candidates.iter().map(|(_, weight)| weight).sum();
             let mut pick = rand::rng().random_range(0.0..total_weight);
@@ -1057,13 +1061,19 @@ impl Model {
     /// Candidates for [`Self::select_worker_set_with_worker_count`] with their
     /// selection weights.
     ///
-    /// A candidate's weight is its worker count. When every candidate's namespace
-    /// also has live prefill workers (disaggregated deployments, e.g. overlapping
-    /// rolling-update generations), prefill and decode only pair within a namespace,
-    /// so each namespace is instead weighted by `min(P / ΣP, D / ΣD)`: the smaller of
-    /// its share of the prefill and of the decode workers across candidate namespaces.
-    /// That weight is split across the namespace's candidates by worker count.
-    fn weighted_candidates<T, F, C>(&self, extract: F, count_workers: C) -> Vec<(T, f64)>
+    /// A candidate's weight is its worker count. With `paired` set and every
+    /// candidate's namespace also having live prefill workers (disaggregated
+    /// deployments, e.g. overlapping rolling-update generations), prefill and decode
+    /// only pair within a namespace, so each namespace is instead weighted by
+    /// `min(P / ΣP, D / ΣD)`: the smaller of its share of the prefill and of the
+    /// decode workers across candidate namespaces. That weight is split across the
+    /// namespace's candidates by worker count.
+    fn weighted_candidates<T, F, C>(
+        &self,
+        extract: F,
+        count_workers: C,
+        paired: bool,
+    ) -> Vec<(T, f64)>
     where
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
@@ -1114,35 +1124,37 @@ impl Model {
             })
             .collect();
 
-        let mut prefill_counts: HashMap<&str, usize> = HashMap::new();
-        for ws in &snapshot {
-            if ws.card().worker_type == Some(crate::worker_type::WorkerType::Prefill) {
-                *prefill_counts.entry(ws.namespace()).or_default() += count_workers(ws);
+        if paired && eligible.len() > 1 {
+            let mut prefill_counts: HashMap<&str, usize> = HashMap::new();
+            for ws in &snapshot {
+                if ws.card().worker_type == Some(crate::worker_type::WorkerType::Prefill) {
+                    *prefill_counts.entry(ws.namespace()).or_default() += count_workers(ws);
+                }
+            }
+            let mut decode_counts: HashMap<&str, usize> = HashMap::new();
+            for (_, ns, count) in &eligible {
+                *decode_counts.entry(ns).or_default() += count;
+            }
+            let prefill_count = |ns: &str| prefill_counts.get(ns).copied().unwrap_or(0);
+
+            if decode_counts.keys().all(|ns| prefill_count(ns) > 0) {
+                let total_prefill: usize = decode_counts.keys().map(|ns| prefill_count(ns)).sum();
+                let total_decode: usize = decode_counts.values().sum();
+                return eligible
+                    .into_iter()
+                    .map(|(val, ns, count)| {
+                        let decode = decode_counts[ns];
+                        let share = (prefill_count(ns) as f64 / total_prefill as f64)
+                            .min(decode as f64 / total_decode as f64);
+                        (val, share * count as f64 / decode as f64)
+                    })
+                    .collect();
             }
         }
-        let mut decode_counts: HashMap<&str, usize> = HashMap::new();
-        for (_, ns, count) in &eligible {
-            *decode_counts.entry(ns).or_default() += count;
-        }
-        let prefill_count = |ns: &str| prefill_counts.get(ns).copied().unwrap_or(0);
 
-        if eligible.len() < 2 || decode_counts.keys().any(|ns| prefill_count(ns) == 0) {
-            return eligible
-                .into_iter()
-                .map(|(val, _, count)| (val, count as f64))
-                .collect();
-        }
-
-        let total_prefill: usize = decode_counts.keys().map(|ns| prefill_count(ns)).sum();
-        let total_decode: usize = decode_counts.values().sum();
         eligible
             .into_iter()
-            .map(|(val, ns, count)| {
-                let decode = decode_counts[ns];
-                let share = (prefill_count(ns) as f64 / total_prefill as f64)
-                    .min(decode as f64 / total_decode as f64);
-                (val, share * count as f64 / decode as f64)
-            })
+            .map(|(val, _, count)| (val, count as f64))
             .collect()
     }
 }
@@ -2906,10 +2918,11 @@ mod tests {
     }
 
     /// Normalized selection weight per namespace, for sets serving chat.
-    fn chat_weights(model: &Model) -> HashMap<String, f64> {
+    fn chat_weights(model: &Model, paired: bool) -> HashMap<String, f64> {
         let candidates = model.weighted_candidates(
             |ws| ws.chat_engine.as_ref().map(|_| ws.namespace().to_string()),
             WorkerSet::worker_count,
+            paired,
         );
         let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
         candidates
@@ -2932,9 +2945,11 @@ mod tests {
         model.add_worker_set("one".to_string(), one);
         model.add_worker_set("three".to_string(), three);
 
-        let weights = chat_weights(&model);
-        assert!((weights["one"] - 0.25).abs() < 1e-9);
-        assert!((weights["three"] - 0.75).abs() < 1e-9);
+        for paired in [false, true] {
+            let weights = chat_weights(&model, paired);
+            assert!((weights["one"] - 0.25).abs() < 1e-9, "paired={paired}");
+            assert!((weights["three"] - 0.75).abs() < 1e-9, "paired={paired}");
+        }
     }
 
     #[test]
@@ -2942,7 +2957,14 @@ mod tests {
         let model = Model::new("llama".to_string());
         let _txs = add_pd_generation(&model, "gen", 4, 1);
 
-        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["gen"]);
+        for paired in [false, true] {
+            let weights = chat_weights(&model, paired);
+            assert_eq!(
+                weights.keys().collect::<Vec<_>>(),
+                ["gen"],
+                "paired={paired}"
+            );
+        }
         assert!(model.get_chat_engine().is_ok());
     }
 
@@ -2955,10 +2977,21 @@ mod tests {
         let _old = add_pd_generation(&model, "old", 4, 1);
         let _new = add_pd_generation(&model, "new", 2, 3);
 
-        let weights = chat_weights(&model);
+        let weights = chat_weights(&model, false);
+        assert!((weights["old"] - 0.25).abs() < 1e-9);
+        assert!((weights["new"] - 0.75).abs() < 1e-9);
+
+        let weights = chat_weights(&model, true);
         assert!((weights["old"] - 3.0 / 7.0).abs() < 1e-9);
         assert!((weights["new"] - 4.0 / 7.0).abs() < 1e-9);
 
+        // Selection follows the process-wide switch, which is off unless
+        // DYN_ENABLE_PAIRED_CAPACITY_WEIGHTING is set.
+        let expected_old = if *crate::frontend_config::ENABLE_PAIRED_CAPACITY_WEIGHTING {
+            3.0 / 7.0
+        } else {
+            0.25
+        };
         let samples = 20_000;
         let picked_old = (0..samples)
             .filter(|_| {
@@ -2969,8 +3002,8 @@ mod tests {
             .count();
         let observed = picked_old as f64 / samples as f64;
         assert!(
-            (observed - 3.0 / 7.0).abs() < 0.03,
-            "old generation picked {observed:.3} of the time, expected ~0.429"
+            (observed - expected_old).abs() < 0.03,
+            "old generation picked {observed:.3} of the time, expected ~{expected_old:.3}"
         );
     }
 
@@ -2981,33 +3014,54 @@ mod tests {
         let _no_prefill = add_pd_generation(&model, "no-prefill", 0, 3);
         let _no_decode = add_pd_generation(&model, "no-decode", 3, 0);
 
-        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["ready"]);
+        for paired in [false, true] {
+            let weights = chat_weights(&model, paired);
+            assert_eq!(
+                weights.keys().collect::<Vec<_>>(),
+                ["ready"],
+                "paired={paired}"
+            );
+        }
     }
 
-    /// Prefill counts come from the same membership snapshot as readiness and
-    /// eligibility, so a set removed mid-selection doesn't skew that selection.
+    /// Readiness, eligibility and prefill counts come from one membership
+    /// snapshot, so a set removed mid-selection doesn't skew that selection.
     #[test]
     fn select_disagg_weights_use_one_membership_snapshot() {
-        let model = Model::new("llama".to_string());
-        let _old = add_pd_generation(&model, "old", 4, 1);
-        let _new = add_pd_generation(&model, "new", 2, 3);
+        for (paired, expected_old) in [(false, 0.25), (true, 3.0 / 7.0)] {
+            let model = Model::new("llama".to_string());
+            let _old = add_pd_generation(&model, "old", 4, 1);
+            let _new = add_pd_generation(&model, "new", 2, 3);
 
-        let candidates = model.weighted_candidates(
-            |ws| {
-                model.remove_worker_set("new:prefill");
-                ws.chat_engine.as_ref().map(|_| ws.namespace().to_string())
-            },
-            WorkerSet::worker_count,
-        );
-        let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
-        let weights: HashMap<String, f64> = candidates
-            .into_iter()
-            .map(|(ns, weight)| (ns, weight / total))
-            .collect();
-        assert!((weights["old"] - 3.0 / 7.0).abs() < 1e-9);
-        assert!((weights["new"] - 4.0 / 7.0).abs() < 1e-9);
+            let candidates = model.weighted_candidates(
+                |ws| {
+                    model.remove_worker_set("new:prefill");
+                    ws.chat_engine.as_ref().map(|_| ws.namespace().to_string())
+                },
+                WorkerSet::worker_count,
+                paired,
+            );
+            let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
+            let weights: HashMap<String, f64> = candidates
+                .into_iter()
+                .map(|(ns, weight)| (ns, weight / total))
+                .collect();
+            assert!(
+                (weights["old"] - expected_old).abs() < 1e-9,
+                "paired={paired}"
+            );
+            assert!(
+                (weights["new"] - (1.0 - expected_old)).abs() < 1e-9,
+                "paired={paired}"
+            );
 
-        // The next selection sees the removal: "new" lost its prefill peer.
-        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["old"]);
+            // The next selection sees the removal: "new" lost its prefill peer.
+            let weights = chat_weights(&model, paired);
+            assert_eq!(
+                weights.keys().collect::<Vec<_>>(),
+                ["old"],
+                "paired={paired}"
+            );
+        }
     }
 }

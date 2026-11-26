@@ -1152,6 +1152,13 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   processor and backend checks, so a schema can still fail later in the request pipeline.
 </ParamField>
 
+<ParamField path="DYN_ENABLE_PAIRED_CAPACITY_WEIGHTING" type="boolean" default="false">
+  When truthy and several disaggregated worker generations are ready at once, the frontend splits
+  traffic between them by paired prefill and decode capacity, `min(P / ΣP, D / ΣD)`, instead of by
+  decode worker count. The setting affects all models served by the frontend process and is read
+  once at startup. See [Rolling Update Behavior](../general/compatibility.mdx#rolling-update-behavior).
+</ParamField>
+
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
   `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages`; ignores the

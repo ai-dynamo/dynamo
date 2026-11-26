@@ -25,6 +25,10 @@ use crate::reasoning_field::ReasoningField;
 pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
 
+/// Process-wide WorkerSet selection policy for disaggregated namespaces.
+pub(crate) static ENABLE_PAIRED_CAPACITY_WEIGHTING: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_PAIRED_CAPACITY_WEIGHTING));
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or
