@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from .measure import measure
-from .plan import atomic_json, design
+from .plan import Plan, atomic_json, design
 
 
 def read(path):
@@ -34,7 +34,14 @@ def main():
     plan.add_argument("--repeats", type=int, default=10)
     plan.add_argument("--warmups", type=int, default=3)
     plan.add_argument("--out", type=Path, required=True)
-    run = commands.add_parser("measure")
+    run = commands.add_parser(
+        "measure",
+        epilog=(
+            "Launch isolated calibration workers with DURU_ENABLE_SCORING=0 and "
+            "DURU_ACCOUNTING_TRANSPORT=journal. Normal serving uses scoring by "
+            "default and requires a matching calibration artifact."
+        ),
+    )
     run.add_argument("--plan", type=Path, required=True)
     run.add_argument("--contract", type=Path, required=True)
     run.add_argument(
@@ -50,9 +57,9 @@ def main():
         options.pop("command")
         output = options.pop("out")
         result = design(**options)
-        atomic_json(output, result)
+        atomic_json(output, result.to_dict())
         print(
-            f"{len(result['P'])} prefill lengths x {len(result['D'])} prefix depths + {len(result['K'])} decode contexts = {len(result['cases'])} points"
+            f"{len(result.P)} prefill lengths x {len(result.D)} prefix depths + {len(result.K)} decode contexts = {len(result.cases)} points"
         )
     else:
         module, name = args.adapter.split(":", 1)
@@ -62,7 +69,7 @@ def main():
             measure(
                 args.out,
                 contract,
-                read(args.plan),
+                Plan.from_dict(read(args.plan)),
                 adapter.submit,
                 adapter.drain,
                 adapter.ledger,

@@ -229,7 +229,7 @@ class ThunderAgentRouterHandler:
             )
             first_chunk = True
             await self._before_dispatch(preprocessed)
-            async for chunk in await self._kv_router.generate_from_request(
+            async for chunk in await self._generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
             ):
@@ -251,6 +251,7 @@ class ThunderAgentRouterHandler:
         decision = await self._scheduler.before_request(
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
+            request_id=context.id() if context is not None else None,
         )
         replica_pin = decision.assigned_replica_hint
         logger.debug(
@@ -310,7 +311,7 @@ class ThunderAgentRouterHandler:
         )
         try:
             await self._before_dispatch(preprocessed)
-            async for chunk in await self._kv_router.generate_from_request(
+            async for chunk in await self._generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
             ):
@@ -382,6 +383,10 @@ class ThunderAgentRouterHandler:
                 replica_pin,
                 selected_worker_id,
             )
+
+    def _generate_from_request(self, request: dict[str, Any], *, context=None):
+        """Return the dispatch awaitable after synchronous request conversion."""
+        return self._kv_router.generate_from_request(request, context=context)
 
     async def _before_dispatch(self, request: dict[str, Any]) -> None:
         """Observe an admitted request immediately before backend dispatch."""

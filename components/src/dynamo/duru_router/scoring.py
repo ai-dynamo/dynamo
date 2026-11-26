@@ -16,7 +16,8 @@ import threading
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
+from concurrent.futures import Future
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -38,9 +39,14 @@ logger = logging.getLogger(__name__)
 MAX_PENDING_EVENTS = 262144
 
 
+class AccountingError(RuntimeError):
+    """The router-owned accounting service has failed or stopped unexpectedly."""
+
+
 class LiveU:
     def __init__(self, capacity, calibration):
-        assert isinstance(capacity, int) and capacity > 0
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("Capacity must be a positive integer")
         self.capacity = capacity
         self.calibration = calibration
         self.prefill_budget = calibration.get("max_prefill", 8192)
@@ -60,10 +66,14 @@ class LiveU:
         # Counts predictor evaluations, including lookahead and cache re-evaluations;
         # it is not a count of accepted steps or affected roots.
         self.extrapolated_cost_evaluations = 0
+        # The cache belongs to this accounting session, not a class-level wrapper
+        # that keeps completed sessions and their calibration tables alive.
+        self.cost = lru_cache(maxsize=32768)(self._cost)
 
     def advance(self, now):
         if self.last is not None:
-            assert now >= self.last, (now, self.last)
+            if not now >= self.last:
+                raise ValueError(f"Accounting time regressed: {now} < {self.last}")
             roots = [r for r, count in self.root_active.items() if count]
             share = self.capacity / len(roots) if roots else 0.0
             for root in roots:
@@ -73,9 +83,13 @@ class LiveU:
         self.last = now
 
     def submit(self, request_id, root, agent, prompt_tokens, now):
+        if request_id in self.active:
+            raise ValueError(f"Request ID already active: {request_id}")
+        if type(prompt_tokens) is not int or prompt_tokens <= 0:
+            raise ValueError("Prompt tokens must be a positive integer")
+        if self.agent_root.get(agent, root) != root:
+            raise ValueError(f"Agent root changed: {agent}")
         self.advance(now)
-        assert request_id not in self.active and prompt_tokens > 0
-        assert self.agent_root.get(agent, root) == root
         self.agent_root[agent] = root
         self.active[request_id] = dict(
             root=root, agent=agent, prompt_tokens=prompt_tokens, arrival=now
@@ -108,8 +122,7 @@ class LiveU:
         for table in (self.entitlement, self.work, self.invalid, self.root_active):
             table.pop(root, None)
 
-    @lru_cache(maxsize=32768)
-    def cost(self, phase, p, d, k):
+    def _cost(self, phase, p, d, k):
         ms, outside = predict(self.calibration[phase], dict(phase=phase, p=p, d=d, k=k))
         if not math.isfinite(ms) or ms <= 0:
             return None
@@ -179,6 +192,8 @@ def score_channel():
 
 
 class Reader:
+    """Read scores whose observation_time uses this host's monotonic clock."""
+
     def __init__(self, snapshot_source=None):
         self.snapshot_source = snapshot_source
         self.path = None if snapshot_source is not None else score_channel()
@@ -210,7 +225,7 @@ class Reader:
                 self._subscriber = ScoreSubscriber(channel_path(self.path))
             self.snapshot = self._subscriber.snapshot()
         self.age = (
-            time.time() - self.snapshot.get("observation_time", 0)
+            time.monotonic() - self.snapshot.get("observation_time", 0)
             if self.snapshot
             else None
         )
@@ -246,8 +261,6 @@ class EventStreamReader:
         self.receiver = receiver
 
     def read(self):
-        if self.closed:
-            return []
         if self.receiver is None:
             try:
                 self.receiver = Receiver(channel_path(self.path))
@@ -275,7 +288,7 @@ def _program_id(fields):
 
 
 class Ingress:
-    """Publish request lifecycle events with explicit router program identity."""
+    """Publish lifecycle events with program identity and monotonic timestamps."""
 
     def __init__(self, path, *, in_process=False):
         if in_process:
@@ -294,6 +307,7 @@ class Ingress:
         if event not in (
             "request_arrived",
             "request_dispatched",
+            "request_dispatch_rejected",
             "request_completed",
             "request_cancelled",
             "request_failed",
@@ -305,11 +319,11 @@ class Ingress:
             return
         if event == "request_arrived":
             _program_id(fields)
-        keys = (
-            ("request_id", "program_id", "root", "agent", "prompt_tokens")
-            if event == "request_arrived"
-            else ("request_id", "program_id", "root")
-        )
+            keys = ("request_id", "program_id", "root", "agent", "prompt_tokens")
+        elif event == "agent_end":
+            keys = ("request_id", "program_id", "root", "agent")
+        else:
+            keys = ("request_id", "program_id", "root")
         self.sequence += 1
         self.journal.submit(
             "record",
@@ -323,7 +337,7 @@ class Ingress:
 
     def close(self):
         try:
-            self.emit("footer", time.time())
+            self.emit("footer", time.monotonic())
         finally:
             self.journal.close()
 
@@ -343,19 +357,8 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
     book = LiveU(
         cfg["capacity"], load_calibration(cfg["calibration"], cfg["runtime_contract"])
     )
-    ingress_reader = (
-        EventStreamReader(cfg["ingress"])
-        if ingress_source is None
-        else EventStreamReader(cfg["ingress"], receiver=ingress_source)
-    )
-    sources = [ingress_reader] + [EventStreamReader(p) for p in cfg["ledgers"]]
-    audit = (
-        open_journal(
-            cfg.get("audit_dir", score_path.parent), name="duru-control", fresh=False
-        )
-        if os.environ.get("DURU_RECORD_EVENTS") == "1"
-        else None
-    )
+    sources = []
+    audit = None
     sequence = 0
     heap = []
     serial = 0
@@ -372,6 +375,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
     max_identities = 100000
     shutdown_deadline = None
     worker_publisher = None
+    cleanup = ExitStack()
 
     def release_root(root, at):
         if any(request_identities[rid][0] == root for rid in worker_requests):
@@ -387,7 +391,28 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
         closing_roots.discard(root)
 
     try:
+        if router_publish is not None:
+            cleanup.callback(router_publish, {})
+        ingress_reader = (
+            EventStreamReader(cfg["ingress"])
+            if ingress_source is None
+            else EventStreamReader(cfg["ingress"], receiver=ingress_source)
+        )
+        cleanup.callback(ingress_reader.close)
+        sources.append(ingress_reader)
+        for path in cfg["ledgers"]:
+            source = EventStreamReader(path)
+            cleanup.callback(source.close)
+            sources.append(source)
+        if os.environ.get("DURU_RECORD_EVENTS") == "1":
+            audit = open_journal(
+                cfg.get("audit_dir", score_path.parent),
+                name="duru-control",
+                fresh=False,
+            )
+            cleanup.callback(audit.close)
         worker_publisher = ScorePublisher(channel_path(score_path))
+        cleanup.callback(worker_publisher.close)
         worker_publish = worker_publisher.publish
         while True:
             stopping = stop.is_set()
@@ -401,6 +426,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                         if row["event"] in (
                             "request_arrived",
                             "request_dispatched",
+                            "request_dispatch_rejected",
                             "request_completed",
                             "request_cancelled",
                             "request_failed",
@@ -441,12 +467,10 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
             if accounting_cutoff > 0:
                 while heap and heap[0][0] <= accounting_cutoff:
                     at, _, kind, event_data = heapq.heappop(heap)
-                    assert book.last is None or at >= book.last, (
-                        "Late compact event",
-                        at,
-                        book.last,
-                        kind,
-                    )
+                    if book.last is not None and at < book.last:
+                        raise ValueError(
+                            f"Late compact event: {kind} at {at} precedes {book.last}"
+                        )
                     if (
                         len(heap) > MAX_PENDING_EVENTS
                         or len(request_identities) > max_identities
@@ -484,6 +508,10 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                                     "Request dispatched without an arrival event"
                                 )
                             worker_requests.add(event_data["request_id"])
+                        elif event_data["event"] == "request_dispatch_rejected":
+                            # The router confirmed rejection before async dispatch.
+                            # Request failure still closes the active accounting entry.
+                            worker_requests.remove(event_data["request_id"])
                         elif event_data["event"] == "agent_group_end":
                             root = event_data["root"]
                             if book.root_active[root]:
@@ -532,10 +560,18 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     rid: dict(book.score(rid), program_id=request_programs[rid], **r)
                     for rid, r in book.active.items()
                 }
-                programs = {
-                    r["program_id"]: dict(r, request_id=rid)
-                    for rid, r in requests.items()
-                }
+                programs = {}
+                for rid, request in requests.items():
+                    program_id = request["program_id"]
+                    previous = programs.get(program_id)
+                    # One reservation serves every active request in a program.
+                    # Use its highest request score, with stable arrival/ID ties.
+                    if previous is None or priority_key(
+                        request["score"], request["arrival"], rid
+                    ) < priority_key(
+                        previous["score"], previous["arrival"], previous["request_id"]
+                    ):
+                        programs[program_id] = dict(request, request_id=rid)
                 for program_id, (root, agent) in program_identities.items():
                     programs.setdefault(
                         program_id,
@@ -552,7 +588,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     schema=1,
                     run_id=run_id,
                     extrapolated_cost_evaluations=book.extrapolated_cost_evaluations,
-                    time=time.time(),
+                    time=time.monotonic(),
                     observation_time=accounting_cutoff,
                     capacity=book.capacity,
                     accounting_state=dict(
@@ -617,7 +653,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                         sequence=sequence,
                         event="footer",
                         run_id=run_id,
-                        time=time.time(),
+                        time=time.monotonic(),
                         last_snapshot=last_snapshot,
                         pending_events=len(heap),
                         inputs_closed=all(source.closed for source in sources),
@@ -627,16 +663,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     ),
                 )
         finally:
-            try:
-                if audit is not None:
-                    audit.close()
-                for source in sources:
-                    source.close()
-            finally:
-                if router_publish is not None:
-                    router_publish({})
-                if worker_publisher is not None:
-                    worker_publisher.close()
+            cleanup.close()
 
 
 class RouterAccounting:
@@ -656,7 +683,7 @@ class RouterAccounting:
             raise ValueError("Router-owned ingress must use in_process=True")
         self._snapshot = {}
         self._stop = threading.Event()
-        self._error = None
+        self._result = Future()
         self._thread = threading.Thread(
             target=self._run, name="duru-accounting", daemon=True
         )
@@ -677,23 +704,31 @@ class RouterAccounting:
                 router_publish=self._router_publish,
                 ingress_source=self._ingress_source,
             )
-        except BaseException as exc:
+        except Exception as exc:
+            # Hand ordinary task failures to the owner without losing their
+            # original traceback. Process-control exceptions still escape.
+            self._result.set_exception(exc)
+        else:
+            self._result.set_result(None)
+        finally:
             self._snapshot = {}
-            self._error = exc
 
     def start(self):
         self._thread.start()
         return self
 
     def check(self):
-        if self._error is not None:
-            raise RuntimeError("Router U accounting failed") from self._error
+        if self._result.done():
+            try:
+                self._result.result()
+            except Exception as exc:
+                raise AccountingError("Router U accounting failed") from exc
         if (
             self._thread.ident is not None
             and not self._thread.is_alive()
             and not self._stop.is_set()
         ):
-            raise RuntimeError("Router U accounting stopped unexpectedly")
+            raise AccountingError("Router U accounting stopped unexpectedly")
 
     def close(self):
         self._stop.set()

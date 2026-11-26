@@ -23,7 +23,12 @@ import uvloop
 from dynamo.common.utils.token_ids import token_ids_len
 from dynamo.duru_router.args import parse_args
 from dynamo.duru_router.router import DuruScheduler
-from dynamo.duru_router.scoring import Ingress, RouterAccounting, score_channel
+from dynamo.duru_router.scoring import (
+    AccountingError,
+    Ingress,
+    RouterAccounting,
+    score_channel,
+)
 from dynamo.llm import HttpError
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.thunderagent_router.__main__ import (
@@ -62,6 +67,7 @@ class Session:
     requests: set[Request] = field(default_factory=set)
     closing: bool = False
     ended: bool = False
+    termination: asyncio.Task | None = None
 
 
 class DuruRouterHandler(ThunderAgentRouterHandler):
@@ -101,13 +107,13 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
             raise AccountingUnavailable() from self.failure
         try:
             self.accounting.check()
-        except Exception as error:
+        except AccountingError as error:
             self.fail(error)
             raise AccountingUnavailable() from error
 
     def emit(self, event, **fields):
         try:
-            self.ingress.emit(event, time.time(), **fields)
+            self.ingress.emit(event, time.monotonic(), **fields)
         except Exception as error:
             self.fail(error)
             raise AccountingUnavailable() from error
@@ -158,9 +164,15 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         session = self.sessions.get(program_id)
         if session is None or session.ended:
             return
-        if session.closing:
-            raise ValueError("Session termination is already in progress")
-        session.closing = True
+        if session.termination is None:
+            session.closing = True
+            session.termination = asyncio.create_task(
+                self._end_session(program_id, session)
+            )
+        # A disconnected final caller must not cancel the session's cleanup.
+        await asyncio.shield(session.termination)
+
+    async def _end_session(self, program_id, session):
         await self.cancel_requests(list(session.requests))
         await self._scheduler.end_program(program_id)
         session.ended = True
@@ -183,6 +195,18 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         request_id = identity["duru_request_id"]
         self.emit("request_dispatched", request_id=request_id)
         self.requests[request_id].dispatched = True
+
+    def _generate_from_request(self, request, *, context=None):
+        try:
+            return super()._generate_from_request(request, context=context)
+        except Exception:
+            # Only synchronous rejection proves no dispatch was started. Errors
+            # from awaiting or consuming the returned stream retain the barrier.
+            identity = request["extra_args"]["sampling_options"]["vllm_xargs"]
+            request_id = identity["duru_request_id"]
+            self.requests[request_id].dispatched = False
+            self.emit("request_dispatch_rejected", request_id=request_id)
+            raise
 
     async def cancel_requests(self, requests):
         tasks = []
@@ -299,7 +323,7 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         try:
             self.check()
             snapshot = self.accounting.reader.refresh()
-        except Exception as error:
+        except (AccountingUnavailable, AccountingError) as error:
             yield {
                 "status": "unhealthy",
                 "component": "duru_router",
@@ -315,6 +339,13 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
 
     async def shutdown(self):
         self.stopping = True
+        await asyncio.gather(
+            *(
+                asyncio.shield(session.termination)
+                for session in self.sessions.values()
+                if session.termination is not None
+            )
+        )
         await self.cancel_requests(
             [
                 request
