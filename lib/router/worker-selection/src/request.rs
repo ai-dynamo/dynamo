@@ -11,15 +11,42 @@ use super::shared_cache::SharedCacheHits;
 /// What is true about a request at every stage, read by a request classifier, a dispatch
 /// gate, and a worker-selection policy alike through `info()` on the request each receives.
 ///
-/// A value that exists only at one stage stays on that stage's type: a classifier's
-/// overrides and timing on `ClassifyRequest`, the affinity target and the shared-cache hits
-/// on [`WorkerSelectionRequest`].
+/// It holds what identifies the request and what its caller sent with it. A value that
+/// exists only at one stage stays on that stage's type: a classifier's overrides and timing
+/// on `ClassifyRequest`, the affinity target on [`WorkerSelectionRequest`].
 #[derive(Clone, Copy, Debug)]
 pub struct RequestInfo<'a> {
     request_id: Option<&'a str>,
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
+    caller_hints: &'a CallerHints,
+}
+
+/// What a caller sends with a request: the output length it expects and its two priorities.
+/// A host keeps one with the request and lends it to `host::request_info`, so building a
+/// [`RequestInfo`] reads none of the three; a plugin reads the values through
+/// [`RequestInfo`]. The default, [`CallerHints::NONE`], is a request whose caller sent none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CallerHints {
+    pub expected_output_tokens: Option<u32>,
+    pub priority_jump: f64,
+    pub strict_priority: u32,
+}
+
+impl CallerHints {
+    /// The hints of a request whose caller sent none.
+    pub const NONE: Self = Self {
+        expected_output_tokens: None,
+        priority_jump: 0.0,
+        strict_priority: 0,
+    };
+}
+
+impl Default for CallerHints {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl<'a> RequestInfo<'a> {
@@ -29,12 +56,14 @@ impl<'a> RequestInfo<'a> {
         isl_tokens: usize,
         session_context: Option<&'a SessionContext>,
         pinned_worker: Option<WorkerWithDpRank>,
+        caller_hints: &'a CallerHints,
     ) -> Self {
         Self {
             request_id,
             isl_tokens,
             session_context,
             pinned_worker,
+            caller_hints,
         }
     }
 
@@ -70,6 +99,33 @@ impl<'a> RequestInfo<'a> {
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker
     }
+
+    /// The output length expected for the request, in tokens, if the frontend that received
+    /// it supplies one. The source depends on the endpoint: the OpenAI-compatible endpoints
+    /// pass the caller's estimate (`nvext.agent_hints.osl`); vLLM's `/inference/v1/generate`
+    /// passes the request's `max_tokens`, which is a cap and not an estimate; the Decision
+    /// APIs pass the zero or one token their scoring request generates.
+    #[inline]
+    pub fn expected_output_tokens(&self) -> Option<u32> {
+        self.caller_hints.expected_output_tokens
+    }
+
+    /// The caller's priority within its strict tier of the router queue. A larger value is
+    /// served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is
+    /// a head start in seconds); `edf` does not use it. Zero when the caller sent none, and
+    /// the queue treats a negative value as zero.
+    #[inline]
+    pub fn priority_jump(&self) -> f64 {
+        self.caller_hints.priority_jump
+    }
+
+    /// The caller's strict priority tier. A queue with the `fcfs`, `lcfs`, or `wspt` policy
+    /// serves a higher tier before a lower one; `edf`, the default for a policy class in
+    /// the policy file, does not use it. Zero when the caller sent none.
+    #[inline]
+    pub fn strict_priority(&self) -> u32 {
+        self.caller_hints.strict_priority
+    }
 }
 
 /// The view of one scheduling request that filters, scorers, and pickers may read.
@@ -84,9 +140,6 @@ pub struct WorkerSelectionRequest<'a> {
     pub(crate) track_prefill_tokens: bool,
     pub(crate) router_temperature_override: Option<f64>,
     pub(crate) affinity_target: Option<WorkerAffinityTarget>,
-    pub(crate) expected_output_tokens: Option<u32>,
-    pub(crate) priority_jump: f64,
-    pub(crate) strict_priority: u32,
     pub(crate) shared_cache_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
     pub(crate) resident_blocks: Option<&'a dyn ResidentBlockSource>,
@@ -105,7 +158,7 @@ impl<'a> WorkerSelectionRequest<'a> {
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
-    /// and the pinned worker.
+    /// the pinned worker, and the caller's expected output length and priorities.
     #[inline]
     pub fn info(&self) -> RequestInfo<'a> {
         self.info
@@ -139,35 +192,10 @@ impl<'a> WorkerSelectionRequest<'a> {
         self.affinity_target
     }
 
-    /// Return the expected output length, if the request supplies one.
-    #[inline]
-    pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.expected_output_tokens
-    }
-
-    /// Return the request's scheduler priority boost.
-    #[inline]
-    pub fn priority_jump(&self) -> f64 {
-        self.priority_jump
-    }
-
-    /// Return the request's strict integer priority.
-    #[inline]
-    pub fn strict_priority(&self) -> u32 {
-        self.strict_priority
-    }
-
     /// Return the request-level router temperature override, if present.
     #[inline]
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
-    }
-
-    /// Block positions the external shared cache holds for this request, when a shared
-    /// cache is configured and answered.
-    #[inline]
-    pub fn shared_cache_hits(&self) -> Option<&SharedCacheHits> {
-        self.shared_cache_hits
     }
 
     /// Whether this selection only previews a worker, as a peek does, without routing the
@@ -195,9 +223,6 @@ impl<'a> crate::host::WorkerSelectionRequestHostExt<'a> for WorkerSelectionReque
             track_prefill_tokens: false,
             router_temperature_override: None,
             affinity_target: None,
-            expected_output_tokens: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
             shared_cache_hits: None,
             has_tier_matches: false,
             resident_blocks: None,
@@ -226,19 +251,6 @@ impl<'a> crate::host::WorkerSelectionRequestHostExt<'a> for WorkerSelectionReque
     #[inline]
     fn with_affinity_target(mut self, affinity_target: Option<WorkerAffinityTarget>) -> Self {
         self.affinity_target = affinity_target;
-        self
-    }
-
-    #[inline]
-    fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
-        self.expected_output_tokens = expected_output_tokens;
-        self
-    }
-
-    #[inline]
-    fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
-        self.priority_jump = priority_jump;
-        self.strict_priority = strict_priority;
         self
     }
 

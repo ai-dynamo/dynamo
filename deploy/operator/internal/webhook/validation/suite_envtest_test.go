@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -167,6 +168,7 @@ type admissionTestCase struct {
 	wantStatusError   string
 	wantAdmissionErrs []string
 	wantWebhookErrors []string
+	wantFieldErrors   field.ErrorList
 	wantWarnings      []string
 	notWantError      string
 }
@@ -242,6 +244,9 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		assertAdmissionStatusError(t, err, wantStatusError)
 	} else {
 		assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	}
+	if len(test.wantFieldErrors) != 0 {
+		assertAdmissionFieldErrors(t, err, test.wantFieldErrors)
 	}
 	wantWarnings := rewriteExpectedNamespace(test.wantWarnings, originalNamespace, env.Namespace())
 	if got := warnings.list(); !slices.Equal(got, wantWarnings) {
@@ -595,6 +600,9 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if len(test.wantWebhookErrors) != 0 {
 		categories++
 	}
+	if len(test.wantFieldErrors) != 0 {
+		categories++
+	}
 	if categories > 1 {
 		t.Fatal("one admission stage cannot have multiple error expectations")
 	}
@@ -607,7 +615,33 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if len(test.wantAdmissionErrs) != 0 {
 		return test.wantAdmissionErrs
 	}
+	if len(test.wantFieldErrors) != 0 {
+		messages := make([]string, len(test.wantFieldErrors))
+		for i, err := range test.wantFieldErrors {
+			messages[i] = err.Error()
+		}
+		return messages
+	}
 	return test.wantWebhookErrors
+}
+
+func assertAdmissionFieldErrors(t *testing.T, err error, want field.ErrorList) {
+	t.Helper()
+	status, ok := err.(apierrors.APIStatus)
+	if !ok || status.Status().Details == nil {
+		t.Fatalf("admission error = %T %v, want typed field causes", err, err)
+	}
+
+	// Compare cause types and paths as well as messages, preserving traversal order.
+	causes := make([]metav1.StatusCause, len(want))
+	for i, expected := range want {
+		causes[i] = metav1.StatusCause{
+			Type: metav1.CauseType(expected.Type), Field: expected.Field, Message: expected.ErrorBody(),
+		}
+	}
+	if got := status.Status().Details.Causes; !reflect.DeepEqual(got, causes) {
+		t.Fatalf("admission field causes = %#v, want %#v", got, causes)
+	}
 }
 
 func assertAdmissionStatusError(t *testing.T, err error, want string) {

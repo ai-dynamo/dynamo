@@ -1111,7 +1111,9 @@ mod selection_trace_tests {
 #[cfg(test)]
 mod row_source_tests {
     use super::*;
-    use crate::host::{WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, request_info};
+    use crate::host::{
+        CallerHints, WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, request_info,
+    };
     use crate::{WorkerCacheData, WorkerCapacity};
     use rustc_hash::FxHashMap;
     use std::cell::Cell;
@@ -1218,9 +1220,12 @@ mod row_source_tests {
     }
 
     fn request() -> WorkerSelectionRequest<'static> {
-        let request = WorkerSelectionRequest::new(request_info(Some("stage"), 64, None, None), 16)
-            .with_prefill_tracking(true)
-            .with_tier_matches(true);
+        let request = WorkerSelectionRequest::new(
+            request_info(Some("stage"), 64, None, None, &CallerHints::NONE),
+            16,
+        )
+        .with_prefill_tracking(true)
+        .with_tier_matches(true);
         assert_eq!(request.request_blocks(), 4);
         request
     }
@@ -1501,8 +1506,11 @@ mod row_source_tests {
                 calls.borrow_mut().push(worker);
                 None
             };
-            let request = WorkerSelectionRequest::new(request_info(None, 64, None, None), 16)
-                .with_decode_progress(has_source.then_some(&provider));
+            let request = WorkerSelectionRequest::new(
+                request_info(None, 64, None, None, &CallerHints::NONE),
+                16,
+            )
+            .with_decode_progress(has_source.then_some(&provider));
             let policy = WorkerSelectionPolicy::new_with_filters(
                 "test",
                 vec![Box::new(DeclaresProgress)],
