@@ -41,9 +41,9 @@ use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
     ArgumentFraming, InvalidGuidedPayloadPolicy, MalformedToolCallPolicy, Tool, ToolCallPolicy,
-    UnifiedEvent, UnifiedParser, UnifiedParserContinuation, UnifiedParserEvent, UnifiedParserInit,
-    UnifiedParserOutput, UnifiedParserRegistration, UnifiedParserStartingState,
-    UnifiedToolOutputMode, resolve_unified_parser_pair_in,
+    UnifiedEvent, UnifiedParser, UnifiedParserContinuation, UnifiedParserDescriptor,
+    UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput, UnifiedParserRegistration,
+    UnifiedParserStartingState, UnifiedToolOutputMode, resolve_unified_parser_pair_in,
 };
 use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
@@ -90,6 +90,7 @@ pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
 /// `DYN_PARSER_VERSION=2`, like DeepSeek V4.1.
 #[cfg(test)]
 pub(crate) const BEAM_UNIFIED_FAMILY: &str = "beam";
+#[cfg(test)]
 pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 /// Nemotron 3 (Ultra, Super, 3.5 Super): `nemotron_v3` forced reasoning over the
 /// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
@@ -100,12 +101,6 @@ pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The registry maps the `mistral` selector to it and declares the `[ARGS]` token
 /// that rejects pre-v11 tokenizers at model setup.
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
-
-fn uses_qwen_xml_grammar(family: &str) -> bool {
-    registration(family).is_some_and(|entry| {
-        entry.descriptor.native_grammar == dynamo_parsers_v2::unified::NativeGrammar::QwenXml
-    })
-}
 
 /// Read the statically linked catalog once after any startup registrations.
 pub(super) static PARSER_REGISTRY: LazyLock<Vec<UnifiedParserRegistration>> =
@@ -1661,7 +1656,7 @@ impl QuotedControlMarkerProbe {
 pub(crate) struct ChoiceState {
     native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
-    family: String,
+    descriptor: &'static UnifiedParserDescriptor,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
     tool_output_mode: UnifiedToolOutputMode,
@@ -1851,7 +1846,7 @@ impl ChoiceState {
                 NativeGrammarState::None
             },
             incomplete_native_call: false,
-            family: family.to_string(),
+            descriptor: &registration.descriptor,
             message_boundaries: Vec::new(),
             parser,
             tool_output_mode,
@@ -1972,10 +1967,7 @@ impl ChoiceState {
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
             Ok(()) => output.events,
-            Err(error)
-                if registration(&self.family)
-                    .is_some_and(|entry| entry.descriptor.errors_are_fatal) =>
-            {
+            Err(error) if self.descriptor.errors_are_fatal => {
                 self.failed = true;
                 self.parse_error = Some(error);
                 Vec::new()
@@ -1983,7 +1975,7 @@ impl ChoiceState {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    family = self.family,
+                    family = %self.descriptor.family,
                     "unified parser push failed; falling back to plain text for this choice"
                 );
                 output.events.extend(self.give_up(text));
@@ -2090,8 +2082,7 @@ impl ChoiceState {
         confirmed_eos: bool,
     ) -> Vec<UnifiedParserEvent> {
         let mut flushed = self.finish_with_eos(confirmed_eos);
-        if registration(&self.family)
-            .is_some_and(|entry| entry.descriptor.discard_native_flush_calls_on_truncation)
+        if self.descriptor.discard_native_flush_calls_on_truncation
             && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
             && matches!(
                 terminal,
@@ -2115,7 +2106,7 @@ impl ChoiceState {
                 Ok(Some(start)) => {
                     self.incomplete_native_call = true;
                     tracing::warn!(
-                        family = self.family,
+                        family = %self.descriptor.family,
                         why = "truncated_native_tool_call_suppressed",
                         suppressed_bytes = input.len() - start,
                         "suppressing unfinished native tool call"
@@ -2147,10 +2138,7 @@ impl ChoiceState {
             // `finish` now hands back the whole `UnifiedParserOutput`; this path only ever
             // wants the ordered events out of it.
             Ok(output) => output.events,
-            Err(error)
-                if registration(&self.family)
-                    .is_some_and(|entry| entry.descriptor.errors_are_fatal) =>
-            {
+            Err(error) if self.descriptor.errors_are_fatal => {
                 self.failed = true;
                 self.parse_error = Some(error);
                 Vec::new()
@@ -2158,7 +2146,7 @@ impl ChoiceState {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    family = self.family,
+                    family = %self.descriptor.family,
                     "unified parser finish failed; recovering buffered text"
                 );
                 self.give_up("")
@@ -2292,9 +2280,8 @@ impl ChoiceState {
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
-            // Muse Spark boundaries feed the Responses API through the sidecar.
-            // Other families must not create empty chunks for optional metadata.
-            if self.family != MUSE_SPARK_UNIFIED_FAMILY
+            // Retain message boundaries for families that expose phases to the Responses API.
+            if !self.descriptor.preserve_message_phases
                 && matches!(
                     delta,
                     UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd
@@ -2342,7 +2329,7 @@ impl ChoiceState {
         if terminal_tool_call_delta {
             resolve_complete_parsed_tool_calls_at_terminal(
                 &mut self.pending_parsed_tool_calls,
-                &self.family,
+                &self.descriptor.family,
                 finish_reason == Some(FinishReason::ToolCalls),
             );
         }
@@ -2480,7 +2467,7 @@ impl ChoiceState {
     fn resolve_complete_parsed_tool_calls_at_eof(&mut self) {
         resolve_complete_parsed_tool_calls_at_eof(
             &mut self.pending_parsed_tool_calls,
-            &self.family,
+            &self.descriptor.family,
         );
     }
 
@@ -3752,7 +3739,6 @@ where
                             .reasoning_content
                             .as_ref()
                             .is_some_and(|reasoning| !reasoning.is_empty())
-                        && uses_qwen_xml_grammar(family)
                         && states.get(&original.index).is_some_and(ChoiceState::has_pending_qwen_xml_opener);
                     if preserve_reasoning_only_state {
                         // Reasoning is an ordered event between generated bytes, not a
@@ -6487,7 +6473,15 @@ pub(crate) mod tests {
         assert_eq!(actual, expected);
         assert_eq!(phased.take_message_boundaries(), vec![None]);
 
-        phased.family = MUSE_SPARK_UNIFIED_FAMILY.to_owned();
+        let mut phased = ChoiceState::new(
+            MUSE_SPARK_UNIFIED_FAMILY,
+            &[],
+            UnifiedParserStartingState::None,
+            UnifiedToolOutputMode::Native,
+            true,
+            ArgumentFraming::default(),
+        )
+        .unwrap();
         let actual = phased.choices_for(&original, deltas, true, Some(FinishReason::Stop));
         assert_eq!(actual.len(), 3);
         assert_eq!(actual[1].delta.content, expected[0].delta.content);
