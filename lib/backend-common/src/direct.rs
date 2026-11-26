@@ -735,8 +735,6 @@ mod tests {
         held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
     }
 
-    /// A factory that builds a `FakeEngine` on `state`, with `config` as the
-    /// sidecar configuration it reports.
     fn fake_factory(state: &Arc<EngineState>, config: WorkerConfig) -> DirectEngineFactory {
         let state = state.clone();
         Arc::new(move |_: &DirectEngineSpec| {
