@@ -203,9 +203,9 @@ base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
 libloading = "0.8"
 # Track the in-tree FFmpeg major (container/context.yaml ffmpeg_version): these
-# bind the system libraries, and video-rs 0.12 requires ffmpeg-next =9.0.0.
-video-rs = { version = "0.12.0", optional = true }
-ffmpeg-next = { version = "9.0.0", optional = true }
+# bind the system libraries, and video-rs 0.13 requires ffmpeg-next =9.1.0.
+video-rs = { version = "0.13.0", optional = true }
+ffmpeg-next = { version = "9.1.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }

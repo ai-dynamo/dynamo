@@ -14,6 +14,7 @@ use crate::resolve::resolve_role;
 use dynamo_kv_indexer::Indexer;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_slot_tracker::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
+use dynamo_worker_selection::WorkerSelectionPolicyContext;
 
 impl SelectionCore {
     pub async fn upsert_worker(
@@ -285,11 +286,12 @@ impl SelectionCore {
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
                 // Fail before starting tasks or opening the indexer: a failed init reruns on every
                 // later upsert to this partition.
-                let selector = (self.worker_selection_policy_factory)(
-                    &self.config.selection,
-                    self.worker_type,
-                    key.as_ref(),
-                );
+                let selector =
+                    (self.worker_selection_policy_factory)(WorkerSelectionPolicyContext::new(
+                        &self.config.selection,
+                        self.worker_type,
+                        key.as_ref(),
+                    ));
                 // Checked per partition, since the factory may build a different policy for each.
                 let inputs =
                     WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector);

@@ -24,6 +24,7 @@ use dynamo_session_affinity::AffinityBindingEvent;
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_router_protocol::WorkerType;
 #[cfg(feature = "ingest-zmq")]
 use dynamo_scheduler::host::HostCache;
@@ -220,7 +221,7 @@ impl SelectionServiceBuilder {
             None => self
                 .plugin_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
-                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
+                .ok_or(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         // Hint policies are a peer plugin role, resolved independently of worker selection.
         if self.host.hints.policies.is_none() {
@@ -554,10 +555,10 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
-                    std::sync::Arc::new(|config, role, _| {
+                    std::sync::Arc::new(|context| {
                         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                            config.clone(),
-                            role.default_selector_label(),
+                            context.selection_config().clone(),
+                            context.worker_type().default_selector_label(),
                         )
                     }),
                     SelectionHost {
@@ -835,10 +836,10 @@ mod tests {
     }
 
     fn test_registry() -> RouterPluginRegistry {
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         }))
     }
@@ -856,8 +857,8 @@ mod tests {
             panic!("missing default accepted")
         };
         assert!(matches!(
-            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
-            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+            error.downcast_ref::<crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)
         ));
     }
 

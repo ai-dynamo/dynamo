@@ -158,9 +158,10 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > above, do not provide this default availability.
 >
 > Custom operator and CRD-installer commands must remove `--dgdr-v1beta2-enabled`.
-> The legacy `dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability;
-> it remains solely for the existing Planner live-retune RBAC condition. Retune remains disabled
-> by default with its existing opt-ins.
+> Remove the obsolete `dynamo-operator.dgdrV1Beta2.enabled` and
+> `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` values from Helm overrides. The chart grants
+> every Planner ServiceAccount the [live retune permissions](../auto-deployment/planner-live-retune.md#rbac)
+> in its namespace. Live retune requires explicit Planner configuration.
 >
 > Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
 > installations, require an administrator to install the matching CRDs before upgrading the operator.

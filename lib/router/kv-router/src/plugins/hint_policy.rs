@@ -7,7 +7,9 @@
 //! them and adds what only the composed router knows: registration, the hosts a hint runs under
 //! by default, and the `hints` entries of the YAML policy file.
 //!
-//! This module is experimental: names and signatures can change without a deprecation period.
+//! The API is experimental: names and signatures can change without a deprecation period. A
+//! plugin names it through `plugins::experimental::hints` and a routing host through
+//! `plugins::host`; this module is not public.
 
 mod config;
 mod registry;
@@ -23,8 +25,8 @@ pub use registry::{
 
 pub use dynamo_kv_hints::KvHintAction;
 pub use dynamo_scheduler::{
-    Commitments, DuplicateHintPolicyName, HintContext, HintPolicy, HintPolicyConstructor,
-    HintPolicyError, HintPolicyFactory, NamedHintPolicy, RoleHintPolicies,
+    Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError,
+    HintPolicyFactory, RoleHintPolicies,
 };
 
 /// A plugin under which a hint runs by default, when the role's entry lists no `hints`. A hint

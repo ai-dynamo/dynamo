@@ -53,6 +53,7 @@ impl RuntimePolicyUpdate {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RuntimePolicyError {
     #[error("the selected worker policy does not support runtime configuration")]
     Unsupported,

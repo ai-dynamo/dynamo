@@ -2600,6 +2600,8 @@ def run_mocker_trace_replay(
     agentic_warmup_policy: Optional[
         Literal["repeated_prefixes", "live_trajectory_v1"]
     ] = None,
+    weka_client: Optional[Literal["recorded", "agentx"]] = None,
+    weka_chat_template: Optional[Dict[str, int]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2607,6 +2609,8 @@ def run_mocker_trace_replay(
 
     ``weka_nested_timestamp_basis`` applies only to Weka traces. Omission uses
     AISimulate's automatic selection; explicit absolute or relative overrides it.
+    ``weka_client`` and ``weka_chat_template`` also apply only to Weka traces;
+    omitting them keeps the recorded client and the trace's own token counts.
 
     Offline replay returns an internal native result consumed by
     ``dynamo.replay``; online replay retains the summary dictionary.

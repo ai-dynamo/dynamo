@@ -5,7 +5,10 @@
 //! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
 //! from its specific ModelDeploymentCard.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
@@ -198,6 +201,18 @@ fn lora_context_engine<Req: Data, Resp: Data>(
     })
 }
 
+/// The `max_logprobs` a worker's card publishes. The request fields are `u8`,
+/// so a larger value saturates. A card that publishes none, or a value that is
+/// not a non-negative integer, gets the OpenAI limit.
+fn published_max_logprobs(card: &ModelDeploymentCard) -> u8 {
+    card.runtime_config
+        .runtime_data
+        .get(crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .map(|published| u8::try_from(published).unwrap_or(u8::MAX))
+        .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+}
+
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
@@ -261,11 +276,16 @@ pub struct WorkerSet {
     allocator_trim_wrapped: bool,
 
     input_policy: ChatInputPolicy,
+
+    /// Smallest `max_logprobs` published by the set's admitted workers. The
+    /// watcher refreshes it when membership changes; adapter views share it.
+    max_logprobs: Arc<AtomicU8>,
 }
 
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        let max_logprobs = Arc::new(AtomicU8::new(published_max_logprobs(&card)));
         Self {
             namespace,
             endpoint_id: None,
@@ -296,6 +316,7 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             input_policy: ChatInputPolicy::default(),
+            max_logprobs,
         }
     }
 
@@ -401,6 +422,22 @@ impl WorkerSet {
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()
+    }
+
+    /// Largest log-probability count every admitted worker of this set
+    /// accepts: the smallest `max_logprobs` they publish.
+    pub fn max_logprobs(&self) -> u8 {
+        self.max_logprobs.load(Ordering::Relaxed)
+    }
+
+    /// Recompute the limit from the admitted workers' cards.
+    pub(crate) fn update_max_logprobs<'a>(
+        &self,
+        cards: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) {
+        if let Some(limit) = cards.map(published_max_logprobs).min() {
+            self.max_logprobs.store(limit, Ordering::Relaxed);
+        }
     }
 
     /// Whether this set has any engine capable of producing output for an
@@ -637,6 +674,8 @@ impl WorkerSet {
             allocator_trim_wrapped: false,
             // An adapter renders through the base model's chat engine and tokenizer.
             input_policy: self.input_policy.clone(),
+            // An adapter runs on the base set's engines, so it has their limit.
+            max_logprobs: self.max_logprobs.clone(),
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();

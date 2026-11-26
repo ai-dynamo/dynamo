@@ -2,6 +2,8 @@
 
 `dynamo-slot-tracker` is the slot tracker stage: it records the requests booked on each worker rank and reports their load and fullness. Hosts outside `lib/router` import through `host`.
 
+`BusyThresholds` is in the request-classifier plugin API (`dynamo_kv_router::plugins::request_classifier`): a classifier reads one from `ClassifyRequest::reject_thresholds()`, and a worker-selection policy is handed none. Keep its fields private: a plugin calls only `is_configured()` and `has_room()`, and a host builds one and reads its limits through the sealed `host::BusyThresholdsHostExt`. Do not add a limit accessor to the type or re-export the trait from a plugin module.
+
 `record_full_worker_ranks_at` fills a caller-owned `FullRankCounts` from the derived
 prompt registry at one instant. It holds one read guard and creates no projection
 map or per-request ownership state. The scheduler uses it when exclusive-affinity
