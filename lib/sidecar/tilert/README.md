@@ -18,14 +18,14 @@ The two engines sit behind one worker because TileRT's prefill has to be told wh
 
 ## Engines
 
-Works with TileRT 0.1.8 only (`tilert.pd_vllm`). TileRT 0.2 changed the decode server's API, and the sidecar fails at startup against it.
+Works with TileRT 0.1.8 and 0.2 (`tilert.pd_vllm`). The sidecar reads the version from the decode server's `/capabilities` at startup. Run the same TileRT version on the prefill and the decode.
 
 | Engine | Requirements |
 |--------|--------------|
 | vLLM prefill | Native gRPC server enabled (`VLLM_USE_RUST_FRONTEND=1`, `--grpc-port`), and TileRT's KV connector as the producer: `--kv-transfer-config '{"kv_connector":"TileRTConnector","kv_connector_module_path":"tilert.pd_vllm.prefill_connector","kv_role":"kv_producer",...}'` |
 | TileRT decode | `python -m tilert.pd_vllm.decode_server` with its HTTP port (`--http-port`), control port (`--ctrl-port`) and `--max-seq-len` |
 
-Pair one sidecar with one decode server. The decode server holds one request's KV at a time and nothing else may send it requests.
+Pair one sidecar with one decode server, and send that server no other requests. A 0.1.8 decode server takes one request at a time; a 0.2 server takes the `max_concurrency` it reports, and the worker registers that many slots.
 
 ## Build and run
 
@@ -62,7 +62,7 @@ The worker withdraws from Dynamo and the sidecar exits when vLLM stops serving o
 
 ## Limits
 
-- One request at a time for each worker, and one prefill paired with one decode server. There is no routing across several of either.
+- One prefill paired with one decode server for each worker. There is no routing across several of either.
 - Aggregated mode only, with no KV-aware routing.
 - One completion per request, without logprobs.
 - The decode stage samples by temperature only. Requests that set `top_p` below 1, `top_k`, `min_p`, `frequency_penalty`, `logit_bias`, `min_tokens`, a thinking token budget or structured output are refused. Repetition and presence penalties and `ignore_eos` are accepted when the decode server's `/capabilities` reports them.

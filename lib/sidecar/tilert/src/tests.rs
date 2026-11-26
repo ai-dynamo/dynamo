@@ -65,8 +65,14 @@ struct Shared {
     landed: Option<String>,
     /// Requests a decode gave up waiting for; their KV is discarded on arrival.
     dropped: HashSet<String>,
-    /// Decode in progress, the only thing `/pd/cancel` matches.
-    decoding: Option<String>,
+    /// Decodes in progress, the only thing a 0.1.8 `/pd/cancel` matches.
+    decoding: HashSet<String>,
+    /// Makes the fake a TileRT 0.2 server that takes this many requests.
+    v02_capacity: Option<usize>,
+    /// 0.2: KV that has landed and waits for its decode; several may wait.
+    parked: HashSet<String>,
+    /// 0.2: how many more `/pd/decode` calls answer 429.
+    busy_answers: u32,
     prefill_requests: Vec<pb::GenerateRequest>,
     aborted: Vec<String>,
     decode_bodies: Vec<Value>,
@@ -91,10 +97,16 @@ struct Shared {
 
 impl Shared {
     fn push_kv(&mut self, rid: &str) {
+        if self.v02_capacity.is_some() {
+            if !self.dropped.contains(rid) {
+                self.parked.insert(rid.to_string());
+            }
+            return;
+        }
         if self.dropped.remove(rid) {
             return;
         }
-        if self.landed.is_none() && self.decoding.is_none() {
+        if self.landed.is_none() && self.decoding.is_empty() {
             self.landed = Some(rid.to_string());
         }
     }
@@ -232,17 +244,28 @@ async fn decode_health(State(shared): State<SharedState>) -> StatusCode {
 }
 
 async fn capabilities(State(shared): State<SharedState>) -> Json<Value> {
-    let penalties = shared.lock().unwrap().penalties;
-    Json(json!({"capabilities": {"penalties": penalties, "ignore_eos": true}}))
+    let shared = shared.lock().unwrap();
+    let penalties = shared.penalties;
+    match shared.v02_capacity {
+        Some(capacity) => Json(json!({
+            "penalties": penalties, "ignore_eos": true, "max_concurrency": capacity,
+            "logprobs": false, "grammar": false,
+        })),
+        None => Json(json!({"capabilities": {"penalties": penalties, "ignore_eos": true}})),
+    }
 }
 
 async fn pd_cancel(State(shared): State<SharedState>, Json(body): Json<Value>) -> StatusCode {
     let rid = body["rid"].as_str().unwrap_or_default().to_string();
     let mut shared = shared.lock().unwrap();
-    let in_flight = shared.decoding.as_deref() == Some(rid.as_str());
-    shared.cancelled.push(rid);
+    let in_flight = shared.decoding.remove(&rid);
+    shared.cancelled.push(rid.clone());
     if in_flight {
-        shared.decoding = None;
+        StatusCode::OK
+    } else if shared.v02_capacity.is_some() {
+        // 0.2 drops the parked KV and refuses KV that arrives later.
+        shared.parked.remove(&rid);
+        shared.dropped.insert(rid);
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -272,33 +295,52 @@ async fn pd_decode(
         entered.notify_one();
         gate.notified().await;
     }
-    let script = {
+    let kv_timeout = |rid: &str| {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({"error": "kv_transfer_timeout", "rid": rid})),
+        )
+            .into_response()
+    };
+    let (script, timings) = {
         let mut shared = shared.lock().unwrap();
         shared.decode_bodies.push(body.clone());
-        if shared.landed.as_deref() != Some(rid.as_str()) {
+        if let Some(capacity) = shared.v02_capacity {
+            if shared.busy_answers > 0 || shared.decoding.len() >= capacity {
+                shared.busy_answers = shared.busy_answers.saturating_sub(1);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": "busy"})),
+                )
+                    .into_response();
+            }
             // The real server first waits `timeout_s` for the KV.
-            shared.dropped.insert(rid.clone());
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({"error": "kv_transfer_timeout", "rid": rid})),
-            )
-                .into_response();
+            if !shared.parked.remove(&rid) {
+                shared.dropped.insert(rid.clone());
+                return kv_timeout(&rid);
+            }
+            (shared.decode, "timing_ms")
+        } else {
+            if shared.landed.as_deref() != Some(rid.as_str()) {
+                shared.dropped.insert(rid.clone());
+                return kv_timeout(&rid);
+            }
+            shared.landed = None;
+            (shared.decode, "phase_ms")
         }
-        shared.landed = None;
-        shared.decode
     };
     let first = body["first_token_id"].as_u64().unwrap();
     let budget = body["max_tokens"].as_u64().unwrap() as usize;
     let tokens: Vec<u64> = [first, 101, 102, 103].into_iter().take(budget).collect();
     if body["stream"] == json!(false) {
-        return Json(json!({"rid": rid, "token_ids": tokens, "phase_ms": {}})).into_response();
+        return Json(json!({"rid": rid, "token_ids": tokens, timings: {}})).into_response();
     }
     // The real server emits nothing for an end-of-sequence first token.
     if first == u64::from(EOS) {
         return ndjson([json!({"done": true, "n": 0, "finish_reason": "stop"})]);
     }
     let batch = json!({"t": tokens});
-    let done = |n: usize| json!({"done": true, "n": n, "finish_reason": "length", "phase_ms": {"decode": 1.0}});
+    let done = |n: usize| json!({"done": true, "n": n, "finish_reason": "length", timings: {"decode": 1.0}});
     match script {
         Decode::Complete => ndjson([
             json!({"t": [tokens[0]]}),
@@ -314,7 +356,7 @@ async fn pd_decode(
         )
             .into_response(),
         Decode::Stall => {
-            shared.lock().unwrap().decoding = Some(rid);
+            shared.lock().unwrap().decoding.insert(rid);
             let first_batch =
                 futures::stream::iter([Ok::<_, std::io::Error>(format!("{batch}\n"))]);
             Body::from_stream(first_batch.chain(futures::stream::pending())).into_response()
@@ -648,7 +690,7 @@ async fn cancel_while_the_decode_is_starting_stops_it_by_id() {
         shared.cancelled,
         vec![shared.prefill_requests[0].request_id.clone()]
     );
-    assert!(shared.decoding.is_none());
+    assert!(shared.decoding.is_empty());
 }
 
 #[tokio::test]
@@ -675,7 +717,7 @@ async fn cancel_mid_decode_stops_the_decode_server() {
         shared.cancelled,
         vec![shared.prefill_requests[0].request_id.clone()]
     );
-    assert!(shared.decoding.is_none());
+    assert!(shared.decoding.is_empty());
 }
 
 #[tokio::test]
@@ -968,4 +1010,105 @@ fn decode_endpoint_supplies_the_kv_host_and_takes_no_path() {
     let args = parse("http://127.0.0.1:5557", &["--decode-kv-host", "10.0.0.2"]).unwrap();
     assert_eq!(args.decode_kv_host(), "10.0.0.2");
     assert!(parse("http://127.0.0.1:5557/prefix", &[]).is_err());
+}
+
+async fn started_v02_engine(capacity: usize) -> (Fakes, TilertSidecarEngine, Option<u64>) {
+    let fakes = start_fakes().await;
+    fakes.shared.lock().unwrap().v02_capacity = Some(capacity);
+    let (engine, _config) = bounded(TilertSidecarEngine::bootstrap(args(&fakes, &[])))
+        .await
+        .expect("bootstrap");
+    let config = bounded(engine.start(0)).await.expect("start");
+    let max_num_seqs = config.llm.and_then(|llm| llm.max_num_seqs);
+    (fakes, engine, max_num_seqs)
+}
+
+#[tokio::test]
+async fn tilert_0_2_serves_max_concurrency_requests_at_once() {
+    let (fakes, engine, max_num_seqs) = started_v02_engine(2).await;
+    assert_eq!(max_num_seqs, Some(2));
+    fakes.shared.lock().unwrap().decode = Decode::Stall;
+
+    let first_context = mock_context();
+    let mut streams = Vec::new();
+    for context in [first_context.clone(), mock_context(), mock_context()] {
+        let stream = engine
+            .generate(request(8), GenerateContext::new(context, None))
+            .await
+            .expect("generate");
+        streams.push(stream);
+    }
+    for stream in &mut streams[..2] {
+        let batch = bounded(stream.next()).await.unwrap().unwrap();
+        assert_eq!(batch.token_ids, vec![FIRST_TOKEN, 101, 102, 103]);
+    }
+    let waiting = tokio::time::timeout(Duration::from_millis(200), streams[2].next()).await;
+    assert!(waiting.is_err(), "the third request waits for a slot");
+    assert_eq!(fakes.shared.lock().unwrap().prefill_requests.len(), 2);
+
+    first_context.stop_generating();
+    let mut cancelled = streams.remove(0);
+    let last = bounded(cancelled.next()).await.unwrap().unwrap();
+    assert_eq!(last.finish_reason, Some(FinishReason::Cancelled));
+    drop(cancelled);
+    let batch = bounded(streams[1].next()).await.unwrap().unwrap();
+    assert_eq!(batch.token_ids, vec![FIRST_TOKEN, 101, 102, 103]);
+    let shared = fakes.shared.lock().unwrap();
+    assert_eq!(
+        shared.cancelled,
+        vec![shared.prefill_requests[0].request_id.clone()]
+    );
+}
+
+/// 0.2 keeps unclaimed KV for half an hour, and only `/pd/cancel` is sure to
+/// free it: a 429 or 409 refusal leaves it parked.
+#[tokio::test]
+async fn tilert_0_2_frees_kv_with_cancel_and_retries_a_busy_server() {
+    let (fakes, engine, _) = started_v02_engine(1).await;
+
+    fakes.shared.lock().unwrap().prefill_fails = true;
+    let outputs = run(&engine, request(8), mock_context()).await;
+    assert!(outputs.last().unwrap().is_err());
+    fakes.shared.lock().unwrap().prefill_fails = false;
+
+    // Busy for a moment, as right after another request ends.
+    fakes.shared.lock().unwrap().busy_answers = 2;
+    let outputs = collect(&engine, request(2)).await;
+    assert_eq!(tokens(&outputs), vec![FIRST_TOKEN, 101]);
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Length)
+    );
+
+    fakes.shared.lock().unwrap().busy_answers = 100;
+    let outputs = run(&engine, request(8), mock_context()).await;
+    let error = outputs.last().unwrap().as_ref().unwrap_err();
+    assert!(is_kind(error, BackendError::WorkerOverloaded), "{error}");
+    fakes.shared.lock().unwrap().busy_answers = 0;
+
+    assert_eq!(
+        tokens(&collect(&engine, request(2)).await),
+        vec![FIRST_TOKEN, 101]
+    );
+    let shared = fakes.shared.lock().unwrap();
+    let rids: Vec<_> = shared
+        .prefill_requests
+        .iter()
+        .map(|request| request.request_id.clone())
+        .collect();
+    assert_eq!(shared.cancelled, vec![rids[0].clone(), rids[2].clone()]);
+    assert!(shared.parked.is_empty());
+    // No one-token claim as on 0.1.8, and the prompt length goes along.
+    assert!(
+        shared
+            .decode_bodies
+            .iter()
+            .all(|body| body["max_tokens"] != json!(1))
+    );
+    assert!(
+        shared
+            .decode_bodies
+            .iter()
+            .all(|body| body["seq_len"] == json!(5))
+    );
 }

@@ -33,8 +33,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::args::Args;
-use crate::decode::{DecodeBody, DecodeCapabilities, DecodeClient, DecodeEvent, DecodeFinish};
-use crate::error::{backend_error, is_kind, is_transport_failure};
+use crate::decode::{
+    DecodeApi, DecodeBody, DecodeCapabilities, DecodeClient, DecodeEvent, DecodeFinish,
+};
+use crate::error::{backend_error, is_kind};
 use crate::prefill::{self, PrefillClient, PrefillRequest};
 
 const ALREADY_STARTED: &str = "TileRT sidecar has already started";
@@ -44,8 +46,8 @@ const PROBE_MAX_TOKENS: u32 = 4;
 const DECODE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long shutdown waits for an in-flight request to release its KV.
 const CLEANUP_DRAIN: Duration = Duration::from_secs(10);
-/// How long a cancelled request waits for the decode server to claim its KV.
-/// KV normally lands within milliseconds of the prefill's answer.
+/// How long a cancelled request waits for a 0.1.8 decode server to claim its
+/// KV. KV normally lands within milliseconds of the prefill's answer.
 const CLAIM_GRACE: Duration = Duration::from_secs(1);
 const DECODE_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 const DECODE_HEALTH_FAILURES: u32 = 3;
@@ -258,9 +260,9 @@ enum Pending {
     Nothing,
 }
 
-/// Holds the worker's slot for one request. When the request ends before the
-/// decode server has taken it over, the slot stays taken until both engines
-/// are clean, so the next request cannot meet this one's KV. It acts on drop
+/// Holds one of the worker's slots for one request. When the request ends
+/// before the decode server has taken it over, the slot stays taken until both
+/// engines are clean, so the next request cannot meet this one's KV. It acts on drop
 /// because the framework may drop a stream without cancelling it.
 struct Handoff {
     prefill: Arc<PrefillClient>,
@@ -294,9 +296,9 @@ impl Drop for Handoff {
                 }
                 Pending::Decode => {
                     decode.cancel(&rid).await;
-                    // The abandoned `/pd/decode` may still claim KV that lands
-                    // while the release waits for it.
-                    if !decode.release(&rid).await {
+                    // On 0.1.8 the abandoned `/pd/decode` may still claim KV
+                    // that lands while the release waits for it.
+                    if decode.api() == DecodeApi::V018 && !decode.release(&rid).await {
                         decode.cancel(&rid).await;
                     }
                 }
@@ -320,8 +322,9 @@ pub struct TilertSidecarEngine {
     kv_transfer_timeout: Duration,
     capabilities: DecodeCapabilities,
     prefill: OnceCell<Arc<PrefillClient>>,
-    /// The decode server holds one request's KV at a time.
+    /// One permit per request the decode server takes at once.
     slot: Arc<Semaphore>,
+    max_concurrency: u32,
     shutdown: CancellationToken,
     lost: CancellationToken,
     lost_reason: Arc<OnceLock<String>>,
@@ -366,8 +369,9 @@ impl TilertSidecarEngine {
         decode
             .wait_healthy(deadline, transport.retry_interval)
             .await?;
-        let capabilities = decode.capabilities().await?;
-        tracing::info!(?capabilities, "TileRT decode capabilities");
+        let server = decode.describe().await?;
+        tracing::info!(?server, "TileRT decode server");
+        let decode = decode.with_api(server.api);
 
         if args.probe_token_ids.is_empty() {
             tracing::warn!(
@@ -399,9 +403,10 @@ impl TilertSidecarEngine {
             served_model_name: args.served_model_name.clone(),
             context_length: args.context_length,
             kv_transfer_timeout,
-            capabilities,
+            capabilities: server.capabilities,
             prefill: OnceCell::new(),
-            slot: Arc::new(Semaphore::new(1)),
+            slot: Arc::new(Semaphore::new(server.max_concurrency as usize)),
+            max_concurrency: server.max_concurrency,
             shutdown: CancellationToken::new(),
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
@@ -479,6 +484,7 @@ async fn probe(
             max_tokens: PROBE_MAX_TOKENS,
             sampling: serde_json::Map::new(),
             timeout_s: kv_transfer_timeout.as_secs_f64(),
+            seq_len: u32::try_from(prompt_tokens).ok(),
         })
         .await;
     let (tokens, phases) = match decoded {
@@ -547,7 +553,7 @@ impl LLMEngine for TilertSidecarEngine {
             runtime_data,
             llm: Some(LlmRegistration {
                 context_length: Some(self.context_length),
-                max_num_seqs: Some(1),
+                max_num_seqs: Some(u64::from(self.max_concurrency)),
                 ..Default::default()
             }),
         })
@@ -660,6 +666,7 @@ impl LLMEngine for TilertSidecarEngine {
                 max_tokens: plan.max_tokens,
                 sampling: plan.decode_sampling(),
                 timeout_s: kv_transfer_timeout.as_secs_f64(),
+                seq_len: Some(prompt_tokens),
             }));
             let opened = tokio::select! {
                 biased;
@@ -668,17 +675,20 @@ impl LLMEngine for TilertSidecarEngine {
                 opened = &mut decode_call => Some(opened),
             };
             let Some(opened) = opened else {
-                // The server can cancel a decode it has claimed, not one that
-                // still waits for its KV, so give the claim a moment.
-                match timeout(CLAIM_GRACE, &mut decode_call).await {
-                    Ok(Ok(_events)) => {
-                        decode.cancel(&rid).await;
-                        handoff.pending = Pending::Nothing;
+                // A 0.1.8 server can cancel a decode it has claimed, not one
+                // that still waits for its KV, so give the claim a moment. On
+                // 0.2 the handoff's `/pd/cancel` covers every state.
+                if decode.api() == DecodeApi::V018 {
+                    match timeout(CLAIM_GRACE, &mut decode_call).await {
+                        Ok(Ok(_events)) => {
+                            decode.cancel(&rid).await;
+                            handoff.pending = Pending::Nothing;
+                        }
+                        Ok(Err(error)) if decode.refusal_frees_kv(&error) => {
+                            handoff.pending = Pending::Nothing;
+                        }
+                        Ok(Err(_)) | Err(_) => {}
                     }
-                    Ok(Err(error)) if !is_transport_failure(&error) => {
-                        handoff.pending = Pending::Nothing;
-                    }
-                    Ok(Err(_)) | Err(_) => {}
                 }
                 yield Ok(LLMEngineOutput::cancelled()
                     .with_usage(request_usage(prompt_tokens, 0, cached_tokens)));
@@ -687,9 +697,7 @@ impl LLMEngine for TilertSidecarEngine {
             let events = match opened {
                 Ok(events) => events,
                 Err(error) => {
-                    // A refusal means the server has let the KV go; a
-                    // transport failure does not.
-                    if !is_transport_failure(&error) {
+                    if decode.refusal_frees_kv(&error) {
                         handoff.pending = Pending::Nothing;
                     }
                     yield Err(error);
@@ -799,9 +807,12 @@ impl LLMEngine for TilertSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.shutdown.cancel();
-        // A request that ended early keeps the slot until its KV is released;
+        // A request that ended early keeps its slot until its KV is released;
         // leaving sooner would strand that KV on the decode server.
-        if timeout(CLEANUP_DRAIN, self.slot.acquire()).await.is_err() {
+        if timeout(CLEANUP_DRAIN, self.slot.acquire_many(self.max_concurrency))
+            .await
+            .is_err()
+        {
             tracing::warn!(
                 drain = ?CLEANUP_DRAIN,
                 "a request was still releasing its KV; shutting down anyway"
