@@ -14,6 +14,7 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec};
 use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
@@ -872,8 +873,6 @@ async fn serve_direct_engines(
     namespace: Option<String>,
     model_path: Option<String>,
 ) -> anyhow::Result<()> {
-    use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec};
-
     let options = DirectEngineOptions {
         namespace: namespace.unwrap_or_else(|| "dynamo".to_string()),
         model_path,
@@ -882,13 +881,25 @@ async fn serve_direct_engines(
         "sglang" => dynamo_sglang_sidecar::direct::direct_engine_factory(options),
         other => anyhow::bail!("--direct-backend {other} is not supported; expected sglang"),
     };
-    let specs = direct
-        .urls
-        .into_iter()
-        .map(|url| DirectEngineSpec { url })
-        .collect();
+    let specs = direct_engine_specs(&direct.urls)?;
     dynamo_backend_common::direct::serve_direct_engines(drt, specs, factory).await?;
     Ok(())
+}
+
+/// One engine per `--engine-url`, named by its endpoint's normal form, so
+/// every spelling of an address is the same engine. A malformed address fails
+/// startup.
+fn direct_engine_specs(
+    urls: &[String],
+) -> Result<Vec<DirectEngineSpec>, dynamo_runtime::error::DynamoError> {
+    urls.iter()
+        .map(|url| {
+            let endpoint = dynamo_sidecar_common::GrpcEndpoint::parse(url, "--engine-url")?;
+            Ok(DirectEngineSpec {
+                url: endpoint.as_str().to_string(),
+            })
+        })
+        .collect()
 }
 
 async fn select_engine(
@@ -1061,6 +1072,21 @@ where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+#[cfg(test)]
+mod direct_engine_tests {
+    use super::*;
+
+    #[test]
+    fn spellings_of_one_address_are_one_engine_and_a_malformed_one_fails() {
+        let urls = ["10.0.0.7:30001", "grpc://10.0.0.7:30001/"].map(String::from);
+        let specs = direct_engine_specs(&urls).unwrap();
+        assert_eq!(specs[0], specs[1]);
+
+        let rejected = direct_engine_specs(&["https://engine:30001".to_string()]).unwrap_err();
+        assert!(rejected.to_string().contains("--engine-url"), "{rejected}");
+    }
 }
 
 #[cfg(test)]
