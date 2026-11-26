@@ -117,14 +117,7 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 		b.setStrings(backends, engineBackendChoices)
 	}
-	if spec.Hardware != nil && spec.Hardware.GPU != nil {
-		if sku := spec.Hardware.GPU.SKU; sku != nil && *sku != "" {
-			b.set(*sku, engineHardware)
-		}
-		if budget := spec.Hardware.GPU.Budget; budget != nil {
-			b.set(int64(*budget), optimizationHardwareBudget)
-		}
-	}
+	b.setHardware(spec.Hardware)
 
 	if spec.Workload != nil && spec.Workload.Static != nil {
 		static := spec.Workload.Static
@@ -191,6 +184,26 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 	}
 	return b.root, b.err
+}
+
+// setHardware lowers the accelerator identity, the candidate GPU budget, and the prefill-to-decode
+// KV-transfer bandwidth. hardware may be nil; unset fields lower nothing. numGpusPerNode is not
+// lowered here: the Run controller writes it as an operator-owned execution value.
+func (b *builder) setHardware(hardware *v1beta2.HardwareSpec) {
+	if hardware == nil {
+		return
+	}
+	if gpu := hardware.GPU; gpu != nil {
+		if gpu.SKU != nil && *gpu.SKU != "" {
+			b.set(*gpu.SKU, engineHardware)
+		}
+		if gpu.Budget != nil {
+			b.set(int64(*gpu.Budget), optimizationHardwareBudget)
+		}
+	}
+	if interconnect := hardware.Interconnect; interconnect != nil && interconnect.KVTransferBandwidthGBps != nil {
+		b.set(*interconnect.KVTransferBandwidthGBps, engineKVTransferBW)
+	}
 }
 
 // setTraceWorkload lowers workload.trace: it replays the recorded arrival times, scaled by the

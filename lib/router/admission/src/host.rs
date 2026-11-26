@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! What an in-tree host names from the admission stage: the classifier runtime it drives, the
-//! queue rejection it renders, the queue policy and profiles it configures, the queue
-//! snapshot replay reads, and the host half of the classifier contract types: how the kernel
-//! builds the request a classifier reads and takes back what the classifier set. That half is
-//! an extension trait here, not methods on the contract type, so a plugin, which does not
-//! name this module, cannot call them. This list is the host contract.
+//! What an in-tree host names from the admission stage: the abort cause it reports and the
+//! request progress it reads and updates, the queue rejection it renders, the queue policy and
+//! profiles it configures, the policy queue offline replay drives, and the host half of the
+//! classifier contract types: how the kernel builds the request a classifier reads and takes
+//! back what the classifier set. That half is an extension trait here, not methods on the
+//! contract type, so a plugin, which does not name this module, cannot call them. This list is
+//! the host contract.
 
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -16,18 +17,13 @@ use tokio::time::Instant;
 
 use crate::classifier::{ClassificationOverrides, ClassifyRequest};
 
-pub use crate::classifier::{
-    AbortCause, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-};
-pub use crate::placement::LaneKey;
+pub use crate::classifier::{AbortCause, RequestProgress, RequestProgressUpdater};
+pub use crate::lane_key::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
-    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot,
-    RecheckScope,
+    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueLimitKind, QueueMetadata, QueueRejection,
+    QueueSnapshot, RecheckScope,
 };
-
-// What the frontend host (lib/llm) names beyond the lists above.
-pub use crate::queue::QueueLimitKind;
 
 mod sealed {
     /// Keeps the host traits implementable only here, so a method can be added to one.

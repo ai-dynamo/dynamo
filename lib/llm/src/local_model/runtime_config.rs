@@ -34,6 +34,13 @@ pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 /// Complete input-modality list advertised by a worker; absence means unknown.
 pub const SUPPORTED_INPUT_MODALITIES: &str = "supported_input_modalities";
 
+/// Runtime-data key for the largest number of per-token log-probability
+/// alternatives the engine returns, as a non-negative integer (vLLM's
+/// `max_logprobs`). The frontend applies it to chat and responses
+/// `top_logprobs` and to completions `logprobs`; an absent value means the
+/// OpenAI limit of 20.
+pub const MAX_LOGPROBS_RUNTIME_KEY: &str = "max_logprobs";
+
 /// `runtime_data` key under which an engine the frontend dials directly lists
 /// its ZMQ KV-event publishers by data-parallel rank, as
 /// `{"<dp_rank>": "tcp://host:port"}`. The frontend subscribes to them itself

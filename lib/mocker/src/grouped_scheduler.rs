@@ -37,7 +37,7 @@ use crate::common::protocols::{
 };
 use crate::engine_adapter::{EngineComponents, engine_components, engine_factory};
 use crate::engine_observations::{
-    dynamo_forward_pass_snapshot, dynamo_kv_event, dynamo_storage_tier,
+    cache_owned, dynamo_forward_pass_snapshot, dynamo_kv_event, dynamo_storage_tier,
 };
 use crate::generalized_live::{
     GroupedLiveDriverConfig, GroupedLiveEngineHandle, GroupedLiveEvent, GroupedLiveRuntime,

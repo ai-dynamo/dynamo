@@ -1601,6 +1601,19 @@ impl ModelManager {
         Err(SystemOneSelectionError::NotFound)
     }
 
+    /// Largest log-probability count a request to `model` (a served name or
+    /// an alias) may ask for. The OpenAI limit for a model that is not
+    /// registered.
+    pub fn max_logprobs(&self, model: &str) -> u8 {
+        let catalog = self.catalog.load();
+        let canonical = catalog.aliases.get(model).map_or(model, String::as_str);
+        catalog
+            .models
+            .get(canonical)
+            .map(|model| model.max_logprobs())
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -3757,6 +3770,28 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn max_logprobs_follows_the_published_limit_through_aliases() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use crate::protocols::openai::validate::MAX_TOP_LOGPROBS;
+
+        let mm = ModelManager::new();
+        assert_eq!(mm.max_logprobs("llama"), MAX_TOP_LOGPROBS);
+
+        let mut card = ModelDeploymentCard::default();
+        card.runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+        let mut worker_set = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
+        worker_set.chat_engine = Some(make_chat_engine());
+        assert!(mm.add_worker_set("llama", "ns1", worker_set));
+        assert!(mm.register_alias("llama-alias", "llama"));
+
+        assert_eq!(mm.max_logprobs("llama"), 32);
+        assert_eq!(mm.max_logprobs("llama-alias"), 32);
+        assert_eq!(mm.max_logprobs("other"), MAX_TOP_LOGPROBS);
     }
 
     #[test]

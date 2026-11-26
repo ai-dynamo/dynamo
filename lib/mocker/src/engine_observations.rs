@@ -3,7 +3,7 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisim_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
+use aisim_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventDomain, KvEventTier};
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
@@ -13,14 +13,25 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use crate::common::protocols::ForwardPassSnapshot;
 
 /// Router storage tier of a native KV event. `HostPinned` events describe a
-/// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
-/// `Disk` events describe a KVCR disk cache (G3). The event's `domain` is not
-/// carried: Dynamo indexes every native event under the publishing worker.
+/// host pool (a per-rank or cluster-shared G2, or a rank's KVCR-owned memory)
+/// and `Disk` events a rank's KVCR disk cache (G3); neither may enter the
+/// device (G1) index.
 pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
     match tier {
         KvEventTier::Device => StorageTier::Device,
         KvEventTier::HostPinned => StorageTier::HostPinned,
         KvEventTier::Disk => StorageTier::Disk,
+    }
+}
+
+/// Whether a cache owner beside the worker (the rank's KVCR store), not the worker,
+/// holds the residency a native KV event describes. A real worker reports it with
+/// `ownership=kvcr`, which the router accepts only as cache-owner residency through
+/// a KV state agent.
+pub(crate) fn cache_owned(event: &KvEvent) -> bool {
+    match event.domain {
+        KvEventDomain::Worker => false,
+        KvEventDomain::CacheOwner => true,
     }
 }
 
