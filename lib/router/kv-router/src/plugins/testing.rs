@@ -58,7 +58,8 @@
 //! experimental dispatch gate, [`SelectionCase::dispatch_head`] builds the queue head a gate
 //! is shown.
 //!
-//! This module follows the stability of the plugin API ([`super`]).
+//! This module follows the stability of the plugin API ([`super`]), except
+//! [`SelectionCase::dispatch_head`], which follows the experimental dispatch gate.
 
 use std::collections::HashMap;
 
@@ -375,6 +376,10 @@ impl SelectionCase {
     /// The view an experimental dispatch gate is shown of this case's request at the head of
     /// the `policy_class` queue, queued now. It carries the facts the case sets: the request
     /// ID, session, pinned worker, and the caller's expected output length and priorities.
+    ///
+    /// It returns [`DispatchHead`], a `plugins::experimental` type, so this method has the
+    /// stability of the dispatch gate, which has no compatibility promise, and not of this
+    /// module.
     pub fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
         dispatch_head_of(&self.request, policy_class, tokio::time::Instant::now())
     }

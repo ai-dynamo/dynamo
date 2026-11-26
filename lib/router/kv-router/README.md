@@ -55,7 +55,7 @@ A statically linked worker-selection policy or request classifier depends on thi
 |---|---|---|
 | `plugins::{worker_selection, request_classifier}` | The plugin API, one module per kind of plugin; the root `plugins` module holds only what both share, including the worker rows both read | Can change in a minor release; each change is listed in that release's deprecation notes |
 | `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name. An API's names move into a kind's module when it is ready | None: can change or be removed in any release |
-| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, `SelectionCase::classify`, `classify`, and `classify_request` for classifier tests, and `registered_policy` and `registered_classifier` for registration tests; import it only from tests and benches | Same as the plugin API |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, `SelectionCase::classify`, `classify`, and `classify_request` for classifier tests, and `registered_policy` and `registered_classifier` for registration tests; import it only from tests and benches | Same as the plugin API, except `SelectionCase::dispatch_head`, which returns an experimental type and follows the dispatch gate |
 | `plugins::host` | What a routing host names to resolve and run plugins: `RouterPlugins`, `RouterPluginRegistryHostExt`, `check_role`, the policy-file entry types, the hosted picker | Not for plugin crates |
 
 ## Features
