@@ -14,14 +14,16 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import threading
 import time
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import aiohttp.web
-from prometheus_client import start_http_server
+from prometheus_client import REGISTRY, start_http_server
 
+from dynamo.common.utils.prometheus import get_prometheus_typed
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -52,6 +54,7 @@ from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
+from dynamo.planner.monitoring.planner_metrics import PREFIX as PLANNER_METRICS_PREFIX
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.reconfiguration import (
@@ -253,6 +256,9 @@ class NativePlannerBase:
         self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
         self.reconfiguration = PlannerReconfiguration(self)
+        # Set while the planner's metrics are attached to the runtime's OTLP
+        # export; see _attach_metrics_export.
+        self._metrics_exported: Optional[threading.Event] = None
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
         self._effect_submission_hold_logged = False
@@ -275,6 +281,7 @@ class NativePlannerBase:
         # required if initialize() created subscriptions before failing.
         self._environment_initialized = True
         try:
+            self._attach_metrics_export()
             await self.environment.initialize()
             self._validate_min_endpoint_budgets_at_startup()
 
@@ -325,6 +332,42 @@ class NativePlannerBase:
         except BaseException:
             await self._shutdown_runtime()
             raise
+
+    def _attach_metrics_export(self) -> None:
+        """Add the dynamo_planner_* families to the runtime's OTLP export.
+
+        Only a live planner with metric collection on: without a runtime there
+        is no exporter, and with port 0 the gauges are never written. The
+        planner's own port keeps serving them for scrapers, so they are not
+        added to the runtime's /metrics as well.
+        """
+        if self.runtime is None or self.prometheus_port == 0:
+            return
+
+        # The binding has no unregister, so detach is a flag the callback
+        # reads. The callback holds the flag, not the planner.
+        exported = threading.Event()
+        exported.set()
+
+        def collect_typed() -> list:
+            if not exported.is_set():
+                return []
+            # The planner collectors share the global registry with the
+            # python_* and process_* defaults; export only the planner's.
+            return get_prometheus_typed(
+                REGISTRY, metric_prefix_filters=[f"{PLANNER_METRICS_PREFIX}_"]
+            )
+
+        # Reserved, never served: like Triton's {namespace}.{server_id}._metrics.
+        metrics_endpoint = self.runtime.endpoint(f"{self.namespace}.Planner._metrics")
+        metrics_endpoint.metrics.register_prometheus_typed_callback(collect_typed)
+        self._metrics_exported = exported
+
+    def _detach_metrics_export(self) -> None:
+        exported = self._metrics_exported
+        self._metrics_exported = None
+        if exported is not None:
+            exported.clear()
 
     @property
     def may_hold_retune_lease(self) -> bool:
@@ -448,6 +491,7 @@ class NativePlannerBase:
         """Release initialized planner resources after normal or failed startup."""
 
         await self.reconfiguration.close()
+        self._detach_metrics_export()
         applying = list(self._retune_apply_tasks)
         for task in applying:
             task.cancel()
