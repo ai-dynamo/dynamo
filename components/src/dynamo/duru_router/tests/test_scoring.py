@@ -132,6 +132,90 @@ def test_same_agent_overlap_duplicate_finish_and_return():
     assert book.entitlement["root"] == 10.0
 
 
+class NoGlobalIteration(dict):
+    """Permit keyed operations, but fail if cleanup scans retained history."""
+
+    def __iter__(self):
+        raise AssertionError("Cleanup must not iterate unrelated root histories")
+
+    keys = items = values = __iter__
+
+
+class NoGlobalSetIteration(set):
+    __iter__ = NoGlobalIteration.__iter__
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("other_roots", [0, 100])
+def test_root_cleanup_uses_only_its_indexed_members(other_roots):
+    index = scoring.LifecycleIndex()
+    book = make_book()
+    for i in range(other_roots):
+        root = f"other-{i}"
+        index.arrive(root, root, root, root)
+        index.dispatch(root)
+        book.submit(root, root, root, 8, 0)
+        book.finish(root, 0)
+    for rid, agent in [("a", "parent"), ("b", "child")]:
+        index.arrive(rid, rid, "target", agent)
+        index.dispatch(rid)
+        book.submit(rid, "target", agent, 8, 0)
+        book.finish(rid, 0)
+        index.finish(rid)
+        index.undispatch(rid)
+    for name in (
+        "request_identities",
+        "request_programs",
+        "program_identities",
+        "root_requests",
+        "root_programs",
+    ):
+        setattr(index, name, NoGlobalIteration(getattr(index, name)))
+    book.agent_root = NoGlobalIteration(book.agent_root)
+    index.worker_requests = NoGlobalSetIteration(index.worker_requests)
+    book.finish_root("target", 0)
+    index.end_program("a")
+    index.release_root("target")
+    assert len(index.request_identities) == other_roots
+    assert len(index.program_identities) == other_roots
+    assert len(index.worker_requests) == other_roots
+    assert len(book.agent_root) == other_roots
+    assert "target" not in index.root_requests
+    assert "target" not in index.root_programs
+    assert "target" not in book.root_agents
+    for i in range(other_roots):
+        root = f"other-{i}"
+        assert index.request_identities[root] == (root, root)
+        assert book.agent_root[root] == root
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_ended_program_reuse_is_not_removed_with_its_previous_root():
+    index = scoring.LifecycleIndex()
+    index.arrive("old", "program", "old-root", "old-agent")
+    index.dispatch("old")
+    index.dispatch("old")
+    assert index.root_workers["old-root"] == 1
+    with pytest.raises(ValueError, match="outstanding requests"):
+        index.end_program("program")
+    index.finish("old")
+    index.finish("old")
+    index.end_program("program")
+    index.arrive("new", "program", "new-root", "new-agent")
+    with pytest.raises(ValueError, match="outstanding worker requests"):
+        index.release_root("old-root")
+    index.undispatch("old")
+    index.release_root("old-root")
+    assert index.program_identities == {"program": ("new-root", "new-agent")}
+    assert index.request_identities == {"new": ("new-root", "new-agent")}
+    assert index.request_programs == {"new": "program"}
+    assert index.program_active == {"program": 1}
+    assert index.root_programs == {"new-root": {"program"}}
+    assert not index.root_workers
+
+
 @pytest.mark.pre_merge
 @pytest.mark.unit
 def test_unused_root_share_is_not_redistributed():
@@ -389,7 +473,20 @@ def run_once(config):
     path, cfg = config
     stop = threading.Event()
     stop.set()
-    replay_accounting(path, stop)
+    clock = SimpleNamespace(now=time.monotonic())
+
+    def wait(delay):
+        clock.now += delay
+
+    with (
+        patch.object(scoring, "time", SimpleNamespace(monotonic=lambda: clock.now)),
+        patch.object(
+            scoring,
+            "threading",
+            SimpleNamespace(Event=lambda: SimpleNamespace(wait=wait)),
+        ),
+    ):
+        replay_accounting(path, stop)
     return audit_rows(cfg)[-1]
 
 
@@ -450,7 +547,7 @@ def cleanup_participants(config, monkeypatch):
     path.write_text(json.dumps(cfg))
     monkeypatch.setenv("DURU_RECORD_EVENTS", "1")
     sources = [
-        SimpleNamespace(read=lambda: [], close=Mock(), closed=False, received_through=0)
+        SimpleNamespace(read=lambda: [], close=Mock(), closed=True, received_through=0)
         for _ in range(3)
     ]
     audit = SimpleNamespace(submit=Mock(), close=Mock())
@@ -474,6 +571,489 @@ def cleanup_participants(config, monkeypatch):
         publisher_factory=publisher_factory,
         router_publish=Mock(),
     )
+
+
+@pytest.fixture
+def timeout_accounting(cleanup_participants, monkeypatch):
+    """Advance source coverage and the deadline clock independently, without sleeps."""
+    participants = cleanup_participants
+    clock = SimpleNamespace(now=100.0, done=False, current=None)
+    monkeypatch.setattr(scoring, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    participants.stop = SimpleNamespace(
+        is_set=lambda: clock.done, wait=lambda timeout: False
+    )
+
+    def execute(batches, timeout=300):
+        pending = iter(batches)
+
+        def ingress_read():
+            batch = next(pending, None)
+            if batch is None:
+                clock.done = True
+                clock.current = (clock.now, clock.now, [], [])
+                for source in participants.sources:
+                    source.closed = True
+                    source.received_through = clock.now
+                return []
+            clock.current = batch
+            clock.now, cutoff, ingress, _ = batch
+            for source in participants.sources:
+                source.closed = False
+                source.received_through = cutoff
+                source.sequence = 1
+            return ingress
+
+        participants.sources[0].read = ingress_read
+        participants.sources[1].read = lambda: clock.current[3]
+        run(
+            participants.path,
+            participants.stop,
+            router_publish=participants.router_publish,
+            dispatch_ack_timeout_seconds=timeout,
+        )
+        return [
+            call.args[0]
+            for call in participants.router_publish.call_args_list
+            if call.args[0]
+        ]
+
+    return execute, participants
+
+
+@pytest.fixture
+def shutdown_accounting(cleanup_participants, monkeypatch):
+    participants = cleanup_participants
+    clock = SimpleNamespace(now=100.0, waits=[])
+
+    def wait(delay):
+        clock.waits.append(delay)
+        clock.now += delay
+
+    monkeypatch.setattr(scoring, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(
+        scoring, "threading", SimpleNamespace(Event=lambda: SimpleNamespace(wait=wait))
+    )
+
+    def execute(batches):
+        calls = []
+        for index, source in enumerate(participants.sources):
+            source.closed = False
+            source.sequence = 0
+            pending = iter(batches)
+            count = SimpleNamespace(value=0)
+            calls.append(count)
+
+            def read(source=source, index=index, pending=pending, count=count):
+                count.value += 1
+                rows = next(pending, ([], [], []))[index]
+                for row in rows:
+                    source.sequence += 1
+                    source.received_through = max(source.received_through, row["time"])
+                    source.closed = row["event"] == "footer"
+                return rows
+
+            source.read = read
+        run(participants.path, participants.stop)
+        return participants.audit.submit.call_args.args[1], calls
+
+    return execute, clock
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_shutdown_drains_work_and_footers_after_empty_reads(shutdown_accounting):
+    execute, clock = shutdown_accounting
+    first_clock = dict(time=100, event="u_clock")
+    next_clock = dict(time=102, event="u_clock")
+    footer = dict(time=103, event="footer")
+    empty = ([], [], [])
+    final, calls = execute(
+        [
+            ([arrival_record()], [first_clock], [first_clock]),
+            empty,
+            (
+                [dict(time=102, event="request_completed", request_id="req")],
+                [
+                    dict(
+                        time=101,
+                        event="accepted_output",
+                        steps=[
+                            work_step(
+                                client_request_id="req", scheduled_at=100.5, end=101
+                            )
+                        ],
+                    ),
+                    next_clock,
+                ],
+                [next_clock],
+            ),
+            empty,
+            ([footer], [footer], [footer]),
+        ]
+    )
+    assert final["complete"] and final["inputs_closed"]
+    assert final["pending_events"] == 0
+    assert final["last_snapshot"]["accepted_steps"] == 1
+    assert final["last_snapshot"]["output_tokens"] == 1
+    assert final["last_snapshot"]["roots"]["root"]["E"] == 2
+    assert final["last_snapshot"]["roots"]["root"]["W"] == pytest.approx(0.01)
+    assert [call.value for call in calls] == [6, 6, 6]
+    assert clock.waits == [0.05, 0.05]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("pending", [False, True])
+def test_shutdown_deadline_reports_incomplete_inputs_without_busy_polling(
+    shutdown_accounting, pending
+):
+    execute, clock = shutdown_accounting
+    batches = [([arrival_record()] if pending else [], [], [])]
+    final, calls = execute(batches)
+    assert not final["complete"] and not final["inputs_closed"]
+    assert final["pending_events"] == int(pending)
+    assert sum(clock.waits) == pytest.approx(5)
+    assert all(0 < delay <= 0.05 for delay in clock.waits)
+    assert calls[0].value == len(clock.waits) + 1 + int(pending)
+
+
+def dispatch_events():
+    return [
+        arrival_record(),
+        dict(time=100, event="request_dispatched", request_id="req"),
+    ]
+
+
+def terminal_ack(at, *, root="root"):
+    return dict(
+        time=at,
+        event="worker_request_finished",
+        requests=[dict(client_request_id="req", root=root, agent="agent")],
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", ["request_failed", "request_cancelled"])
+def test_dispatch_timeout_uses_failure_time_despite_frozen_cutoff_and_keeps_late_work(
+    timeout_accounting, outcome
+):
+    execute, participants = timeout_accounting
+    snapshots = execute(
+        [
+            (100, 100, dispatch_events(), []),
+            (
+                101,
+                100,
+                [
+                    dict(time=101, event=outcome, request_id="req"),
+                    dict(time=101.1, event="agent_group_end", root="root"),
+                ],
+                [],
+            ),
+            (400.999, 100, [], []),
+            (401, 100, [], []),
+            (
+                402,
+                402,
+                [],
+                [
+                    dict(
+                        time=102,
+                        event="accepted_output",
+                        steps=[
+                            work_step(
+                                client_request_id="req", scheduled_at=100.5, end=102
+                            )
+                        ],
+                    ),
+                    terminal_ack(402),
+                ],
+            ),
+        ]
+    )
+    assert all("dispatch_timeout" not in snapshot for snapshot in snapshots[:3])
+    alarm = dict(request_id="req", timeout_seconds=300, failed_at=101)
+    assert snapshots[3]["dispatch_timeout"] == alarm
+    assert snapshots[3]["observation_time"] == 100
+    assert snapshots[3]["accounting_state"]["worker_requests"] == 1
+    assert snapshots[3]["accounting_state"]["request_identities"] == 1
+    late = snapshots[4]
+    assert late["dispatch_timeout"] == alarm
+    assert late["accepted_steps"] == 1
+    assert late["output_tokens"] == 1
+    assert late["accounting_state"]["worker_requests"] == 0
+    assert late["accounting_state"]["request_identities"] == 0
+    assert late["roots"] == {}
+    # Accounting still publishes worker snapshots after the admission gate latches.
+    assert participants.publisher.publish.call_args_list[4].args[0] == late
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("ack_at", [200, 401, 500])
+def test_received_ack_cancels_timeout_before_ordered_accounting_catches_up(
+    timeout_accounting, ack_at
+):
+    execute, _ = timeout_accounting
+    snapshots = execute(
+        [
+            (100, 100, dispatch_events(), []),
+            (101, 100, [dict(time=101, event="request_failed", request_id="req")], []),
+            (ack_at, 100, [], [terminal_ack(ack_at)]),
+            (500, 100, [], []),
+            (501, 501, [], []),
+        ]
+    )
+    assert all("dispatch_timeout" not in snapshot for snapshot in snapshots)
+    assert snapshots[3]["accounting_state"]["worker_requests"] == 1
+    assert snapshots[4]["accounting_state"]["worker_requests"] == 0
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("resolution", [None, "rejected", "acknowledged"])
+def test_watchdog_observes_dispatch_and_resolution_before_ordered_cutoff(
+    timeout_accounting, resolution
+):
+    execute, _ = timeout_accounting
+    ingress = [dict(time=101, event="request_dispatched", request_id="req")]
+    if resolution == "rejected":
+        ingress.append(
+            dict(time=101.5, event="request_dispatch_rejected", request_id="req")
+        )
+    ingress.append(dict(time=102, event="request_failed", request_id="req"))
+    snapshots = execute(
+        [
+            (100, 100, [arrival_record()], []),
+            (102, 100, ingress, []),
+            (200, 100, [], [terminal_ack(150)] if resolution == "acknowledged" else []),
+            (401.999, 100, [], []),
+            (402, 100, [], []),
+        ]
+    )
+    assert all("dispatch_timeout" not in snapshot for snapshot in snapshots[:4])
+    assert snapshots[4]["observation_time"] == 100
+    assert snapshots[4]["accounting_state"]["worker_requests"] == 0
+    assert snapshots[4]["accounting_state"]["request_identities"] == 1
+    if resolution is None:
+        assert snapshots[4]["dispatch_timeout"] == dict(
+            request_id="req", timeout_seconds=300, failed_at=102
+        )
+    else:
+        assert "dispatch_timeout" not in snapshots[4]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "case", ["running", "completed", "rejected", "undispatched", "disabled"]
+)
+def test_only_failed_uncertain_dispatch_starts_a_deadline(timeout_accounting, case):
+    execute, _ = timeout_accounting
+    arrivals = dispatch_events() if case != "undispatched" else [arrival_record()]
+    outcomes = []
+    if case == "rejected":
+        outcomes.append(
+            dict(time=101, event="request_dispatch_rejected", request_id="req")
+        )
+    if case != "running":
+        outcomes.append(
+            dict(
+                time=101,
+                request_id="req",
+                event=(
+                    "request_completed" if case == "completed" else "request_failed"
+                ),
+            )
+        )
+    snapshots = execute(
+        [(100, 100, arrivals, []), (101, 101, outcomes, []), (1000, 101, [], [])],
+        timeout=None if case == "disabled" else 300,
+    )
+    assert all("dispatch_timeout" not in snapshot for snapshot in snapshots)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("identity_known", [False, True])
+@pytest.mark.parametrize("valid", [False, True])
+def test_dispatch_timeout_requires_matching_ack_identity(identity_known, valid):
+    index = scoring.LifecycleIndex()
+    monitor = scoring.DispatchAckMonitor(index, 300)
+    if identity_known:
+        index.arrive("r", "p", "root", "agent")
+        index.dispatch("r")
+    monitor.failed("r", 100)
+    monitor.acknowledged("r", ("root" if valid else "wrong-root", "agent"))
+    if not identity_known:
+        index.arrive("r", "p", "root", "agent")
+        index.dispatch("r")
+    monitor.arm("r")
+    monitor.failed("r", 200)  # A duplicate failure must not extend the deadline.
+    assert monitor.expire(399.999) is None
+    assert bool(monitor.expire(400)) is (not valid)
+    assert index.worker_requests == {"r"}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_acknowledged_deadline_storage_is_bounded():
+    index = scoring.LifecycleIndex()
+    monitor = scoring.DispatchAckMonitor(index, 300)
+    for number in range(300):
+        rid = str(number)
+        index.arrive(rid, rid, rid, rid)
+        index.dispatch(rid)
+        monitor.failed(rid, 100)
+        monitor.acknowledged(rid, (rid, rid))
+        monitor.forget(rid)
+    assert (
+        not monitor.failures and not monitor.acknowledgements and not monitor.deadlines
+    )
+    assert len(monitor.heap) <= 128
+    assert monitor.expire(1000) is None
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "bad", ""])
+def test_invalid_dispatch_ack_timeout_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("DURU_DISPATCH_ACK_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError, match="DURU_DISPATCH_ACK_TIMEOUT_SECONDS"):
+        scoring.RouterAccounting("unused")
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("value,expected", [(None, 300), ("0.5", 0.5)])
+def test_dispatch_ack_timeout_configuration_reaches_accounting(
+    monkeypatch, value, expected
+):
+    monkeypatch.delenv("DURU_DISPATCH_ACK_TIMEOUT_SECONDS", raising=False)
+    if value is not None:
+        monkeypatch.setenv("DURU_DISPATCH_ACK_TIMEOUT_SECONDS", value)
+    worker = Mock()
+    monkeypatch.setattr(scoring, "run", worker)
+    owner = scoring.RouterAccounting("unused")
+    owner._run()
+    assert worker.call_args.kwargs["dispatch_ack_timeout_seconds"] == expected
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_interleaved_roots_release_only_after_their_worker_acknowledgements(
+    cleanup_participants, monkeypatch
+):
+    participants = cleanup_participants
+    book = make_book(1)
+    monkeypatch.setattr(scoring, "LiveU", lambda *args: book)
+    ingress = []
+    for root in ("a", "b"):
+        for number in (1, 2):
+            rid = f"{root}{number}"
+            ingress.extend(
+                [
+                    arrival_record(100, rid, root, root=root, agent=root),
+                    dict(time=100, event="request_dispatched", request_id=rid),
+                ]
+            )
+    ingress.extend(
+        [
+            dict(time=100, event="request_dispatched", request_id="b1"),
+            dict(time=100.1, event="request_dispatch_rejected", request_id="b2"),
+            *[
+                dict(time=102, event="request_completed", request_id=rid)
+                for rid in ("a1", "a2", "b1")
+            ],
+            dict(time=102, event="request_failed", request_id="b2"),
+            dict(time=102.1, event="agent_group_end", root="a"),
+            dict(time=102.1, event="agent_group_end", root="b"),
+        ]
+    )
+
+    def accepted(rid, at):
+        return dict(
+            event="accepted_output",
+            steps=[work_step(client_request_id=rid, root=rid[0], agent=rid[0], end=at)],
+        )
+
+    def acknowledged(rid, at):
+        return dict(
+            time=at,
+            event="worker_request_finished",
+            requests=[dict(client_request_id=rid, root=rid[0], agent=rid[0])],
+        )
+
+    batches = [
+        (103, ingress, [accepted("a1", 101), accepted("b1", 101)]),
+        (
+            104.5,
+            [],
+            [
+                acknowledged("a1", 104),
+                acknowledged("a1", 104.1),
+                accepted("a2", 104.2),
+                accepted("b1", 104.3),
+            ],
+        ),
+        (105, [], [acknowledged("b1", 105)]),
+        (
+            107,
+            [],
+            [
+                acknowledged("b1", 105.1),
+                acknowledged("a2", 106),
+                acknowledged("a2", 106.1),
+            ],
+        ),
+        (107, [], []),
+    ]
+    for source, column in zip(participants.sources, (1, 2, None)):
+        source.sequence = 0
+        pending = iter(batches)
+
+        def read(source=source, column=column, pending=pending):
+            cutoff, arrivals, work = next(pending, batches[-1])
+            source.received_through = cutoff
+            source.closed = not arrivals and not work
+            source.sequence += 1
+            return arrivals if column == 1 else work if column == 2 else []
+
+        source.read = read
+    run(
+        participants.path, participants.stop, router_publish=participants.router_publish
+    )
+    snapshots = [
+        call.args[0]
+        for call in participants.router_publish.call_args_list
+        if call.args[0]
+    ]
+    first, partial, b_released, both_released = snapshots[:4]
+    assert first["accounting_state"]["worker_requests"] == 3
+    assert first["accounting_state"]["closing_roots"] == 2
+    assert set(first["roots"]) == {"a", "b"}
+    assert partial["accounting_state"]["worker_requests"] == 2
+    assert partial["accounting_state"]["request_identities"] == 4
+    assert partial["roots"]["a"]["E"] == partial["roots"]["b"]["E"] == 1
+    assert partial["roots"]["a"]["W"] == partial["roots"]["b"]["W"] == 4
+    assert set(b_released["roots"]) == {"a"}
+    assert b_released["accounting_state"]["request_identities"] == 2
+    assert b_released["accounting_state"]["program_identities"] == 1
+    assert b_released["accounting_state"]["worker_requests"] == 1
+    assert b_released["accounting_state"]["closing_roots"] == 1
+    assert both_released["accounting_state"] == dict(
+        request_identities=0,
+        program_identities=0,
+        agents=0,
+        roots=0,
+        pending_events=0,
+        worker_requests=0,
+        closing_roots=0,
+    )
+    assert both_released["accepted_steps"] == 4
+    assert both_released["output_tokens"] == 4
+    assert not book.root_agents
 
 
 @pytest.mark.pre_merge

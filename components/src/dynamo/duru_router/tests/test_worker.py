@@ -200,18 +200,52 @@ def test_queue_order_and_allocated_identity(worker):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail):
-    ready, missing, holder = [Request(name) for name in ("ready", "missing", "holder")]
-    scheduler.waiting.extend([ready, missing])
+@pytest.mark.parametrize("holder_row", [None, {"score": None}, {"score": 1}])
+def test_native_queues_and_missing_scores_restored(
+    scheduler, monkeypatch, fail, holder_row
+):
+    ready, missing, another, holder = [
+        Request(name) for name in ("ready", "missing", "another", "holder")
+    ]
+    scheduler.waiting.extend([ready, missing, another])
     scheduler.kv_holding_waiting.append(holder)
-    snapshot = {"requests": {"ready": {"score": 3}, "holder": {"score": 1}}}
+    snapshot = {"requests": {"ready": {"score": 3}}}
+    if holder_row is not None:
+        snapshot["requests"]["holder"] = holder_row
     monkeypatch.setattr(scheduler.u_reader, "refresh", lambda **kw: snapshot)
     scheduler.failure = RuntimeError("native failure") if fail else None
     with pytest.raises(RuntimeError, match="native failure") if fail else nullcontext():
         scheduler.schedule()
     assert scheduler.selected_queues == ([ready], [holder])
-    assert list(scheduler.waiting) == [missing, ready]
+    assert list(scheduler.waiting) == [missing, another, ready]
     assert list(scheduler.kv_holding_waiting) == [holder]
+    assert scheduler.u_reader.pinned is None
+
+
+def test_fresh_scores_rank_kv_holders_without_hiding_unscored_holders(
+    scheduler, monkeypatch
+):
+    missing, first, second, scored = [
+        Request(name) for name in ("missing", "first", "second", "scored")
+    ]
+    first.status.name = "PREEMPTED"
+    scheduler.waiting.append(missing)
+    scheduler.kv_holding_waiting.extend([first, second, scored])
+    now = 100.0
+    monkeypatch.setattr(scoring.time, "monotonic", lambda: now)
+    snapshot = dict(observation_time=now, requests={"scored": {"score": 2}})
+    scheduler.u_reader = scoring.Reader(snapshot_source=lambda: snapshot)
+
+    def native_schedule(self):
+        assert not self.waiting
+        assert len(self.kv_holding_waiting) == 3
+        assert self.u_reader.pinned is snapshot
+        return [self.kv_holding_waiting.pop_request() for _ in range(3)]
+
+    monkeypatch.setattr(NativeScheduler, "schedule", native_schedule)
+    assert scheduler.schedule() == [scored, first, second]
+    assert list(scheduler.waiting) == [missing]
+    assert not scheduler.kv_holding_waiting
     assert scheduler.u_reader.pinned is None
 
 

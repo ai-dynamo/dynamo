@@ -100,6 +100,10 @@ class DuruScheduler(AsyncScheduler):
         try:
             for queue in (self.waiting, self.kv_holding_waiting):
                 queue._peeked = None
+                # KV holders must remain visible to native recovery and draining;
+                # an available score ranks them but does not gate their progress.
+                if queue is self.kv_holding_waiting:
+                    continue
                 deferred = [
                     request
                     for request in queue
@@ -117,7 +121,7 @@ class DuruScheduler(AsyncScheduler):
         finally:
             for queue, deferred in held:
                 if deferred:
-                    queue.prepend_requests(deferred)
+                    queue.prepend_requests(reversed(deferred))
 
     def _update_after_schedule(self, scheduler_output):
         if scheduler_output.scheduled_spec_decode_tokens:

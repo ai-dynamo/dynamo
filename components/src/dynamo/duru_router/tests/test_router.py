@@ -641,3 +641,78 @@ async def test_highest_score_exception_precedes_lower_score_backfill(
 def test_alpha_requires_pending_request_and_valid_score(score, pending, allowed):
     candidate = Candidate("request", 200, score=score, pending_request=pending)
     assert DuruPolicy(alpha=0.7).may_force_admit(candidate) is allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["queued", "resumed"])
+async def test_cancelled_turn_restores_first_admission_eligibility(
+    case, monkeypatch, phase
+):
+    if phase == "resumed":
+        program = case.put("request", 100, 1)
+        program._u_new_admission = True
+    else:
+        case.score("request", 1)
+        program = case.router._table.begin_request("request", 100)
+    original_flag = program._u_new_admission
+    original_lifecycle = program.lifecycle
+    original_wait = case.router._wait_for_resume
+
+    async def cancel_admission(*args):
+        if phase == "resumed":
+            await original_wait(*args)
+            assert not program._u_new_admission
+        else:
+            assert program._u_new_admission
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(case.router, "_wait_for_resume", cancel_admission)
+    task = await case.start("request", 100)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert case.router._table.programs["request"] is program
+    assert program._u_new_admission is original_flag
+    assert program.lifecycle is original_lifecycle
+    assert program.assigned_replica is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("periodic", [False, True])
+@pytest.mark.parametrize("live", [{1}, set()])
+async def test_ranked_resume_ignores_stale_capacity_cards(case, periodic, live):
+    case.capacity.workers = {(1, 0): 1000, (2, 0): 4000}
+    case.capacity.live_workers = live
+    if periodic:
+        program = case.put("request", 900, 1)
+        program._u_new_admission = True
+        case.save()
+        await case.router._scheduler_tick()
+    else:
+        case.score("request", 1)
+        task = await case.start("request", 900)
+        program = case.router._table.programs["request"]
+        if live:
+            await asyncio.wait_for(task, 1)
+        else:
+            assert not task.done()
+    assert program.assigned_replica == ((1, 0) if live else None)
+    assert program.lifecycle is (
+        ProgramLifecycle.ACTIVE if live else ProgramLifecycle.PAUSED
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [{1}, set()])
+async def test_ranked_reassignment_requires_live_worker(case, live):
+    case.capacity.workers = {(1, 0): 1000, (2, 0): 4000}
+    case.capacity.live_workers = live
+    program = case.router._table.begin_request("request", 100)
+    program.assigned_replica = (2, 0)
+    case.score("request", 1)
+    task = await case.start("request", 100)
+    if live:
+        assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
+    else:
+        assert not task.done()
+        assert program.assigned_replica is None
+        assert program.lifecycle is ProgramLifecycle.PAUSED

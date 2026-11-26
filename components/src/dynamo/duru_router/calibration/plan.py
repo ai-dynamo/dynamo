@@ -49,6 +49,12 @@ class Plan:
 
 
 def atomic_json(path, value):
+    """Publish complete JSON by atomically replacing path with a private sibling file.
+
+    Concurrent writers cannot share or truncate each other's temporary file;
+    each successful replacement publishes one complete value. This does not
+    promise fsync durability across a machine failure.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, indent=2, allow_nan=False) + "\n"
@@ -65,6 +71,10 @@ def atomic_json(path, value):
 
 
 def geometric_points(maximum, count):
+    """Include 1 and maximum with geometrically spaced integer coordinates.
+
+    Rounding and deduplication can return fewer than count distinct points.
+    """
     if maximum < 1 or count < 2:
         raise ValueError("Need a positive range and at least two sparse points")
     return sorted(

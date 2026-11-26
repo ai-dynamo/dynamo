@@ -27,6 +27,12 @@ def parse_args(argv: Optional[list[str]] = None) -> DuruRouterConfig:
     parser = argparse.ArgumentParser(
         description="Dynamo Duru Router: program-level scheduler with "
         "tool-boundary pause/resume on top of native KV-aware routing",
+        epilog=(
+            "DURU_DISPATCH_ACK_TIMEOUT_SECONDS (default: 300) bounds the wait for "
+            "a worker acknowledgement after uncertain dispatch failure or cancellation. "
+            "Expiry stops new admissions until recovery; it does not release "
+            "unacknowledged work. Accounting continues to drain late worker events."
+        ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
     DuruArgGroup().add_arguments(parser)

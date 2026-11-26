@@ -73,6 +73,7 @@ class RequestSnapshot:
     acting_since: float
     was_paused: bool
     admission_epoch: int
+    policy_state: object = None
 
 
 @dataclass
@@ -99,7 +100,9 @@ class ProgramTable:
         program.acting_since = 0.0
         return program
 
-    def snapshot_request(self, program_id: str) -> Optional[RequestSnapshot]:
+    def snapshot_request(
+        self, program_id: str, *, policy_state: object = None
+    ) -> Optional[RequestSnapshot]:
         """Capture state before admission; None means admission creates it."""
         program = self.programs.get(program_id)
         if program is None:
@@ -117,6 +120,7 @@ class ProgramTable:
             acting_since=program.acting_since,
             was_paused=program_id in self.paused,
             admission_epoch=program.admission_epoch,
+            policy_state=policy_state,
         )
 
     def rollback_request(

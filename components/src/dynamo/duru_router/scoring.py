@@ -15,7 +15,7 @@ import os
 import threading
 import time
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from functools import lru_cache
@@ -43,6 +43,19 @@ class AccountingError(RuntimeError):
     """The router-owned accounting service has failed or stopped unexpectedly."""
 
 
+class DispatchAckTimeout(AccountingError):
+    """New admissions stopped while uncertain worker delivery remains accounted."""
+
+    def __init__(self, request_id, timeout_seconds, failed_at):
+        self.request_id = request_id
+        self.timeout_seconds = timeout_seconds
+        self.failed_at = failed_at
+        super().__init__(
+            f"Worker acknowledgement for request {request_id} timed out after "
+            f"{timeout_seconds:g}s; delivery remains uncertain and new admissions are stopped"
+        )
+
+
 class LiveU:
     def __init__(self, capacity, calibration):
         if type(capacity) is not int or capacity <= 0:
@@ -61,6 +74,7 @@ class LiveU:
         self.invalid = Counter()
         self.last = None
         self.agent_root = {}
+        self.root_agents = defaultdict(set)
         self.accepted_steps = 0
         self.output_tokens = 0
         # Counts predictor evaluations, including lookahead and cache re-evaluations;
@@ -91,6 +105,7 @@ class LiveU:
             raise ValueError(f"Agent root changed: {agent}")
         self.advance(now)
         self.agent_root[agent] = root
+        self.root_agents[root].add(agent)
         self.active[request_id] = dict(
             root=root, agent=agent, prompt_tokens=prompt_tokens, arrival=now
         )
@@ -115,8 +130,7 @@ class LiveU:
         self.advance(now)
         if self.root_active[root]:
             raise ValueError("Root completed with outstanding requests: " + root)
-        agents = [agent for agent, owner in self.agent_root.items() if owner == root]
-        for agent in agents:
+        for agent in self.root_agents.pop(root, ()):
             del self.agent_root[agent]
             self.agent_active_requests.pop(agent, None)
         for table in (self.entitlement, self.work, self.invalid, self.root_active):
@@ -182,6 +196,237 @@ class LiveU:
             kind="zero_work_root_next_five",
             lookahead_s=predicted,
         )
+
+
+class LifecycleIndex:
+    """Retain identities until their root has no outstanding worker acknowledgements.
+
+    Root membership indexes bound cleanup to that root's history. Active request
+    counts separately permit program termination before the root is released.
+    """
+
+    def __init__(self):
+        self.request_identities = {}
+        self.request_programs = {}
+        self.program_identities = {}
+        self.worker_requests = set()
+        self.root_requests = defaultdict(set)
+        self.root_programs = defaultdict(set)
+        self.root_workers = Counter()
+        self.program_active = Counter()
+
+    def arrive(self, request_id, program_id, root, agent):
+        """Register one arrival without allowing retained identities to change."""
+        if request_id in self.request_identities:
+            raise ValueError("Request ID reused: " + request_id)
+        identity = (root, agent)
+        if self.program_identities.get(program_id, identity) != identity:
+            raise ValueError("Router program identity changed: " + program_id)
+        self.request_identities[request_id] = identity
+        self.request_programs[request_id] = program_id
+        self.program_identities[program_id] = identity
+        self.root_requests[root].add(request_id)
+        self.root_programs[root].add(program_id)
+        self.program_active[program_id] += 1
+
+    def dispatch(self, request_id):
+        """Track a worker acknowledgement once even if dispatch is repeated."""
+        if request_id not in self.request_identities:
+            raise ValueError("Request dispatched without an arrival event")
+        if request_id not in self.worker_requests:
+            self.worker_requests.add(request_id)
+            self.root_workers[self.request_identities[request_id][0]] += 1
+
+    def undispatch(self, request_id):
+        """Release a confirmed rejection or a validated worker acknowledgement."""
+        self.worker_requests.remove(request_id)
+        root = self.request_identities[request_id][0]
+        self.root_workers[root] -= 1
+        if not self.root_workers[root]:
+            del self.root_workers[root]
+
+    def finish(self, request_id):
+        """End active membership while retaining identity for late worker output."""
+        program_id = self.request_programs.pop(request_id, None)
+        if program_id is not None:
+            self.program_active[program_id] -= 1
+            if not self.program_active[program_id]:
+                del self.program_active[program_id]
+
+    def end_program(self, program_id):
+        """Release an idle program without scanning other programs' requests."""
+        if self.program_active[program_id]:
+            raise ValueError(
+                "Program completed with outstanding requests: " + program_id
+            )
+        identity = self.program_identities.pop(program_id, None)
+        if identity is not None:
+            programs = self.root_programs[identity[0]]
+            programs.remove(program_id)
+            if not programs:
+                del self.root_programs[identity[0]]
+
+    def release_root(self, root):
+        """Forget only this root after its active work and worker barrier clear."""
+        if self.root_workers[root]:
+            raise ValueError("Root completed with outstanding worker requests: " + root)
+        for request_id in self.root_requests.pop(root, ()):
+            self.request_identities.pop(request_id)
+            self.request_programs.pop(request_id, None)
+        for program_id in self.root_programs.pop(root, ()):
+            self.program_identities.pop(program_id)
+            self.program_active.pop(program_id, None)
+
+
+class DispatchAckMonitor:
+    """Latch admission failure without dropping uncertain work or stopping accounting.
+
+    Each pass receives available acknowledgements before checking deadlines;
+    expiry is bounded by accounting polling, not a real-time scheduling guarantee.
+    """
+
+    def __init__(self, identities, timeout_seconds):
+        if timeout_seconds is not None and (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "Dispatch acknowledgement timeout must be finite and positive"
+            )
+        self.identities = identities
+        self.timeout_seconds = timeout_seconds
+        self.failures = {}
+        self.acknowledgements = {}
+        self.observed_arrivals = {}
+        self.observed_dispatches = set()
+        self.observed_rejections = set()
+        self.deadlines = {}
+        self.heap = []
+        self.latched = None
+
+    def arrived(self, request_id, identity):
+        """Retain identity for watchdog checks while ordered arrival is pending."""
+        if self.timeout_seconds is None or self.latched is not None:
+            return
+        if request_id not in self.identities.request_identities:
+            self.observed_arrivals.setdefault(request_id, identity)
+
+    def dispatched(self, request_id):
+        """Observe possible delivery without advancing accounting's worker barrier."""
+        if self.timeout_seconds is None or self.latched is not None:
+            return
+        self.observed_dispatches.add(request_id)
+        self.arm(request_id)
+
+    def rejected(self, request_id):
+        """Confirmed synchronous rejection suppresses a timer before cutoff catches up."""
+        if self.timeout_seconds is None or self.latched is not None:
+            return
+        self.forget(request_id)
+        self.observed_rejections.add(request_id)
+
+    def ordered_arrival(self, request_id):
+        self.observed_arrivals.pop(request_id, None)
+
+    def ordered_dispatch(self, request_id):
+        self.observed_dispatches.discard(request_id)
+        self.arm(request_id)
+
+    def _identity(self, request_id):
+        return self.identities.request_identities.get(
+            request_id, self.observed_arrivals.get(request_id)
+        )
+
+    def failed(self, request_id, at):
+        """Observe caller failure even when accounting's common cutoff is frozen."""
+        if (
+            self.timeout_seconds is None
+            or self.latched is not None
+            or request_id in self.observed_rejections
+        ):
+            return
+        self.failures.setdefault(request_id, at)
+        self.arm(request_id)
+
+    def acknowledged(self, request_id, identity):
+        """Cancel a matching received acknowledgement without advancing worker state."""
+        if self.timeout_seconds is None or self.latched is not None:
+            return
+        known = self._identity(request_id)
+        if known is not None:
+            if identity != known:
+                return
+            self.acknowledgements[request_id] = [identity]
+            self.deadlines.pop(request_id, None)
+        else:
+            self.acknowledgements.setdefault(request_id, []).append(identity)
+        self._compact()
+
+    def arm(self, request_id):
+        """Start a timer only for a failed request still awaiting worker acknowledgement."""
+        if (
+            request_id not in self.failures
+            or (
+                request_id not in self.identities.worker_requests
+                and request_id not in self.observed_dispatches
+            )
+            or request_id in self.observed_rejections
+            or self.latched is not None
+        ):
+            return
+        identity = self._identity(request_id)
+        if identity is None:
+            return
+        if identity in self.acknowledgements.get(request_id, ()):
+            self.deadlines.pop(request_id, None)
+            return
+        if request_id not in self.deadlines:
+            failed_at = self.failures[request_id]
+            self.deadlines[request_id] = failed_at
+            heapq.heappush(
+                self.heap, (failed_at + self.timeout_seconds, request_id, failed_at)
+            )
+
+    def forget(self, request_id):
+        """Drop timer bookkeeping after confirmed completion or non-delivery."""
+        self.failures.pop(request_id, None)
+        self.acknowledgements.pop(request_id, None)
+        self.observed_arrivals.pop(request_id, None)
+        self.observed_dispatches.discard(request_id)
+        self.observed_rejections.discard(request_id)
+        self.deadlines.pop(request_id, None)
+        self._compact()
+
+    def _compact(self):
+        if len(self.heap) > 2 * len(self.deadlines) + 128:
+            self.heap = [
+                (at + self.timeout_seconds, request_id, at)
+                for request_id, at in self.deadlines.items()
+            ]
+            heapq.heapify(self.heap)
+
+    def expire(self, now):
+        """Latch the first expired deadline; later acknowledgement never reopens admission."""
+        while self.latched is None and self.heap and self.heap[0][0] <= now:
+            _, request_id, failed_at = heapq.heappop(self.heap)
+            if self.deadlines.get(request_id) != failed_at:
+                continue
+            self.latched = dict(
+                request_id=request_id,
+                timeout_seconds=self.timeout_seconds,
+                failed_at=failed_at,
+            )
+            # Admission remains latched; further timers cannot change that decision.
+            self.failures.clear()
+            self.acknowledgements.clear()
+            self.observed_arrivals.clear()
+            self.observed_dispatches.clear()
+            self.observed_rejections.clear()
+            self.deadlines.clear()
+            self.heap.clear()
+        return self.latched
 
 
 def score_channel():
@@ -342,13 +587,21 @@ class Ingress:
             self.journal.close()
 
 
-def run(config, stop=None, *, router_publish=None, ingress_source=None):
+def run(
+    config,
+    stop=None,
+    *,
+    router_publish=None,
+    ingress_source=None,
+    dispatch_ack_timeout_seconds=None,
+):
     if transport() != "memory":
         raise ValueError(
             "Live U accounting requires IPC (DURU_ACCOUNTING_TRANSPORT=memory)"
         )
     cfg = json.loads(Path(config).read_text())
     stop = stop if stop is not None else threading.Event()
+    drain_wait = threading.Event()
     score_path = Path(cfg["scores"])
     score_path.parent.mkdir(parents=True, exist_ok=True)
     if not cfg["ledgers"]:
@@ -366,10 +619,12 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
     last_snapshot = None
     performance = PerformanceLogger()
     # Completed requests can still receive accepted-work callbacks.
-    request_identities = {}
-    request_programs = {}
-    program_identities = {}
-    worker_requests = set()
+    identities = LifecycleIndex()
+    dispatch_acks = DispatchAckMonitor(identities, dispatch_ack_timeout_seconds)
+    request_identities = identities.request_identities
+    request_programs = identities.request_programs
+    program_identities = identities.program_identities
+    worker_requests = identities.worker_requests
     closing_roots = set()
     stopped_cleanly = False
     max_identities = 100000
@@ -378,16 +633,12 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
     cleanup = ExitStack()
 
     def release_root(root, at):
-        if any(request_identities[rid][0] == root for rid in worker_requests):
+        if identities.root_workers[root]:
             return
         book.finish_root(root, at)
-        for rid, identity in list(request_identities.items()):
-            if identity[0] == root:
-                request_identities.pop(rid)
-                request_programs.pop(rid, None)
-        for pid, identity in list(program_identities.items()):
-            if identity[0] == root:
-                program_identities.pop(pid)
+        for request_id in identities.root_requests.get(root, ()):
+            dispatch_acks.forget(request_id)
+        identities.release_root(root)
         closing_roots.discard(root)
 
     try:
@@ -423,6 +674,16 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                 for row in source.read():
                     made_progress = True
                     if index == 0:
+                        if row["event"] == "request_arrived":
+                            dispatch_acks.arrived(
+                                row["request_id"], (row["root"], row["agent"])
+                            )
+                        elif row["event"] == "request_dispatched":
+                            dispatch_acks.dispatched(row["request_id"])
+                        elif row["event"] == "request_dispatch_rejected":
+                            dispatch_acks.rejected(row["request_id"])
+                        if row["event"] in ("request_failed", "request_cancelled"):
+                            dispatch_acks.failed(row["request_id"], row["time"])
                         if row["event"] in (
                             "request_arrived",
                             "request_dispatched",
@@ -439,6 +700,10 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                                 raise RuntimeError("Duru pending-event limit exceeded")
                     elif row["event"] == "worker_request_finished":
                         for identity in row["requests"]:
+                            dispatch_acks.acknowledged(
+                                identity["client_request_id"],
+                                (identity.get("root"), identity.get("agent")),
+                            )
                             serial += 1
                             heapq.heappush(
                                 heap,
@@ -484,17 +749,14 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     if kind == "ingress":
                         if event_data["event"] == "request_arrived":
                             request_id = event_data["request_id"]
-                            if request_id in request_identities:
-                                raise ValueError("Request ID reused: " + request_id)
                             program_id = _program_id(event_data)
-                            identity = (event_data["root"], event_data["agent"])
-                            if program_identities.get(program_id, identity) != identity:
-                                raise ValueError(
-                                    "Router program identity changed: " + program_id
-                                )
-                            program_identities[program_id] = identity
-                            request_programs[event_data["request_id"]] = program_id
-                            request_identities[request_id] = identity
+                            identities.arrive(
+                                request_id,
+                                program_id,
+                                event_data["root"],
+                                event_data["agent"],
+                            )
+                            dispatch_acks.ordered_arrival(request_id)
                             book.submit(
                                 event_data["request_id"],
                                 event_data["root"],
@@ -503,15 +765,13 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                                 at,
                             )
                         elif event_data["event"] == "request_dispatched":
-                            if event_data["request_id"] not in request_identities:
-                                raise ValueError(
-                                    "Request dispatched without an arrival event"
-                                )
-                            worker_requests.add(event_data["request_id"])
+                            identities.dispatch(event_data["request_id"])
+                            dispatch_acks.ordered_dispatch(event_data["request_id"])
                         elif event_data["event"] == "request_dispatch_rejected":
                             # The router confirmed rejection before async dispatch.
                             # Request failure still closes the active accounting entry.
-                            worker_requests.remove(event_data["request_id"])
+                            identities.undispatch(event_data["request_id"])
+                            dispatch_acks.forget(event_data["request_id"])
                         elif event_data["event"] == "agent_group_end":
                             root = event_data["root"]
                             if book.root_active[root]:
@@ -521,16 +781,12 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                             closing_roots.add(root)
                             release_root(root, at)
                         elif event_data["event"] == "agent_end":
-                            pid = _program_id(event_data)
-                            if pid in request_programs.values():
-                                raise ValueError(
-                                    "Program completed with outstanding requests: "
-                                    + pid
-                                )
-                            program_identities.pop(pid, None)
+                            identities.end_program(_program_id(event_data))
                         else:
                             book.finish(event_data["request_id"], at)
-                            request_programs.pop(event_data["request_id"], None)
+                            identities.finish(event_data["request_id"])
+                            if event_data["request_id"] not in worker_requests:
+                                dispatch_acks.forget(event_data["request_id"])
                     else:
                         request_id = event_data["client_request_id"]
                         # Terminal acknowledgements are idempotent. Old harnesses
@@ -539,6 +795,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                             kind == "worker_request_finished"
                             and request_id not in worker_requests
                         ):
+                            dispatch_acks.forget(request_id)
                             continue
                         if request_id not in request_identities:
                             raise ValueError("Unjoined work: " + request_id)
@@ -550,11 +807,13 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                                 "Worker request identity mismatch: " + request_id
                             )
                         if kind == "worker_request_finished":
-                            worker_requests.discard(request_id)
+                            identities.undispatch(request_id)
+                            dispatch_acks.forget(request_id)
                             if event_data["root"] in closing_roots:
                                 release_root(event_data["root"], at)
                         else:
                             book.accepted(event_data)
+                dispatch_timeout = dispatch_acks.expire(time.monotonic())
                 book.advance(accounting_cutoff)
                 requests = {
                     rid: dict(book.score(rid), program_id=request_programs[rid], **r)
@@ -605,6 +864,8 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     accepted_steps=book.accepted_steps,
                     output_tokens=book.output_tokens,
                 )
+                if dispatch_timeout is not None:
+                    snapshot["dispatch_timeout"] = dispatch_timeout
                 if audit is not None:
                     snapshot.update(
                         source_received_through=[x.received_through for x in sources],
@@ -633,10 +894,19 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     )
                     last_save = time.monotonic()
             if stopping:
-                if made_progress and time.monotonic() < shutdown_deadline:
-                    continue
-                stopped_cleanly = True
-                break
+                if all(source.closed for source in sources) and not heap:
+                    if made_progress:
+                        # Check for already-buffered records after the last footer.
+                        continue
+                    stopped_cleanly = True
+                    break
+                remaining = shutdown_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if not made_progress:
+                    # stop is already set, so waiting on it would busy-spin.
+                    drain_wait.wait(min(0.05, remaining))
+                continue
             stop.wait(0.05)
     finally:
         try:
@@ -671,11 +941,30 @@ class RouterAccounting:
 
     Published snapshots are replaced, never mutated. Router decisions read the
     latest object directly; engine processes receive compact scores over IPC.
-    Errors invalidate the local snapshot and are surfaced by check()/close().
+    Fatal accounting errors invalidate the local snapshot and surface through
+    check()/close(). Live serving uses DURU_DISPATCH_ACK_TIMEOUT_SECONDS (default
+    300) to stop new admissions when failed dispatches remain unacknowledged,
+    independently of the common cutoff. This latched admission-only condition
+    keeps accounting and worker score publication running for late completion.
     """
 
     def __init__(self, config, *, ingress=None):
         self.config = config
+        try:
+            self.dispatch_ack_timeout_seconds = float(
+                os.environ.get("DURU_DISPATCH_ACK_TIMEOUT_SECONDS", "300")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "DURU_DISPATCH_ACK_TIMEOUT_SECONDS must be finite and positive"
+            ) from exc
+        if (
+            not math.isfinite(self.dispatch_ack_timeout_seconds)
+            or self.dispatch_ack_timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "DURU_DISPATCH_ACK_TIMEOUT_SECONDS must be finite and positive"
+            )
         self._ingress_source = None if ingress is None else ingress.journal
         if self._ingress_source is not None and not isinstance(
             self._ingress_source, InProcessChannel
@@ -703,6 +992,7 @@ class RouterAccounting:
                 self._stop,
                 router_publish=self._router_publish,
                 ingress_source=self._ingress_source,
+                dispatch_ack_timeout_seconds=self.dispatch_ack_timeout_seconds,
             )
         except Exception as exc:
             # Hand ordinary task failures to the owner without losing their
@@ -717,7 +1007,7 @@ class RouterAccounting:
         self._thread.start()
         return self
 
-    def check(self):
+    def check(self, *, admissions=True):
         if self._result.done():
             try:
                 self._result.result()
@@ -729,6 +1019,9 @@ class RouterAccounting:
             and not self._stop.is_set()
         ):
             raise AccountingError("Router U accounting stopped unexpectedly")
+        timeout = self._snapshot.get("dispatch_timeout")
+        if admissions and timeout is not None:
+            raise DispatchAckTimeout(**timeout)
 
     def close(self):
         self._stop.set()
@@ -737,4 +1030,4 @@ class RouterAccounting:
             if self._thread.is_alive():
                 raise TimeoutError("Router U accounting did not stop")
         self._snapshot = {}
-        self.check()
+        self.check(admissions=False)

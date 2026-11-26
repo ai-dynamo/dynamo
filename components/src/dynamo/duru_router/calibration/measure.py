@@ -53,6 +53,11 @@ def decode_window(events, prompt_length, warmup_tokens, expected_tokens):
 
 
 def fit(points, plan: Plan, contract):
+    """Build and structurally validate an artifact from all planned measurements.
+
+    Planned decode K values establish coverage; measured_K values provide the
+    coordinates stored in the decode grid. Prefill uses planned P/D coordinates.
+    """
     prefill = {
         (row["P"], row["D"]): row["wall_ms"]
         for row in points
@@ -285,6 +290,12 @@ def measure(
 
 
 def load(path, expected_contract):
+    """Load an artifact only when its runtime contract matches exactly.
+
+    Validate the schema, timing metric, prefill budget, and table structure,
+    including ordered coordinates and finite positive costs. Loading never
+    starts calibration or remeasures invalid data.
+    """
     artifact = json.loads(Path(path).read_text())
     if artifact.get("schema_version") != 1 or artifact.get("timing_metric") != METRIC:
         raise ValueError("Unsupported calibration artifact or timing definition")

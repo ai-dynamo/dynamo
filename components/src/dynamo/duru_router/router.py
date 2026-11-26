@@ -141,6 +141,12 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
     def admission_queued(self, program: Program) -> None:
         program._u_new_admission = True
 
+    def snapshot_admission_state(self, program: Program) -> bool:
+        return program._u_new_admission
+
+    def restore_admission_state(self, program: Program, state: object) -> None:
+        program._u_new_admission = bool(state)
+
     def check_admission_owner(self, program, admitted, admitted_epoch) -> None:
         if (
             program is not admitted

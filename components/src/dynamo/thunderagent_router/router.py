@@ -150,7 +150,15 @@ class ThunderAgentScheduler:
         while True:
             async with self._lock:
                 if self._admission_ready(program_id):
-                    snapshot = self._table.snapshot_request(program_id)
+                    existing = self._table.programs.get(program_id)
+                    snapshot = self._table.snapshot_request(
+                        program_id,
+                        policy_state=(
+                            self._policy.snapshot_admission_state(existing)
+                            if existing is not None
+                            else None
+                        ),
+                    )
                     wait_event, was_paused = self._admit_locked(
                         program_id, estimated_prompt_tokens
                     )
@@ -268,6 +276,8 @@ class ThunderAgentScheduler:
                 # A later admission owns the shared Program state.
                 return
             self._table.rollback_request(program_id, snapshot)
+            if snapshot is not None:
+                self._policy.restore_admission_state(admitted, snapshot.policy_state)
             self._stat_admissions_cancelled += 1
             logger.info(
                 "thunderagent.program admission_cancelled program=%s "
@@ -306,7 +316,9 @@ class ThunderAgentScheduler:
         live_worker_ids: set[int] = set()
         if program.assigned_replica is not None:
             live_worker_ids = self._capacity.live_worker_ids()
-            if not live_worker_ids or program.assigned_replica[0] in live_worker_ids:
+            if (
+                not live_worker_ids and not self._policy.rank_initial_admission()
+            ) or program.assigned_replica[0] in live_worker_ids:
                 return None, False
             stale_worker_id = program.assigned_replica[0]
             program.assigned_replica = None
@@ -672,6 +684,11 @@ class ThunderAgentScheduler:
         """Apply policy choices and maintain occupancy. Caller holds ``self._lock``."""
         if not self._table.paused:
             return
+        if self._policy.rank_initial_admission():
+            # MDC cards can outlive endpoint registration. Ranked admissions
+            # need an eligible live replica on both immediate and periodic passes.
+            live_workers = self._capacity.live_worker_ids()
+            usage = {key: row for key, row in usage.items() if key[0] in live_workers}
 
         paused_programs = [
             self._table.programs[pid]

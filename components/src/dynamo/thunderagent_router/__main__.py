@@ -509,54 +509,56 @@ async def serve_router(
         config.namespace,
     )
 
-    await handler.initialize()
+    try:
+        await handler.initialize()
 
-    generate_endpoint = runtime.endpoint(
-        f"{config.namespace}.thunderagent_router.generate"
-    )
-
-    if config.model_name:
-        model_path = config.model_path or config.model_name
-        # Thread the tool_call/reasoning parsers into register_model so the
-        # frontend's response path can translate model-native tool calls (e.g.
-        # MiniMax's <minimax:tool_call> XML, Qwen's hermes) into OpenAI
-        # tool_calls before pi / openhands / other agents see them. These use
-        # the same --dyn-tool-call-parser / --dyn-reasoning-parser flag names
-        # (and DYN_TOOL_CALL_PARSER / DYN_REASONING_PARSER env vars) as the
-        # standalone dynamo.vllm worker.
-        runtime_cfg = ModelRuntimeConfig()
-        if config.tool_call_parser:
-            runtime_cfg.tool_call_parser = config.tool_call_parser
-        if config.reasoning_parser:
-            runtime_cfg.reasoning_parser = config.reasoning_parser
-        if config.publish_sglang_generate:
-            _publish_sglang_generate_capability(runtime_cfg)
-            logger.info("Published SGLang engine-native generate capability")
-        await register_model(
-            model_input=ModelInput.Tokens,
-            model_type=ModelType.Chat | ModelType.Completions,
-            endpoint=generate_endpoint,
-            model_path=model_path,
-            model_name=config.model_name,
-            runtime_config=runtime_cfg,
-            # The router is the serving entry point (front door) exposing the
-            # OpenAI surface; it has no mandatory peer-role dependency.
-            worker_type=WorkerType.Aggregated,
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.thunderagent_router.generate"
         )
 
-    status_endpoint = runtime.endpoint(f"{config.namespace}.thunderagent_router.status")
-    metrics_endpoint = runtime.endpoint(
-        f"{config.namespace}.thunderagent_router.metrics"
-    )
+        if config.model_name:
+            model_path = config.model_path or config.model_name
+            # Thread the tool_call/reasoning parsers into register_model so the
+            # frontend's response path can translate model-native tool calls (e.g.
+            # MiniMax's <minimax:tool_call> XML, Qwen's hermes) into OpenAI
+            # tool_calls before pi / openhands / other agents see them. These use
+            # the same --dyn-tool-call-parser / --dyn-reasoning-parser flag names
+            # (and DYN_TOOL_CALL_PARSER / DYN_REASONING_PARSER env vars) as the
+            # standalone dynamo.vllm worker.
+            runtime_cfg = ModelRuntimeConfig()
+            if config.tool_call_parser:
+                runtime_cfg.tool_call_parser = config.tool_call_parser
+            if config.reasoning_parser:
+                runtime_cfg.reasoning_parser = config.reasoning_parser
+            if config.publish_sglang_generate:
+                _publish_sglang_generate_capability(runtime_cfg)
+                logger.info("Published SGLang engine-native generate capability")
+            await register_model(
+                model_input=ModelInput.Tokens,
+                model_type=ModelType.Chat | ModelType.Completions,
+                endpoint=generate_endpoint,
+                model_path=model_path,
+                model_name=config.model_name,
+                runtime_config=runtime_cfg,
+                # The router is the serving entry point (front door) exposing the
+                # OpenAI surface; it has no mandatory peer-role dependency.
+                worker_type=WorkerType.Aggregated,
+            )
 
-    logger.info(
-        "ThunderAgent Router serving endpoints: generate=%s status=%s metrics=%s",
-        f"{config.namespace}.thunderagent_router.generate",
-        f"{config.namespace}.thunderagent_router.status",
-        f"{config.namespace}.thunderagent_router.metrics",
-    )
+        status_endpoint = runtime.endpoint(
+            f"{config.namespace}.thunderagent_router.status"
+        )
+        metrics_endpoint = runtime.endpoint(
+            f"{config.namespace}.thunderagent_router.metrics"
+        )
 
-    try:
+        logger.info(
+            "ThunderAgent Router serving endpoints: generate=%s status=%s metrics=%s",
+            f"{config.namespace}.thunderagent_router.generate",
+            f"{config.namespace}.thunderagent_router.status",
+            f"{config.namespace}.thunderagent_router.metrics",
+        )
+
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
