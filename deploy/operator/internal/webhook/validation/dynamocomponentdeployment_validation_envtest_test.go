@@ -118,6 +118,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionVLLMBackend)
 			dcd.Spec.Experimental.Checkpoint = nil
 		})},
+		{name: "vLLM cold-start failover inferred from the command is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionVLLMBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		})},
 		{name: "SGLang cold-start failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = admissionSGLangBackend
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)

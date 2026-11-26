@@ -429,6 +429,7 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 	}
 
 	// Cold-start intra-pod failover renders only for vLLM; resolve the engine as rendering does.
+	// Inter-pod GMS is skipped: validateFailoverSpec requires failover.mode to match gpuMemoryService.mode.
 	if dynamo.IsIntraPodFailoverEnabled(spec) && dynamo.GetCheckpoint(spec) == nil && !spec.IsInterPodGMSEnabled() {
 		failoverPath := experimentalPath.Child("failover")
 		backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(spec, explicitBackendFramework)
@@ -440,7 +441,7 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 		} else if backendFramework != dynamo.BackendFrameworkVLLM {
 			allErrs = append(allErrs, field.Forbidden(
 				failoverPath,
-				fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", backendFramework),
+				fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", detectedBackendFramework(backendFramework)),
 			))
 		}
 	}

@@ -450,14 +450,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if err != nil {
 				allErrs = append(allErrs, field.Invalid(modePath, gms.Mode, "the inter-pod GMS layout requires a consistent vLLM backend"))
 			} else if backendFramework != dynamo.BackendFrameworkVLLM {
-				detected := string(backendFramework)
-				if backendFramework == dynamo.BackendFrameworkNoop {
-					detected = unsetValue
-				}
 				allErrs = append(allErrs, field.Invalid(
 					modePath,
 					gms.Mode,
-					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detected),
+					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detectedBackendFramework(backendFramework)),
 				))
 			}
 		}
