@@ -48,7 +48,9 @@ impl Engine {
 }
 
 /// A frontend that serves `engines` directly, with each engine's role taken
-/// from the engine itself.
+/// from the engine itself. It starts once every engine is registered: the
+/// host registers each engine on its own, and the frontend is ready at its
+/// first model.
 async fn direct_frontend(env: &Environment, engines: &[&Engine], mode: RouterMode) -> Frontend {
     let options = DirectEngineOptions {
         namespace: env.namespace.clone(),
@@ -66,6 +68,12 @@ async fn direct_frontend(env: &Environment, engines: &[&Engine], mode: RouterMod
     )
     .await
     .unwrap();
+    bounded("direct engine registrations", async {
+        while env.worker_cards().await.len() < engines.len() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
     Frontend::start_with_router_mode(env, mode).await
 }
 
