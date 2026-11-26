@@ -30,19 +30,11 @@ def parse_frontend_config(argv: list[str]) -> FrontendConfig:
     return config
 
 
-def test_direct_mode_collects_engine_urls() -> None:
+def test_direct_mode_uses_in_process_discovery() -> None:
     config = parse_frontend_config(
-        [
-            "--direct",
-            "--engine-url",
-            "http://prefill-0:30001",
-            "--engine-url",
-            "http://decode-0:30001",
-        ]
+        ["--direct", "--engine-url", "http://a:30001", "--discovery-backend", "etcd"]
     )
-    assert config.direct
-    assert config.direct_backend == "sglang"
-    assert config.engine_urls == ["http://prefill-0:30001", "http://decode-0:30001"]
+    assert config.discovery_backend == "mem"
 
 
 def test_engine_urls_on_the_command_line_replace_the_environment(

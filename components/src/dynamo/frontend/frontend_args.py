@@ -350,6 +350,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                     "--direct is only supported by the HTTP frontend, "
                     f"so it cannot be combined with {mode_flag}"
                 )
+            # Direct engines are registered in the frontend's own discovery.
+            self.discovery_backend = "mem"
         elif self.engine_urls:
             raise ValueError("--engine-url requires --direct")
         if self.migration_max_seq_len is not None and (
