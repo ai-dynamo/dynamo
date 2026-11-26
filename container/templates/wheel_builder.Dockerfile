@@ -497,9 +497,10 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
-# (the runtime image keeps only the compiled wheel). Best-effort: unreadable/absent
-# files are skipped and the generator falls back to canonical SPDX text. cargo's
-# registry lives under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
+# (the runtime image keeps only the compiled wheel). Keyed "<name>-<version>"
+# to match generators/rust.py. Best-effort: unreadable/absent files are skipped
+# and the generator falls back to canonical SPDX text. cargo's registry lives
+# under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
 # Only the helper is copied here, so other container/compliance changes do not
 # re-run this step.
 COPY container/compliance/harvest_cargo_licenses.sh /tmp/harvest_cargo_licenses.sh

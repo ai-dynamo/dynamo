@@ -1,27 +1,9 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Copy each crate's license files out of Cargo registry source caches so the
-# Rust NOTICES generator can inline upstream license text.
-#
-# Usage: harvest_cargo_licenses.sh --policy best-effort|strict --out DIR REGISTRY_SRC...
-#
-# Each REGISTRY_SRC is a Cargo `registry/src` directory; a missing one is
-# skipped. Crates are the directories exactly two levels below it
-# (`registry/src/<index>/<name>-<version>`). Only the crate's top-level
-# LICENSE*, LICENCE*, COPYING*, NOTICE* and UNLICENSE* entries are copied, to
-# DIR/<name>-<version>/, the key compliance/generators/rust.py looks up.
-#
-# Policies:
-#   best-effort  Select any existing path. find and cp errors are ignored and
-#                the exit status is always 0; the generator falls back to
-#                canonical SPDX text for anything missing.
-#   strict       Select regular files only. find errors are printed, and the
-#                first mkdir or cp failure makes the script exit non-zero.
-#
-# Run it inside the RUN that mounts the registry cache, or it sees an empty or
-# partial registry.
+
+# Copy crate license files from Cargo registry/src caches to DIR/<name>-<version>/
+# for the Rust NOTICES generator. Run inside the RUN that mounts the registry cache.
 
 set -u
 

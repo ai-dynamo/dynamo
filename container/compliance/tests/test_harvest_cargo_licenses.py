@@ -94,9 +94,8 @@ def test_missing_root_is_skipped(tmp_path: Path, shell: str, policy: str) -> Non
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize("policy", _POLICIES)
 def test_matching_directory_entry(tmp_path: Path, shell: str, policy: str) -> None:
-    # best-effort selects any existing path (-e); its cp of a directory fails
-    # silently and leaves an empty crate directory. strict selects regular
-    # files only (-f) and never creates one.
+    # best-effort selects any path (-e), so its failed cp leaves an empty crate
+    # directory; strict selects regular files only (-f).
     root = tmp_path / "registry/src"
     crate = _crate(root, "index", "dual-1.0.0")
     (crate / "LICENSES").mkdir()
