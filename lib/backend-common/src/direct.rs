@@ -73,11 +73,12 @@ pub struct DirectEngineSpec {
 /// constructor that sidecar runs, which usually asks the engine what it is
 /// (its role, model and parsers).
 ///
-/// The host calls it on every probe and retries every error. A build fails on
-/// the engine's state: it is down, or it reports something about itself that
-/// its sidecar would not run with, and a restart of the engine changes either.
-/// The frontend's own input, such as a malformed address, is rejected before
-/// the engines are served.
+/// The host calls it on every probe and retries every error it returns, with
+/// backoff: from an engine that is down, from one that reports something its
+/// sidecar would not run with, and from a setting the factory itself reads,
+/// such as an invalid sidecar variable in the frontend's environment. The host
+/// does not check a spec's address either: a caller that wants a malformed one
+/// to fail startup checks it first, as the Python entry point does.
 ///
 /// The host never cancels or times out the build or `LLMEngine::start`, as
 /// `Worker` does not: the engine must bound them itself (the sidecar
@@ -221,10 +222,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// it serves, register it, and keep it registered while it serves. Returns once
 /// every engine's supervisor runs, without waiting for any engine to serve; an
 /// engine that is down is probed with backoff until it serves, and the others
-/// serve meanwhile. Fails only on shared discovery, an empty list or an engine
-/// listed twice. An engine the factory builds but whose configuration this
-/// frontend rejects (an `InvalidArgument` error, such as KV events it cannot
-/// subscribe to) is logged as an error and not probed again.
+/// serve meanwhile. Fails on shared discovery, an empty list, an engine listed
+/// twice, or a runtime that already has a direct dispatch, which a second call
+/// on one runtime finds. An engine the factory builds but whose configuration
+/// this frontend rejects (an `InvalidArgument` error, such as KV events it
+/// cannot subscribe to) is logged as an error and not probed again.
 ///
 /// Each engine's worker configuration, and with it its role, comes from the
 /// factory on every probe.
