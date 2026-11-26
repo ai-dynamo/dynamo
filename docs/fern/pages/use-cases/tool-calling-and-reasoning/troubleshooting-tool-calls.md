@@ -189,7 +189,9 @@ Forced choices can install guided JSON or family-native structural tags. A mode 
 
 ## Known limitations and follow-up
 
-**GPT-OSS with native Harmony.** On the vLLM and SGLang backends, the Chat Completions and Responses APIs return at most one tool call per response when `tool_choice: "auto"` is set, even if `parallel_tool_calls: true` is specified. To enable multiple parallel tool calls in a single response, set `tool_choice: "required"` and `parallel_tool_calls: true`, and use the V2 parser route with [structural tags enabled](structural-tag.md).
+When GPT-OSS uses its Harmony tool-call format with `--dyn-tool-call-parser gpt_oss` or `--dyn-tool-call-parser harmony` on the worker, the Chat Completions and Responses APIs return at most one tool call per response on the vLLM and SGLang backends if `tool_choice: "auto"` is set. This limit applies even when `parallel_tool_calls: true` is set.
+
+To allow multiple tool calls in a single response, set `tool_choice: "required"` and `parallel_tool_calls: true`, and use the [V2 parser route](#parser-generation-routing) with [structural tags enabled](structural-tag.md). This mode requires at least one tool call but does not guarantee multiple calls.
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
 
