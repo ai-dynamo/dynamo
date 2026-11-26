@@ -43,6 +43,17 @@ _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 BUILTIN_CHAT_PROCESSORS = ("dynamo", "vllm", "sglang")
 
 
+class _ReplaceEnvList(argparse.Action):
+    """Collect a repeatable flag into a list. The first value on the command
+    line replaces the list from the environment variable; argparse's ``append``
+    would add to it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, self.dest)
+        given = [] if current is self.default else current
+        setattr(namespace, self.dest, [*given, values])
+
+
 def _parse_chat_template_kwargs(value: str) -> Dict[str, Any]:
     parsed = json.loads(value)
     if not isinstance(parsed, dict):
@@ -807,12 +818,12 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ENGINE_URLS",
             default=[],
             dest="engine_urls",
-            action="append",
+            action=_ReplaceEnvList,
             help=(
                 "Engine gRPC endpoint to route to in --direct mode, for example "
                 "http://host:30001. May be repeated. Each engine reports its own role "
                 "(aggregated, prefill or decode). DYN_ENGINE_URLS accepts "
-                "whitespace-separated values."
+                "whitespace-separated values, and is ignored when --engine-url is given."
             ),
             env=self.env,
         )

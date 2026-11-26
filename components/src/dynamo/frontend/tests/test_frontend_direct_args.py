@@ -45,13 +45,18 @@ def test_direct_mode_collects_engine_urls() -> None:
     assert config.engine_urls == ["http://prefill-0:30001", "http://decode-0:30001"]
 
 
-def test_engine_urls_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engine_urls_on_the_command_line_replace_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("DYN_DIRECT", "true")
     monkeypatch.setenv("DYN_ENGINE_URLS", "http://a:30001 http://b:30001")
     assert parse_frontend_config([]).engine_urls == [
         "http://a:30001",
         "http://b:30001",
     ]
+    assert parse_frontend_config(
+        ["--engine-url", "http://c:30001", "--engine-url", "http://d:30001"]
+    ).engine_urls == ["http://c:30001", "http://d:30001"]
 
 
 def test_direct_mode_needs_an_engine() -> None:
