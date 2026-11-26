@@ -143,7 +143,7 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** Add `--publish-per-request-metrics` to TensorRT-LLM workers whose dashboards or alerts read those series.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`RequestClassifier::classify` is synchronous** ([#18443](https://github.com/ai-dynamo/dynamo/pull/18443)). It returns `Result<ClassifyRequest, Box<ClassifierError>>` instead of a `ClassifyFuture`, and `ClassifyFuture` is removed. `classify` runs under the router-wide classifier lock and must not wait. A classifier that holds requests returns a `DispatchGate` from the new `dispatch_gate` method; the router queues each request at once and asks the gate before it dispatches.
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`RequestClassifier::classify` is synchronous** ([#18443](https://github.com/ai-dynamo/dynamo/pull/18443)). It returns `Result<ClassifyRequest, Box<RequestClassifierError>>` instead of a `ClassifyFuture`, and `ClassifyFuture` is removed. `classify` runs under the router-wide classifier lock and must not wait. A classifier that holds requests returns a `DispatchGate` from the new `dispatch_gate` method; the router queues each request at once and asks the gate before it dispatches.
 
   > **Migrate:** Return `Ok(request)` or an error directly from `classify`. If your classifier waited inside the returned future, implement `DispatchGate`, return it from `dispatch_gate`, and hold the queued request there. See [Custom Admission Control](../../../developer-guide/knowledge-base/modular-components/router/custom-admission-control.md).
 
