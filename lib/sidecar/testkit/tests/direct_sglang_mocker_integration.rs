@@ -111,25 +111,55 @@ async fn kv_routing_follows_the_engines_own_kv_events() {
     let a = Engine::start(&env, DisaggregationMode::Aggregated).await;
     let b = Engine::start(&env, DisaggregationMode::Aggregated).await;
     let frontend = direct_frontend(&env, &[&a, &b], RouterMode::KV).await;
-    let prompt = ["hello world"; 16].join(" ");
 
-    // The first request caches the prompt on one engine, which publishes the
-    // blocks on its own ZMQ socket; the frontend subscribes to it directly.
-    assert_eq!(
-        complete(&frontend, &env, &prompt).await,
-        reqwest::StatusCode::OK
-    );
-    let (cached, other) = if a.served() == 1 { (&a, &b) } else { (&b, &a) };
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    for _ in 0..6 {
-        assert_eq!(
-            complete(&frontend, &env, &prompt).await,
-            reqwest::StatusCode::OK
-        );
-    }
-    assert_eq!((cached.served(), other.served()), (7, 0));
+    // A request caches its prompt on one engine, which publishes the blocks on
+    // its own ZMQ socket; the frontend subscribes to it directly. Once the
+    // router has indexed them, every repeat of the prompt lands on that
+    // engine. Until then a repeat lands on either engine, so an attempt that
+    // repeats too early starts over with a prompt neither engine has cached,
+    // after a longer wait.
+    const REPEATS: usize = 20;
+    bounded("KV events route a prompt to its cache", async {
+        for attempt in 0.. {
+            let prompt = prompt(attempt);
+            let (a_before, b_before) = (a.served(), b.served());
+            assert_eq!(
+                complete(&frontend, &env, &prompt).await,
+                reqwest::StatusCode::OK
+            );
+            let (cached, other, other_before) = if a.served() > a_before {
+                (&a, &b, b_before)
+            } else {
+                (&b, &a, a_before)
+            };
+            let cached_before = cached.served();
+            tokio::time::sleep(Duration::from_millis(5) * 2_u32.pow(attempt)).await;
+            while other.served() == other_before && cached.served() < cached_before + REPEATS {
+                assert_eq!(
+                    complete(&frontend, &env, &prompt).await,
+                    reqwest::StatusCode::OK
+                );
+            }
+            if other.served() == other_before {
+                return;
+            }
+        }
+    })
+    .await;
     frontend.shutdown().await;
+}
+
+/// A prompt of eight KV blocks, none of which another attempt's prompt has:
+/// the attempt number comes first, in binary, spelled in the two words the
+/// test tokenizer knows.
+fn prompt(attempt: u32) -> String {
+    let words: Vec<_> = (0..32)
+        .map(|bit| match attempt >> bit & 1 {
+            0 => "hello",
+            _ => "world",
+        })
+        .collect();
+    words.join(" ")
 }
 
 #[tokio::test]
