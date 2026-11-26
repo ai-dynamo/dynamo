@@ -48,9 +48,10 @@ impl Engine {
 }
 
 /// A frontend that serves `engines` directly, with each engine's role taken
-/// from the engine itself. It starts once every engine is registered: the
-/// host registers each engine on its own, and the frontend is ready at its
-/// first model.
+/// from the engine itself. It is returned once every engine has served a
+/// request through it: the host registers each engine on its own, and the
+/// frontend, ready at its first model, admits each engine and the prefill role
+/// on its own too.
 async fn direct_frontend(env: &Environment, engines: &[&Engine], mode: RouterMode) -> Frontend {
     let options = DirectEngineOptions {
         namespace: env.namespace.clone(),
@@ -68,13 +69,16 @@ async fn direct_frontend(env: &Environment, engines: &[&Engine], mode: RouterMod
     )
     .await
     .unwrap();
-    bounded("direct engine registrations", async {
-        while env.worker_cards().await.len() < engines.len() {
+    let frontend = Frontend::start_with_router_mode(env, mode).await;
+    bounded("every direct engine serves", async {
+        while engines.iter().any(|engine| engine.served() == 0) {
+            // A request the frontend cannot route yet fails; the next one is sent.
+            let _ = frontend.complete(&env.model, "hello").send().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
-    Frontend::start_with_router_mode(env, mode).await
+    frontend
 }
 
 async fn complete(frontend: &Frontend, env: &Environment, prompt: &str) -> reqwest::StatusCode {
@@ -94,14 +98,16 @@ async fn round_robin_reaches_every_engine() {
     let b = Engine::start(&env, DisaggregationMode::Aggregated).await;
     let frontend = direct_frontend(&env, &[&a, &b], RouterMode::RoundRobin).await;
 
+    let (a_before, b_before) = (a.served(), b.served());
     for _ in 0..4 {
         assert_eq!(
             complete(&frontend, &env, "hello").await,
             reqwest::StatusCode::OK
         );
     }
-    assert_eq!(a.served() + b.served(), 4);
-    assert!(a.served() > 0 && b.served() > 0);
+    let (a_served, b_served) = (a.served() - a_before, b.served() - b_before);
+    assert_eq!(a_served + b_served, 4);
+    assert!(a_served > 0 && b_served > 0);
     frontend.shutdown().await;
 }
 
@@ -170,12 +176,19 @@ async fn disaggregated_requests_use_the_engines_that_report_prefill_and_decode()
     // Both are listed the same way: each engine says which role it serves.
     let frontend = direct_frontend(&env, &[&prefill, &decode], RouterMode::RoundRobin).await;
 
+    let (prefill_before, decode_before) = (prefill.served(), decode.served());
     for _ in 0..2 {
         assert_eq!(
             complete(&frontend, &env, "hello").await,
             reqwest::StatusCode::OK
         );
     }
-    assert_eq!((prefill.served(), decode.served()), (2, 2));
+    assert_eq!(
+        (
+            prefill.served() - prefill_before,
+            decode.served() - decode_before
+        ),
+        (2, 2)
+    );
     frontend.shutdown().await;
 }
