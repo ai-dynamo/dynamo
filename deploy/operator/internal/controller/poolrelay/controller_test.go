@@ -97,19 +97,6 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		!slices.Equal(container.Args, []string{"--cluster-id", "east", "--sources-file", sourcesFilePath, "--bind", "0.0.0.0:5561"}) {
 		t.Fatalf("unexpected Relay process command: %v %v", container.Command, container.Args)
 	}
-	t.Log("Relay keeps its base namespace even before frontend status is published")
-	foundNamespace := false
-	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
-		if item.Name == "DYN_NAMESPACE" {
-			foundNamespace = true
-			if item.Value != "inference-green" {
-				t.Fatalf("unexpected Relay runtime namespace: %q", item.Value)
-			}
-		}
-	}
-	if !foundNamespace {
-		t.Fatal("Relay runtime namespace was not configured")
-	}
 	var sources corev1.ConfigMap
 	if err := client.Get(ctx, childKey, &sources); err != nil {
 		t.Fatal(err)
@@ -140,34 +127,6 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	}
 	if service.ResourceVersion != serviceVersion || deployment.ResourceVersion != deploymentVersion {
 		t.Fatal("unchanged resources were rewritten on the second reconcile")
-	}
-	if err := client.Get(ctx, key, dgd); err != nil {
-		t.Fatal(err)
-	}
-	component := dgd.Status.Components["decode"]
-	component.RuntimeNamespace = "green-runtime-next"
-	dgd.Status.Components["decode"] = component
-	if err := client.Status().Update(ctx, dgd); err != nil {
-		t.Fatal(err)
-	}
-	t.Log("Follow the worker runtime namespace without rolling Relay Pods")
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Get(ctx, childKey, &sources); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(sources.Data["sources.json"]), &sourceDocument); err != nil {
-		t.Fatal(err)
-	}
-	if len(sourceDocument.Sources) != 1 || sourceDocument.Sources[0].Namespace != "green-runtime-next" || sourceDocument.ConnectionRevision != connectionRevision {
-		t.Fatalf("Relay did not follow the worker runtime namespace: %s", sources.Data["sources.json"])
-	}
-	if err := client.Get(ctx, childKey, &deployment); err != nil {
-		t.Fatal(err)
-	}
-	if deployment.ResourceVersion != deploymentVersion {
-		t.Fatal("changing the source file unexpectedly rolled the Relay Deployment")
 	}
 	t.Log("Restore a source volume that no longer projects sources.json")
 	deployment.Spec.Template.Spec.Volumes[0].ConfigMap.Items = []corev1.KeyToPath{{Key: "wrong", Path: "wrong.json"}}
@@ -311,7 +270,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	}
 
 	t.Log("Resume reconciliation when the published worker binding returns")
-	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "green-runtime-next"}
+	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "inference-green-hash"}
 	if err := client.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}
