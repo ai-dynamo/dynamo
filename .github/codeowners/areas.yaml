@@ -9,6 +9,7 @@ areas:
   - components/src/dynamo/frontend/
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
+  - examples/parser-plugins/
   - lib/bindings/python/rust/parsers.rs
   - lib/generate-format-catalog/
   - lib/llm/src/generate_format.rs
