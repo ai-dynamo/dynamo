@@ -71,7 +71,6 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
-          dgdr_v1beta2_enabled: 'true'
           planner_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ inputs.planner_image_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}

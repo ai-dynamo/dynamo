@@ -33,14 +33,9 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 		want     BackendFramework
 		wantErr  string
 	}{
-		{name: "vllm with runtime image entrypoint", engine: []string{"vllm-rs"}, want: BackendFrameworkVLLM},
-		{name: "native vllm executable", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
-		{name: "wrapped runtime does not change engine backend", engine: []string{"vllm-rs"}, command: []string{"/bin/sh", "-c", "exec dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
-		{name: "native launch conflicts with explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", wantErr: "backend framework mismatch"},
-		{name: "sglang", engine: []string{"python3", "-m", "dynamo.sglang"}, want: BackendFrameworkSGLang},
-		{name: "trtllm", engine: []string{"python3", "-m", "dynamo.trtllm"}, want: BackendFrameworkTRTLLM},
-		{name: "conflicting explicit backend", engine: []string{"vllm-rs"}, explicit: "sglang", wantErr: "backend framework mismatch"},
-		{name: "opaque engine uses explicit backend", command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", want: BackendFrameworkSGLang},
+		{name: "native engine command is not inferred", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
+		{name: "native engine uses explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "vllm", want: BackendFrameworkVLLM},
+		{name: "launcher is detected beside a runtime sidecar", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-sglang-sidecar"}, want: BackendFrameworkSGLang},
 		{name: "opaque engine cannot inherit runtime backend", command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
 	}
 	for _, tc := range cases {
@@ -78,21 +73,19 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 	}
 }
 
-// TestNativeSidecarCompilationCacheBackendDetection applies inferred vLLM cache
-// defaults to the engine in both graph and standalone component rendering.
-func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
+// TestNativeSidecarCompilationCacheExplicitBackend applies the explicit vLLM
+// cache defaults to the engine in both graph and standalone component rendering.
+func TestNativeSidecarCompilationCacheExplicitBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name, mountPath string
 		command         []string
 	}{
 		{name: "default mount", command: []string{"dynamo-vllm-sidecar"}},
 		{name: "explicit mount", mountPath: "/cache", command: []string{"dynamo-vllm-sidecar"}},
-		{name: "runtime shell wrapper", mountPath: "/cache", command: []string{"bash", "-ec", "exec dynamo-vllm-sidecar"}},
-		{name: "runtime image entrypoint", mountPath: "/cache"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mountPath := tc.mountPath
-			t.Log("Configure a vLLM sidecar without an explicit backend")
+			t.Log("Configure a native vLLM engine sidecar with an explicit backend")
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: mountPath},
@@ -103,31 +96,21 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
 				Name: "test", Namespace: "test",
-				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
 			}
 			original := dgd.DeepCopy()
 
-			t.Log("Materialize a graph child with the inferred engine backend")
+			t.Log("Materialize a graph child with the explicit engine backend")
 			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
 			require.Len(t, children, 1)
 			require.Equal(t, string(BackendFrameworkVLLM), children["worker"].Spec.BackendFramework)
 			require.Equal(t, original, dgd)
 
-			t.Log("Verify inferred and explicit vLLM produce the same worker generation")
-			inferredHash, err := ComputeDGDWorkersSpecHash(dgd)
-			require.NoError(t, err)
-			explicit := dgd.DeepCopy()
-			explicit.Spec.BackendFramework = "vllm"
-			explicitHash, err := ComputeDGDWorkersSpecHash(explicit)
-			require.NoError(t, err)
-			require.Equal(t, explicitHash, inferredHash)
-			require.Equal(t, original, dgd)
-
-			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
+			t.Log("Render an independent standalone DCD with the same explicit backend")
 			dcd := &v1beta1.DynamoComponentDeployment{
 				Name: "worker", Namespace: "test",
-				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component, BackendFramework: "vllm"},
 			}
 			originalDCD := dcd.DeepCopy()
 			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
@@ -171,11 +154,11 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 	}
 }
 
-func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
-	const currentOrigin = "1.6.0"
-	const legacyOrigin = "1.5.0"
+func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
+	const currentOrigin = "1.8.0"
+	const legacyOrigin = "1.6.0"
 
-	for _, origin := range []string{currentOrigin, legacyOrigin, ""} {
+	for _, origin := range []string{currentOrigin, "1.7.0", legacyOrigin, "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure graph, engine, runtime, and frontend dependencies with duplicate overrides")
 			graphEnv := []corev1.EnvVar{{Name: "Z_GRAPH", Value: "graph"}, {Name: "A_GRAPH", Value: "$(Z_GRAPH)"}}
@@ -238,13 +221,13 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 			require.Len(t, children, 1)
 			pods := []*corev1.PodSpec{pod}
 			for _, child := range children {
-				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: child.Spec.Env})
 				require.NoError(t, err)
 				pods = append(pods, childPod)
 			}
 			require.Equal(t, original, dgd)
 
-			t.Log("Verify legacy environment merging, overrides, and cache isolation")
+			t.Log("Verify origin-selected environment merging, overrides, and cache isolation")
 			for _, rendered := range pods {
 				engine, runtime, frontend := rendered.Containers[0], rendered.InitContainers[0], rendered.Containers[1]
 				require.Contains(t, engine.VolumeMounts, corev1.VolumeMount{Name: "cache", MountPath: "/cache"})
@@ -253,6 +236,23 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				require.Equal(t, "required", envVarsToMap(runtime.Env)[commonconsts.EnvKvTransferEnforcement])
 				require.Equal(t, "nats://user:4222", envVarsToMap(runtime.Env)["NATS_SERVER"])
 				require.Equal(t, "nats://frontend:4222", envVarsToMap(frontend.Env)["NATS_SERVER"])
+				if origin == currentOrigin {
+					require.Equal(t, slices.Concat(graphEnv, engineEnv), engine.Env)
+					require.Len(t, envVarsToMap(runtime.Env), len(runtime.Env))
+					require.Len(t, envVarsToMap(frontend.Env), len(frontend.Env))
+					runtimeSuffix := slices.Concat(graphEnv, runtimeEnv[:len(runtimeEnv)-1])
+					var authored []corev1.EnvVar
+					for _, env := range runtime.Env {
+						for _, input := range runtimeSuffix {
+							if env.Name == input.Name {
+								authored = append(authored, env)
+							}
+						}
+					}
+					require.Equal(t, runtimeSuffix, authored)
+					require.Equal(t, frontendEnv, frontend.Env[len(frontend.Env)-len(frontendEnv):])
+					continue
+				}
 				require.Equal(t, []corev1.EnvVar{
 					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 					{Name: "A_GRAPH", Value: "$(Z_GRAPH)"},
@@ -486,9 +486,9 @@ func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]s
 }
 
 func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
-	const currentOrigin = "1.6.0"
+	const currentOrigin = "1.8.0"
 
-	for _, origin := range []string{currentOrigin, "1.5.0", ""} {
+	for _, origin := range []string{currentOrigin, "1.7.0", "1.6.0", "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure a combined worker that references and overrides the cache default")
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -516,13 +516,17 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 					cacheEnv = append(cacheEnv, env)
 				}
 			}
-			require.Equal(t, []corev1.EnvVar{
+			want := []corev1.EnvVar{
 				{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 				{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
 				{Name: "VLLM_USE_V1", Value: "1"},
 				{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
-			}, cacheEnv)
-			require.Equal(t, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: "/cache"}, pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
+			}
+			if origin == currentOrigin {
+				want = want[:3]
+			}
+			require.Equal(t, want, cacheEnv)
+			require.Equal(t, want[len(want)-1], pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
 		})
 	}
 }
@@ -984,7 +988,7 @@ func TestRenderedRuntimeVersionSource(t *testing.T) {
 			_, err := generateBasePodSpecWithDefaultsAndOwnership(
 				component, BackendFrameworkNoop, nil, "graph", "ns", tc.role, nodes,
 				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove,
-				"engine", nil, defaults, roleLaunchOwnedByPodTemplate, tc.nativeSidecar, staticContainerGPUCount(0),
+				"engine", nil, defaults, roleLaunchOwnedByPodTemplate, tc.nativeSidecar, staticContainerGPUCount(0), nil,
 			)
 			require.NoError(t, err)
 			if tc.wantVersion == "" {
@@ -1020,7 +1024,7 @@ func TestNativeRoleRuntimeVersionsAndKVTransferPolicy(t *testing.T) {
 
 	t.Log("KV transfer policy belongs to runtime and does not create a worker runtime")
 	originalWorker := component.Roles[1].PodTemplate.DeepCopy()
-	applyKvTransferPolicyToWorkerComponent(component, &v1beta1.KvTransferPolicy{LabelKey: "topology.kubernetes.io/zone"}, nil, true)
+	applyKvTransferPolicyToWorkerComponent(component, &v1beta1.KvTransferPolicy{LabelKey: "topology.kubernetes.io/zone"}, nil, true, nil)
 	require.Equal(t, originalWorker.Spec, component.Roles[1].PodTemplate.Spec)
 	require.Empty(t, component.Roles[0].PodTemplate.Spec.Containers[0].Env)
 	require.NotEmpty(t, component.Roles[0].PodTemplate.Spec.InitContainers[0].Env)

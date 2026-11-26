@@ -1090,7 +1090,7 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 				dgd.Spec.Components[0].Replicas = new(int32(0))
 			}
 			if test.mixedLPX {
-				dgd.Spec.Components = append(dgd.Spec.Components, newLPXHandoffSource(t, "single_v2").Spec.Components[0])
+				dgd.Spec.Components = append(dgd.Spec.Components, newLPXHandoffSource(t, "node-local-v2-lpu-only").Spec.Components[0])
 			}
 			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}}

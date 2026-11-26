@@ -15,7 +15,7 @@ from vllm.device_allocator.sleep_mode_backend import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator
 
 BACKEND_NAME = "gms-v1"
 
@@ -36,8 +36,14 @@ class GMSV1SleepModeBackend(SleepModeBackend):
     def capture_kv_cache(self):
         return self._client.kv_cache_region()
 
-    def suspend(self, level: int = 1) -> None:
-        if level != 1:
+    def suspend(self, discardable: Collection[int] | int = ()) -> None:
+        # vLLM 0.33 (enterprise image) passes the sleep level instead; remove the
+        # int case once it ships 0.34.
+        if isinstance(discardable, int):
+            is_level_1 = discardable == 1
+        else:
+            is_level_1 = not discardable
+        if not is_level_1:
             raise ValueError("GMS V1 supports only whole-engine level 1 suspend")
         self._client.suspend()
         self._state = "SUSPENDED"

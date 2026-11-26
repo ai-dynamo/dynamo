@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
+| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
@@ -30,7 +30,7 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 [TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
 [NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
 [AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
-[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[AISimulate](https://pypi.org/project/aisim/) (offline configuration search),
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
 [Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 
@@ -193,8 +193,6 @@ cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
   adds NVTX ranges.
 - CI's non-default feature checks are in [`pre-merge.yml`](.github/workflows/pre-merge.yml).
   Each is a separate cold build (about 4 min), so run only the one you touched.
-
-On macOS, build and test `dynamo-llm` with `--no-default-features` unless you need `block-manager`.
 
 ### Python tests
 

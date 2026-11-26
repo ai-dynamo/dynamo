@@ -36,9 +36,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             libc6-dev \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
-        && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
         && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*; \
+        && rm -rf /var/lib/apt/lists/* \
+        && {% include "templates/verify_ca_certificates.Dockerfile" %}; \
     fi
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         python${PYTHON_VERSION} -m venv /tmp/buildenv \
@@ -72,11 +72,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
-    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    && rm -rf /var/lib/apt/lists/* \
+    && {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -87,6 +85,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -97,10 +97,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
         libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -200,17 +211,11 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
 
 # Setup environment for all users
 USER root
-# nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
-# dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
-# silently fall back to stub mode while the Python ones work. The wheel keeps
-# its libraries in a private directory; put that on the loader path. NIXL finds
-# the backend plugins beside them on its own (nixl_plugin_manager.cpp's
-# getPluginDir dladdr fallback), so NIXL_PLUGIN_DIR is deliberately left unset.
-RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
-    [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
-    [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
-    echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
-    ldconfig && \
+# Register the NIXL wheel's libraries with the loader so the Rust bindings'
+# dlopen("libnixl_capi.so") resolves. NIXL finds the backend plugins beside
+# them on its own, so NIXL_PLUGIN_DIR is deliberately left unset.
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    /opt/dynamo/venv/bin/python /tmp/register_nixl_libs.py && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc

@@ -3,7 +3,7 @@
 
 mod support;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc,
@@ -50,10 +50,10 @@ impl InputProbe {
         }
     }
 
-    fn check(&self, context: &WorkerSelectionContext<'_>) {
+    fn check(&self, request: &WorkerSelectionRequest<'_>) {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        // Ordinary request context stays available without CACHE.
-        assert_eq!(context.isl_tokens(), 17);
+        // Ordinary request values stay available without CACHE.
+        assert_eq!(request.info().isl_tokens(), 17);
     }
 
     fn check_cache(&self, cache: WorkerCacheInput<'_>) {
@@ -81,10 +81,10 @@ impl WorkerFilter for InputProbe {
 
     fn keep(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
-        self.check(context);
+        self.check(request);
         self.check_candidate(candidate);
         Ok(true)
     }
@@ -97,11 +97,11 @@ impl WorkerScorer for InputProbe {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        self.check(context);
+        self.check(request);
         assert_eq!(candidates.len(), costs.len());
         assert!(!candidates.is_empty());
         assert!(candidates.get(candidates.len()).is_none());
@@ -123,10 +123,10 @@ impl WorkerPicker for InputProbe {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        self.check(context);
+        self.check(request);
         assert_eq!(
             input.cache().is_some(),
             self.inputs.contains(WorkerInputs::CACHE)
@@ -207,7 +207,6 @@ fn each_component_can_only_read_its_own_inputs() {
                             calls: calls.clone(),
                         };
                         let policy = WorkerSelectionPolicy::new_with_filters(
-                            SelectionConfig::default(),
                             "test",
                             vec![
                                 Box::new(probe(filter_mask)),

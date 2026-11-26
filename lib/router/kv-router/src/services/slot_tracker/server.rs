@@ -282,9 +282,6 @@ fn service_error(error: ServiceError) -> Response {
         ServiceError::Sequence(SequenceError::DuplicateRequest { .. }) => {
             json_error(StatusCode::CONFLICT, error)
         }
-        ServiceError::Sequence(SequenceError::ReplicaSyncPublishFailed(_)) => {
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, error)
-        }
     }
 }
 

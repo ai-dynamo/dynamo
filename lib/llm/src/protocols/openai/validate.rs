@@ -4,9 +4,7 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionToolType,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
@@ -435,8 +433,16 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
+                // Treat `"stop": []` as no client-supplied stop strings, matching
+                // stock vLLM and stock SGLang. OpenAI's published schema specifies
+                // one to four items for the array form.
+                // `get_stop()` maps the empty list to `None`.
+                // OpenAI Chat Completions schema https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                // OpenAI Completions schema https://developers.openai.com/api/reference/resources/completions/methods/create
+                // Stock vLLM sampling parameters https://github.com/vllm-project/vllm/blob/62d4bc3c7e33b1b6c906e233e6af2d3506c482ca/vllm/sampling_params.py#L581-L584
+                // Stock SGLang sampling parameters https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/python/sglang/srt/sampling/sampling_params.py#L331-L352
                 if sequences.is_empty() {
-                    anyhow::bail!("Stop sequences array cannot be empty");
+                    return Ok(());
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
                     return Err(crate::protocols::common::invalid_argument_error(format!(
@@ -481,22 +487,6 @@ pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<()
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        let has_custom_content = match message {
-            ChatCompletionRequestMessage::User(user) => matches!(
-                &user.content,
-                ChatCompletionRequestUserMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestUserMessageContentPart::Custom(_)))
-            ),
-            ChatCompletionRequestMessage::Tool(tool) => matches!(
-                &tool.content,
-                ChatCompletionRequestToolMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestToolMessageContentPart::Custom(_)))
-            ),
-            _ => false,
-        };
-        if has_custom_content {
-            anyhow::bail!("messages[{message_index}].content custom parts are not supported");
-        }
         if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
@@ -852,6 +842,19 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
+/// Checks an optional log-probability count against `max`, the serving
+/// model's limit: 20 unless its workers publish their own `max_logprobs`. The
+/// library rules are fixed at 20, so this check is local. `label` names the
+/// field in the error (`Top_logprobs` or `Logprobs`).
+pub fn validate_max_logprobs(label: &str, count: Option<u8>, max: u8) -> Result<(), anyhow::Error> {
+    if let Some(count) = count
+        && count > max
+    {
+        anyhow::bail!("{label} must be between 0 and {max}, got {count}");
+    }
+    Ok(())
+}
+
 /// Checks the optional OpenAI `best_of` count [0, 20], then Dynamo's local
 /// `best_of >= n` rule when both are present. None succeeds. Returns the library
 /// diagnostic for a range failure and a local error for the relationship.
@@ -1020,7 +1023,7 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
 
     #[test]
-    fn custom_message_content_is_rejected_before_model_validation() {
+    fn custom_message_content_preserves_model_validation() {
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
         let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
@@ -1028,16 +1031,13 @@ mod tests {
             json!({"role":"user", "content":[custom.clone()]}),
             json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
         ] {
-            for model in ["test", ""] {
-                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
-                    "model":model, "messages":[message.clone()]
-                }))
-                .unwrap();
-                assert_eq!(
-                    request.validate().unwrap_err().to_string(),
-                    "messages[0].content custom parts are not supported"
-                );
-            }
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[message]
+            }))
+            .unwrap();
+            request.validate().unwrap();
+            request.inner.model.clear();
+            assert!(request.validate().is_err());
         }
     }
 
@@ -1309,6 +1309,29 @@ mod tests {
         assert!(err.to_string().contains("between 0 and 20"), "{err}");
     }
 
+    /// The limit is the serving model's, so the check follows the maximum it
+    /// is given, above or below the default, in the library rule's words.
+    #[test]
+    fn validate_max_logprobs_follows_the_given_maximum() {
+        for max in [0, 5, MAX_TOP_LOGPROBS, 32, u8::MAX] {
+            for accepted in [None, Some(0), Some(max)] {
+                validate_max_logprobs("Top_logprobs", accepted, max).unwrap();
+            }
+        }
+        assert_eq!(
+            validate_max_logprobs("Top_logprobs", Some(33), 32)
+                .unwrap_err()
+                .to_string(),
+            "Top_logprobs must be between 0 and 32, got 33"
+        );
+        assert_eq!(
+            validate_max_logprobs("Logprobs", Some(21), MAX_LOGPROBS)
+                .unwrap_err()
+                .to_string(),
+            validate_logprobs(Some(21)).unwrap_err().to_string()
+        );
+    }
+
     #[test]
     fn validate_no_unsupported_fields_accepts_vllm_xargs() {
         let fields = HashMap::from([(
@@ -1405,6 +1428,21 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_empty_array_as_no_stop() {
+        validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![]))).unwrap();
+        // An empty string, alone or as an element, is still rejected.
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::String(String::new()))).is_err()
+        );
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![
+                String::new()
+            ])))
+            .is_err()
+        );
     }
 
     #[test]

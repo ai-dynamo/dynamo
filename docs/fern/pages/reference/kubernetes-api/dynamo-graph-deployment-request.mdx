@@ -11,6 +11,36 @@ For the task-oriented walkthrough — authoring a request step by step — see [
 
 This page documents the `nvidia.com/v1beta1` API — the storage version.
 
+## v1beta2 availability
+
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are available without a feature gate.
+They are not feature complete.
+The operator installs their CRDs and reconciles native v1beta2 Requests by default;
+`v1beta1` remains the Request storage version. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
+installations, require an administrator to install the matching CRDs before upgrading the operator.
+
+Custom operator invocations may omit `--operator-image` at startup. Before preparing a new Run
+execution, set it to the image matching the running operator build; Helm supplies it automatically.
+Without it, reconciliation retries without freezing the execution input or creating a Job.
+Existing executions continue using their frozen publisher image.
+
+On a cluster with discoverable GPUs, a native Request can use admission defaults:
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-search
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+```
+
+Planner live retune remains a separate, disabled-by-default feature with its existing opt-ins.
+See the [installation guide](../../kubernetes/installation/install-dynamo.md)
+for upgrade instructions and [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md)
+for the additional configuration and permissions.
+
 ## Conversion views
 
 When the `nvidia.com/v1beta2` API is served, the API server represents a native
@@ -77,10 +107,44 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 KV-transfer bandwidth
+
+In a disaggregated candidate, the prefill worker sends each request's KV cache to a
+decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
+is the sustained bandwidth, in decimal GB/s, that one GPU has for that transfer. It is a
+per-GPU value, not the aggregate of a node or of a parallel group. Prefer a measured value,
+for example from a NIXL benchmark, to the nominal NIC rate.
+
+The field lowers to AISimulate's `engine.kv_transfer.bandwidth_gb_per_second`. When it is
+omitted, AISimulate's default models the transfer as instantaneous, so disaggregated
+candidates report optimistic TTFT and goodput. See AISimulate's
+[P/D KV transfer](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+documentation for how candidates use the bandwidth, including
+[link sharing](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md#link-sharing).
+
+```yaml
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  hardware:
+    interconnect:
+      kvTransferBandwidthGBps: 27.7 # Measured NIXL GPU-to-GPU bandwidth across nodes.
+```
+
+Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` is applied
+after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
+set other transfer fields, or delete the transfer model with `null`.
+
+<Note>
+  Client-side `kubectl apply` incorrectly removes native `null` values. Use
+  `{$null: true}` for deletions, or submit native nulls with `kubectl create`
+  or `kubectl apply --server-side`.
+</Note>
+
 ### v1beta2 DGD Overrides
 
-**Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`
-in the platform Helm chart to use `spec.overrides.dgd`. It accepts one partial
+DGDR v1beta2 is available without a feature gate and is not feature complete.
+`spec.overrides.dgd` accepts one partial
 `nvidia.com/v1beta1` DGD, applied to every selected Candidate across backends and topologies.
 Other DGD API versions are not accepted here.
 
@@ -548,46 +612,122 @@ service.
   Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
 </ParamField>
 
-<ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
-  Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
-  interpolation sweep. Configure model identity and estimator controls through
-  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+<ParamField path="ais_perf_model" type="object or list of objects" default="null">
+  AISimulate perf model of the workers the Planner scales. The value is one perf model
+  config, or a list of configs with one `worker_type` each (`prefill`, `decode`, or
+  `aggregated`). Available since v1.8.
+
+  ```yaml
+  ais_perf_model:
+    - worker_type: prefill
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+      tp: 2
+    - worker_type: decode
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+      tp: 2
+  ```
+
+  A config holds AISimulate `ForwardPassPerfModelConfig` keys, or `from` to take them
+  from a template file, a dataset, or a state snapshot. See
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation. One config without `worker_type` covers every worker
+  type. A string is an error; a file path is not read here.
+
+  The profiler job checks a config without `from` that the Planner mode uses in full
+  when it reads the request. A directory in `systems_paths` or a state snapshot that such
+  a config names must therefore exist in the profiler job; a missing one is an error, for
+  example
+  `ais_perf_model entry for decode: forward-pass systems path is not a directory: /data/systems`.
+  When a path exists only in the Planner pod, write those keys in a template file and
+  name it with `from`.
+
+  With `optimization_target: sla`, the profiler writes the field when it is unset and
+  compares a value you write with the deployment it selects. With any other
+  `optimization_target`, it does neither: an unset field stays unset, and a value you
+  write is passed on as written.
+
+  When the field is unset, the profiler writes a list with one config per worker type of
+  the Planner mode into the generated Planner config. Each generated config holds
+  `model`, `system`, `backend`, `backend_version`, `worker_type`, `tp`, and
+  `attention_dp`, plus `pp` when it is not 1, `moe_tp_size` and `moe_ep_size` for an
+  MoE deployment, and `cp_size` when it is above 1. The profiler writes the list only
+  for a vLLM, SGLang, or TensorRT-LLM backend for which AISimulate has performance data
+  on the selected system. Otherwise the field stays unset and the Planner uses FPM
+  regression.
+
+  A value you write is kept as written. The profiler compares `model`, `system`,
+  `backend`, `worker_type`, `tp`, `pp`, `attention_dp`, `moe_tp_size`, `moe_ep_size`,
+  and `cp_size` of each config with the deployment it selects. A key that a config
+  without `from` leaves out counts with its default, so no `tp` means `tp: 1`. A
+  difference is an error, for example
+  `ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2`.
+
+  For a config with `from`, the profiler compares only the keys the config writes itself.
+  It does not read the file, dataset, or state snapshot that `from` names, so the fields
+  that come from there are not compared, and the Planner does not compare them with the
+  deployment either. The profiler logs one warning that names these fields for each
+  worker type, for example
+  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size, moe_ep_size and cp_size. The Planner takes them from the source without a comparison.`
+  Make sure that the source describes the selected deployment.
+
+  Constructs each model through
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  interpolation sweep. The retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.
+
+  The `roles` and `dataset_profiles` keys are the deprecated form of the value. They
+  still work and print one warning, for example
+  `ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
+  `roles` and `dataset_profiles` can be written together when they name different worker
+  types. Either of them next to any other key is an error.
 </ParamField>
 
 <Indent>
-  <ParamField path="roles" type="object" required={true}>
-    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
-    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
-    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
-    Model identifier, AISimulate system identifier, and inference backend
-    (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
+  <ParamField path="model / system / backend" type="string">
+    Keys of a config. Model identifier, AISimulate system identifier, and inference backend
+    (`vllm`, `sglang`, or `trtllm`). A config without `from` must write all three.
+    Optional `backend_version`, `tp`, `pp`,
     `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
     use the upstream schema. Published worker capabilities must agree with the
     configured identity.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimation_mode" type="string" default="auto">
-    `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
+  <ParamField path="estimation_mode" type="string" default="auto">
+    Key of a config. `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
     Explicit modes select the named estimator.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
-    `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
+  <ParamField path="fallback_policy" type="string" default="deny">
+    Key of a config. `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
     `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
     Auto selection searches the full priority order even with `deny`.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
-    Ordered performance-data roots. The SDK resolves its packaged root when unset.
+  <ParamField path="systems_paths" type="list[string]" default="[]">
+    Key of a config. Ordered performance-data roots. The SDK resolves its packaged root when unset.
     `database_mode` and `transfer_policy` are also passed through unchanged.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimator_config" type="object" default="{}">
-    Complete upstream estimator controls, including independent regression and
+  <ParamField path="estimator_config" type="object" default="{}">
+    Key of a config. Complete upstream estimator controls, including independent regression and
     correction sampling, fit settings, feature weights, and correction bounds.
     Explicit settings override Planner sampling defaults. A legacy total bucket
     count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
     AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
+  </ParamField>
+  <ParamField path="roles" type="object" deprecated={true}>
+    **Deprecated.** Use a list of configs. Removed in v1.9.
+
+    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
+    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
+    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
+    A role takes the config keys above.
+  </ParamField>
+  <ParamField path="dataset_profiles" type="object" deprecated={true}>
+    **Deprecated.** Use `from: {dataset: {root, manifest}}` in a config. Removed in v1.9.
+
+    Maps a role to an execution-profile manifest in a local AISimulate dataset. See
+    [Planner configuration](../components/planner-configuration.mdx#local-execution-profile-datasets).
   </ParamField>
 </Indent>
 
@@ -1304,12 +1444,30 @@ kubectl get dgdr my-model -n $NAMESPACE \
 - The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
 
+## Rerun a v1beta2 request
+
+Set `spec.rerun.reason` when the search inputs remain unchanged but you need a fresh Run. Changing
+the reason advances the Request generation. The Request controller cancels the active immutable Run,
+retains it in history, and creates a replacement Run containing the same search input and the new
+reason.
+
+```bash
+kubectl patch dgdr qwen3-search --type merge \
+  --patch '{"spec":{"rerun":{"reason":"repeat after catalog refresh"}}}'
+```
+
+Change the reason again to request another Run. Reapplying the same reason does not change the spec
+or create a generation. This control always creates a replacement Run; it does not retry execution
+within the same Run.
+
 ## Replay a recorded trace (v1beta2)
 
-<Warning>
-The `nvidia.com/v1beta2` API is experimental and disabled by default. See the
-[installation guide](../../kubernetes/installation/install-dynamo.md) before you enable it.
-</Warning>
+<Note>
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are available without a feature gate.
+They are not feature complete.
+See the [installation guide](../../kubernetes/installation/install-dynamo.md).
+Planner live retune remains disabled by default with its existing opt-ins.
+</Note>
 
 A native `v1beta2` request can evaluate every candidate against a recorded request trace instead
 of synthetic traffic. Set `spec.workload.trace` instead of `spec.workload.static`; the two are
@@ -1371,21 +1529,20 @@ with `traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traff
 These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
-override deletes the named field or parent object, and the operator does not restore it. For
-example, this override deletes the lowered source:
+or `{$null: true}` override deletes the named field or parent object, and the operator does not
+restore it. For example, this override deletes the lowered traffic configuration:
 
 ```yaml
 spec:
   aisim:
     inputOverrides:
-      traffic:
-        source: null
+      traffic: null  # or equivalent {$null: true} for kubectl apply
 ```
 
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
-claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. AISimulate validates
-the resulting input when the Run's Job starts, and an input it rejects fails the Run; admission does
-not validate it against the AISimulate schema yet.
+claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. Admission validates
+the merged input against the bundled AISimulate schema; the Run's Job also applies AISimulate's
+runtime validation.
 
 ### Trace claim lifecycle
 
@@ -1451,7 +1608,7 @@ stay `Terminating` after every Run released it, until those Runs are retired or 
 deleted.
 </Note>
 
-If the operator is uninstalled, or the `v1beta2` API is disabled, while Runs are in flight, their
+If the operator is stopped or uninstalled while Runs are in flight, their
 finalizers stay on the claim and keep it from being deleted. List them, then remove only the
 `nvidia.com/dgdr-run-` finalizers (requires `jq`):
 

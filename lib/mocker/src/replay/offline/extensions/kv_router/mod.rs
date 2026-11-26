@@ -3,30 +3,36 @@
 
 use crate::replay::default_selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
-    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
+    BlockReason, LaneCheck, LaneKey, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane,
+    QueueMetadata, QueueSnapshot, RecheckScope,
 };
-use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_hints::KvTransferSourceChoice;
 use dynamo_kv_indexer::host::RadixTree;
 use dynamo_kv_indexer::host::{
-    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, SessionPrefixIndexer,
-    TieredMatchDetails, query_lower_tiers_with_options,
+    ApproximateCachePolicyKind, BlockEntry, KvIndexerInterface, LowerTierIndexers,
+    LowerTierQueryOptions, PruneConfig, PruneManager, ResidencyProjection,
+    ResidencyRoutingSnapshot, RoutingDecisionHashes, SessionPrefixIndexer, TieredMatchDetails,
+    apply_prune_removes, apply_routing_decision, query_lower_tiers_with_options,
 };
 use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -44,6 +50,7 @@ use dynamo_slot_tracker::host::{
     WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::host::CallerHints;
 use futures::executor::block_on;
 use futures::future::try_join_all;
 use rustc_hash::FxHashMap;
@@ -54,14 +61,15 @@ use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config,
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_cache_owner, replay_cache_owner_hint_source,
+    replay_role, replay_router_config, replay_selector_with_seed, replay_slots,
+    replay_worker_config, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{
     ConversationAffinityConfig, ConversationAffinityMode, ReplayPrefillLoadEstimator,
 };
-use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use aisimulate_core::replay::{
+use aisim_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisim_core::replay::{
     KvFetchAction, KvHints, Placement, PlacementCacheSample, PlacementDecision, PlacementEffects,
     PlacementPolicy, ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
@@ -262,6 +270,23 @@ struct SyncReplayIndexer {
     session_prefix_index: Option<SessionPrefixIndexer>,
     /// Whether lookups keep the matched chain that KV fetch hints need.
     retain_kv_transfer_chain: bool,
+    /// Set for production's approximate primary index (`use_kv_events=false`).
+    approximate: Option<ApproximateRetention>,
+    /// Ranks whose KVCR-owned residency has been seen. Each has one cache owner
+    /// ([`replay_cache_owner`]) that lasts until the worker's removal is finalized.
+    cache_owned_ranks: BTreeSet<WorkerWithDpRank>,
+    routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
+}
+
+/// TTL retention of production's approximate primary index: the router indexes
+/// its own routing decisions instead of engine KV events, and each block expires
+/// `router_ttl_secs` after the latest decision that stored it.
+struct ApproximateRetention {
+    config: PruneConfig,
+    /// One set of timers per worker, created at its first decision and dropped
+    /// with the worker, as production's `WorkerPruneManager` keeps them.
+    timers: BTreeMap<WorkerWithDpRank, PruneManager<BlockEntry>>,
+    next_event_id: u64,
 }
 
 impl SyncReplayIndexer {
@@ -273,7 +298,83 @@ impl SyncReplayIndexer {
             has_indexed_events: false,
             session_prefix_index: None,
             retain_kv_transfer_chain: false,
+            approximate: None,
+            cache_owned_ranks: BTreeSet::new(),
+            routing_snapshot: None,
         }
+    }
+
+    /// Project every cache owner to its rank, and let those of `routable` workers
+    /// serve KV fetch hints, as the live router's snapshot of a KV state agent does.
+    fn refresh_cache_owner_routing(&mut self, routable: impl Fn(WorkerId) -> bool) {
+        if self.cache_owned_ranks.is_empty() && self.lower_tier.is_none() {
+            return;
+        }
+        let owners = || {
+            self.cache_owned_ranks
+                .iter()
+                .map(|&worker| (replay_cache_owner(worker), worker))
+        };
+        let projection =
+            ResidencyProjection::new(owners()).expect("each replay rank has its own cache owner");
+        let sources = owners()
+            .filter(|(_, worker)| routable(worker.worker_id))
+            .map(|(owner, worker)| (owner, replay_cache_owner_hint_source(), Some(worker)));
+        let snapshot = ResidencyRoutingSnapshot::new(projection, sources);
+        self.routing_snapshot = Some(Arc::new(snapshot.clone()));
+        self.lower_tier().set_residency_routing_snapshot(snapshot);
+    }
+
+    fn lower_tier(&mut self) -> &LowerTierIndexers {
+        let block_size = self.block_size;
+        self.lower_tier
+            .get_or_insert_with(|| LowerTierIndexers::new(1, block_size))
+    }
+
+    /// Store a routing decision's prompt blocks on `worker` and restart their
+    /// TTL at `now`, as production's approximate index does.
+    fn record_routing_decision(
+        &mut self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        now: Instant,
+    ) -> Result<()> {
+        let Some(approximate) = &mut self.approximate else {
+            return Ok(());
+        };
+        if local_hashes.is_empty() {
+            return Ok(());
+        }
+        let hashes = RoutingDecisionHashes::from_local_hashes(local_hashes);
+        let entries = apply_routing_decision(
+            &mut self.tree,
+            worker,
+            &hashes.local_hashes,
+            &hashes.sequence_hashes,
+            &mut approximate.next_event_id,
+        )
+        .context("failed to record a replay routing decision")?;
+        approximate
+            .timers
+            .entry(worker)
+            .or_insert_with(|| PruneManager::with_bucket_origin(approximate.config.clone(), now))
+            .insert_at(entries, now);
+        self.has_indexed_events = true;
+        Ok(())
+    }
+
+    /// Remove every approximate block whose TTL bucket ended by `now`, as
+    /// production's prune task does.
+    fn expire_routing_decisions(&mut self, now: Instant) {
+        let Some(approximate) = &mut self.approximate else {
+            return;
+        };
+        let expired = approximate
+            .timers
+            .values_mut()
+            .flat_map(|timers| timers.pop_expired(now))
+            .collect();
+        apply_prune_removes(&mut self.tree, expired, &mut approximate.next_event_id);
     }
 
     fn find_matches_for_request(
@@ -339,11 +440,7 @@ impl SyncReplayIndexer {
                 }
                 continue;
             }
-            let block_size = self.block_size;
-            let indexer = self
-                .lower_tier
-                .get_or_insert_with(|| LowerTierIndexers::new(1, block_size))
-                .get_or_create(event.storage_tier);
+            let indexer = self.lower_tier().get_or_create(event.storage_tier);
             lower_tier_acks.push(async move {
                 indexer
                     .apply_event_and_wait(event)
@@ -360,16 +457,42 @@ impl SyncReplayIndexer {
         self.apply_events(vec![event])
     }
 
-    fn remove_worker(&mut self, worker_id: WorkerId) {
+    fn remove_worker(&mut self, worker_id: WorkerId) -> Result<()> {
         self.tree.remove_worker(worker_id);
+        if let Some(approximate) = &mut self.approximate {
+            approximate
+                .timers
+                .retain(|worker, _| worker.worker_id != worker_id);
+        }
         if let Some(index) = &self.session_prefix_index {
             index.clear_worker_id_frontiers(worker_id);
         }
+        let owned: Vec<_> = self
+            .cache_owned_ranks
+            .extract_if(.., |worker| worker.worker_id == worker_id)
+            .collect();
         if let Some(lower_tier) = &self.lower_tier {
             for indexer in lower_tier.all() {
                 block_on(indexer.remove_worker(worker_id));
+                // `remove_worker` drops only worker-owned residency.
+                for &worker in &owned {
+                    let clear = RouterEvent::with_cache_owner(
+                        worker_id,
+                        KvCacheEvent {
+                            event_id: 0,
+                            data: KvCacheEventData::Cleared,
+                            dp_rank: worker.dp_rank,
+                        },
+                        StorageTier::Device,
+                        replay_cache_owner(worker),
+                    );
+                    block_on(indexer.apply_event_and_wait(clear)).with_context(|| {
+                        format!("failed to clear the replay cache owner of {worker:?}")
+                    })?;
+                }
             }
         }
+        Ok(())
     }
 
     fn apply_session_event(&self, event: &RouterEvent) {
@@ -435,7 +558,8 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
-    /// Authored local hashes for affinity refresh and session-prefix lookup.
+    /// Authored local hashes for affinity refresh, session-prefix lookup and the
+    /// approximate index's routing decision.
     /// Active-load hashes can be keyed/randomized, so cannot substitute for these.
     block_hashes: Option<Vec<LocalBlockHash>>,
     affinity_id: Option<String>,
@@ -469,14 +593,16 @@ impl PendingRequest {
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             lora_name: None,
-            priority_jump: self.priority_jump,
-            strict_priority: self.strict_priority,
+            caller_hints: CallerHints {
+                expected_output_tokens: self.expected_output_tokens,
+                priority_jump: self.priority_jump,
+                strict_priority: self.strict_priority,
+            },
             policy_class: self.policy_class.clone(),
             session_context: self
                 .session_id
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None)),
-            expected_output_tokens: self.expected_output_tokens,
             affinity_target: self.affinity_hold.as_ref().and_then(Hold::target),
             pinned_worker: self
                 .affinity_hold
@@ -521,6 +647,8 @@ pub(crate) struct OfflineReplayRouter {
     needs_drain: bool,
     /// Fixed at startup, like production's index; see `new_with_selector_seed`.
     kv_transfer_chain_supported: bool,
+    /// The role computes KV copy sources, as resolved for the live router.
+    sends_kv_fetch_hints: bool,
     kv_transfer_gate_warned: bool,
 }
 
@@ -535,6 +663,8 @@ impl KvRouterPlacement {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         topology: &[WorkerTopology],
         selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
     ) -> Result<Self> {
         // Composition checks that `topology[i]` is worker `i`.
         let router_hints: Vec<bool> = topology.iter().map(|worker| worker.router_hint).collect();
@@ -544,6 +674,8 @@ impl KvRouterPlacement {
             prefill_load_estimator,
             &router_hints,
             selector_seed,
+            worker_type,
+            router_plugins,
         )?;
         Ok(Self { router })
     }
@@ -812,17 +944,22 @@ impl OfflineReplayRouter {
             prefill_load_estimator,
             &vec![false; num_workers],
             None,
+            WorkerType::Aggregated,
+            None,
         )
     }
 
-    /// Worker `i` receives KV fetch hints and serves as their source when
-    /// `router_hints[i]` is set.
+    /// Worker `i` takes KV fetch hints when `router_hints[i]` is set and the role's policies
+    /// send them. It is then also their source, unless its ranks have cache owners. A worker-selection policy the router config selects for
+    /// `worker_type` resolves from `router_plugins`.
     pub(crate) fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         router_hints: &[bool],
         selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let mut indexer = SyncReplayIndexer::new(args.block_size as u32);
@@ -843,13 +980,38 @@ impl OfflineReplayRouter {
             })
             .collect();
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
-        // As in production: the startup policy reads the KV index (a later retune
-        // keeps the index it started with), and the index retains the chain.
+        let selector =
+            replay_selector_with_seed(&config, worker_type, router_plugins, selector_seed)?;
+        // As in production: the KV index exists only when the startup policy or one of
+        // the role's configured hint policies reads it (a later retune keeps the index
+        // it started with), and the role sends KV fetch hints when one of them reads
+        // copy sources.
+        let role = replay_role(&config, worker_type, router_plugins, &selector)?;
+        let reads_kv_index = role.inputs.reads_kv_index();
+        // A default hint policy starts no index, so its copy sources need the index the
+        // selection reads to retain the chain.
         let kv_transfer_chain_supported =
-            WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector)
-                .reads_kv_index()
-                && config.supports_kv_transfer_chain_retention();
+            reads_kv_index && config.supports_kv_transfer_chain_retention();
+        // Replay feeds no decode-pool KV events to the router (see `RouterEventObservation`),
+        // so a decode role has no copy sources to compute.
+        let sends_kv_fetch_hints = role.computes_copy_sources && worker_type != WorkerType::Decode;
+        if !config.use_kv_events {
+            config.validate().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl,
+                "offline replay models the approximate index's ttl retention, not {}",
+                config.router_approximate_cache_policy
+            );
+            if reads_kv_index {
+                indexer.approximate = Some(ApproximateRetention {
+                    config: PruneConfig {
+                        ttl: Duration::from_secs_f64(config.router_ttl_secs),
+                    },
+                    timers: BTreeMap::new(),
+                    next_event_id: 0,
+                });
+            }
+        }
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -879,9 +1041,11 @@ impl OfflineReplayRouter {
             affinity_active: HashMap::new(),
             needs_drain: false,
             kv_transfer_chain_supported,
+            sends_kv_fetch_hints,
             kv_transfer_gate_warned: false,
         };
         router.refresh_kv_transfer_chain();
+        router.refresh_cache_owners();
         Ok(router)
     }
 
@@ -919,8 +1083,7 @@ impl OfflineReplayRouter {
                     .and_then(|identity| identity.lineage.as_ref())
                     .context("sibling affinity requires unambiguous conversation lineage")?;
                 anyhow::ensure!(
-                    lineage.schema
-                        == aisimulate_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
+                    lineage.schema == aisim_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
                         && !lineage.root_conversation_id.is_empty(),
                     "unsupported conversation lineage"
                 );
@@ -966,8 +1129,9 @@ impl OfflineReplayRouter {
         Ok(())
     }
 
-    /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`. KV events change
-    /// no load, so this never admits queued requests on its own.
+    /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`, then expire the
+    /// approximate index's routing decisions whose TTL has passed. Neither changes load, so this
+    /// never admits queued requests on its own.
     fn apply_due_kv_events(&mut self, now_ms: f64) -> Result<()> {
         while let Some((_, events)) = self
             .lagged_kv_events
@@ -975,6 +1139,8 @@ impl OfflineReplayRouter {
         {
             self.on_kv_events(events)?;
         }
+        self.indexer
+            .expire_routing_decisions(self.decay_now(now_ms));
         Ok(())
     }
 
@@ -1046,16 +1212,6 @@ impl OfflineReplayRouter {
 
         if should_queue {
             let snapshot = self.snapshot_for(&mut pending);
-            let placement = pending
-                .affinity_hold
-                .as_ref()
-                .and_then(Hold::target)
-                .and_then(|target| {
-                    target
-                        .dp_rank
-                        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
-                })
-                .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
             let metadata = QueueMetadata {
                 class_index,
                 snapshot,
@@ -1065,9 +1221,26 @@ impl OfflineReplayRouter {
                 // from scheduler ingress, after any affinity wait.
                 class_due_at: class.slo_ttft_due_at(decay_now),
                 arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+                lane_key: None,
             };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
+            // As in the live router, a session's requests wait in their own lane, so a
+            // session bound to a busy rank holds only itself; a sessionless request bound to a
+            // rank by its affinity hold waits in that rank's lane.
+            let lane = match pending.session_id.as_deref() {
+                Some(session) => QueueLane::Keyed(LaneKey::new(session)),
+                None => pending
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .and_then(|target| {
+                        target
+                            .dp_rank
+                            .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+                    })
+                    .map_or(QueueLane::Shared, QueueLane::Exact),
+            };
             self.pending
                 .enqueue_with_due_at(
                     metadata,
@@ -1076,7 +1249,7 @@ impl OfflineReplayRouter {
                         .saturating_mul(self.dp_size as usize),
                     priority_jump,
                     strict_priority,
-                    placement,
+                    lane,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -1103,6 +1276,10 @@ impl OfflineReplayRouter {
         events: Vec<RouterEvent>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        if !self.config.use_kv_events {
+            // Production's router does not subscribe to engine KV events.
+            return Ok(RouterEffects::default());
+        }
         if self.kv_event_lag_ms == 0.0 {
             return self.on_kv_events(events);
         }
@@ -1115,6 +1292,23 @@ impl OfflineReplayRouter {
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
         self.indexer.apply_events(events)?;
         Ok(RouterEffects::default())
+    }
+
+    /// With `kvcr.local_g2`, each rank has a cache owner from the time its worker joins until
+    /// the worker's state is dropped. The owners of routable workers are the KV fetch sources,
+    /// as behind a live KV state agent.
+    fn refresh_cache_owners(&mut self) {
+        if !self.worker_config_template.is_cache_owned() {
+            return;
+        }
+        let dp_size = self.dp_size;
+        let ranks = self.workers_with_configs.keys().flat_map(|&worker_id| {
+            (0..dp_size).map(move |dp_rank| WorkerWithDpRank::new(worker_id, dp_rank))
+        });
+        self.indexer.cache_owned_ranks.extend(ranks);
+        let workers = &self.workers_with_configs;
+        self.indexer
+            .refresh_cache_owner_routing(|worker_id| workers.contains_key(&worker_id));
     }
 
     pub(crate) fn on_prefill_completed(
@@ -1163,7 +1357,7 @@ impl OfflineReplayRouter {
     }
 
     /// Register a new worker with the router without disturbing existing slot state.
-    /// With `router_hint`, it receives KV fetch hints and serves as their source.
+    /// `router_hint` is as in [`Self::new_with_selector_seed`].
     pub(crate) fn add_worker(&mut self, worker_id: usize, router_hint: bool) -> Result<()> {
         let wid = worker_id as WorkerId;
         if self
@@ -1184,21 +1378,25 @@ impl OfflineReplayRouter {
             return Err(error.into());
         }
         self.refresh_kv_transfer_chain();
+        self.refresh_cache_owners();
         Ok(())
     }
 
-    /// Lookups retain the transfer chain that KV fetch hints need while the
-    /// router supports it and a routable worker takes hints.
+    /// Lookups retain the transfer chain that KV fetch hints need while the role
+    /// computes copy sources, the index supports it and a routable worker takes hints.
+    /// The role check has rejected a selection or a configured hint policy over an index
+    /// that cannot; a default hint policy over one sends nothing, with one warning.
     fn refresh_kv_transfer_chain(&mut self) {
-        let hinted = self
-            .workers_with_configs
-            .values()
-            .any(ReplayWorkerConfig::is_hint_capable);
+        let hinted = self.sends_kv_fetch_hints
+            && self
+                .workers_with_configs
+                .values()
+                .any(ReplayWorkerConfig::is_hint_capable);
         self.indexer.retain_kv_transfer_chain = hinted && self.kv_transfer_chain_supported;
         if hinted && !self.kv_transfer_chain_supported && !self.kv_transfer_gate_warned {
             self.kv_transfer_gate_warned = true;
             tracing::warn!(
-                "router hints need a local event-driven indexer with no approximate side indexer; workers advertise hint capability but no hints will be attached"
+                "KV copy sources need a local, event-driven KV index with no approximate side index; workers advertise router hints, but the router computes no copy sources for them"
             );
         }
     }
@@ -1216,6 +1414,7 @@ impl OfflineReplayRouter {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
         self.refresh_kv_transfer_chain();
+        self.refresh_cache_owners();
         Ok(())
     }
 
@@ -1226,7 +1425,8 @@ impl OfflineReplayRouter {
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
-        self.indexer.remove_worker(wid);
+        self.indexer.remove_worker(wid)?;
+        self.refresh_cache_owners();
         // Lagged events from the removed worker would re-add blocks it no longer owns.
         self.lagged_kv_events.retain_mut(|(_, events)| {
             events.retain(|event| event.worker_id != wid);
@@ -1327,8 +1527,20 @@ impl OfflineReplayRouter {
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
         let retain_hashes = self.affinity.is_some()
+            || self.indexer.approximate.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
+        // A request list arrives without replay hashes; a salted request
+        // needs the engine's.
+        let cache_salt = request_cache_salt(request);
+        let replay_hashes = match (replay_hashes, cache_salt) {
+            (None, Some(cache_salt)) => Some(salted_request_hashes(
+                &request_view.prompt_tokens_for_placement()?,
+                self.block_size,
+                cache_salt,
+            )),
+            (replay_hashes, _) => replay_hashes,
+        };
         let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let local_hashes =
@@ -1348,12 +1560,17 @@ impl OfflineReplayRouter {
                         .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 } else {
                     let tokens = request_view.prompt_tokens_for_placement()?;
+                    // Keyed identities never meet engine hashes; the namespace
+                    // only keeps one salt's active blocks apart from another's.
                     self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
                         &tokens,
                         None,
-                        BlockHashOptions::default(),
+                        BlockHashOptions {
+                            cache_namespace: cache_salt,
+                            ..Default::default()
+                        },
                         None,
                     )
                 };
@@ -1428,6 +1645,14 @@ impl OfflineReplayRouter {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
+        // A request that waited in the queue names cache owners from its arrival. Resolve
+        // them against the owners that serve hints now: one whose worker has drained
+        // since must not earn the target a copy the engine cannot run.
+        if let Some(candidates) = request.kv_transfer_candidates.as_mut()
+            && candidates.routing_snapshot.is_some()
+        {
+            candidates.routing_snapshot = self.indexer.routing_snapshot.clone();
+        }
         let mut scheduling_request = request.scheduling_request(worker_loads);
         let eligibility = scheduling_request.eligibility();
         // Best and selected overlap use the same weighted, rounded blocks as
@@ -1454,7 +1679,10 @@ impl OfflineReplayRouter {
                 self.block_size,
             ))?;
         let worker_idx = self.scheduler_id(selection.worker)?;
-        let kv_fetch_source = self.kv_fetch_source(selection.kv_transfer_source)?;
+        let kv_fetch_source = self.kv_fetch_source(
+            selection.kv_transfer_source,
+            scheduling_request.kv_transfer_candidates.as_ref(),
+        )?;
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -1494,6 +1722,13 @@ impl OfflineReplayRouter {
             index.update_session_from_match(session_id, selection.worker, matched_hash)?;
         }
 
+        if self.indexer.approximate.is_some()
+            && let Some(hashes) = request.block_hashes.take()
+        {
+            self.indexer
+                .record_routing_decision(selection.worker, hashes, decay_now)?;
+        }
+
         if let Some(hold) = request.affinity_hold.take() {
             self.affinity_staged
                 .insert(request.uuid, (hold, selection.worker.into()));
@@ -1515,28 +1750,63 @@ impl OfflineReplayRouter {
             .ok_or_else(|| anyhow!("scheduler id of {worker:?} does not fit into usize"))
     }
 
-    /// Replay models no cache owners, so a cache-owner source gives no hint.
-    fn kv_fetch_source(&self, source: Option<KvTransferSourceChoice>) -> Result<Option<usize>> {
-        match source.map(|choice| choice.source) {
-            Some(KvTransferCandidateSource::Worker(worker)) => self.scheduler_id(worker).map(Some),
-            Some(KvTransferCandidateSource::CacheOwner(_)) | None => Ok(None),
-        }
+    /// The engine pulls from a rank: the source rank itself, or the rank a cache-owner
+    /// source is attached to in the lookup's routing snapshot.
+    fn kv_fetch_source(
+        &self,
+        source: Option<KvTransferSourceChoice>,
+        candidates: Option<&KvTransferCandidates>,
+    ) -> Result<Option<usize>> {
+        let rank = match source.map(|choice| choice.source) {
+            Some(KvTransferCandidateSource::Worker(worker)) => Some(worker),
+            Some(KvTransferCandidateSource::CacheOwner(owner)) => candidates
+                .and_then(|candidates| candidates.routing_snapshot.as_ref())
+                .and_then(|snapshot| snapshot.router_hint_source(owner))
+                .and_then(|source| source.attached_worker),
+            None => None,
+        };
+        rank.map(|worker| self.scheduler_id(worker)).transpose()
     }
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         self.needs_drain = false;
         let mut admissions = Vec::new();
-        self.pending.recheck_all_workers();
+        // Replay has no dispatch gate: capacity is the only reason a lane blocks.
+        self.pending.recheck_blocked_lanes(RecheckScope::Capacity);
+        let mut class_room: Vec<Option<bool>> = vec![None; self.pending.class_count()];
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot worker loads once one is needed.
             let mut worker_loads = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, request| {
+            // Every head without an affinity target asks the same question of the same loads,
+            // so each class answers it once per pass rather than once per session lane.
+            class_room.fill(None);
+            let Some(popped) = self.pending.pop_next(|class_index, class, request| {
+                let unconstrained = request
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .is_none();
+                let shared = |room: bool| {
+                    if room {
+                        LaneCheck::Dispatch
+                    } else {
+                        LaneCheck::Blocked(BlockReason::SharedCapacity)
+                    }
+                };
+                if unconstrained && let Some(room) = class_room[class_index] {
+                    return shared(room);
+                }
                 let worker_loads =
                     worker_loads.get_or_insert_with(|| slots.project_worker_loads(None, decay_now));
-                !Self::request_workers_busy(worker_loads, workers, class, request)
+                let room = !Self::request_workers_busy(worker_loads, workers, class, request);
+                if unconstrained {
+                    class_room[class_index] = Some(room);
+                    return shared(room);
+                }
+                LaneCheck::from(room)
             }) else {
                 break;
             };
@@ -1655,7 +1925,9 @@ mod tests {
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::ApproximateCachePolicyKind;
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_router_protocol::WorkerType;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
         PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,
@@ -1667,11 +1939,12 @@ mod tests {
 
     use super::{
         KvReplayMetadata, KvRouterPlacement, OfflineReplayRouter, ReplayRequestHashes,
-        SyncReplayIndexer, WorkerAdmission,
+        RouterEventBatch, SyncReplayIndexer, WorkerAdmission,
     };
     use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{
+    use crate::replay::router_shared::replay_cache_owner;
+    use aisim_core::replay::{
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
@@ -1685,7 +1958,7 @@ mod tests {
         #[case] dp_size: u32,
     ) {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = dp_size;
         let mut policy = Policy::new_with_selector_seed(
@@ -1694,6 +1967,8 @@ mod tests {
             None,
             &topology(num_workers, dp_size, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(crate::replay::ConversationAffinityConfig {
@@ -1784,7 +2059,7 @@ mod tests {
     #[test]
     fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         use dynamo_scheduler::host::KvSchedulerError;
         let mut policy = Policy::new_with_selector_seed(
             &queueing_args(),
@@ -1792,6 +2067,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -1842,7 +2119,7 @@ mod tests {
 
     #[test]
     fn affinity_queue_cost_uses_only_the_bound_rank_cache() {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = 2;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -1851,6 +2128,8 @@ mod tests {
             None,
             &topology(1, 2, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -1919,13 +2198,15 @@ mod tests {
         #[case] evict: bool,
         #[case] authored_hashes: bool,
     ) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
             &queueing_args(),
             Some(queueing_router_config()),
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -2004,7 +2285,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     fn affinity_clock_does_not_drain_on_decay_and_abort_releases_capacity(#[case] affinity: bool) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut config = queueing_router_config();
         config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -2013,6 +2294,8 @@ mod tests {
             Some(estimator(Duration::from_secs(10))),
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(affinity.then(Default::default))
@@ -2072,13 +2355,15 @@ mod tests {
     #[test]
     fn affinity_table_full_routes_without_affinity() {
         use super::{KvRouterPlacement as Policy, SessionAffinity, SessionAffinityConfig};
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = Policy::new_with_selector_seed(
             &replay_args(),
             None,
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap();
         let mut config = SessionAffinityConfig::new(Duration::from_secs(60));
@@ -2206,6 +2491,7 @@ mod tests {
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
+            cache_salt: None,
         }
     }
 
@@ -2213,7 +2499,7 @@ mod tests {
     fn unhandled_request_fields_are_rejected_instead_of_dropped() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
-        request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+        request.kv_hints = Some(aisim_core::replay::AuthoredKvHints {
             source_worker: 0,
             source_dp_rank: 0,
         });
@@ -2221,11 +2507,11 @@ mod tests {
         assert!(error.to_string().contains("authored KV fetch hints"));
         assert_eq!(router.pending_count(), 0);
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,
@@ -2366,6 +2652,101 @@ mod tests {
         assert_ne!(pending.token_seq, Some(replay_hashes.sequence_hashes));
     }
 
+    fn cache_salt_request(uuid: u128, cache_salt: Option<&str>) -> DirectRequest {
+        DirectRequest {
+            cache_salt: cache_salt.map(str::to_owned),
+            ..request(uuid, 7)
+        }
+    }
+
+    /// A request list reaches the router without replay hashes. Its salted
+    /// requests still have to match what the engine publishes for the salt.
+    #[test]
+    fn request_list_cache_salt_selects_the_engine_cache_namespace() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let block_size = router.block_size;
+        let published = |cache_salt| {
+            ReplayRequestHashes::from_tokens_with_cache_salt(
+                &request(0, 7).tokens,
+                block_size,
+                cache_salt,
+            )
+        };
+        // The worker holds the one-block prompt under salt "a".
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                published(Some("a")).local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Routing overlap and the worker's active blocks after each arrival.
+        // Active blocks are shared only inside a namespace, and an empty salt
+        // is the unsalted one.
+        let namespaces = [Some("a"), Some("b"), None, Some(""), Some("a")];
+        let mut observed = Vec::new();
+        for (index, cache_salt) in namespaces.into_iter().enumerate() {
+            let request = cache_salt_request(index as u128 + 1, cache_salt);
+            let effects = router.on_request_arrival(&request, None, 0.0).unwrap();
+            observed.push((
+                effects.admissions[0].best_available_overlap_blocks,
+                router.debug_snapshot(0.0).active_blocks_by_worker[0].1,
+            ));
+        }
+        assert_eq!(observed, [(1, 1), (0, 2), (0, 3), (0, 3), (1, 3)]);
+
+        // Public tracking identities are the engine's sequence hashes.
+        for cache_salt in namespaces {
+            let request = cache_salt_request(9, cache_salt);
+            let pending = router
+                .build_pending_request(&request, request.max_output_tokens, None, None)
+                .unwrap();
+            assert_eq!(
+                pending.token_seq,
+                Some(published(cache_salt).sequence_hashes),
+                "{cache_salt:?}"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::request_list(false)]
+    #[case::replay_hashes(true)]
+    fn keyed_tracking_identities_follow_the_cache_salt(#[case] with_replay_hashes: bool) {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..Default::default()
+        };
+        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let identities = |cache_salt: Option<&str>| {
+            let request = cache_salt_request(1, cache_salt);
+            let replay_hashes = with_replay_hashes.then(|| {
+                ReplayRequestHashes::from_tokens_with_cache_salt(
+                    &request.tokens,
+                    router.block_size,
+                    cache_salt,
+                )
+            });
+            router
+                .build_pending_request(&request, request.max_output_tokens, replay_hashes, None)
+                .unwrap()
+                .token_seq
+                .expect("active blocks are tracked")
+        };
+        let unsalted = identities(None);
+        assert_eq!(unsalted.len(), 1);
+        assert_eq!(identities(Some("")), unsalted);
+        assert_eq!(identities(Some("a")), identities(Some("a")));
+        assert_ne!(identities(Some("a")), unsalted);
+        assert_ne!(identities(Some("a")), identities(Some("b")));
+    }
+
     #[test]
     fn lower_tier_events_are_indexed_outside_the_primary_tree() {
         let mut indexer = SyncReplayIndexer::new(64);
@@ -2389,7 +2770,7 @@ mod tests {
             .unwrap();
         assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
 
-        indexer.remove_worker(7);
+        indexer.remove_worker(7).unwrap();
         let tiered = indexer.find_matches_for_hashes(vec![LocalBlockHash(101)]);
         assert!(tiered.device.overlap_scores.scores.is_empty());
         assert!(
@@ -3720,15 +4101,47 @@ policy_classes:
             .collect()
     }
 
+    /// `config` with the `kv_fetch` hint policy listed for every role. The default policy
+    /// sends no KV fetch hints, as in the live router.
+    pub(super) fn with_kv_fetch_hints(config: KvRouterConfig) -> KvRouterConfig {
+        KvRouterConfig {
+            router_policy_config: Some(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/replay/offline/extensions/kv_router/testdata/kv_fetch_policy.yaml"
+                )
+                .to_string(),
+            ),
+            ..config
+        }
+    }
+
     fn kv_fetch_placement(
         args: &MockerConfig,
         config: KvRouterConfig,
         workers: usize,
         router_hint: bool,
     ) -> KvRouterPlacement {
+        seeded_placement(args, with_kv_fetch_hints(config), workers, router_hint)
+    }
+
+    fn seeded_placement(
+        args: &MockerConfig,
+        config: KvRouterConfig,
+        workers: usize,
+        router_hint: bool,
+    ) -> KvRouterPlacement {
         let topology = topology(workers, args.dp_size.max(1), router_hint);
-        KvRouterPlacement::new_with_selector_seed(args, Some(config), None, &topology, Some(0))
-            .unwrap()
+        KvRouterPlacement::new_with_selector_seed(
+            args,
+            Some(config),
+            None,
+            &topology,
+            Some(0),
+            WorkerType::Aggregated,
+            None,
+        )
+        .unwrap()
     }
 
     fn assert_fetches_from_a_peer(placement: &Placement) {
@@ -3823,13 +4236,15 @@ policy_classes:
 
     #[test]
     fn kv_fetch_hints_need_a_hint_capable_target_and_holder() {
-        // `router_hint` of (target worker 0, holder worker 1), whether lookups
-        // retain the chain, and the target's hint.
-        for (router_hint, retained, hint) in [
-            ((true, true), true, fetch_hint(1)),
-            ((false, false), false, None),
-            ((false, true), true, None),
-            ((true, false), true, None),
+        // `router_hint` of (target worker 0, holder worker 1), whether the role lists
+        // `kv_fetch`, whether lookups retain the chain, and the target's hint. As in the
+        // live router, the default policy sends no KV fetch hint.
+        for (router_hint, kv_fetch, retained, hint) in [
+            ((true, true), true, true, fetch_hint(1)),
+            ((true, true), false, false, None),
+            ((false, false), true, false, None),
+            ((false, true), true, true, None),
+            ((true, false), true, true, None),
         ] {
             let topology = [
                 worker_topology(0, 1, router_hint.0),
@@ -3837,10 +4252,16 @@ policy_classes:
             ];
             let mut placement = KvRouterPlacement::new_with_selector_seed(
                 &replay_args(),
-                Some(router_config()),
+                Some(if kv_fetch {
+                    with_kv_fetch_hints(router_config())
+                } else {
+                    router_config()
+                }),
                 None,
                 &topology,
                 Some(0),
+                WorkerType::Aggregated,
+                None,
             )
             .unwrap();
             occupy_worker_1(&mut placement, 0);
@@ -3865,53 +4286,111 @@ policy_classes:
             );
             assert_eq!(
                 placement.router.indexer.retain_kv_transfer_chain, retained,
-                "{router_hint:?}"
+                "{router_hint:?} {kv_fetch}"
             );
             assert_eq!(
                 pending.kv_transfer_candidates.is_some(),
                 retained,
-                "{router_hint:?}"
+                "{router_hint:?} {kv_fetch}"
             );
             let placed = place_now(&mut placement, &target, 0.0);
             assert_eq!(
                 (placed.scheduler_id, placed.kv_hints),
                 (0, hint),
-                "{router_hint:?}"
+                "{router_hint:?} {kv_fetch}"
             );
         }
     }
 
     #[test]
-    fn kv_fetch_hints_need_an_index_that_retains_the_chain() {
-        // Production builds no KV index for a policy that reads neither cache nor
-        // fetch inputs (overlap credit 0 zeroes every inherited cache weight), and
-        // a remote, approximate or predict-on-route index retains no chain.
-        for (case, (config, hinted)) in [
-            (router_config(), true),
+    fn a_configured_kv_fetch_policy_starts_the_index_it_needs() {
+        // Overlap credit 0 zeroes every inherited cache weight, so the selection reads
+        // no KV index. As in production, the listed `kv_fetch` still starts one: the
+        // selection follows load and the idle target fetches from the busy holder.
+        let config = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            ..router_config()
+        };
+        let mut placement = kv_fetch_placement(&replay_args(), config, 2, true);
+        assert!(placement.router.indexer.retain_kv_transfer_chain);
+        let busy = place_now(
+            &mut placement,
+            &request_with_priorities(100, 9, 1024, 0, 0),
+            0.0,
+        )
+        .scheduler_id;
+        placement
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(busy as WorkerId, 0)])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!(
+            (placed.scheduler_id, placed.kv_hints),
+            (1 - busy, fetch_hint(busy))
+        );
+    }
+
+    #[test]
+    fn default_kv_fetch_of_kvcr_sends_hints_without_copy_credit() {
+        // With `shared_cache_multiplier: 0` the `kvcr` selection reads no copy sources.
+        // Its default `kv_fetch` still sends the selected worker a fetch; `hints: []`
+        // turns that off.
+        for (hints, hint) in [("", fetch_hint(1)), ("    hints: []\n", None)] {
+            let policy = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                policy.path(),
+                format!(
+                    "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.0}}\n{hints}"
+                ),
+            )
+            .unwrap();
+            let config = KvRouterConfig {
+                router_policy_config: Some(policy.path().display().to_string()),
+                ..router_config()
+            };
+            let mut placement = seeded_placement(&replay_args(), config, 2, true);
+            occupy_worker_1(&mut placement, 0);
+            placement
+                .router
+                .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+                .unwrap();
+            let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+            assert_eq!(
+                (placed.scheduler_id, placed.kv_hints),
+                (0, hint),
+                "hints {hints:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_rejects_the_roles_the_live_router_rejects() {
+        // A listed `kv_fetch` over an index that retains no chain (approximate, remote
+        // or predict-on-route), and a `kvcr` selection whose copies no hint policy sends.
+        let unsent_copies = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            unsent_copies.path(),
+            "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {shared_cache_multiplier: 0.5}\n    hints: []\n",
+        )
+        .unwrap();
+        use dynamo_kv_router::plugins::host::PluginConfigError;
+        let no_chain = |config| (with_kv_fetch_hints(config), true);
+        for (case, (config, copy_sources_unavailable)) in [
+            no_chain(KvRouterConfig {
+                use_kv_events: false,
+                ..router_config()
+            }),
+            no_chain(KvRouterConfig {
+                use_remote_indexer: true,
+                ..router_config()
+            }),
+            no_chain(KvRouterConfig {
+                router_predicted_ttl_secs: Some(1.0),
+                ..router_config()
+            }),
             (
                 KvRouterConfig {
-                    overlap_score_credit: 0.0,
-                    ..router_config()
-                },
-                false,
-            ),
-            (
-                KvRouterConfig {
-                    use_kv_events: false,
-                    ..router_config()
-                },
-                false,
-            ),
-            (
-                KvRouterConfig {
-                    use_remote_indexer: true,
-                    ..router_config()
-                },
-                false,
-            ),
-            (
-                KvRouterConfig {
-                    router_predicted_ttl_secs: Some(1.0),
+                    router_policy_config: Some(unsent_copies.path().display().to_string()),
                     ..router_config()
                 },
                 false,
@@ -3920,58 +4399,159 @@ policy_classes:
         .into_iter()
         .enumerate()
         {
-            let reads_index = config.overlap_score_credit > 0.0;
-            let mut placement = kv_fetch_placement(&replay_args(), config, 3, true);
-            assert_eq!(
-                placement.router.kv_transfer_gate_warned, !hinted,
-                "case {case}"
-            );
-            // A drain recomputes the gate from the remaining hint workers.
-            placement.router.remove_worker(2).unwrap();
-            assert_eq!(
-                placement.router.indexer.retain_kv_transfer_chain, hinted,
-                "case {case}"
-            );
-            // Without overlap credit the load setup ties, so that case skips it.
-            if reads_index {
-                occupy_worker_1(&mut placement, 0);
-            }
-            placement
-                .router
-                .on_kv_events(vec![target_prefix_in_g2(1, 0)])
-                .unwrap();
-            let target = kv_fetch_target(1);
-            let pending = placement
-                .router
-                .build_pending_request(&target, target.max_output_tokens, None, None)
-                .unwrap();
-            assert_eq!(
-                pending.kv_transfer_candidates.is_some(),
-                hinted,
-                "case {case}"
-            );
-            let placed = place_now(&mut placement, &target, 0.0);
-            assert_eq!(
-                placed.kv_hints,
-                fetch_hint(1).filter(|_| hinted),
-                "case {case}"
-            );
+            let Err(error) = KvRouterPlacement::new_with_selector_seed(
+                &replay_args(),
+                Some(config),
+                None,
+                &topology(2, 1, true),
+                Some(0),
+                WorkerType::Aggregated,
+                None,
+            ) else {
+                panic!("case {case} was accepted")
+            };
+            let expected = match error.downcast_ref::<PluginConfigError>() {
+                Some(PluginConfigError::CopySourcesUnavailable { .. }) => copy_sources_unavailable,
+                Some(PluginConfigError::UnsentCopies { .. }) => !copy_sources_unavailable,
+                _ => false,
+            };
+            assert!(expected, "case {case}: {error}");
         }
     }
 
+    /// A router config written with the `KvRouterConfig` JSON names the router
+    /// simulation adapter sends to replay.
+    fn router_config_json(value: Value) -> KvRouterConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[rstest::rstest]
+    #[case::kv_events(true, 512)]
+    #[case::approximate(false, 0)]
+    fn engine_kv_events_reach_only_an_event_driven_index(
+        #[case] use_kv_events: bool,
+        #[case] overlap_tokens: usize,
+    ) {
+        let config = router_config_json(serde_json::json!({ "use_kv_events": use_kv_events }));
+        let mut placement = seeded_placement(&replay_args(), config, 2, false);
+        PlacementPolicy::<DirectRequest>::observe(
+            &mut placement,
+            RouterEventBatch(vec![target_prefix(1, 0, StorageTier::Device)]),
+            0.0,
+        )
+        .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!(placed.reported_overlap_tokens, overlap_tokens);
+    }
+
+    #[test]
+    fn approximate_index_expires_routing_decisions_after_router_ttl() {
+        let config = router_config_json(serde_json::json!({
+            "use_kv_events": false,
+            "router_ttl_secs": 1.0,
+        }));
+        let mut placement = seeded_placement(&replay_args(), config, 2, false);
+        let cached_blocks = |placement: &mut KvRouterPlacement, now_ms: f64| {
+            placement.router.apply_due_kv_events(now_ms).unwrap();
+            placement
+                .router
+                .indexer
+                .debug_snapshot()
+                .total_cached_blocks
+        };
+
+        let first = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!(first.reported_overlap_tokens, 0);
+        PlacementPolicy::<DirectRequest>::request_terminal(&mut placement, Uuid::from_u128(1), 1.0)
+            .unwrap();
+        // A repeat inside the TTL hits the decision the router recorded, and
+        // restarts the TTL of its blocks.
+        let repeat = place_now(&mut placement, &kv_fetch_target(2), 900.0);
+        assert_eq!(
+            (repeat.scheduler_id, repeat.reported_overlap_tokens),
+            (first.scheduler_id, 512)
+        );
+        PlacementPolicy::<DirectRequest>::request_terminal(
+            &mut placement,
+            Uuid::from_u128(2),
+            901.0,
+        )
+        .unwrap();
+        assert_eq!(cached_blocks(&mut placement, 1_850.0), 8);
+        assert_eq!(cached_blocks(&mut placement, 1_950.0), 0);
+        let expired = place_now(&mut placement, &kv_fetch_target(3), 1_950.0);
+        assert_eq!(expired.reported_overlap_tokens, 0);
+    }
+
+    #[test]
+    fn approximate_index_rejects_the_lru_cache_policy() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::Lru,
+            ..KvRouterConfig::default()
+        };
+        let Err(error) = KvRouterPlacement::new_with_selector_seed(
+            &replay_args(),
+            Some(config),
+            None,
+            &topology(2, 1, false),
+            Some(0),
+            WorkerType::Aggregated,
+            None,
+        ) else {
+            panic!("offline replay accepted the lru approximate cache policy");
+        };
+        assert!(
+            format!("{error:#}").contains("ttl retention, not lru"),
+            "{error:#}"
+        );
+    }
+
+    /// A removed worker's decision timers go with it, as in production, so their
+    /// expiry does not re-create the worker in the index.
+    #[test]
+    fn approximate_index_drops_a_removed_workers_timers() {
+        let config = router_config_json(serde_json::json!({
+            "use_kv_events": false,
+            "router_ttl_secs": 1.0,
+        }));
+        let mut placement = seeded_placement(&replay_args(), config, 2, false);
+        let worker = place_now(&mut placement, &kv_fetch_target(1), 0.0).scheduler_id;
+        PlacementPolicy::<DirectRequest>::request_terminal(&mut placement, Uuid::from_u128(1), 1.0)
+            .unwrap();
+        let indexed_workers =
+            |placement: &KvRouterPlacement| placement.router.indexer.tree.get_workers();
+        assert!(indexed_workers(&placement).contains(&(worker as WorkerId)));
+        placement.router.remove_worker(worker).unwrap();
+        placement.router.finalize_worker_removal(worker).unwrap();
+        placement.router.apply_due_kv_events(2_000.0).unwrap();
+        assert!(!indexed_workers(&placement).contains(&(worker as WorkerId)));
+    }
+
     /// Queues the target while both workers are busy and worker 1 holds its
-    /// prefix in G2.
-    fn queue_kv_fetch_target() -> KvRouterPlacement {
-        let mut placement = kv_fetch_placement(&queueing_args(), queueing_router_config(), 2, true);
+    /// prefix in G2, or with `cache_owner` in its KVCR-owned memory.
+    fn queue_kv_fetch_target(cache_owner: bool) -> KvRouterPlacement {
+        let mut args = queueing_args();
+        if cache_owner {
+            args.engine.kvcr = Some(
+                serde_json::from_value(serde_json::json!({"local_g2": {"num_blocks": 8}})).unwrap(),
+            );
+        }
+        let mut placement = kv_fetch_placement(&args, queueing_router_config(), 2, true);
         occupy_worker_1(&mut placement, 0);
         let worker_0_request = request_with_priorities(101, 8, 512, 0, 0);
         assert_eq!(
             place_now(&mut placement, &worker_0_request, 0.0).scheduler_id,
             0
         );
+        let holder = target_prefix_in_g2(1, 0);
         placement
             .router
-            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .on_kv_events(vec![if cache_owner {
+                cache_owned(holder)
+            } else {
+                holder
+            }])
             .unwrap();
         let effects = placement
             .place(&kv_fetch_target(1), KvReplayMetadata::default(), None, 0.0)
@@ -3996,36 +4576,49 @@ policy_classes:
 
     #[test]
     fn queued_request_gets_kv_fetch_hint_at_admission() {
-        let mut placement = queue_kv_fetch_target();
-        let admitted = admit_queued_kv_fetch_target(&mut placement);
-        assert_eq!(
-            (admitted.scheduler_id, admitted.kv_hints),
-            (0, fetch_hint(1))
-        );
+        for cache_owner in [false, true] {
+            let mut placement = queue_kv_fetch_target(cache_owner);
+            let admitted = admit_queued_kv_fetch_target(&mut placement);
+            assert_eq!(
+                (admitted.scheduler_id, admitted.kv_hints),
+                (0, fetch_hint(1)),
+                "cache owner {cache_owner}"
+            );
+        }
     }
 
     #[test]
     fn queued_request_gets_no_kv_fetch_hint_after_holder_drains() {
-        let mut placement = queue_kv_fetch_target();
-        // Candidates date from arrival and still name worker 1; eligibility is
-        // checked at admission.
-        let queued_holders = placement
-            .router
-            .pending
-            .entries()
-            .flat_map(|entry| entry.payload().kv_transfer_candidates.iter())
-            .flat_map(|candidates| candidates.owner_prefix_blocks.iter())
-            .map(|&(source, _)| source)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            queued_holders,
-            vec![KvTransferCandidateSource::Worker(WorkerWithDpRank::new(
-                1, 0
-            ))]
-        );
-        placement.router.remove_worker(1).unwrap();
-        let admitted = admit_queued_kv_fetch_target(&mut placement);
-        assert_eq!((admitted.scheduler_id, admitted.kv_hints), (0, None));
+        for cache_owner in [false, true] {
+            let mut placement = queue_kv_fetch_target(cache_owner);
+            // Candidates date from arrival and still name the holder; eligibility is
+            // checked at admission.
+            let queued_holders = placement
+                .router
+                .pending
+                .entries()
+                .flat_map(|entry| entry.payload().kv_transfer_candidates.iter())
+                .flat_map(|candidates| candidates.owner_prefix_blocks.iter())
+                .map(|&(source, _)| source)
+                .collect::<Vec<_>>();
+            let owners = queued_holders
+                .iter()
+                .filter(|holder| matches!(holder, KvTransferCandidateSource::CacheOwner(_)))
+                .count();
+            assert_eq!(owners, usize::from(cache_owner), "{queued_holders:?}");
+            assert!(
+                queued_holders.contains(&KvTransferCandidateSource::Worker(WorkerWithDpRank::new(
+                    1, 0
+                ))) || cache_owner
+            );
+            placement.router.remove_worker(1).unwrap();
+            let admitted = admit_queued_kv_fetch_target(&mut placement);
+            assert_eq!(
+                (admitted.scheduler_id, admitted.kv_hints),
+                (0, None),
+                "cache owner {cache_owner}"
+            );
+        }
     }
 
     #[test]
@@ -4072,6 +4665,67 @@ policy_classes:
             .unwrap();
         assert!(!placement.router.indexer.retain_kv_transfer_chain);
         assert!(pending.kv_transfer_candidates.is_none());
+    }
+
+    fn cache_owned(event: RouterEvent) -> RouterEvent {
+        let owner = replay_cache_owner(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
+        RouterEvent::with_cache_owner(event.worker_id, event.event, event.storage_tier, owner)
+    }
+
+    #[test]
+    fn cache_owners_are_the_kv_fetch_sources_of_their_ranks() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        args.engine.kvcr = Some(
+            serde_json::from_value(serde_json::json!({"local_g2": {"num_blocks": 8}})).unwrap(),
+        );
+        let mut placement = kv_fetch_placement(&args, router_config(), 2, true);
+        occupy_worker_1(&mut placement, 1);
+        // Worker 0 rank 0 caches the first block in G1, so the target lands there. Worker 1
+        // rank 1 holds the target in its own G2, which a worker with cache owners never serves.
+        placement
+            .router
+            .on_kv_events(vec![
+                target_prefix_in_g2(1, 1),
+                chain_store_event(0, 3, 0, &kv_fetch_target_hashes()[..1], StorageTier::Device),
+            ])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, None));
+
+        // The owner's chain is a source, and the engine pulls from the owner's rank.
+        placement
+            .router
+            .on_kv_events(vec![cache_owned(target_prefix_in_g2(1, 1))])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(2), 0.0);
+        assert_eq!(placed.kv_hints, fetch_hint(3));
+
+        // A draining worker's cache owner is no source.
+        placement.router.remove_worker(1).unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(3), 0.0);
+        assert_eq!(placed.kv_hints, None);
+
+        // The owner's residency scores for its rank until the worker's state is dropped,
+        // and a later worker with the same id starts without it.
+        let host_blocks = |placement: &KvRouterPlacement| {
+            let target = kv_fetch_target(4);
+            let pending = placement
+                .router
+                .build_pending_request(&target, target.max_output_tokens, None, None)
+                .unwrap();
+            let rank = WorkerWithDpRank::new(1, 1);
+            pending
+                .overlap
+                .tier_overlap_blocks
+                .host_pinned
+                .get(&rank)
+                .copied()
+        };
+        assert_eq!(host_blocks(&placement), Some(8));
+        placement.router.finalize_worker_removal(1).unwrap();
+        placement.router.add_worker(1, true).unwrap();
+        assert_eq!(host_blocks(&placement), None);
     }
 
     #[test]
