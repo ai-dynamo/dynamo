@@ -709,8 +709,8 @@ impl RoutingHost {
                 == Some(worker_id),
             "completion probe requires the exact pinned worker"
         );
+        let budget = CleanupBudget::default();
         if matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let budget = CleanupBudget::default();
             let (selection, _) = self
                 .select_with_affinity(request, phase, true, &budget)
                 .await?;
@@ -718,6 +718,11 @@ impl RoutingHost {
                 selection.worker.worker_id == worker_id,
                 "completion probe selected a different worker"
             );
+        } else {
+            self.select_with_session_affinity(request, phase, true, &budget, |_| {
+                std::future::ready(Ok(()))
+            })
+            .await?;
         }
         self.inner.ensure_dispatchable(worker_id)
     }

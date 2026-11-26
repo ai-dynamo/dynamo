@@ -1380,7 +1380,21 @@ async fn handler_completions(
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     if request.inner.max_tokens == Some(0) {
-        return probe_completion_route(&state, request, &headers).await;
+        let request_id = get_or_create_request_id(&headers);
+        request.inner.model = state.manager().resolve_canonical_name(&request.inner.model);
+        let metric_model = state.manager().metric_model_for(&request.inner.model);
+        let mut inflight = state.metrics_clone().create_inflight_guard(
+            metric_model,
+            Endpoint::Completions,
+            request.inner.stream.unwrap_or(false),
+            &request_id,
+        );
+        let response = probe_completion_route(&state, request, request_id, &headers).await;
+        match &response {
+            Ok(_) => inflight.mark_ok(),
+            Err(error) => inflight.mark_error(extract_error_type_from_response(error)),
+        }
+        return response;
     }
 
     // create the context for the request
@@ -1432,7 +1446,8 @@ async fn handler_completions(
 /// Check a pinned aggregate route without invoking a serving engine.
 async fn probe_completion_route(
     state: &Arc<service_v2::State>,
-    mut request: NvCreateCompletionRequest,
+    request: NvCreateCompletionRequest,
+    request_id: String,
     headers: &HeaderMap,
 ) -> Result<Response, ErrorResponse> {
     use crate::protocols::openai::completions::get_prompt_batch_size;
@@ -1452,7 +1467,6 @@ async fn probe_completion_route(
         ));
     }
     validate_completion_stream_options(&request)?;
-    request.inner.model = state.manager().resolve_canonical_name(&request.inner.model);
     let max_logprobs = request_max_logprobs(state, &request.inner.model, request.inner.logprobs);
     request
         .validate_route_probe(max_logprobs)
@@ -1464,12 +1478,10 @@ async fn probe_completion_route(
         return Err(unavailable(model_not_ready_message(&request.inner.model)));
     };
     let model_name = request.inner.model.clone();
-    let context = context_from_headers_with_input_trigger(
-        request,
-        get_or_create_request_id(headers),
-        headers,
-        |request| Some(classify_completion_request(request)),
-    )?;
+    let context =
+        context_from_headers_with_input_trigger(request, request_id, headers, |request| {
+            Some(classify_completion_request(request))
+        })?;
     if !probe
         .check(context, worker_id)
         .await
@@ -8015,6 +8027,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn completion_route_probe_checks_held_target_without_dispatch() {
+        use dynamo_http_server::metrics::{RequestType, Status};
+
         use crate::{
             discovery::{LoadThresholdHandle, WorkerSet},
             entrypoint::input::CompletionRouteProbe,
@@ -8089,7 +8103,9 @@ mod tests {
                 .model_manager()
                 .add_worker_set("probe-model", "completion-probe", set)
         );
-        let (_, router) = completions_router(service.state_clone(), None);
+        let state = service.state_clone();
+        let metrics = state.metrics_clone();
+        let (_, router) = completions_router(state, None);
 
         // Neither instance has a serving endpoint. A worker dispatch cannot pass this probe.
         for (worker_id, expected) in [
@@ -8117,6 +8133,23 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "worker {worker_id:?}");
         }
+        for (status, error_type) in [
+            (Status::Success, ErrorType::None),
+            (Status::Error, ErrorType::Unavailable),
+            (Status::Error, ErrorType::Validation),
+        ] {
+            assert_eq!(
+                metrics.get_request_counter(
+                    "probe-model",
+                    &Endpoint::Completions,
+                    &RequestType::Unary,
+                    &status,
+                    &error_type,
+                ),
+                1,
+            );
+        }
+        assert_eq!(metrics.get_inflight_count("probe-model"), 0);
 
         runtime.shutdown();
     }
