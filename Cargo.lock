@@ -2548,6 +2548,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-dummy-parser"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "dynamo-parsers-v2",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
 version = "1.8.0"
 dependencies = [
@@ -2978,6 +2987,7 @@ dependencies = [
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-multimodal",
+ "dynamo-parser-plugin-catalog",
  "dynamo-parsers",
  "dynamo-parsers-v2",
  "dynamo-protocols 10.0.1",
@@ -3236,6 +3246,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-parser-plugin-catalog"
+version = "1.8.0"
+dependencies = [
+ "dynamo-dummy-parser",
+ "dynamo-parsers-v2",
+]
+
+[[package]]
 name = "dynamo-parsers"
 version = "11.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,7 +3263,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "dynamo-protocols 10.0.1",
- "dynamo-structural-tag",
+ "dynamo-structural-tag 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -3262,12 +3280,11 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1211739971e54b388ccfe341e9cabb5cb77dfe0c17c43effae542d5c76640ec"
+version = "0.10.11"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4#f4fe89926bc0a525a0bc6f62cd836d00d7267dd4"
 dependencies = [
  "anyhow",
- "dynamo-structural-tag",
+ "dynamo-structural-tag 0.1.2 (git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4)",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -3688,6 +3705,18 @@ name = "dynamo-structural-tag"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8350d3089f5f140c6f8dfcdbdf77b2c1e97b0bcc1b67b4d32a06a41426ea7085"
+dependencies = [
+ "anyhow",
+ "jsonschema 0.29.1",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dynamo-structural-tag"
+version = "0.1.2"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=f4fe89926bc0a525a0bc6f62cd836d00d7267dd4#f4fe89926bc0a525a0bc6f62cd836d00d7267dd4"
 dependencies = [
  "anyhow",
  "jsonschema 0.29.1",

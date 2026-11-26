@@ -35,6 +35,8 @@ members = [
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
     "lib/generate-format-catalog",
+    "examples/parser-plugins/dummy-parser",
+    "examples/parser-plugins/catalog",
     "lib/generate-formats/sglang",
     "lib/generate-formats/vllm",
     "examples/router/custom-policy-example/soft-pin-repin",
@@ -118,7 +120,8 @@ dynamo-parsers = { version = "=11.0.11" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "=0.10.3" }
+# Draft: switch back to the crates.io release once UnifiedFamily is published.
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates", rev = "f4fe89926bc0a525a0bc6f62cd836d00d7267dd4" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.8.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.8.0" }
 

@@ -2664,7 +2664,9 @@ impl OpenAIPreprocessor {
 
     /// Families verified to have no supported non-thinking generation mode.
     fn reasoning_is_mandatory(family: Option<&str>) -> bool {
-        matches!(family, Some("beam"))
+        family
+            .and_then(dynamo_parsers_v2::unified_family_info)
+            .is_some_and(|info| info.thinking == dynamo_parsers_v2::ThinkingPolicy::Mandatory)
     }
 
     /// Validate the client's effective reasoning toggle against the model's policy.
@@ -7855,7 +7857,13 @@ impl OpenAIPreprocessor {
                 beam_prompt_open_channel(prompt)
                     == Some(dynamo_parsers_v2::UnifiedParserStartingState::Reasoning)
             }
-            _ => prompt.ends_with("<think>"),
+            _ => {
+                let opener = reasoning_parser
+                    .and_then(dynamo_parsers_v2::unified_family_info)
+                    .and_then(|info| info.reasoning)
+                    .map_or("<think>", |markers| markers.open);
+                prompt.ends_with(opener)
+            }
         }
     }
 
@@ -15742,6 +15750,29 @@ mod tests {
                 Some("...<|channel>thought"),
             ),
             "mismatched parser families must keep the configured reasoning parser"
+        );
+    }
+
+    #[test]
+    fn linked_parser_uses_its_registered_reasoning_opener() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::linked_parser_uses_its_registered_reasoning_opener"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        dynamo_parser_plugin_catalog::register();
+        let alias = Some("dummy-alias");
+        let open = Some("assistant\n<dummy:think>\n");
+        let closed = Some("assistant\n<dummy:think></dummy:think>\n");
+        assert!(
+            OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(alias, None, open).unified
+        );
+        assert!(
+            !OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(alias, None, closed).unified
         );
     }
 

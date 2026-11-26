@@ -379,6 +379,9 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    #[cfg(feature = "static-parser-catalog")]
+    dynamo_parser_plugin_catalog::register();
+
     let mut formats = dynamo_llm::generate_format::Registry::default();
     dynamo_generate_format_catalog::register(&mut formats)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-dummy-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A toy reasoning + tool-call parser used to try out parser plugin designs"
+
+[dependencies]
+anyhow = { workspace = true }
+dynamo-parsers-v2 = { workspace = true }
+serde_json = { workspace = true }
