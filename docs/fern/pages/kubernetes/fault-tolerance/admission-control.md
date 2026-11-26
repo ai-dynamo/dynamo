@@ -6,11 +6,12 @@ subtitle: Configure the backend admission gate in a Kubernetes deployment.
 ---
 
 Backend admission control limits requests inside each engine and queues excess work outside it.
-Configure the gate on the worker containers in your DynamoGraphDeployment (DGD). It covers
-token-based workers: Dynamo Python workers, including unified backend `LLMEngine` workers, and the
-vLLM, SGLang, TensorRT-LLM, and LPX sidecars. Workers built on a unified backend `RawEngine`, such as
-Python `DiffusionEngine` workers and the Triton sidecar, have no gate, so these settings have no
-effect on them. See [Backend](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
+Configure the gate on the worker containers in your DynamoGraphDeployment (DGD). It covers Dynamo
+Python workers that register a model, including unified backend `LLMEngine` workers and the
+TensorRT-LLM and SGLang diffusion workers, and the vLLM, SGLang, TensorRT-LLM, and LPX sidecars.
+Workers built on a unified backend `RawEngine`, such as Python workers whose engine subclasses the
+unified backend `DiffusionEngine` (for example, `SampleDiffusionEngine`) and the Triton sidecar,
+have no gate, so these settings have no effect on them. See [Backend](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
 
 For behavior and tuning guidance, see
 [Admission Control Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md).
