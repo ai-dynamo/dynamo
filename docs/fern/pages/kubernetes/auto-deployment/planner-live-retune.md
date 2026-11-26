@@ -106,7 +106,7 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   `metadata.generation`. Retune does not consume role Pod templates, commands, arguments, or
   environment lists from spec or status.
 
-## Configure the frontend
+## Enable Retune wiring
 
 Enable `retune` on the component whose type is `planner`, and reference an existing writable trace
 claim. The operator selects the one `frontend` component by type, independently of its name. The
@@ -208,6 +208,9 @@ as described in [Roll out](#roll-out).
 
 The admin listener is unauthenticated: admit only the Planner to port `8002` before enabling the
 feature ([Security](#security) has a NetworkPolicy). No NetworkPolicy is created automatically.
+
+Trace capture has these limits:
+
 - Records are dropped without a count for `prompt_embeds`, multimodal, `n > 1` and `best_of > 1`
   requests, and when the writer lags or a batch write fails.
 - The trace holds unkeyed xxh3 hash chains of the prompts. Anyone who can create pods in the
@@ -385,7 +388,7 @@ retries:
 |---|---|
 | P4 | The supported versioned launch contract resolves the three startup router values using existing SDK defaults |
 | P7 | Known served-model projections do not disagree; the frontend is not an EPP or a `frontendSidecar` |
-| P8 | Effective router configuration satisfies frontend replica-synchronization requirements |
+| P8 | One frontend replica, or synchronized routers (`router_replica_sync`, which Retune enables by default) |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
 | P10 | A published target hash matches the immutable launch hash; pending publication pauses without rollback. Explicitly configured legacy trace-storage values agree with the launch contract |
 | P14 | Every router's startup policy parameters match the values resolved from the semantic launch contract |
@@ -424,7 +427,8 @@ status does not establish that all workers serve the same model.
 1. Set `advisory: true` and wait until `dynamo_planner_retune_router_converged` is 1 and
    `dynamo_planner_retune_rollback_pending` is 0. The routers are then back at their startup
    parameters. The mode stored in the state alone does not show that.
-2. Remove `retune` from the Planner configuration.
+2. Remove `retune` from the Planner `--config` file. Leave the DGD component's `retune` field
+   in place for now.
 3. Keep the Planner component's operator-owned `retune` wiring enabled while cleanup completes,
    so the old frontend admin endpoint and trace storage remain reachable.
 4. Delete the Planner's Requests and both Leases. Select the Requests by the DGD's
@@ -445,7 +449,7 @@ status does not establish that all workers serve the same model.
 5. Set the Planner component's `retune.enabled` to `false`, or remove that component field. This
    removes the operator-owned wiring on the next normal frontend/Planner rollout. Do not remove
    the wiring before confirming router rollback.
-6. Delete `<segments_dir>/<dgd>` and `<windows_dir>/<dgd>` from the claim.
+6. Delete `segments/<dgd>` and `windows/<dgd>` from the claim.
 
 Before upgrading the operator or its CRDs, switch to advisory or disable retune, then delete the
 retune Requests.
@@ -468,7 +472,7 @@ again, cleanup waits for the Pod to be replaced or enter `Succeeded` or `Failed`
 - **Frontend admin API.** The Planner calls `/router_policy` on each frontend's admin listener,
   which has no authentication. The same listener serves the busy-threshold API
   (`/busy_threshold` and `/router_policy/busy_threshold`), and a threshold set there makes the
-  frontend reject requests. [Configure the frontend](#configure-the-frontend) binds the listener
+  frontend reject requests. [Enable Retune wiring](#enable-retune-wiring) binds the listener
   to the Pod's IP, so anything that reaches a frontend Pod on port `8002`
   can change its router policies and its busy thresholds. Admit only the Planner to that
   port, for example with the NetworkPolicy below, and do not expose it through a Service or an
@@ -476,7 +480,7 @@ again, cleanup waits for the Pod to be replaced or enter `Succeeded` or `Failed`
   launches no windows (P12) and logs why.
 - **Ownership.** Outside advisory mode the Planner owns the eight router policy parameters and
   reverts manual changes.
-- **Trace data.** See the privacy note in [Configure the frontend](#configure-the-frontend).
+- **Trace data.** See the privacy note in [Enable Retune wiring](#enable-retune-wiring).
 
 For a DGD named `my-dgd`, this NetworkPolicy admits only its Planner pods to port 8002 of its
 frontend pods and leaves every other port of the frontends as open as with no policy: the other

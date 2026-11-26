@@ -815,13 +815,13 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     <ParamField path="claim_name" type="string" deprecated={true}>
       Optional compatibility setting. Trace storage comes from the operator-injected launch contract. An explicitly supplied claim must match that binding; omission does not infer a claim from authored Pod templates.
     </ParamField>
-    <ParamField path="mount_path" type="string" default="/trace">
+    <ParamField path="mount_path" type="string" default="/trace" deprecated={true}>
       Optional compatibility setting for the absolute trace mount. The launch contract supplies the actual path. An explicitly supplied value must match it.
     </ParamField>
-    <ParamField path="segments_dir" type="string" default="segments">
+    <ParamField path="segments_dir" type="string" default="segments" deprecated={true}>
       Optional compatibility setting for the claim-relative frontend trace directory. The launch contract supplies the actual directory; an explicitly supplied value must match it. The layout is `<segments_dir>/<dgd>/<pod>/`.
     </ParamField>
-    <ParamField path="windows_dir" type="string" default="windows">
+    <ParamField path="windows_dir" type="string" default="windows" deprecated={true}>
       Optional compatibility setting for the claim-relative replay-window directory. The launch contract supplies the actual directory; an explicitly supplied value must match it. Window files use `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, where `<selection>` is a digest of the window's start, end, and cutoff.
     </ParamField>
     <ParamField path="phase_seconds" type="number" default="0.0">

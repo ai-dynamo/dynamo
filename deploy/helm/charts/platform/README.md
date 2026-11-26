@@ -291,7 +291,7 @@ with the launch binding. Restrict access to frontend admin
 port `8002`; the current listener is unauthenticated and no NetworkPolicy is created automatically.
 
 Retune state now checkpoints the previous wiring and router process identities in Lease format v2.
-The new Planner reads v1 state, but older Planners cannot write v2 state. Before downgrading,
+The new Planner reads v1 state, but older Planners cannot read v2 state. Before downgrading,
 use the new Planner to finish rollback and cleanup, then remove its Retune Leases.
 
 **Existing deployments:** An absent or disabled component setting leaves workload templates
