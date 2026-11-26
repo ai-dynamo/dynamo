@@ -44,21 +44,26 @@ pub(crate) struct Listener {
     pub bootstrap_port: Option<u16>,
 }
 
-/// Each running dispatch's listener index and rid suffix, keyed by the
-/// address of its context allocation.
-type Dispatches = Arc<Mutex<HashMap<usize, (usize, u32)>>>;
+/// One running dispatch: its listener index, its token, and whether its rid
+/// is the public ID alone.
+type Running = (usize, u32, bool);
+
+/// Each running dispatch, keyed by the address of its context allocation.
+type Dispatches = Arc<Mutex<HashMap<usize, Running>>>;
 
 /// Each critical section is one map operation, so a panic elsewhere cannot
 /// leave the map half-updated, and a poisoned lock is still safe to use.
-fn lock(
-    dispatches: &Mutex<HashMap<usize, (usize, u32)>>,
-) -> MutexGuard<'_, HashMap<usize, (usize, u32)>> {
+fn lock(dispatches: &Mutex<HashMap<usize, Running>>) -> MutexGuard<'_, HashMap<usize, Running>> {
     dispatches.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A dispatch's rid: its public ID plus `suffix` in hex.
-fn dispatch_rid(id: &str, suffix: u32) -> String {
-    format!("{id}-{suffix:08x}")
+/// A dispatch's rid: its public ID, plus `suffix` in hex unless `public`.
+fn dispatch_rid(id: &str, suffix: u32, public: bool) -> String {
+    if public {
+        id.to_string()
+    } else {
+        format!("{id}-{suffix:08x}")
+    }
 }
 
 fn context_key(ctx: &Arc<dyn AsyncEngineContext>) -> usize {
@@ -112,7 +117,7 @@ impl Drop for Dispatched {
         // A later dispatch of the same context owns the entry.
         if dispatches
             .get(&key)
-            .is_some_and(|&(_, suffix)| suffix == self.suffix)
+            .is_some_and(|&(_, suffix, _)| suffix == self.suffix)
         {
             dispatches.remove(&key);
         }
@@ -183,9 +188,24 @@ impl NodeListeners {
     /// aborts every generation that shares a rid. The record lasts until the
     /// returned guard drops.
     pub(crate) fn dispatch(&self, ctx: Arc<dyn AsyncEngineContext>, index: usize) -> Dispatched {
+        self.record(ctx, index, false)
+    }
+
+    /// Like [`Self::dispatch`], under the public ID itself. An external
+    /// encoder addresses its embeddings to that ID, so SGLang must know the
+    /// request by it.
+    pub(crate) fn dispatch_public(
+        &self,
+        ctx: Arc<dyn AsyncEngineContext>,
+        index: usize,
+    ) -> Dispatched {
+        self.record(ctx, index, true)
+    }
+
+    fn record(&self, ctx: Arc<dyn AsyncEngineContext>, index: usize, public: bool) -> Dispatched {
         let suffix = rand::random::<u32>();
-        let rid = dispatch_rid(ctx.id(), suffix);
-        lock(&self.dispatches).insert(context_key(&ctx), (index, suffix));
+        let rid = dispatch_rid(ctx.id(), suffix, public);
+        lock(&self.dispatches).insert(context_key(&ctx), (index, suffix, public));
         Dispatched {
             dispatches: self.dispatches.clone(),
             context: ctx,
@@ -196,8 +216,8 @@ impl NodeListeners {
 
     /// The listener index and rid that `ctx` runs under, while it runs.
     fn running(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<(usize, String)> {
-        let (index, suffix) = *lock(&self.dispatches).get(&context_key(ctx))?;
-        Some((index, dispatch_rid(ctx.id(), suffix)))
+        let (index, suffix, public) = *lock(&self.dispatches).get(&context_key(ctx))?;
+        Some((index, dispatch_rid(ctx.id(), suffix, public)))
     }
 
     /// Abort the request of `ctx` by its own rid, on the listener that runs
@@ -393,6 +413,11 @@ mod tests {
         assert_eq!(listeners.running(&ctx), Some((1, later.rid().into())));
         drop(later);
         assert!(lock(&listeners.dispatches).is_empty());
+
+        // An encoder handoff runs and aborts under the public ID itself.
+        let public = listeners.dispatch_public(failed.clone(), 1);
+        assert_eq!(public.rid(), "same-id");
+        assert_eq!(listeners.running(&failed), Some((1, "same-id".into())));
     }
 
     #[tokio::test]

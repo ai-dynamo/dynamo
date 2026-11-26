@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import subprocess
 import sys
@@ -17,22 +18,14 @@ LAUNCHER = Path(__file__).resolve().parents[2] / "lib/sidecar/sglang/launch/enco
     [
         (["--single-gpu"], "GPU-X", ["GPU-X", "GPU-X"]),
         (
-            ["--tp-size", "4", "--colocate", "--split-pd"],
+            ["--tp-size", "4", "--colocate"],
             "6,3,2,5",
-            ["6,3,2,5", "6,3,2,5", "6,3,2,5"],
+            ["6,3,2,5", "6,3,2,5"],
         ),
         (
-            [
-                "--tp-size",
-                "2",
-                "--encoder-tp-size",
-                "1",
-                "--encoders",
-                "2",
-                "--split-pd",
-            ],
-            "6,4,3,8,0,1",
-            ["6", "4", "3,8", "0,1"],
+            ["--tp-size", "2", "--encoder-tp-size", "1", "--encoders", "2"],
+            "6,4,3,8",
+            ["6", "4", "3,8"],
         ),
         (
             ["--encoder-tp-size", "1", "--", "--tensor-parallel-size=2"],
@@ -88,21 +81,34 @@ sleep 0.3
     assert launches == [f"{group} {len(group.split(','))}" for group in groups]
 
 
-@pytest.mark.parametrize("existing_key", [False, True])
-def test_epd_workers_share_handoff_key(tmp_path, existing_key):
-    # Each E/P/D process observes the file while the launcher's children are live.
+def test_epd_roles_follow_the_native_encoder_contract(tmp_path):
+    # E is the plain HTTP encoder; only the language worker runs the Rust
+    # server in external-encoder mode. Each role records what it was given.
     recorder = tmp_path / "record"
     recorder.write_text(
         f"#!{sys.executable}\n"
-        """import os, sys
+        """import json, os, sys
 from pathlib import Path
-if "sglang.launch_server" in sys.argv:
-    assert os.environ["SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF"] == "1"
-    assert os.environ["SGLANG_RUST_SERVER"] == ("0" if "--encoder-only" in sys.argv else "1")
-    key = Path(os.environ["SGLANG_ENCODER_HANDOFF_KEY_FILE"])
-    assert len(key.read_bytes()) == 32
-    port = sys.argv[sys.argv.index("--nccl-port") + 1]
-    (Path(os.environ["RECORDS"]) / port).write_text(str(key))
+records = Path(os.environ["RECORDS"])
+argv = sys.argv[1:]
+if "sglang.launch_server" in argv:
+    assert argv[argv.index("--encoder-transfer-backend") + 1] == "zmq_to_scheduler"
+    assert "--grpc-mode" not in argv and "--disaggregation-mode" not in argv
+    if "--encoder-only" in argv:
+        assert "SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF" not in os.environ
+        assert "SGLANG_RUST_SERVER" not in os.environ
+        assert "--grpc-port" not in argv and "--language-only" not in argv
+        role = "encoder"
+    else:
+        assert os.environ["SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF"] == "1"
+        assert os.environ["SGLANG_RUST_SERVER"] == "1"
+        assert "--language-only" in argv and "--grpc-port" in argv
+        role = "language"
+    port = argv[argv.index("--port") + 1]
+    (records / f"engine-{role}-{port}").write_text("")
+elif "--grpc-endpoint" in argv:
+    name = "sidecar-" + os.environ["DYN_SYSTEM_PORT"]
+    (records / name).write_text(json.dumps(argv))
 """
     )
     recorder.chmod(0o755)
@@ -113,13 +119,22 @@ if "sglang.launch_server" in sys.argv:
         "SGLANG_PYTHON": str(recorder),
         "DYNAMO_SIDECAR_BIN": str(recorder),
         "DYN_LAUNCH_WAIT_ALL": "1",
+        # The launcher must not pass the language worker's mode to E.
+        "SGLANG_RUST_SERVER": "1",
+        "SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF": "1",
     }
-    supplied = tmp_path / "existing.key"
-    if existing_key:
-        supplied.write_bytes(os.urandom(32))
-        env["SGLANG_ENCODER_HANDOFF_KEY_FILE"] = str(supplied)
     subprocess.run(
-        [str(LAUNCHER), "--split-pd", "--single-gpu"],
+        [
+            str(LAUNCHER),
+            "--encoders",
+            "2",
+            "--single-gpu",
+            "--model",
+            "test/model",
+            "--",
+            "--served-model-name",
+            "vision",
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -127,9 +142,44 @@ if "sglang.launch_server" in sys.argv:
         start_new_session=True,
         timeout=20,
     )
-    paths = [Path(result.read_text()) for result in tmp_path.glob("[0-9]*")]
-    assert len(paths) == 3 and len(set(paths)) == 1
-    if existing_key:
-        assert paths[0] == supplied and supplied.is_file()
-    else:
-        assert not paths[0].exists()
+    engines = sorted(path.name for path in tmp_path.glob("engine-*"))
+    assert engines == [
+        "engine-encoder-30003",
+        "engine-encoder-30006",
+        "engine-language-30009",
+    ]
+    sidecars = [
+        json.loads(path.read_text()) for path in sorted(tmp_path.glob("sidecar-*"))
+    ]
+    assert len(sidecars) == 3
+    for port, sidecar in zip((30003, 30006), sidecars):
+        assert sidecar == [
+            "--disaggregation-mode",
+            "encode",
+            "--grpc-endpoint",
+            f"127.0.0.1:{port}",
+            "--encoder-model-path",
+            "test/model",
+            "--encoder-served-model-name",
+            "vision",
+        ]
+    assert sidecars[2] == ["--grpc-endpoint", "127.0.0.1:30010", "--route-to-encoder"]
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (["--split-pd", "--single-gpu"], "--split-pd is not supported"),
+        (["--encoder-transfer-backend", "nixl"], "Unknown option"),
+    ],
+)
+def test_epd_launcher_rejects_unsupported_topologies(options, message):
+    result = subprocess.run(
+        [str(LAUNCHER), *options],
+        env={"PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 2
+    assert message in result.stderr

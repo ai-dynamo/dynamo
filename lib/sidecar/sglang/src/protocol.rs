@@ -136,22 +136,17 @@ pub(crate) fn build_generate_request(
     };
     let routing = request.routing.as_ref();
     let disaggregated = resolve_disaggregated_params(request, mode, target)?;
-    // The selected encoder already owns the embedding. Omit source media on
-    // this wire even though Dynamo retains it for routing and retries.
-    let encoder_handoff = request.encoder_result.as_ref().map(Value::to_string);
+    // The selected encoder delivers the embeddings. SGLang refuses source
+    // media beside a handoff, though Dynamo retains it for routing and retries.
+    let encoder_handoff = request
+        .encoder_result
+        .as_ref()
+        .map(|result| crate::encoder::handoff(result).map(|handoff| handoff.to_string()))
+        .transpose()?;
     let [image_data, video_data, audio_data] = if encoder_handoff.is_some() {
         [None, None, None]
     } else {
         media_data(request)?
-    };
-    let mm_hashes = if let Some(handoff) = &request.encoder_result {
-        caller_hashes(request, handoff)?.map(|items| pb::StringListOrList {
-            value: Some(pb::string_list_or_list::Value::One(pb::StringList {
-                items,
-            })),
-        })
-    } else {
-        None
     };
 
     // `routed_dp_rank` is not sent: SGLang's Rust listeners run a request on
@@ -189,7 +184,6 @@ pub(crate) fn build_generate_request(
             .map(i64::from),
         image_data,
         encoder_handoff,
-        mm_hashes,
         video_data,
         audio_data,
         priority: routing.and_then(|routing| routing.priority).map(i64::from),
@@ -213,56 +207,6 @@ pub(crate) fn build_generate_request(
         generate,
         disaggregated.as_ref().map(disaggregated_params_to_json),
     ))
-}
-
-/// Dynamo's frontend supplies these scalar cache-key overrides independently
-/// of the native encoder's 32-byte content identities.
-fn caller_hashes(
-    request: &PreprocessedRequest,
-    handoff: &Value,
-) -> Result<Option<Vec<String>>, DynamoError> {
-    let Some(extra) = request.extra_args.as_ref() else {
-        return Ok(None);
-    };
-    let items = if let Some(value) = extra.get("mm_hashes") {
-        serde_json::from_value(value.clone()).map_err(|_| {
-            client::invalid_request("extra_args.mm_hashes must be a list of strings")
-        })?
-    } else if let Some(value) = extra.get("mm_hashes_by_modality") {
-        let counts =
-            ["images", "videos", "audios"].map(|key| handoff[key].as_array().map_or(0, Vec::len));
-        grouped_media_hashes(value, counts)?
-    } else {
-        return Ok(None);
-    };
-    Ok(Some(items))
-}
-
-/// Staged SGLang accepts one routing hint per source, grouped in wire order.
-fn grouped_media_hashes(value: &Value, counts: [usize; 3]) -> Result<Vec<String>, DynamoError> {
-    #[derive(Default, serde::Deserialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct Hashes {
-        image: Vec<String>,
-        video: Vec<String>,
-        audio: Vec<String>,
-    }
-    let groups: Hashes = serde::Deserialize::deserialize(value).map_err(|_| {
-        client::invalid_request(
-            "mm_hashes_by_modality must contain image, video or audio string lists",
-        )
-    })?;
-    if [groups.image.len(), groups.video.len(), groups.audio.len()] != counts {
-        return Err(client::invalid_request(
-            "mm_hashes_by_modality must match the staged source count for each modality",
-        ));
-    }
-    Ok(groups
-        .image
-        .into_iter()
-        .chain(groups.video)
-        .chain(groups.audio)
-        .collect())
 }
 
 /// The request's image, video and audio items, one list per modality. SGLang

@@ -19,8 +19,7 @@ use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
 
-use crate::discovery::{self, Discovery};
-use crate::encoder::{self, NativeBackend};
+use crate::discovery::{self, Discovery, EngineInfo};
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
@@ -235,25 +234,15 @@ pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
     bootstrap: bool,
-) -> Result<NativeBackend, DynamoError> {
+) -> Result<EngineInfo, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let channel = connect_channel(endpoint, transport, deadline, bootstrap).await?;
-    let encoder = encoder::client(channel.clone());
-    let info = retry_unavailable(transport.retry_interval, deadline, || {
-        let mut encoder = encoder.clone();
-        async move { encoder::discover(&mut encoder, deadline).await }
-    })
-    .await?;
-    if let Some(info) = info {
-        return Ok(NativeBackend::Encoder(Box::new(info)));
-    }
-    let client = client_from_channel(channel);
+    let client = connect(endpoint, transport, deadline, bootstrap).await?;
     let discovery = retry_unavailable(transport.retry_interval, deadline, || {
         let mut client = client.clone();
         async move { discover(&mut client, deadline).await }
     })
     .await?;
-    discovery::engine_info(discovery).map(Into::into)
+    discovery::engine_info(discovery)
 }
 
 /// What one try of a startup wait found.
@@ -356,29 +345,18 @@ pub async fn connect(
     deadline: Instant,
     bootstrap: bool,
 ) -> Result<Client, DynamoError> {
-    Ok(client_from_channel(
-        connect_channel(uri, cfg, deadline, bootstrap).await?,
-    ))
-}
-
-pub(crate) async fn connect_channel(
-    uri: &GrpcEndpoint,
-    cfg: &GrpcTransportConfig,
-    deadline: Instant,
-    bootstrap: bool,
-) -> Result<Channel, DynamoError> {
     let cfg = GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         ..*cfg
     };
     let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
-    Ok(pool.next_channel())
+    Ok(client_from_channel(pool.next_channel()))
 }
 
 /// `GrpcChannelPool` starts its own deadline from `cfg.startup_deadline`;
 /// `deadline` also bounds it, because callers start their startup budget
 /// before connecting.
-pub(crate) async fn connect_pool(
+async fn connect_pool(
     uri: &GrpcEndpoint,
     cfg: GrpcTransportConfig,
     deadline: Instant,
@@ -503,49 +481,33 @@ pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool
 }
 
 const SERVING_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const SERVING_POLL_TIMEOUT: Duration = Duration::from_secs(5);
-const SERVING_POLL_FAILURES: u32 = 3;
+pub(crate) const SERVING_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SERVING_POLL_FAILURES: u32 = 3;
 
 /// api.v1 has no engine-state stream, so this polls GetModelInfo and returns
 /// why once a poll cannot reach SGLang (UNAVAILABLE), or once
 /// [`SERVING_POLL_FAILURES`] polls in a row fail otherwise or time out.
 /// SGLang answers GetModelInfo from static metadata. HealthCheck instead runs
 /// a probe generation, which also fails while the scheduler is paused.
-pub(crate) async fn watch_serving(client: Client, attempt_timeout: Duration) -> String {
-    watch_metadata("GetModelInfo", attempt_timeout, || {
-        let mut client = client.clone();
-        async move {
-            client
-                .get_model_info(pb::GetModelInfoRequest {})
-                .await
-                .map(|_| ())
-        }
-    })
-    .await
-}
-
-pub(crate) async fn watch_metadata<F: Future<Output = Result<(), tonic::Status>>>(
-    method: &str,
-    attempt_timeout: Duration,
-    mut poll: impl FnMut() -> F,
-) -> String {
+pub(crate) async fn watch_serving(mut client: Client, attempt_timeout: Duration) -> String {
     let poll_timeout = attempt_timeout.min(SERVING_POLL_TIMEOUT);
     let mut failures = 0;
     loop {
         tokio::time::sleep(SERVING_POLL_INTERVAL).await;
-        let failure = match tokio::time::timeout(poll_timeout, poll()).await {
+        let request = client.get_model_info(pb::GetModelInfoRequest {});
+        let failure = match tokio::time::timeout(poll_timeout, request).await {
             Ok(Ok(_)) => {
                 failures = 0;
                 continue;
             }
             Ok(Err(status)) if status.code() == tonic::Code::Unavailable => {
-                return format!("{method}: {} ({:?})", status.message(), status.code());
+                return format!("GetModelInfo: {} ({:?})", status.message(), status.code());
             }
-            Ok(Err(status)) => format!("{method}: {} ({:?})", status.message(), status.code()),
-            Err(_) => format!("{method} did not answer in {poll_timeout:?}"),
+            Ok(Err(status)) => format!("GetModelInfo: {} ({:?})", status.message(), status.code()),
+            Err(_) => format!("GetModelInfo did not answer in {poll_timeout:?}"),
         };
         failures += 1;
-        tracing::debug!(failures, %failure, method, "SGLang metadata poll failed");
+        tracing::debug!(failures, %failure, "SGLang GetModelInfo poll failed");
         if failures == SERVING_POLL_FAILURES {
             return format!("{failure}; {failures} polls in a row failed");
         }
@@ -680,13 +642,6 @@ pub(crate) fn stream_incomplete(message: impl Into<String>) -> DynamoError {
     backend(BackendError::StreamIncomplete, message)
 }
 
-pub(crate) fn invalid_stage_reply(message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::BackendProtocol)
-        .message(message)
-        .build()
-}
-
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }
@@ -697,16 +652,6 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
             BackendError::InvalidArgument
         }
         tonic::Code::Unavailable => BackendError::CannotConnect,
-        // The staged encoder uses RESOURCE_EXHAUSTED when all lease slots are full.
-        tonic::Code::ResourceExhausted if rpc == "Stage" => BackendError::WorkerOverloaded,
-        // Tonic reports its own gRPC transport deadline as CANCELLED. A peer's
-        // cancellation has no local TimeoutExpired source and remains cancelled.
-        tonic::Code::Cancelled
-            if std::iter::successors(std::error::Error::source(&status), |e| (*e).source())
-                .any(|e| e.is::<tonic::TimeoutExpired>()) =>
-        {
-            BackendError::ConnectionTimeout
-        }
         tonic::Code::Cancelled => BackendError::Cancelled,
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
@@ -870,7 +815,6 @@ mod tests {
             (tonic::Code::NotFound, BackendError::InvalidArgument),
             (tonic::Code::OutOfRange, BackendError::InvalidArgument),
             (tonic::Code::Unavailable, BackendError::CannotConnect),
-            (tonic::Code::ResourceExhausted, BackendError::Unknown),
             (tonic::Code::Cancelled, BackendError::Cancelled),
             (
                 tonic::Code::DeadlineExceeded,
@@ -903,18 +847,6 @@ mod tests {
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::CannotConnect)
-        );
-
-        let stage_full = status_to_dynamo("Stage", tonic::Status::resource_exhausted("full"));
-        assert_eq!(
-            stage_full.error_type(),
-            ErrorType::Backend(BackendError::WorkerOverloaded)
-        );
-        let transport_timeout = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
-        assert_eq!(transport_timeout.code(), tonic::Code::Cancelled);
-        assert_eq!(
-            status_to_dynamo("Stage", transport_timeout).error_type(),
-            ErrorType::Backend(BackendError::ConnectionTimeout)
         );
 
         let error =

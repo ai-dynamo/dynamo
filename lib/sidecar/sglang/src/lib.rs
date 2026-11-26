@@ -5,12 +5,15 @@
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
 //! proxying inference to an out-of-process SGLang engine over
-//! a native gRPC endpoint. Language workers use `sglang.api.v1.SglangService`
-//! (`SGLANG_RUST_SERVER=1`). A standalone `--encoder-only --grpc-mode`
-//! process exposes `sglang.grpc.encoder.SglangEncoder`. Its GetEncoderInfo
-//! RPC identifies the Encode role and its Stage RPC produces the transfer
-//! descriptor for the downstream language worker. The native services report
-//! their own model identity and deployment metadata.
+//! `sglang.api.v1.SglangService`, the native gRPC contract of SGLang's Rust
+//! server (`SGLANG_RUST_SERVER=1`). Model identity, disaggregation role,
+//! parallelism, KV block sizing, and context length are discovered from the
+//! engine's gRPC metadata RPCs.
+//!
+//! With `--disaggregation-mode encode` the sidecar instead fronts SGLang's
+//! native HTTP encoder (`--encoder-only`) as a Dynamo Encode worker. It sends
+//! the encoder's own `/encode` requests and returns a descriptor that the
+//! language worker's sidecar forwards to SGLang as `encoder_handoff`.
 //!
 //! SGLang's Rust server runs one listener per data-parallel group leader. One
 //! sidecar serves every listener of its node as one worker that owns their DP
@@ -36,7 +39,6 @@ pub mod engine;
 mod listeners;
 mod native_http;
 mod node;
-mod staged_media;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.
@@ -79,14 +81,20 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
                 SystemProbePolicy::RuntimeOnly,
             )
             .await?;
-            tracing::info!("Sidecar runtime connected; discovering engine metadata");
-            let discovery = client::bootstrap_discover(
-                &args.sidecar.grpc_endpoint,
-                &args.sidecar.grpc.config(),
-                false,
-            )
-            .await
-            .map_err(SidecarStartupError::from)?;
+            // The native encoder serves HTTP only, so it has no discovery RPCs.
+            let discovery = if args.sidecar.common.disaggregation_mode.is_encode() {
+                None
+            } else {
+                tracing::info!("Sidecar runtime connected; discovering engine metadata");
+                let discovery = client::bootstrap_discover(
+                    &args.sidecar.grpc_endpoint,
+                    &args.sidecar.grpc.config(),
+                    false,
+                )
+                .await
+                .map_err(SidecarStartupError::from)?;
+                Some(discovery)
+            };
             Ok::<_, anyhow::Error>((drt, discovery))
         };
         let runtime_shutdown = runtime.shutdown_started_token();
@@ -103,8 +111,11 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             anyhow::bail!("runtime shut down during sidecar initialization");
         }
         let (drt, discovery) = result?;
-        let (engine, config) = SglangSidecarEngine::from_discovered(args, discovery)
-            .map_err(SidecarStartupError::from)?;
+        let (engine, config) = match discovery {
+            Some(discovery) => SglangSidecarEngine::from_discovered(args, discovery),
+            None => SglangSidecarEngine::from_encoder_args(args),
+        }
+        .map_err(SidecarStartupError::from)?;
         dynamo_backend_common::Worker::new(Arc::new(engine), config)
             .run_with_drt(drt, shutdown)
             .await

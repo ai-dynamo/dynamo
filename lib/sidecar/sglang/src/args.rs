@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES: NonZeroUsize =
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
     name = "dynamo-sglang-sidecar",
-    about = "Dynamo sidecar for an out-of-process SGLang native gRPC server."
+    about = "Dynamo sidecar for an out-of-process SGLang native gRPC server or HTTP encoder."
 )]
 pub struct Args {
     #[command(flatten)]
@@ -28,19 +28,28 @@ pub struct Args {
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
 
-    /// Address of this native encoder reachable from the language workers.
-    /// Defaults to --grpc-endpoint. Set it when the sidecar dials a local address.
+    /// Model path of the native encoder, registered as this encode worker's
+    /// model. Required with `--disaggregation-mode encode`, where
+    /// `--grpc-endpoint` names the encoder's HTTP listener (`--port`) and the
+    /// sidecar speaks no gRPC. Use the language workers' model path.
+    #[arg(long, env = "SGLANG_ENCODER_MODEL_PATH")]
+    pub encoder_model_path: Option<String>,
+
+    /// Tokenizer path registered for the encode worker. Defaults to
+    /// --encoder-model-path.
+    #[arg(long, env = "SGLANG_ENCODER_TOKENIZER_PATH")]
+    pub encoder_tokenizer_path: Option<String>,
+
+    /// Served model name registered for the encode worker. Set it to the
+    /// language workers' served model name when they have one.
+    #[arg(long, env = "SGLANG_ENCODER_SERVED_MODEL_NAME")]
+    pub encoder_served_model_name: Option<String>,
+
+    /// HTTP address of this native encoder reachable from the language
+    /// workers, as `host:port`. Defaults to --grpc-endpoint. Set it when the
+    /// sidecar dials a local address.
     #[arg(long, env = "SGLANG_ENCODER_ADVERTISE_ENDPOINT")]
     pub encoder_advertise_endpoint: Option<String>,
-
-    /// Maximum seconds to wait for the native encoder's Stage RPC.
-    #[arg(
-        long,
-        env = "DYN_SGLANG_ENCODER_STAGE_TIMEOUT_SECS",
-        default_value_t = 180,
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    pub encoder_stage_timeout_secs: u32,
 
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.

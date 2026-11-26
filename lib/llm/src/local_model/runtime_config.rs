@@ -186,14 +186,6 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// with different contracts out of the same serving cohort.
 pub const ENCODER_HANDOFF_CONTRACT: &str = "encoder_handoff_contract";
 
-/// Backend-local media capabilities shared within one WorkerSet. An encoder's
-/// source decoders can differ from a language worker's supported receipt layouts.
-pub const ENCODER_HANDOFF_CAPABILITIES: &str = "encoder_handoff_capabilities";
-
-/// Backend-defined embedding transport identity shared by an external encoder and
-/// its embedding receiver (prefill or aggregated). Decode only consumes metadata.
-pub const ENCODER_HANDOFF_TRANSFER_MODE: &str = "encoder_handoff_transfer_mode";
-
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///

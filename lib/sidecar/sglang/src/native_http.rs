@@ -70,11 +70,12 @@ pub(crate) fn request(
             "encoder_handoff is supplied by Dynamo's EncoderRouter",
         ));
     }
-    if let Some(handoff) = &request.encoder_result {
+    if let Some(result) = &request.encoder_result {
+        // SGLang refuses source media beside a handoff.
         for key in ["image_data", "video_data", "audio_data"] {
             body.remove(key);
         }
-        body.insert("encoder_handoff".into(), handoff.clone());
+        body.insert("encoder_handoff".into(), crate::encoder::handoff(result)?);
     }
     let rid = rid.to_string();
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
@@ -838,6 +839,50 @@ mod tests {
         assert!(native.body.get("priority").is_none());
         assert!(native.body.get("routed_dp_rank").is_none());
         assert_eq!(native.body["lora_path"], "old-adapter");
+    }
+
+    #[test]
+    fn native_request_names_the_selected_encoder_instead_of_source_media() {
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {
+            "image_data": ["https://example.test/a.png"], "video_data": null,
+            "sampling_params": {"max_new_tokens": 9}
+        }}));
+        let parts = json!([{"modality": "image", "items": 1}]);
+        canonical.encoder_result = Some(json!({
+            "encoder_url": "http://e:30000", "request_id": "public", "parts": parts
+        }));
+        let native = request(
+            &canonical,
+            "public",
+            DisaggregationMode::Aggregated,
+            target(None, None),
+        )
+        .unwrap()
+        .unwrap();
+        // The rid is the ID the encoder's parts were sent under.
+        assert_eq!(native.body["rid"], "public");
+        assert_eq!(
+            native.body["encoder_handoff"],
+            json!({"encoder_url": "http://e:30000", "parts": parts})
+        );
+        for key in ["image_data", "video_data", "audio_data"] {
+            assert!(native.body.get(key).is_none(), "{key}");
+        }
+        assert_eq!(native.body["sampling_params"]["max_new_tokens"], 9);
+
+        // A client cannot name an encoder itself.
+        canonical.encoder_result = None;
+        canonical.extra_args = Some(json!({"sglang_tito": {"encoder_handoff": {}}}));
+        assert!(
+            request(
+                &canonical,
+                "public",
+                DisaggregationMode::Aggregated,
+                target(None, None),
+            )
+            .is_err()
+        );
     }
 
     #[test]

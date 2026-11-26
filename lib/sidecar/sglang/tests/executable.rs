@@ -22,6 +22,7 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "--response-plane",
         "--event-plane",
         "--grpc-endpoint",
+        "--encoder-model-path",
         "--encoder-advertise-endpoint",
         "--route-to-encoder",
         "DYN_SIDECAR_GRPC_ENDPOINT",

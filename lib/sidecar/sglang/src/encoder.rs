@@ -1,347 +1,193 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native encoder service discovery and the Dynamo encode terminal.
+//! The Dynamo encode worker for SGLang's native HTTP encoder, and the
+//! encoder result its language workers forward to SGLang.
+//!
+//! The encode worker sends the encoder one `/encode` request per modality,
+//! under request IDs `{request_id}_local_part_{index}`. `/encode` answers only
+//! after the embedding reached a language worker, so the encode terminal is
+//! yielded while those requests are still open. The language worker then
+//! registers its receive address with the encoder under the same request ID.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
+    BackendError, DynamoError, EngineConfig, ErrorType, GenerateContext, LLMEngineOutput,
+    PreprocessedRequest,
 };
 use dynamo_llm::kv_router::encoder_router::ENCODER_RELEASE;
-use dynamo_llm::local_model::runtime_config::{
-    ENCODER_HANDOFF_CAPABILITIES, ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
-};
-use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-};
+use dynamo_llm::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, HttpEndpoint};
 use futures::stream::BoxStream;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use tokio::sync::OnceCell;
-use tokio::time::{Instant, timeout, timeout_at};
+use serde_json::Value;
+use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 
 use crate::client;
-use crate::discovery::EngineInfo;
-use crate::proto::encoder as pb;
 use crate::protocol;
-use crate::staged_media::{self, StagedMedia};
 
-type EncoderClient = pb::sglang_encoder_client::SglangEncoderClient<Channel>;
+/// How long an encode may fail before its terminal is yielded. Covers an
+/// unreachable encoder and a rejected request, which fail at once.
+const ENCODE_FAILURE_GRACE: Duration = Duration::from_millis(200);
 
-/// How long a stopped or expired Stage call waits for a reply already in flight.
-/// Arbitrary; long enough for a local reply, short enough not to hold a cancelled request.
-const STAGE_REPLY_GRACE: Duration = Duration::from_secs(2);
+/// Above the native encoder's own 180 s limit, so its error arrives first.
+const ENCODE_TIMEOUT: Duration = Duration::from_secs(200);
 
-pub(crate) enum NativeBackend {
-    Language(Box<EngineInfo>),
-    Encoder(Box<pb::GetEncoderInfoResponse>),
+/// `/health` runs a dummy encode on an idle encoder, so it is polled less
+/// often than a language worker's metadata RPC.
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The contract every SGLang encode worker and every language worker that
+/// routes to one advertises.
+const CONTRACT: &str = "native-encode-v1";
+
+/// Mark `config` as part of the external-encoder deployment.
+pub(crate) fn advertise(config: &mut EngineConfig) {
+    config.runtime_data.insert(
+        ENCODER_HANDOFF_CONTRACT.into(),
+        serde_json::json!({ "sglang": CONTRACT }),
+    );
 }
 
-impl From<EngineInfo> for NativeBackend {
-    fn from(value: EngineInfo) -> Self {
-        Self::Language(Box::new(value))
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Modality {
+    Image,
+    Video,
+    Audio,
 }
 
-pub(crate) fn client(channel: Channel) -> EncoderClient {
-    EncoderClient::new(channel)
-        .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-}
+impl Modality {
+    /// The order in which a request's parts are numbered.
+    const ALL: [Self; 3] = [Self::Image, Self::Video, Self::Audio];
 
-/// UNIMPLEMENTED identifies an endpoint without the staged encoder service.
-/// Any other failure is an encoder discovery error, including invalid topology.
-pub(crate) async fn discover(
-    rpc: &mut EncoderClient,
-    deadline: Instant,
-) -> Result<Option<pb::GetEncoderInfoResponse>, DynamoError> {
-    let result = timeout_at(deadline, rpc.get_encoder_info(pb::GetEncoderInfoRequest {}))
-        .await
-        .map_err(|_| client::connection_timeout("GetEncoderInfo timed out"))?;
-    match result {
-        Ok(info) => Ok(Some(info.into_inner())),
-        Err(status) if status.code() == tonic::Code::Unimplemented => Ok(None),
-        Err(status) => Err(client::status_to_dynamo("GetEncoderInfo", status)),
-    }
-}
-
-/// The same advertisement governs source admission and descriptor validation
-/// on E and on every language worker. Audio uses its own contract so a visual
-/// request can still use the older descriptors on an audio-capable worker.
-#[derive(Default, Serialize)]
-pub(crate) struct StagedCapabilities {
-    pub(crate) images: bool,
-    pub(crate) video: bool,
-    pub(crate) native_model_type: String,
-    pub(crate) audio_model_type: String,
-    #[serde(skip)]
-    pub(crate) handoff_key_id: String,
-    #[serde(skip)]
-    pub(crate) layout_id: String,
-    // Only E and P/PD participate in embedding transfer.
-    #[serde(skip)]
-    pub(crate) transfer_backend: Option<&'static str>,
-}
-
-pub(crate) fn require_staged_layout_id(id: &str) -> Result<(), DynamoError> {
-    if id.is_empty() {
-        return Err(client::protocol_error(
-            "staged SGLang worker must report its descriptor layout ID",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn staged_transfer_backend(backend: &str) -> Result<&'static str, DynamoError> {
-    match backend {
-        "nixl" => Ok("nixl"),
-        "zmq_to_scheduler" => Ok("zmq_to_scheduler"),
-        _ => Err(client::protocol_error(format!(
-            "staged SGLang worker must report its resolved encoder transfer backend (nixl or zmq_to_scheduler), got {backend:?}"
-        ))),
-    }
-}
-
-impl StagedCapabilities {
-    pub(crate) fn advertise(&self, config: &mut EngineConfig) {
-        config.runtime_data.insert(
-            ENCODER_HANDOFF_CONTRACT.into(),
-            serde_json::json!({ "sglang": { "layout_id": self.layout_id, "handoff_key_id": self.handoff_key_id } }),
-        );
-        config
-            .runtime_data
-            .insert(ENCODER_HANDOFF_CAPABILITIES.into(), serde_json::json!(self));
-        if let Some(backend) = self.transfer_backend {
-            config
-                .runtime_data
-                .insert(ENCODER_HANDOFF_TRANSFER_MODE.into(), backend.into());
+    fn media_key(self) -> &'static str {
+        match self {
+            Self::Image => "image_url",
+            Self::Video => "video_url",
+            Self::Audio => "audio_url",
         }
     }
 
-    fn model_for(&self, [images, videos, audios]: [usize; 3]) -> Result<&str, DynamoError> {
-        if images > 0 && !self.images {
-            return Err(client::invalid_request(
-                "the selected SGLang worker does not support staged images",
-            ));
+    /// The native encoder's `modality` value.
+    fn native(self) -> &'static str {
+        match self {
+            Self::Image => "IMAGE",
+            Self::Video => "VIDEO",
+            Self::Audio => "AUDIO",
         }
-        if videos > 0 && !self.video {
-            return Err(client::invalid_request(
-                "the selected SGLang worker does not support staged video",
-            ));
-        }
-        if audios == 0 {
-            return Ok(&self.native_model_type);
-        }
-        if self.audio_model_type.is_empty() {
-            return Err(client::invalid_request(
-                "the selected SGLang worker does not support staged audio",
-            ));
-        }
-        Ok(&self.audio_model_type)
     }
 }
 
-#[derive(Deserialize, Serialize)]
-struct Handoff {
-    peer: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    instance_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    signature: String,
-    #[serde(flatten)]
-    transfer: pb::StagedImageTransfer,
+/// One modality of a request: one native encode request.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Part {
+    modality: Modality,
+    items: usize,
 }
 
-impl Handoff {
-    fn validate(
-        &self,
-        request_id: &str,
-        [images, videos, audios]: [usize; 3],
-        native_model_type: &str,
-    ) -> Result<(), DynamoError> {
-        let t = &self.transfer;
-        if !matches_layout_contract(t, videos, audios, native_model_type)
-            || request_id.is_empty()
-            || t.request_id != request_id
-            || !is_lower_hex(&t.transfer_id, 32)
-            || t.part_id != format!("{}_local_part_0", t.transfer_id)
-            || t.part_idx != 0
-            || t.num_parts != 1
-            || (images == 0 && videos == 0 && audios == 0)
-            || t.image_count as usize != images
-            || t.images.len() != images
-            || t.videos.len() != videos
-            || t.audios.len() != audios
-            || !t.videos.iter().all(|v| valid_video_layout(v, t.version))
-            || t.images
-                .iter()
-                .any(|i| i.t == 0 || i.h == 0 || i.w == 0 || !is_lower_hex(&i.identity, 64))
+/// The encode terminal's `encoder_result`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Descriptor {
+    /// Where the language worker reaches the encoder, as `http://host:port`.
+    encoder_url: String,
+    /// The ID the parts were encoded under, which SGLang must get as `rid`.
+    request_id: String,
+    /// In part-index order.
+    parts: Vec<Part>,
+}
+
+impl Descriptor {
+    fn parse(result: &Value) -> Result<Self, DynamoError> {
+        let descriptor = Self::deserialize(result)
+            .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
+        let mut seen = [false; 3];
+        let distinct = descriptor.parts.iter().all(|part| {
+            part.items > 0 && !std::mem::replace(&mut seen[part.modality as usize], true)
+        });
+        if !distinct
+            || descriptor.parts.is_empty()
+            || descriptor.request_id.is_empty()
+            || !descriptor.encoder_url.starts_with("http://")
         {
             return Err(client::invalid_request(
-                "invalid SGLang encoder_result version, identity, part, or media layout",
+                "invalid SGLang encoder_result request, encoder, or parts",
             ));
         }
-        if advertised_peer(&self.peer)? != self.peer {
-            return Err(client::invalid_request(
-                "invalid encoder peer in encoder_result",
-            ));
+        Ok(descriptor)
+    }
+
+    /// Item counts as `[images, videos, audios]`.
+    fn counts(&self) -> [usize; 3] {
+        let mut counts = [0; 3];
+        for part in &self.parts {
+            counts[part.modality as usize] = part.items;
         }
-        Ok(())
+        counts
     }
 }
 
-// E and the selected language worker both validate against their own native
-// service's advertisement. An absent model type means that peer speaks v1/v2.
-fn matches_layout_contract(
-    transfer: &pb::StagedImageTransfer,
-    videos: usize,
-    audios: usize,
-    native_model_type: &str,
-) -> bool {
-    if transfer.native_model_type != native_model_type {
-        return false;
-    }
-    if native_model_type.is_empty() {
-        return audios == 0
-            && transfer.version == (if videos == 0 { 1 } else { 2 })
-            && transfer.embedding_width == 0
-            && transfer
-                .images
-                .iter()
-                .all(|layout| layout.embedding_rows == 0 && layout.original_size.is_empty())
-            && transfer
-                .videos
-                .iter()
-                .all(|layout| layout.embedding_rows == 0);
-    }
-    transfer.version == (if audios == 0 { 3 } else { 4 })
-        && transfer.audios.iter().all(|layout| {
-            is_lower_hex(&layout.identity, 64)
-                && layout.feature_length > 0
-                && layout.embedding_rows > 0
-                && layout.embedding_width > 0
-                && layout.embedding_width <= transfer.embedding_width
-                && (!transfer.images.is_empty()
-                    || !transfer.videos.is_empty()
-                    || layout.embedding_width == transfer.embedding_width)
-        })
-        && transfer.embedding_width > 0
-        && transfer.images.iter().all(|layout| {
-            layout.embedding_rows > 0
-                && (layout.original_size.is_empty()
-                    || matches!(layout.original_size.as_slice(), [w, h] if *w > 0 && *h > 0))
-        })
-        && transfer
-            .videos
-            .iter()
-            .all(|layout| layout.embedding_rows > 0)
+/// SGLang's `encoder_handoff` for the encoder result of a request.
+pub(crate) fn handoff(result: &Value) -> Result<Value, DynamoError> {
+    let descriptor = Descriptor::parse(result)?;
+    Ok(serde_json::json!({
+        "encoder_url": descriptor.encoder_url,
+        "parts": descriptor.parts,
+    }))
 }
 
-fn valid_video_layout(layout: &pb::VideoLayout, version: u32) -> bool {
-    let temporal_grid = layout.t as usize;
-    // The v3 processor may compress several temporal patches into one frame
-    // embedding. Its timestamps and per-frame identities refer to those groups.
-    let groups = if version >= 3 && !layout.timestamps.is_empty() {
-        layout.timestamps.len()
-    } else {
-        temporal_grid
-    };
-    groups > 0
-        && temporal_grid > 0
-        && temporal_grid.is_multiple_of(groups)
-        && layout.h > 0
-        && layout.w > 0
-        && (layout.identities.len() == 1 || layout.identities.len() == groups)
-        && layout
-            .identities
-            .iter()
-            .all(|value| is_lower_hex(value, 64))
-        && (layout.timestamps.is_empty() || layout.timestamps.len() == groups)
-        && layout
-            .timestamps
-            .iter()
-            .all(|value| value.is_finite() && *value >= 0.0)
-        && layout.timestamps.is_sorted()
-        && layout
-            .second_per_grid_ts
-            .is_none_or(|value| value.is_finite() && value > 0.0)
-}
-
-fn is_lower_hex(value: &str, len: usize) -> bool {
-    value.len() == len
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-fn advertised_peer(raw: &str) -> Result<String, DynamoError> {
-    let endpoint = GrpcEndpoint::parse(raw, "--encoder-advertise-endpoint")?;
-    if !endpoint.as_str().starts_with("http://") {
-        return Err(client::invalid_arg(
-            "an encoder must advertise a TCP endpoint reachable by its consumers",
-        ));
-    }
-    if matches!(endpoint.authority_host(), "0.0.0.0" | "[::]" | "*") {
-        return Err(client::invalid_arg(
-            "cannot advertise a wildcard encoder address",
-        ));
-    }
-    let port = url::Url::parse(endpoint.as_str())
-        .ok()
-        .and_then(|u| u.port_or_known_default())
-        .filter(|port| *port != 0)
-        .ok_or_else(|| client::invalid_arg("invalid encoder port"))?;
-    // GrpcEndpoint normalizes the default HTTP port away. The native Python
-    // and Rust gRPC clients expect an explicit host:port on the transfer.
-    Ok(format!("grpc://{}:{port}", endpoint.authority_host()))
-}
-
-/// Count original source items, including one item per video regardless of its
-/// temporal grid size. Each source list preserves its own placeholder order.
+/// Count original source items as `[images, videos, audios]`. Each source
+/// list preserves its own placeholder order.
 fn media_counts(request: &PreprocessedRequest) -> Result<[usize; 3], DynamoError> {
     let Some(media) = &request.multi_modal_data else {
         return Ok([0; 3]);
     };
     if media.iter().any(|(key, items)| {
-        !matches!(key.as_str(), "image_url" | "video_url" | "audio_url") && !items.is_empty()
+        !Modality::ALL.iter().any(|m| m.media_key() == key.as_str()) && !items.is_empty()
     }) {
         return Err(client::invalid_request(
-            "staged SGLang encoders require image, video, or audio URLs",
+            "SGLang encoders require image, video, or audio URLs",
         ));
     }
-    Ok(["image_url", "video_url", "audio_url"].map(|key| media.get(key).map_or(0, Vec::len)))
+    Ok(Modality::ALL.map(|m| media.get(m.media_key()).map_or(0, Vec::len)))
 }
 
+/// Check what a language worker received for `request_id`. `required` is
+/// `--route-to-encoder`: SGLang then takes media only through an encoder.
 pub(crate) fn validate_consumer(
     request: &PreprocessedRequest,
     request_id: &str,
     required: bool,
-    capabilities: &StagedCapabilities,
 ) -> Result<(), DynamoError> {
     if let Some(result) = &request.encoder_result {
-        let handoff = Handoff::deserialize(result)
-            .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
-        let signed = is_lower_hex(&handoff.signature, 64) && is_lower_hex(&handoff.instance_id, 32);
-        if !capabilities.handoff_key_id.is_empty() && !signed {
+        if !required {
             return Err(client::invalid_request(
-                "missing or malformed signed encoder receipt",
+                "this SGLang worker consumes encoder_result only with --route-to-encoder",
             ));
         }
-        // The native consumer counts placeholders in the original token IDs.
-        // When Dynamo retains sources for retries, also check each modality's count.
-        let counts = match &request.multi_modal_data {
-            Some(_) => media_counts(request)?,
-            None => [
-                handoff.transfer.image_count as usize,
-                handoff.transfer.videos.len(),
-                handoff.transfer.audios.len(),
-            ],
-        };
-        handoff.validate(request_id, counts, capabilities.model_for(counts)?)?;
+        let descriptor = Descriptor::parse(result)?;
+        if descriptor.request_id != request_id {
+            return Err(client::invalid_request(
+                "encoder_result was produced for another request",
+            ));
+        }
+        // SGLang counts placeholders in the token IDs. When Dynamo retains
+        // the sources, also check each modality's count.
+        if request.multi_modal_data.is_some() && media_counts(request)? != descriptor.counts() {
+            return Err(client::invalid_request(
+                "encoder_result does not match the request's media counts",
+            ));
+        }
     } else if required
         && (request
             .multi_modal_data
@@ -362,8 +208,8 @@ pub(crate) fn validate_consumer(
                         })
                 }))
     {
-        // A caller that bypasses the encoder router still needs a staged result.
-        capabilities.model_for(media_counts(request)?)?;
+        // A caller that bypasses the encoder router still needs a result.
+        media_counts(request)?;
         for source in request
             .multi_modal_data
             .iter()
@@ -379,458 +225,801 @@ pub(crate) fn validate_consumer(
     Ok(())
 }
 
-pub(crate) fn stage_request(
+/// The native encoder's `/encode` body.
+#[derive(Debug, Serialize)]
+struct EncodeRequest {
+    mm_items: Vec<String>,
+    num_parts: usize,
+    part_idx: usize,
+    req_id: String,
+    modality: &'static str,
+    // The language worker registers its own receive address, so these stay null.
+    prefill_host: Option<String>,
+    embedding_port: Option<u16>,
+}
+
+/// One encode request per modality the request carries, numbered in
+/// [`Modality::ALL`] order, and the parts they announce.
+fn encode_requests(
     request: PreprocessedRequest,
-    request_id: String,
-    capabilities: &StagedCapabilities,
-) -> Result<pb::StageRequest, DynamoError> {
+    request_id: &str,
+) -> Result<(Vec<Part>, Vec<EncodeRequest>), DynamoError> {
     let counts = media_counts(&request)?;
     if counts == [0; 3] || request.encoder_result.is_some() {
         return Err(client::invalid_request(
-            "SGLang Stage requires unencoded media",
+            "SGLang encode requires unencoded media",
         ));
     }
-    capabilities.model_for(counts)?;
     protocol::validate_request(&request)?;
     if request.media_io_kwargs.is_some() {
         return Err(client::invalid_request(
-            "SGLang Stage cannot apply media_io_kwargs",
+            "the SGLang encoder cannot apply media_io_kwargs",
         ));
     }
+    let num_parts = counts.iter().filter(|count| **count > 0).count();
     let mut media = request.multi_modal_data.unwrap_or_default();
-    let mut sources = |key: &str| {
-        media
-            .remove(key)
-            .unwrap_or_default()
+    let mut parts = Vec::with_capacity(num_parts);
+    let mut requests = Vec::with_capacity(num_parts);
+    for modality in Modality::ALL {
+        let sources = media.remove(modality.media_key()).unwrap_or_default();
+        if sources.is_empty() {
+            continue;
+        }
+        let mm_items = sources
             .into_iter()
             .map(protocol::into_media_source)
-            .collect::<Result<Vec<_>, _>>()
-    };
-    Ok(pb::StageRequest {
-        request_id,
-        mm_items: sources("image_url")?,
-        video_urls: sources("video_url")?,
-        audio_urls: sources("audio_url")?,
-    })
+            .collect::<Result<Vec<_>, _>>()?;
+        let part_idx = requests.len();
+        parts.push(Part {
+            modality,
+            items: mm_items.len(),
+        });
+        requests.push(EncodeRequest {
+            mm_items,
+            num_parts,
+            part_idx,
+            req_id: format!("{request_id}_local_part_{part_idx}"),
+            modality: modality.native(),
+            prefill_host: None,
+            embedding_port: None,
+        });
+    }
+    Ok((parts, requests))
+}
+
+/// `http://host:port` at which language workers reach the encoder.
+fn advertised_url(raw: &str) -> Result<String, DynamoError> {
+    let endpoint = GrpcEndpoint::parse(raw, "--encoder-advertise-endpoint")?;
+    if !endpoint.as_str().starts_with("http://") {
+        return Err(client::invalid_arg(
+            "an encoder must advertise a TCP endpoint reachable by its language workers",
+        ));
+    }
+    if matches!(endpoint.authority_host(), "0.0.0.0" | "[::]" | "*") {
+        return Err(client::invalid_arg(
+            "cannot advertise a wildcard encoder address",
+        ));
+    }
+    let port = url::Url::parse(endpoint.as_str())
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| client::invalid_arg("invalid encoder port"))?;
+    // GrpcEndpoint normalizes the default HTTP port away. SGLang matches the
+    // URL against its --encoder-urls as text, so the port stays explicit.
+    Ok(format!("http://{}:{port}", endpoint.authority_host()))
+}
+
+/// Each running encode's token and task, by request ID.
+type Inflight = Arc<Mutex<HashMap<String, (u64, AbortHandle)>>>;
+
+/// Each critical section is one map operation, so a poisoned lock is still
+/// safe to use.
+fn lock(inflight: &Inflight) -> MutexGuard<'_, HashMap<String, (u64, AbortHandle)>> {
+    inflight.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Removes a running encode's entry when its task ends or is aborted.
+struct Entry {
+    inflight: Inflight,
+    request_id: String,
+    token: u64,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        let mut inflight = lock(&self.inflight);
+        // A later encode of the same request ID owns the entry.
+        if inflight
+            .get(&self.request_id)
+            .is_some_and(|(token, _)| *token == self.token)
+        {
+            inflight.remove(&self.request_id);
+        }
+    }
+}
+
+/// Aborts an encode whose terminal was never yielded.
+struct AbortUnlessYielded(Option<AbortHandle>);
+
+impl AbortUnlessYielded {
+    fn abort(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for AbortUnlessYielded {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+/// What the wait for an early encode failure saw.
+enum Early {
+    Stopped,
+    /// The encode ended; `Err` when its task was aborted.
+    Ended(Result<Result<(), DynamoError>, oneshot::error::RecvError>),
+    Running,
 }
 
 pub(crate) struct Encoder {
-    info: pb::GetEncoderInfoResponse,
-    capabilities: StagedCapabilities,
-    peer: String,
-    pool: OnceCell<GrpcChannelPool>,
-    stage_timeout: Duration,
-    media: Option<Arc<StagedMedia>>,
+    model_path: String,
+    served_model_name: Option<String>,
+    endpoint: HttpEndpoint,
+    /// `encoder_url` of every descriptor.
+    advertised: String,
+    http: reqwest::Client,
+    inflight: Inflight,
+    next_token: AtomicU64,
 }
 
 impl Encoder {
+    /// `endpoint` is the encoder's HTTP listener. `advertised` defaults to it.
     pub(crate) fn new(
-        info: pb::GetEncoderInfoResponse,
         endpoint: &GrpcEndpoint,
         advertised: Option<&str>,
-        stage_timeout: Duration,
+        model_path: String,
+        served_model_name: Option<String>,
+        connect_timeout: Duration,
     ) -> Result<Self, DynamoError> {
-        if info.model_path.trim().is_empty() {
-            return Err(client::protocol_error(
-                "GetEncoderInfo returned an empty model_path",
+        if !endpoint.as_str().starts_with("http://") {
+            return Err(client::invalid_arg(
+                "an encode worker reaches SGLang's encoder over HTTP at --grpc-endpoint host:port",
             ));
         }
-        if info.instance_id.len() != 16 {
-            return Err(client::protocol_error(
-                "GetEncoderInfo must identify the staged encoder with a 16-byte instance_id",
-            ));
-        }
-        require_staged_layout_id(&info.staged_layout_id)?;
-        let peer = if info.handoff_key_id.is_empty() {
-            advertised_peer(advertised.unwrap_or(endpoint.as_str()))?
-        } else {
-            let peer = advertised_peer(&info.handoff_peer)?;
-            if !is_lower_hex(&info.handoff_key_id, 64)
-                || peer != info.handoff_peer
-                || advertised
-                    .map(advertised_peer)
-                    .transpose()?
-                    .is_some_and(|explicit| explicit != peer)
-            {
-                return Err(client::invalid_arg(
-                    "encoder handoff key or advertised signing endpoint mismatch",
-                ));
-            }
-            peer
-        };
-        let media = info
-            .staged_media_policy
-            .as_ref()
-            .map(StagedMedia::new)
-            .transpose()?
-            .map(Arc::new);
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .build()
+            .map_err(|error| {
+                client::invalid_arg(format!(
+                    "could not configure the SGLang encoder HTTP client: {error}"
+                ))
+            })?;
         Ok(Self {
-            capabilities: StagedCapabilities {
-                images: info.supports_staged_images.unwrap_or(true),
-                video: info.supports_staged_video,
-                native_model_type: info.native_model_type.clone(),
-                audio_model_type: info.staged_audio_model_type.clone(),
-                handoff_key_id: info.handoff_key_id.clone(),
-                layout_id: info.staged_layout_id.clone(),
-                transfer_backend: Some(staged_transfer_backend(&info.staged_transfer_backend)?),
-            },
-            info,
-            media,
-            peer,
-            pool: OnceCell::new(),
-            stage_timeout,
+            model_path,
+            served_model_name,
+            advertised: advertised_url(advertised.unwrap_or(endpoint.as_str()))?,
+            endpoint: HttpEndpoint::parse(endpoint.as_str(), "--grpc-endpoint")?,
+            http,
+            inflight: Inflight::default(),
+            next_token: AtomicU64::new(0),
         })
     }
 
-    pub(crate) fn tokenizer(&self) -> &str {
-        if self.info.tokenizer_path.is_empty() {
-            &self.info.model_path
-        } else {
-            &self.info.tokenizer_path
-        }
-    }
-
-    pub(crate) fn served_name(&self) -> Option<String> {
-        (!self.info.served_model_name.is_empty()).then(|| self.info.served_model_name.clone())
-    }
-
+    /// Wait until the encoder is healthy, then describe the encode worker.
     pub(crate) async fn start(
         &self,
-        endpoint: &GrpcEndpoint,
         transport: &GrpcTransportConfig,
     ) -> Result<EngineConfig, DynamoError> {
         let deadline = Instant::now() + transport.startup_deadline;
-        let pool = client::connect_pool(endpoint, *transport, deadline, false).await?;
-        let mut rpc = client(pool.next_channel());
-        let info = discover(&mut rpc, deadline).await?;
-        if info.as_ref() != Some(&self.info) {
-            return Err(client::invalid_arg(
-                "native encoder identity changed during startup",
-            ));
+        let health = self.endpoint.with_path("/health");
+        loop {
+            let response =
+                tokio::time::timeout_at(deadline, self.http.get(health.clone()).send()).await;
+            let failure = match response {
+                Ok(Ok(response)) if response.status().is_success() => break,
+                Ok(Ok(response)) => format!("HTTP {}", response.status()),
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => {
+                    return Err(client::connection_timeout(format!(
+                        "SGLang encoder {health} did not answer within the startup deadline"
+                    )));
+                }
+            };
+            if Instant::now() >= deadline {
+                return Err(client::cannot_connect(format!(
+                    "SGLang encoder {health} did not become healthy: {failure}"
+                )));
+            }
+            tokio::time::sleep_until((Instant::now() + transport.retry_interval).min(deadline))
+                .await;
         }
-        self.pool
-            .set(pool)
-            .map_err(|_| client::engine_shutdown("encoder already started"))?;
         let mut config = EngineConfig {
-            model: self.info.model_path.clone(),
-            served_model_name: self.served_name(),
+            model: self.model_path.clone(),
+            served_model_name: self.served_model_name.clone(),
             llm: Some(Default::default()),
             ..Default::default()
         };
-        self.capabilities.advertise(&mut config);
+        advertise(&mut config);
         Ok(config)
     }
 
-    fn rpc(&self) -> Result<EncoderClient, DynamoError> {
-        self.pool
-            .get()
-            .map(|pool| client(pool.next_channel()))
-            .ok_or_else(|| client::engine_shutdown("encoder has not started"))
-    }
-
+    /// Polls `/health` and resolves with the reason once the encoder cannot be
+    /// reached, or once [`client::SERVING_POLL_FAILURES`] polls in a row fail
+    /// otherwise or time out.
     pub(crate) fn watch_serving(
         &self,
         attempt_timeout: Duration,
-    ) -> Result<impl Future<Output = String> + Send + 'static, DynamoError> {
-        let rpc = self.rpc()?;
-        let expected = self.info.clone();
-        Ok(client::watch_metadata(
-            "GetEncoderInfo",
-            attempt_timeout,
-            move || {
-                let mut rpc = rpc.clone();
-                let expected = expected.clone();
-                async move {
-                    let reply = rpc.get_encoder_info(pb::GetEncoderInfoRequest {}).await?;
-                    if reply.into_inner() == expected {
-                        Ok(())
-                    } else {
-                        Err(tonic::Status::failed_precondition(
-                            "native encoder identity changed",
-                        ))
+    ) -> impl Future<Output = String> + Send + 'static {
+        let http = self.http.clone();
+        let health = self.endpoint.with_path("/health");
+        async move {
+            let poll_timeout = attempt_timeout.min(client::SERVING_POLL_TIMEOUT);
+            let mut failures = 0;
+            loop {
+                tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
+                let poll = http.get(health.clone()).send();
+                let failure = match tokio::time::timeout(poll_timeout, poll).await {
+                    Ok(Ok(response)) if response.status().is_success() => {
+                        failures = 0;
+                        continue;
                     }
+                    Ok(Ok(response)) => format!("/health returned HTTP {}", response.status()),
+                    Ok(Err(error)) if error.is_connect() => return format!("/health: {error}"),
+                    Ok(Err(error)) => format!("/health: {error}"),
+                    Err(_) => format!("/health did not answer in {poll_timeout:?}"),
+                };
+                failures += 1;
+                tracing::debug!(failures, %failure, "SGLang encoder health poll failed");
+                if failures == client::SERVING_POLL_FAILURES {
+                    return format!("{failure}; {failures} polls in a row failed");
                 }
-            },
-        ))
+            }
+        }
     }
 
-    pub(crate) fn stage(
+    /// Start the request's encodes and yield their descriptor, or handle the
+    /// release of an earlier one.
+    pub(crate) fn encode(
         &self,
         request: PreprocessedRequest,
         ctx: GenerateContext,
         stop: CancellationToken,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         if let Some(original_id) = ctx.metadata().get(ENCODER_RELEASE) {
-            let handoff = request
-                .encoder_result
-                .as_ref()
-                .and_then(|value| Handoff::deserialize(value).ok())
-                .ok_or_else(|| {
-                    client::invalid_request("encoder release requires a staged result")
-                })?;
-            // The original worker and its existing native channel are the only
-            // release targets. Never dial a peer supplied in the receipt.
-            if original_id.is_empty()
-                || handoff.transfer.request_id != *original_id
-                || handoff.peer != self.peer
-                || !is_lower_hex(&handoff.transfer.transfer_id, 32)
-                || media_counts(&request)? != [0; 3]
-                || !request.token_ids.is_empty()
-                || (!self.capabilities.handoff_key_id.is_empty()
-                    && handoff.instance_id
-                        != self
-                            .info
-                            .instance_id
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<String>())
-            {
-                return Err(client::invalid_request(
-                    "encoder release does not match its original stage",
-                ));
-            }
-            let mut rpc = self.rpc()?;
-            let transfer_id = handoff.transfer.transfer_id;
-            let expected = self.info.instance_id.clone();
-            return Ok(Box::pin(async_stream::try_stream! {
-                let ack = client::rpc_with_deadline("Release", Instant::now() + Duration::from_secs(2), rpc.release(pb::ReleaseRequest { transfer_id })).await?;
-                if ack.into_inner().instance_id != expected {
-                    Err(client::protocol_error("Release came from a different encoder instance"))?;
-                }
-                // Release uses the encode endpoint, whose terminal result must be an object.
-                yield LLMEngineOutput::encode_terminal(Default::default());
-            }));
+            return self.release(&request, original_id);
         }
         let request_id = ctx.id().to_string();
-        let mut message = stage_request(request, request_id.clone(), &self.capabilities)?;
-        let images = message.mm_items.len();
-        let videos = message.video_urls.len();
-        let audios = message.audio_urls.len();
-        let counts = [images, videos, audios];
-        let mut rpc = self.rpc()?;
-        let peer = self.peer.clone();
-        let instance_id = self.info.instance_id.clone();
-        let authenticated = !self.capabilities.handoff_key_id.is_empty();
-        let native_model_type = self.capabilities.model_for(counts)?.to_owned();
-        let media = self.media.clone();
-        let stage_timeout = self.stage_timeout;
-        let mut stage_rpc = rpc.clone();
+        let (parts, requests) = encode_requests(request, &request_id)?;
+        let descriptor = Descriptor {
+            encoder_url: self.advertised.clone(),
+            request_id: request_id.clone(),
+            parts,
+        };
+        let Value::Object(result) = serde_json::to_value(&descriptor)
+            .map_err(|error| client::protocol_error(error.to_string()))?
+        else {
+            unreachable!("the descriptor is a struct")
+        };
+        let http = self.http.clone();
+        let url = self.endpoint.with_path("/encode");
+        let inflight = self.inflight.clone();
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         Ok(Box::pin(async_stream::try_stream! {
-            let submitted = AtomicBool::new(false);
-            let stage = async {
-                staged_media::prepare(&mut message, media.as_deref()).await?;
-                let mut request = tonic::Request::new(message);
-                request.set_timeout(stage_timeout);
-                submitted.store(true, Ordering::Relaxed);
-                // E retires its own staging at the wire deadline, so the local
-                // deadline must fire second.
-                client::rpc_with_deadline("Stage", Instant::now() + stage_timeout + STAGE_REPLY_GRACE, stage_rpc.stage(request)).await
-            };
-            tokio::pin!(stage);
-            let response = tokio::select! {
+            if stop.is_cancelled() || ctx.is_stopped() {
+                yield LLMEngineOutput::cancelled();
+                return;
+            }
+            let (task, mut ended) =
+                spawn_encode(&inflight, token, &request_id, http, url, requests);
+            let mut task = AbortUnlessYielded(Some(task));
+            let early = tokio::select! {
                 biased;
-                _ = stop.cancelled() => None,
-                _ = ctx.stopped() => None,
-                res = &mut stage => Some(res),
+                _ = stop.cancelled() => Early::Stopped,
+                _ = ctx.stopped() => Early::Stopped,
+                result = &mut ended => Early::Ended(result),
+                _ = tokio::time::sleep(ENCODE_FAILURE_GRACE) => Early::Running,
             };
-            let Some(response) = response else {
-                // Only the Stage reply names the transfer. Dropping a reply that
-                // E already sent would hold its slot until the producer expiry.
-                if submitted.load(Ordering::Relaxed)
-                    && let Ok(Ok(reply)) = timeout(STAGE_REPLY_GRACE, &mut stage).await
-                    && let Some(transfer) = reply.into_inner().transfer
-                {
-                    let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
-                        transfer_id: transfer.transfer_id,
-                    })).await;
+            let outcome = match early {
+                Early::Stopped | Early::Ended(Err(_)) => None,
+                Early::Ended(Ok(result)) => Some(result),
+                Early::Running => {
+                    // A failure may land between the grace expiring and this close.
+                    ended.close();
+                    Some(ended.try_recv().unwrap_or(Ok(())))
                 }
+            };
+            let Some(outcome) = outcome else {
+                task.abort();
                 yield LLMEngineOutput::cancelled();
                 return;
             };
-            let response = response?.into_inner();
-            let transfer = response.transfer.ok_or_else(|| client::invalid_stage_reply("Stage returned no transfer"))?;
-            let handoff = Handoff {
-                peer, transfer, signature: response.handoff_mac,
-                instance_id: if authenticated {
-                    instance_id.iter().map(|b| format!("{b:02x}")).collect()
-                } else { String::new() },
-            };
-            let validated = (|| {
-                if response.instance_id != instance_id {
-                    return Err(client::invalid_stage_reply("Stage came from a different encoder instance"));
-                }
-                if authenticated && !is_lower_hex(&handoff.signature, 64) {
-                    return Err(client::invalid_stage_reply("Stage returned no valid encoder handoff MAC"));
-                }
-                handoff.validate(&request_id, counts, &native_model_type).map_err(|e| {
-                    client::invalid_stage_reply(format!("Stage returned an invalid handoff: {e}"))
-                })?;
-                serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))
-            })();
-            if validated.is_err() || stop.is_cancelled() || ctx.is_stopped() {
-                let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
-                    transfer_id: handoff.transfer.transfer_id.clone(),
-                })).await;
-                if stop.is_cancelled() || ctx.is_stopped() {
-                    yield LLMEngineOutput::cancelled();
-                    return;
-                }
+            outcome?;
+            if stop.is_cancelled() || ctx.is_stopped() {
+                task.abort();
+                yield LLMEngineOutput::cancelled();
+                return;
             }
-            let result = validated?;
-            tracing::debug!(
-                peer = %handoff.peer,
-                request_id = %request_id,
-                part_id = %handoff.transfer.part_id,
-                image_count = images,
-                video_count = videos,
-                audio_count = audios,
-                "native SGLang encoder staged media"
-            );
-            let serde_json::Value::Object(object) = result else {
-                unreachable!("the encoder handoff is a struct")
-            };
-            let mut terminal = LLMEngineOutput::encode_terminal(object);
+            tracing::debug!(request_id = %request_id, "native SGLang encoder is encoding");
+            // The frontend releases the encode from here on.
+            task.0 = None;
+            let mut terminal = LLMEngineOutput::encode_terminal(result);
             terminal.extra_args = Some(Box::new(serde_json::json!({ (ENCODER_RELEASE): true })));
             yield terminal;
         }))
+    }
+
+    /// Abort the encode a cancelled or rejected request left running.
+    fn release(
+        &self,
+        request: &PreprocessedRequest,
+        original_id: &str,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let descriptor = request
+            .encoder_result
+            .as_ref()
+            .and_then(|result| Descriptor::parse(result).ok())
+            .ok_or_else(|| client::invalid_request("encoder release requires an encoder result"))?;
+        // Only an encode this worker started can be released here.
+        if original_id.is_empty()
+            || descriptor.request_id != original_id
+            || descriptor.encoder_url != self.advertised
+            || media_counts(request)? != [0; 3]
+            || !request.token_ids.is_empty()
+        {
+            return Err(client::invalid_request(
+                "encoder release does not match its original encode",
+            ));
+        }
+        let running = lock(&self.inflight).remove(original_id);
+        if let Some((_, task)) = running {
+            task.abort();
+        }
+        // Release uses the encode endpoint, whose terminal result must be an object.
+        let acknowledgement: Result<_, DynamoError> =
+            Ok(LLMEngineOutput::encode_terminal(Default::default()));
+        Ok(Box::pin(futures::stream::iter([acknowledgement])))
+    }
+}
+
+/// Run the encode in a task of its own and record it. The receiver gets the
+/// outcome while it still listens; a later failure is logged.
+fn spawn_encode(
+    inflight: &Inflight,
+    token: u64,
+    request_id: &str,
+    http: reqwest::Client,
+    url: url::Url,
+    requests: Vec<EncodeRequest>,
+) -> (AbortHandle, oneshot::Receiver<Result<(), DynamoError>>) {
+    let (ended_tx, ended_rx) = oneshot::channel();
+    let entry = Entry {
+        inflight: inflight.clone(),
+        request_id: request_id.to_string(),
+        token,
+    };
+    // Held across the spawn, so that the task removes its entry after the insert.
+    let mut running = lock(inflight);
+    let task = tokio::spawn(async move {
+        // Every part at once. The first failure drops the other requests.
+        let posts = requests
+            .into_iter()
+            .map(|request| post_part(http.clone(), url.clone(), request));
+        let result = futures::future::try_join_all(posts).await.map(|_| ());
+        let request_id = entry.request_id.clone();
+        drop(entry);
+        if let Err(Err(error)) = ended_tx.send(result) {
+            tracing::warn!(%request_id, %error, "SGLang encoder failed after its encode terminal");
+        }
+    })
+    .abort_handle();
+    let earlier = running.insert(request_id.to_string(), (token, task.clone()));
+    drop(running);
+    // The encoder keys its work by request ID, so a repeat replaces the earlier encode.
+    if let Some((_, earlier)) = earlier {
+        earlier.abort();
+    }
+    (task, ended_rx)
+}
+
+async fn post_part(
+    http: reqwest::Client,
+    url: url::Url,
+    request: EncodeRequest,
+) -> Result<(), DynamoError> {
+    let response = http
+        .post(url)
+        .timeout(ENCODE_TIMEOUT)
+        .json(&request)
+        .send()
+        .await
+        .map_err(request_error)?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let detail = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("could not read error response: {error}"));
+    Err(status_error(status, &detail))
+}
+
+fn request_error(error: reqwest::Error) -> DynamoError {
+    if error.is_timeout() {
+        client::connection_timeout(format!("SGLang encoder /encode timed out: {error}"))
+    } else if error.is_connect() {
+        client::cannot_connect(format!("could not connect to the SGLang encoder: {error}"))
+    } else {
+        client::protocol_error(format!("SGLang encoder /encode request failed: {error}"))
+    }
+}
+
+/// An `/encode` error status. The encoder answers `{"status": "error",
+/// "message": ...}`; a 4xx names media or a modality it cannot encode.
+fn status_error(status: StatusCode, detail: &str) -> DynamoError {
+    let body = serde_json::from_str::<Value>(detail).ok();
+    let reason = body
+        .as_ref()
+        .and_then(|body| body.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or(detail);
+    let message = format!("SGLang encoder /encode returned HTTP {status}: {reason}");
+    if status.is_client_error() {
+        // The encoder's text may name internal addresses, so it stays private.
+        DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message(message)
+            .public_message("the SGLang encoder rejected the request's media")
+            .build()
+    } else if status == StatusCode::GATEWAY_TIMEOUT {
+        client::connection_timeout(message)
+    } else if matches!(status.as_u16(), 502 | 503) {
+        client::cannot_connect(message)
+    } else {
+        client::protocol_error(message)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use dynamo_backend_common::testing::mock_context;
+    use dynamo_backend_common::{
+        FinishReason, MultimodalData, OutputOptions, SamplingOptions, StopConditions,
+    };
+    use futures::StreamExt;
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
 
-    #[test]
-    fn encoder_registration_requires_an_instance_id() {
-        let endpoint = GrpcEndpoint::parse("127.0.0.1:9100", "encoder").unwrap();
-        for size in [0, 15, 17] {
-            let info = pb::GetEncoderInfoResponse {
-                model_path: "vision".into(),
-                instance_id: vec![1; size],
-                ..Default::default()
-            };
-            assert!(Encoder::new(info, &endpoint, None, Duration::from_secs(1)).is_err());
-        }
+    const IMAGE: &str = "data:image/png;base64,AAAA";
+
+    fn request(media: &[(&str, &[&str])]) -> PreprocessedRequest {
+        let mut request = PreprocessedRequest::builder()
+            .model("model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .stop_conditions(StopConditions::default())
+            .build()
+            .unwrap();
+        request.multi_modal_data = Some(
+            media
+                .iter()
+                .map(|(key, sources)| {
+                    let items = sources
+                        .iter()
+                        .map(|source| MultimodalData::RawUrl(source.to_string()))
+                        .collect();
+                    (key.to_string(), items)
+                })
+                .collect(),
+        );
+        request
+    }
+
+    fn descriptor(request_id: &str, parts: Value) -> Value {
+        json!({"encoder_url": "http://e:30000", "request_id": request_id, "parts": parts})
     }
 
     #[test]
-    fn signed_encoder_advertises_its_peer_and_key_in_the_worker_contract() {
-        let local = GrpcEndpoint::parse("127.0.0.1:9100", "encoder").unwrap();
-        let key = "ab".repeat(32);
-        let info = pb::GetEncoderInfoResponse {
-            model_path: "vision".into(),
-            instance_id: vec![1; 16],
-            handoff_peer: "grpc://worker:9100".into(),
-            handoff_key_id: key.clone(),
-            staged_transfer_backend: "nixl".into(),
-            staged_layout_id: "vision-layout".into(),
-            ..Default::default()
-        };
-        let connect =
-            |info, advertised| Encoder::new(info, &local, advertised, Duration::from_secs(1));
-        let encoder = connect(info.clone(), Some("worker:9100")).unwrap();
-        assert_eq!(encoder.peer, "grpc://worker:9100");
-        let mut config = EngineConfig::default();
-        encoder.capabilities.advertise(&mut config);
+    fn parts_are_numbered_image_video_audio_under_the_request_id() {
+        let clip = "https://example.test/a.mp4";
+        let sound = "https://example.test/a.wav";
+        let mixed = request(&[
+            ("audio_url", &[sound]),
+            ("image_url", &[IMAGE, "https://example.test/b.png"]),
+            ("video_url", &[clip]),
+        ]);
+        let (parts, requests) = encode_requests(mixed, "req").unwrap();
         assert_eq!(
-            config.runtime_data[ENCODER_HANDOFF_CONTRACT]["sglang"]["handoff_key_id"],
-            key
+            serde_json::to_value(&parts).unwrap(),
+            json!([
+                {"modality": "image", "items": 2},
+                {"modality": "video", "items": 1},
+                {"modality": "audio", "items": 1}
+            ])
         );
-        assert_eq!(config.runtime_data[ENCODER_HANDOFF_TRANSFER_MODE], "nixl");
-        assert!(
-            connect(
-                pb::GetEncoderInfoResponse {
-                    staged_layout_id: String::new(),
-                    ..info.clone()
-                },
-                None
-            )
-            .is_err()
+        assert_eq!(
+            serde_json::to_value(&requests).unwrap(),
+            json!([
+                {"mm_items": [IMAGE, "https://example.test/b.png"], "num_parts": 3,
+                 "part_idx": 0, "req_id": "req_local_part_0", "modality": "IMAGE",
+                 "prefill_host": null, "embedding_port": null},
+                {"mm_items": [clip], "num_parts": 3, "part_idx": 1,
+                 "req_id": "req_local_part_1", "modality": "VIDEO",
+                 "prefill_host": null, "embedding_port": null},
+                {"mm_items": [sound], "num_parts": 3, "part_idx": 2,
+                 "req_id": "req_local_part_2", "modality": "AUDIO",
+                 "prefill_host": null, "embedding_port": null}
+            ])
         );
-        let video_encoder = connect(
-            pb::GetEncoderInfoResponse {
-                supports_staged_video: true,
-                ..info.clone()
-            },
-            None,
-        )
-        .unwrap();
-        let mut with_video = EngineConfig::default();
-        video_encoder.capabilities.advertise(&mut with_video);
+
+        // A modality the request lacks takes no part index.
+        let audio = request(&[("image_url", &[]), ("audio_url", &[sound])]);
+        let (parts, requests) = encode_requests(audio, "req").unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!((requests[0].num_parts, requests[0].part_idx), (1, 0));
+        assert_eq!(requests[0].req_id, "req_local_part_0");
+        assert_eq!(requests[0].modality, "AUDIO");
+    }
+
+    #[test]
+    fn encode_refuses_what_the_native_encoder_cannot_take() {
+        assert!(encode_requests(request(&[]), "req").is_err());
+        assert!(encode_requests(request(&[("image_url", &["file:///a.png"])]), "req").is_err());
+        assert!(encode_requests(request(&[("chemistry", &[IMAGE])]), "req").is_err());
+        let mut encoded = request(&[("image_url", &[IMAGE])]);
+        encoded.encoder_result = Some(json!({}));
+        assert!(encode_requests(encoded, "req").is_err());
+    }
+
+    #[test]
+    fn consumer_checks_the_descriptor_against_its_own_request() {
+        let mut req = request(&[("image_url", &[IMAGE, IMAGE]), ("audio_url", &[IMAGE])]);
+
+        // A media request that bypassed the encoder is unavailable, not invalid.
+        let missing = validate_consumer(&req, "public", true).unwrap_err();
+        assert_eq!(missing.class(), ErrorType::Unavailable);
+        validate_consumer(&req, "public", false).unwrap();
+
+        let parts = json!([{"modality": "image", "items": 2}, {"modality": "audio", "items": 1}]);
+        req.encoder_result = Some(descriptor("public", parts.clone()));
+        validate_consumer(&req, "public", true).unwrap();
+        assert!(validate_consumer(&req, "other", true).is_err());
+        // Without --route-to-encoder SGLang would ignore the handoff.
+        assert!(validate_consumer(&req, "public", false).is_err());
+
+        for parts in [
+            json!([]),
+            json!([{"modality": "image", "items": 2}]),
+            json!([{"modality": "image", "items": 3}, {"modality": "audio", "items": 1}]),
+            json!([{"modality": "image", "items": 2}, {"modality": "video", "items": 1}]),
+            json!([{"modality": "image", "items": 2}, {"modality": "image", "items": 1}]),
+            json!([{"modality": "image", "items": 0}, {"modality": "audio", "items": 1}]),
+            json!([{"modality": "text", "items": 2}]),
+        ] {
+            req.encoder_result = Some(descriptor("public", parts.clone()));
+            assert!(validate_consumer(&req, "public", true).is_err(), "{parts}");
+        }
+        let mut unknown = descriptor("public", parts.clone());
+        unknown["signature"] = json!("ab");
+        req.encoder_result = Some(unknown);
+        assert!(validate_consumer(&req, "public", true).is_err());
+
+        // A request that kept no sources is checked by SGLang's placeholder count.
+        req.multi_modal_data = None;
+        req.encoder_result = Some(descriptor("public", parts));
+        validate_consumer(&req, "public", true).unwrap();
+
+        // Text requests need no encoder.
+        validate_consumer(&request(&[]), "public", true).unwrap();
+        // Native /generate envelopes may carry media without canonical media slots.
+        let mut native = request(&[]);
+        native.multi_modal_data = None;
+        native.extra_args = Some(json!({
+            (dynamo_sglang_generate::PAYLOAD_KEY): {"image_data": IMAGE}
+        }));
+        assert!(validate_consumer(&native, "public", true).is_err());
+    }
+
+    #[test]
+    fn sglang_gets_the_encoder_and_parts_without_the_request_id() {
+        let parts = json!([{"modality": "video", "items": 1}, {"modality": "image", "items": 2}]);
+        assert_eq!(
+            handoff(&descriptor("public", parts.clone())).unwrap(),
+            json!({"encoder_url": "http://e:30000", "parts": parts})
+        );
+        assert!(handoff(&json!({"encoder_url": "http://e:30000"})).is_err());
+    }
+
+    #[test]
+    fn workers_advertise_one_contract_and_a_reachable_encoder() {
+        let mut config = EngineConfig::default();
+        advertise(&mut config);
         assert_eq!(
             config.runtime_data[ENCODER_HANDOFF_CONTRACT],
-            with_video.runtime_data[ENCODER_HANDOFF_CONTRACT]
+            json!({"sglang": "native-encode-v1"})
         );
-        assert_ne!(
-            config.runtime_data[ENCODER_HANDOFF_CAPABILITIES],
-            with_video.runtime_data[ENCODER_HANDOFF_CAPABILITIES]
-        );
-        assert!(encoder.capabilities.model_for([1, 0, 0]).is_ok());
-        assert!(encoder.capabilities.model_for([0, 1, 0]).is_err());
-        for backend in ["", "auto", "zmq_to_tokenizer"] {
-            let incompatible = pb::GetEncoderInfoResponse {
-                staged_transfer_backend: backend.into(),
-                ..info.clone()
-            };
-            assert!(connect(incompatible, None).is_err());
+
+        assert_eq!(advertised_url("e:30000").unwrap(), "http://e:30000");
+        assert_eq!(advertised_url("http://e").unwrap(), "http://e:80");
+        assert_eq!(advertised_url("[::1]:9").unwrap(), "http://[::1]:9");
+        for unreachable in ["0.0.0.0:30000", "[::]:30000", "unix:///run/e.sock"] {
+            assert!(advertised_url(unreachable).is_err(), "{unreachable}");
         }
-        assert!(connect(info.clone(), Some("other:9100")).is_err());
-        assert!(
-            connect(
-                pb::GetEncoderInfoResponse {
-                    handoff_key_id: "bad".into(),
-                    ..info
-                },
-                None
+    }
+
+    /// An encoder that answers every request with `reply`, or never.
+    async fn fake_encoder(reply: Option<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let mut received = vec![0; 65536];
+                    let _ = socket.read(&mut received).await;
+                    match reply {
+                        Some(reply) => {
+                            let _ = socket.write_all(reply.as_bytes()).await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    fn encoder_at(address: &str) -> Encoder {
+        let endpoint = GrpcEndpoint::parse(address, "--grpc-endpoint").unwrap();
+        Encoder::new(
+            &endpoint,
+            None,
+            "model".into(),
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_immediate_encoder_rejection_fails_the_encode() {
+        let body = r#"{"status":"error","message":"unsupported modality: VIDEO"}"#;
+        let reply = format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let encoder = encoder_at(&fake_encoder(Some(reply)).await);
+        let ctx = GenerateContext::new(mock_context(), None);
+        let mut stream = encoder
+            .encode(
+                request(&[("image_url", &[IMAGE])]),
+                ctx,
+                CancellationToken::new(),
             )
-            .is_err()
+            .unwrap();
+        let error = stream.next().await.unwrap().err().unwrap();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(error.message().contains("unsupported modality: VIDEO"));
+        assert!(lock(&encoder.inflight).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_encoder_fails_the_encode_as_unavailable() {
+        // Bound, then closed: nothing listens on the port.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let encoder = encoder_at(&address);
+        let ctx = GenerateContext::new(mock_context(), None);
+        let mut stream = encoder
+            .encode(
+                request(&[("image_url", &[IMAGE])]),
+                ctx,
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let error = stream.next().await.unwrap().err().unwrap();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::CannotConnect)
         );
     }
 
-    #[test]
-    fn v1_handoff_json_is_unchanged_for_legacy_consumers() {
-        let descriptor = serde_json::json!({
-            "version": 1, "peer": "grpc://e:9100", "request_id": "r",
-            "transfer_id":"10".repeat(16), "part_id":format!("{}_local_part_0","10".repeat(16)),
-            "num_parts":1,"part_idx":0,"image_count":1,"images":[{"t":1,"h":4,"w":4,"identity":"c".repeat(64)}]
-        });
-        let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
-        handoff.validate("r", [1, 0, 0], "").unwrap();
-        assert_eq!(serde_json::to_value(handoff).unwrap(), descriptor);
+    #[tokio::test]
+    async fn a_running_encode_yields_its_descriptor_and_release_aborts_it() {
+        let address = fake_encoder(None).await;
+        let encoder = encoder_at(&address);
+        let ctx = GenerateContext::new(mock_context(), None);
+        let request_id = ctx.id().to_string();
+        let mut stream = encoder
+            .encode(
+                request(&[("image_url", &[IMAGE])]),
+                ctx,
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        let result = *terminal.encoder_result.unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "encoder_url": format!("http://{address}"),
+                "request_id": request_id,
+                "parts": [{"modality": "image", "items": 1}]
+            })
+        );
+        assert_eq!(terminal.extra_args.unwrap()[ENCODER_RELEASE], true);
+        assert!(stream.next().await.is_none());
+        // The encode outlives its stream until the encoder answers.
+        drop(stream);
+        assert!(lock(&encoder.inflight).contains_key(&request_id));
+
+        // The frontend's cleanup call: no tokens, no media, the original ID in metadata.
+        let release = |result: Value, original_id: &str| {
+            let cleanup = PreprocessedRequest::builder()
+                .model("model".to_string())
+                .token_ids(Vec::new())
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .encoder_result(Some(result))
+                .build()
+                .unwrap();
+            let metadata = BTreeMap::from([(ENCODER_RELEASE.to_string(), original_id.to_string())]);
+            let ctx = GenerateContext::with_metadata(mock_context(), None, metadata);
+            encoder.encode(cleanup, ctx, CancellationToken::new())
+        };
+        // A release names its own encoder and request.
+        assert!(release(result.clone(), "other").is_err());
+        let mut foreign = result.clone();
+        foreign["encoder_url"] = json!("http://other:1");
+        assert!(release(foreign, &request_id).is_err());
+        assert!(lock(&encoder.inflight).contains_key(&request_id));
+
+        let mut acknowledged = release(result, &request_id).unwrap();
+        let ack = acknowledged.next().await.unwrap().unwrap();
+        assert_eq!(ack.finish_reason, Some(FinishReason::Stop));
+        assert!(lock(&encoder.inflight).is_empty());
     }
 
-    #[test]
-    fn native_handoff_checks_the_advertised_model_and_item_shapes() {
-        let key = "10".repeat(16);
-        let descriptor = serde_json::json!({
-            "version": 3, "peer": "grpc://e:9100", "request_id": "r",
-            "transfer_id": key, "part_id": format!("{key}_local_part_0"),
-            "part_idx": 0, "num_parts": 1, "image_count": 1,
-            "native_model_type": "kimi_vl", "embedding_width": 1536,
-            "images": [{
-                "t": 1, "h": 4, "w": 6, "identity": "bb".repeat(32),
-                "embedding_rows": 6, "original_size": [96, 64]
-            }]
+    #[tokio::test]
+    async fn a_request_stopped_before_its_terminal_aborts_the_encode() {
+        let encoder = encoder_at(&fake_encoder(None).await);
+        let stop = CancellationToken::new();
+        let ctx = GenerateContext::new(mock_context(), None);
+        let mut stream = encoder
+            .encode(request(&[("image_url", &[IMAGE])]), ctx, stop.clone())
+            .unwrap();
+        // Stop while the encode waits out its failure grace.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stop.cancel();
         });
-        let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
-        handoff.validate("r", [1, 0, 0], "kimi_vl").unwrap();
-        assert_eq!(serde_json::to_value(&handoff).unwrap(), descriptor);
-        assert!(handoff.validate("r", [1, 0, 0], "").is_err());
-        assert!(handoff.validate("r", [1, 0, 0], "glm4v").is_err());
-        for (field, value) in [
-            ("/version", serde_json::json!(1)),
-            ("/embedding_width", serde_json::json!(0)),
-            ("/images/0/embedding_rows", serde_json::json!(0)),
-            ("/images/0/original_size", serde_json::json!([96])),
-            ("/images/0/original_size", serde_json::json!([0, 64])),
-        ] {
-            let mut malformed = descriptor.clone();
-            *malformed.pointer_mut(field).unwrap() = value;
-            let handoff: Handoff = serde_json::from_value(malformed).unwrap();
-            assert!(
-                handoff.validate("r", [1, 0, 0], "kimi_vl").is_err(),
-                "{field}"
-            );
+        let cancelled = stream.next().await.unwrap().unwrap();
+        assert_eq!(cancelled.finish_reason, Some(FinishReason::Cancelled));
+        drop(stream);
+        // The aborted task removes its entry when the runtime drops it.
+        for _ in 0..100 {
+            if lock(&encoder.inflight).is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        panic!("the stopped encode is still running");
     }
 }

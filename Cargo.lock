@@ -3496,7 +3496,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "base64 0.22.1",
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",

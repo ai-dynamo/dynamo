@@ -168,7 +168,7 @@ impl<C: ClientCodec> SglangFormat<C> {
 
 /// Project each modality in source order. The native token IDs preserve how
 /// media items are interleaved in the prompt.
-fn take_staged_media(
+fn take_encoder_media(
     body: &mut Map<String, Value>,
 ) -> Result<Option<MultimodalDataMap>, ClientError> {
     let nonempty = |key: &str| {
@@ -188,7 +188,7 @@ fn take_staged_media(
     ] {
         if body.get(field).is_some_and(|v| !v.is_null()) {
             return Err(ClientError::new(format!(
-                "{field} is unsupported for staged SGLang media"
+                "{field} is unsupported with an external SGLang encoder"
             )));
         }
     }
@@ -209,7 +209,7 @@ fn take_staged_media(
         for value in sources {
             let Value::String(source) = value else {
                 return Err(ClientError::new(format!(
-                    "{field} must be a URL string or a flat list of URL strings for staged media"
+                    "{field} must be a URL string or a flat list of URL strings with an encoder"
                 )));
             };
             if source.starts_with("data:") {
@@ -285,7 +285,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             validation,
             bind: Box::new(move |worker| {
                 let media = if worker.requires_encoder_result {
-                    take_staged_media(&mut body)?
+                    take_encoder_media(&mut body)?
                 } else {
                     None
                 };

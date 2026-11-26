@@ -28,7 +28,6 @@ mm-routing = ["dynamo-llm/mm-routing"]
 jemalloc = ["dynamo-sidecar-common/jemalloc"]
 
 [dependencies]
-base64 = "0.22"
 dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { workspace = true }

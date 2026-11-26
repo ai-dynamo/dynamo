@@ -1233,8 +1233,7 @@ mod tests {
         let error = router
             .generate(SingleIn::new(multimodal_request()), downstream.clone())
             .await
-            .err()
-            .expect("required encoder is still pending");
+            .expect_err("required encoder is still pending");
         assert!(error.is::<RequiredEncoderStage>());
         assert!(dynamo_runtime::error::match_error_chain(
             error.as_ref(),

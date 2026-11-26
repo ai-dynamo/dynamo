@@ -164,7 +164,7 @@ fn bind_native(body: &Value, requires_encoder_result: bool) -> Result<Bound, Cli
 }
 
 #[test]
-fn staged_generate_projects_ordered_images_and_retains_token_ids_and_hashes() {
+fn encoder_generate_projects_ordered_images_and_retains_token_ids_and_hashes() {
     let first = "data:image/png;base64,AQ==";
     let second = "data:image/jpeg;base64,Ag==";
     let ids = [11, 151655, 12, 151655, 13];
@@ -198,7 +198,7 @@ fn staged_generate_projects_ordered_images_and_retains_token_ids_and_hashes() {
 }
 
 #[test]
-fn staged_generate_bypasses_text_and_legacy_generate_preserves_opaque_media() {
+fn encoder_generate_bypasses_text_and_legacy_generate_preserves_opaque_media() {
     for media in [Value::Null, json!([])] {
         let req = bind_native(&json!({"input_ids": [1], "image_data": media}), true).unwrap();
         assert!(req.request.multi_modal_data.is_none());
@@ -216,7 +216,7 @@ fn staged_generate_bypasses_text_and_legacy_generate_preserves_opaque_media() {
 }
 
 #[test]
-fn staged_generate_rejects_invalid_sources_and_processor_overrides() {
+fn encoder_generate_rejects_invalid_sources_and_processor_overrides() {
     let image = "data:image/png;base64,AQ==";
     for fields in [
         json!({"image_data": [[image]]}),
@@ -234,7 +234,7 @@ fn staged_generate_rejects_invalid_sources_and_processor_overrides() {
 }
 
 #[test]
-fn staged_video_preserves_clip_order_and_interleaved_prompt() {
+fn encoder_video_preserves_clip_order_and_interleaved_prompt() {
     let clip = "data:video/mp4;base64,AA==";
     let clip2 = "data:video/mp4;base64,Ag==";
     let image = "data:image/png;base64,AQ==";
@@ -265,7 +265,7 @@ fn staged_video_preserves_clip_order_and_interleaved_prompt() {
 }
 
 #[test]
-fn staged_audio_preserves_native_token_order_for_audio_only_and_mixed_media() {
+fn encoder_audio_preserves_native_token_order_for_audio_only_and_mixed_media() {
     let first = "data:audio/wav;base64,AQ==";
     let second = "https://example.test/sound.wav";
     let image = "https://example.test/image.jpg";

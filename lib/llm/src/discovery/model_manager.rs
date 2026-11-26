@@ -4704,14 +4704,11 @@ mod tests {
         endpoint: Endpoint,
         role: WorkerType,
         key: &str,
-        transfer_mode: Option<&str>,
     ) -> (
         Option<Arc<crate::kv_router::PrefillRouter>>,
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
-        use crate::local_model::runtime_config::{
-            ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
-        };
+        use crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
         let mut card = topology_card(role);
         if role == WorkerType::Aggregated {
             card.needs = vec![vec![WorkerType::Encode]];
@@ -4732,11 +4729,6 @@ mod tests {
                 serde_json::json!({"sglang": {"handoff_key_id": key}}),
             )
             .unwrap();
-        if let Some(mode) = transfer_mode {
-            card.runtime_config
-                .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, mode)
-                .unwrap();
-        }
         let group = endpoint.id().to_string();
         let (set, prefill, encoder) = topology_worker_set(manager.clone(), card.clone(), endpoint);
         manager
@@ -4769,14 +4761,12 @@ mod tests {
             };
             let mut routers = (None, None);
             for role in order {
-                let (key, mode) = match role {
-                    WorkerType::Encode => ("other-key", Some("nixl")),
-                    WorkerType::Prefill => ("key", Some("nixl")),
-                    WorkerType::Decode => ("key", None),
+                let key = match role {
+                    WorkerType::Encode => "other-key",
+                    WorkerType::Prefill | WorkerType::Decode => "key",
                     _ => unreachable!(),
                 };
-                let (prefill, encoder) =
-                    register_staged_role(&manager, endpoint(role), role, key, mode);
+                let (prefill, encoder) = register_staged_role(&manager, endpoint(role), role, key);
                 if encoder.is_some() {
                     routers = (prefill, encoder);
                 }
@@ -4788,13 +4778,7 @@ mod tests {
 
             // One matching encoder is selectable even while an incompatible endpoint is live.
             let good = component.endpoint("replacement");
-            register_staged_role(
-                &manager,
-                good.clone(),
-                WorkerType::Encode,
-                "key",
-                Some("nixl"),
-            );
+            register_staged_role(&manager, good.clone(), WorkerType::Encode, "key");
             let (prefill, encoder) = (routers.0.unwrap(), routers.1.unwrap());
             assert!(ready());
             assert_eq!(encoder.target_endpoint_id(), Some(good.id()));
@@ -4808,20 +4792,14 @@ mod tests {
                 .unwrap();
             assert!(!ready());
             assert_eq!(encoder.target_endpoint_id(), None);
-            register_staged_role(
-                &manager,
-                good.clone(),
-                WorkerType::Encode,
-                "key",
-                Some("nixl"),
-            );
+            register_staged_role(&manager, good.clone(), WorkerType::Encode, "key");
             assert!(ready());
             let decode = endpoint(WorkerType::Decode);
             manager
                 .remove_discovery_group(&decode.id().to_string())
                 .unwrap();
             let (prefill, encoder) =
-                register_staged_role(&manager, decode, WorkerType::Decode, "other-key", None);
+                register_staged_role(&manager, decode, WorkerType::Decode, "other-key");
             assert!(!ready());
             assert_eq!(prefill.unwrap().target_endpoint_id(), None);
             assert_eq!(encoder.unwrap().target_endpoint_id(), None);
@@ -4830,7 +4808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_encoder_contract_requires_matching_aggregated_transport() {
+    async fn encoder_contract_must_match_the_aggregated_receiver() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -4854,13 +4832,12 @@ mod tests {
             component.endpoint("aggregated"),
             WorkerType::Aggregated,
             "key",
-            Some("zmq_to_scheduler"),
         );
         let router = router.unwrap();
         let encoder = component.endpoint("encode");
-        for mode in [Some("nixl"), None, Some("zmq_to_scheduler")] {
-            register_staged_role(&manager, encoder.clone(), WorkerType::Encode, "key", mode);
-            let compatible = mode == Some("zmq_to_scheduler");
+        for key in ["other-key", "key"] {
+            register_staged_role(&manager, encoder.clone(), WorkerType::Encode, key);
+            let compatible = key == "key";
             assert_eq!(ready(), compatible);
             assert_eq!(
                 router.target_endpoint_id(),

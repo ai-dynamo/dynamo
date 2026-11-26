@@ -18,7 +18,6 @@ use super::identity::{
     PoolCatalogSnapshot, WorkerRole,
 };
 use crate::discovery::readiness::{EncoderHandoff, ReadinessUnit, evaluate_readiness};
-use crate::local_model::runtime_config::ENCODER_HANDOFF_CAPABILITIES;
 #[cfg(test)]
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
@@ -400,7 +399,6 @@ fn topology_units<'a>(
         };
         let config = membership.runtime_configs.get(worker_id);
         let handoff = config.map(EncoderHandoff::from).unwrap_or_default();
-        let capabilities = config.and_then(|c| c.runtime_data.get(ENCODER_HANDOFF_CAPABILITIES));
         let live = live_workers.is_some_and(|workers| workers.contains(worker_id));
         *groups
             .entry((
@@ -408,14 +406,13 @@ fn topology_units<'a>(
                 topology.model_type,
                 &topology.needs,
                 handoff,
-                capabilities,
             ))
             .or_insert(0usize) += usize::from(live);
     }
     groups
         .into_iter()
         .map(
-            |((worker_type, model_type, needs, handoff, _), live_count)| ReadinessUnit {
+            |((worker_type, model_type, needs, handoff), live_count)| ReadinessUnit {
                 worker_type,
                 live_count,
                 needs: needs.clone(),
@@ -1159,9 +1156,7 @@ mod tests {
 
     #[test]
     fn relay_readiness_compares_encoder_handoffs_from_discovery() {
-        use crate::local_model::runtime_config::{
-            ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE, ModelRuntimeConfig,
-        };
+        use crate::local_model::runtime_config::{ENCODER_HANDOFF_CONTRACT, ModelRuntimeConfig};
         for (encoder_key, expected) in [
             ("other", TopologyReadinessState::Unavailable),
             ("key", TopologyReadinessState::Ready),
@@ -1177,16 +1172,6 @@ mod tests {
                 let mut config = ModelRuntimeConfig::default();
                 config
                     .set_engine_specific(ENCODER_HANDOFF_CONTRACT, serde_json::json!({"key":key}))
-                    .unwrap();
-                config
-                    .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, "nixl")
-                    .unwrap();
-                // This E stages images while the receiver also supports video.
-                config
-                    .set_engine_specific(
-                        ENCODER_HANDOFF_CAPABILITIES,
-                        serde_json::json!({"images":true,"video":role != WorkerType::Encode}),
-                    )
                     .unwrap();
                 if role == WorkerType::Encode {
                     member.worker_topology.get_mut(&id).unwrap().model_type = ModelType::empty();

@@ -10,18 +10,14 @@
 
 use std::collections::HashSet;
 
-use crate::local_model::runtime_config::{
-    ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE, ModelRuntimeConfig,
-};
+use crate::local_model::runtime_config::{ENCODER_HANDOFF_CONTRACT, ModelRuntimeConfig};
 use crate::model_card::ModelDeploymentCard;
 use crate::worker_type::WorkerType;
 
-/// The backend owns both identities. Discovery compares the receipt contract on
-/// every hop and the embedding transport only where embeddings actually move.
+/// The backend owns the contract. Discovery compares it on every hop.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EncoderHandoff<'a> {
     contract: Option<&'a serde_json::Value>,
-    transfer_mode: Option<&'a str>,
     route_to_encoder: bool,
 }
 
@@ -29,10 +25,6 @@ impl<'a> From<&'a ModelRuntimeConfig> for EncoderHandoff<'a> {
     fn from(config: &'a ModelRuntimeConfig) -> Self {
         Self {
             contract: config.runtime_data.get(ENCODER_HANDOFF_CONTRACT),
-            transfer_mode: config
-                .runtime_data
-                .get(ENCODER_HANDOFF_TRANSFER_MODE)
-                .and_then(serde_json::Value::as_str),
             route_to_encoder: config
                 .runtime_data
                 .get("encoder_result_handoff")
@@ -44,10 +36,7 @@ impl<'a> From<&'a ModelRuntimeConfig> for EncoderHandoff<'a> {
 
 impl EncoderHandoff<'_> {
     pub(super) fn accepts_encoder(self, encoder: Self) -> bool {
-        self.route_to_encoder
-            && self.contract == encoder.contract
-            && (self.contract.is_none() || self.transfer_mode.is_some())
-            && self.transfer_mode == encoder.transfer_mode
+        self.route_to_encoder && self.contract == encoder.contract
     }
 
     pub(super) fn accepts_prefill(self, prefill: Self) -> bool {
@@ -354,14 +343,9 @@ mod tests {
         // Native external mode also accepts pre-staged traffic without a Dynamo E.
         assert!(evaluate_readiness(&[pd.clone()]).ready);
         pd.needs = vec![vec![Encode]];
-        let mut encoder = staged(Encode, vec![vec![Aggregated]]);
+        let encoder = staged(Encode, vec![vec![Aggregated]]);
         assert!(!evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
         pd.handoff.route_to_encoder = true;
-        // The transport was absent on old experimental sidecar advertisements.
-        assert!(!evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
-        for peer in [&mut pd, &mut encoder] {
-            peer.handoff.transfer_mode = Some("nixl");
-        }
         assert!(evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
         let mut unavailable_duplicate = encoder.clone();
         unavailable_duplicate.live_count = 0;

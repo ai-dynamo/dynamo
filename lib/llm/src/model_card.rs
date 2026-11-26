@@ -1548,17 +1548,6 @@ impl ModelDeploymentCard {
                     crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT,
                 );
 
-                append_runtime_contract_checksum(
-                    &mut bytes_to_hash,
-                    &self.runtime_config,
-                    crate::local_model::runtime_config::ENCODER_HANDOFF_CAPABILITIES,
-                );
-                append_runtime_contract_checksum(
-                    &mut bytes_to_hash,
-                    &self.runtime_config,
-                    crate::local_model::runtime_config::ENCODER_HANDOFF_TRANSFER_MODE,
-                );
-
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4159,9 +4148,7 @@ mod ownership_tests {
 
     #[test]
     fn only_matching_encoder_handoff_contracts_share_a_worker_set() {
-        use crate::local_model::runtime_config::{
-            ENCODER_HANDOFF_CAPABILITIES, ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
-        };
+        use crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
 
         let card = |contract: Option<serde_json::Value>| {
             let mut card = ModelDeploymentCard::with_name_only("model");
@@ -4187,31 +4174,6 @@ mod ownership_tests {
             external.mdcsum(),
             card(Some(serde_json::json!({"protocol":"a", "video":false}))).mdcsum()
         );
-        let with_transport = |transport: &str| {
-            let mut worker = card(Some(serde_json::json!({"protocol":"a", "video":true})));
-            worker
-                .runtime_config
-                .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, transport)
-                .unwrap();
-            worker
-        };
-        assert_ne!(
-            with_transport("nixl").mdcsum(),
-            with_transport("zmq_to_scheduler").mdcsum()
-        );
-        assert_ne!(with_transport("nixl").mdcsum(), external.mdcsum());
-        let with_video = |video: bool| {
-            let mut worker = with_transport("nixl");
-            worker
-                .runtime_config
-                .set_engine_specific(
-                    ENCODER_HANDOFF_CAPABILITIES,
-                    serde_json::json!({"images": true, "video": video}),
-                )
-                .unwrap();
-            worker
-        };
-        assert_ne!(with_video(true).mdcsum(), with_video(false).mdcsum());
     }
 
     #[test]

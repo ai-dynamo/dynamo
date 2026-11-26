@@ -108,7 +108,7 @@ hops.
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
 | Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
-| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | Required staging propagates encoder errors. Optional staging falls back to inline encoding downstream. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | A required encoder's errors fail the request. An optional one falls back to inline encoding downstream. |
 
 ### Prefill hop
 
@@ -223,9 +223,9 @@ newer booking that reused the same request id and worker.
 - **Untargeted**: no prefill target. Pass through to the next stage.
 
 `ModelManager::reconcile_discovery_topology` sets the target only when the namespace has
-exactly one prefill worker set and one decode worker set with compatible encoder receipt
-contracts. When the receiver routes to E, Dynamo binds a unique compatible standalone encoder
-worker set. E and P/PD must agree on the embedding transport. D consumes the receipt metadata.
+exactly one prefill worker set and one decode worker set with equal encoder handoff
+contracts. When the receiver routes to E, Dynamo binds a unique standalone encoder worker set
+with the receiver's contract.
 In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.
