@@ -2070,7 +2070,7 @@ mod tests {
     fn no_endpoints_maps_to_unavailable() {
         let error = map_scheduler_error(KvSchedulerError::NoEndpoints);
         assert!(
-            crate::http::service::metrics::request_was_unavailable(error.as_ref()),
+            dynamo_http_server::metrics::request_was_unavailable(error.as_ref()),
             "no eligible worker must reach HTTP as 503, got an untyped error: {error:#}"
         );
     }
