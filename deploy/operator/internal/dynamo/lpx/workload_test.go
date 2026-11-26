@@ -133,11 +133,22 @@ func TestSoleWorkloadNames(t *testing.T) {
 			_, err = ResolveWorkloads(t.Context(), reader, dgd, pcsName+"a", registry)
 			require.ErrorContains(t, err, "exceeds the LPX maximum of 38 characters")
 
-			t.Log("Accept an authored capacity only in the supported range")
+			t.Log("Accept an observed capacity only in the supported range")
 			for _, replicas := range []int32{-1, 0, 1, 2496, 2497, math.MaxInt32} {
+				err := workload.ValidateReplicas(replicas)
+				require.Equal(t, replicas < 0 || replicas > 2496, err != nil, "replicas=%d: %v", replicas, err)
+			}
+
+			t.Log("Accept an authored capacity only in the supported range")
+			authored := []int32{1}
+			if test.drafts == 0 {
+				// Admission lets only a component that serves alone author more than one replica.
+				authored = []int32{1, 2496, 2497}
+			}
+			for _, replicas := range authored {
 				dgd.Spec.Components[0].Replicas = new(replicas)
 				_, err := ResolveWorkloads(t.Context(), reader, dgd, pcsName, registry)
-				require.Equal(t, replicas < 0 || replicas > 2496, err != nil, "replicas=%d: %v", replicas, err)
+				require.Equal(t, replicas > 2496, err != nil, "replicas=%d: %v", replicas, err)
 			}
 		})
 	}

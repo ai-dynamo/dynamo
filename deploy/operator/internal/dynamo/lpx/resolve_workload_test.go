@@ -270,9 +270,8 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	conductor.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 	}
-	dgd.Spec.Components[0].Replicas = new(int32(2))
 
-	t.Log("Project two complete hybrid replicas")
+	t.Log("Project the hybrid request shape and clique names for each replica ordinal")
 	xt, err := resolveSoleWorkload(t, reader, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, PipelineHybrid, xt.Pipeline())

@@ -409,10 +409,11 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 		backend      configv1alpha1.DiscoveryBackend
 		override     configv1alpha1.DiscoveryBackend
 		wantServices bool
+		wantRole     string
 	}{
 		{name: "discovery disabled", pipeline: lpx.PipelineSingle},
-		{name: "operator enables Kubernetes discovery", pipeline: lpx.PipelineSingle, backend: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true},
-		{name: "DGD enables hybrid discovery", pipeline: lpx.PipelineHybrid, override: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true},
+		{name: "operator enables Kubernetes discovery", pipeline: lpx.PipelineSingle, backend: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true, wantRole: "agent"},
+		{name: "DGD enables hybrid discovery", pipeline: lpx.PipelineHybrid, override: configv1alpha1.DiscoveryBackendKubernetes, wantServices: true, wantRole: "cyborg-worker"},
 		{name: "DGD disables Kubernetes discovery", pipeline: lpx.PipelineSingle, backend: configv1alpha1.DiscoveryBackendKubernetes, override: configv1alpha1.DiscoveryBackendEtcd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -461,7 +462,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			for index, clique := range pcs.Spec.Template.Cliques {
 				require.Subset(t, clique.Spec.PodSpec.Containers[0].Env, dgd.Spec.Env)
 				if clique.Labels[dynamo.LPXServingLabel] == consts.KubeLabelValueTrue {
-					require.Equal(t, lpxTestWorkloadByName(t, workloads, clique.Labels[consts.KubeLabelDynamoComponent]).ServingTemplate(), clique.Name)
+					require.Equal(t, tc.wantRole, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 					require.Equal(t, dynamo.HashModelName("test/model"), clique.Labels[consts.KubeLabelDynamoBaseModelHash])
 					service := getResource[*corev1.Service](t, resources, lpxTestWorkloadByName(t, workloads, clique.Labels[consts.KubeLabelDynamoComponent]).ResourcePrefix()+"-serve")
 					require.NotEqual(t, clique.Labels[consts.KubeLabelDynamoWorkerHash], nextPCS.Spec.Template.Cliques[index].Labels[consts.KubeLabelDynamoWorkerHash])
@@ -480,6 +481,13 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 				service := getResource[*corev1.Service](t, resources, workload.ResourcePrefix()+"-serve")
 				component := dgd.GetComponentByName(groupName)
 				require.Equal(t, service.Spec.Selector, getResource[*corev1.Service](t, nextResources, service.Name).Spec.Selector)
+				selected := 0
+				for _, clique := range pcs.Spec.Template.Cliques {
+					if labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Merge(clique.Labels, map[string]string{grovecommon.LabelPartOfKey: pcs.Name})) {
+						selected++
+					}
+				}
+				require.Equal(t, 1, selected)
 				require.Equal(t, child.Namespace, service.Namespace)
 				require.Equal(t, "inference", service.Labels["example.com/team"])
 				require.Equal(t, map[string]string{
