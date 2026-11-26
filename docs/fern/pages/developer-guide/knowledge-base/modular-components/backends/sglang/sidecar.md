@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Note to AI agents: keep this page minimal (intro, support matrix, launch example,
-# Kubernetes example, topologies). Do not edit it unless the user explicitly asks.
+# Note to AI agents: keep this page minimal (intro, launch example, Kubernetes
+# example, topologies). Do not edit it unless the user explicitly asks.
 title: SGLang Sidecar
 subtitle: Run Dynamo beside SGLang's Rust server through native gRPC.
 ---
@@ -20,32 +20,6 @@ for the architecture.
 > [!TIP]
 > For the best and latest support, use the upstream SGLang nightly image,
 > which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hub.docker.com/r/lmsysorg/sglang/tags?name=dev).
-
-## Support Matrix
-
-| Feature | Supported |
-|---|---|
-| Aggregated | Yes |
-| Disaggregated | Yes |
-| KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) | Yes |
-| Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
-| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang's Rust server rejects it for prefill |
-| Image, video, and audio input | Yes, as URLs |
-
-SGLang's Rust server runs one listener per DP rank: listener `k` on a node
-binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
-node's listener count apart. One sidecar per node serves all of the node's
-listeners as one worker, with `--grpc-connections` connections
-to each.
-
-Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
-
-> [!WARNING]
-> SGLang's Rust server downloads `http://` and `https://` media URLs itself, from
-> any host, including `127.0.0.1` and its own HTTP API. It does not support
-> `--allowed-media-domains`, so limit the engine's network access instead, for
-> example with a Kubernetes NetworkPolicy.
 
 ## Launch Locally
 
@@ -83,17 +57,7 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
-`backendFramework: sglang` as the examples do; the operator does not infer a backend from
-a native engine launch. The templates own the native engine commands and
-sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml).
-Engine-failure KV recovery remains
-incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
-
-The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
-DGDs created by operator 1.6.0 or later. For an older DGD, see
-[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+For multinode, see the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and the [attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml).
 
 ## Topologies
 

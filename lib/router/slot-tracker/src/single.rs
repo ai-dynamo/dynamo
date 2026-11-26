@@ -285,6 +285,13 @@ impl ActiveSequences {
         completion
     }
 
+    /// Whether `request_id` is tracked here and past its prefill phase.
+    pub(super) fn is_prefill_completed(&self, request_id: &RequestId) -> bool {
+        self.requests
+            .get(request_id)
+            .is_some_and(|state| state.prefill_completed)
+    }
+
     /// Free all blocks associated with a request.
     ///
     /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need

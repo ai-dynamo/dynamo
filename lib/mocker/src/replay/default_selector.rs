@@ -79,6 +79,23 @@ impl DefaultWorkerSelector {
     }
     /// Handle that reads and updates this selector's runtime parameters from another owner.
     ///
+    /// The worker inputs whose resources a router starts for `role`: this selector's, plus
+    /// those of the role's configured hint policies. Rejects what the live router's setup
+    /// rejects ([`dynamo_kv_router::plugins::host::check_role`]).
+    pub fn check_role(
+        &self,
+        role: WorkerType,
+        hint_policies: dynamo_kv_router::plugins::host::RoleHintPolicies,
+        config: &dynamo_kv_router::config::KvRouterConfig,
+    ) -> Result<WorkerInputs, dynamo_kv_router::plugins::host::PluginConfigError> {
+        dynamo_kv_router::plugins::host::check_role(
+            role,
+            &self.policy.lock(),
+            hint_policies,
+            config,
+        )
+    }
+
     /// Every handle shares this selector's policy, so an update is visible to the next
     /// selection. A clone of the selector has its own policy and needs its own handle.
     pub fn runtime_control(&self) -> DefaultWorkerSelectorControl {

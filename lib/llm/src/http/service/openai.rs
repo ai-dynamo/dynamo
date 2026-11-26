@@ -1489,7 +1489,8 @@ async fn completions(
     // Validate stream_options is only used when streaming (NVBug 5662680)
     validate_completion_stream_options(&request)?;
 
-    validate_completion_fields_generic(&request)?;
+    let max_logprobs = request_max_logprobs(&state, &request.inner.model, request.inner.logprobs);
+    validate_completion_fields_generic(&request, max_logprobs)?;
 
     // Detect batch prompts
     let batch_size = get_prompt_batch_size(&request.inner.prompt);
@@ -4436,7 +4437,8 @@ async fn chat_completions(
     );
 
     // Handle Rest of Validation Errors
-    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
+    let max_top_logprobs = request_max_logprobs(&state, &model, request.inner.top_logprobs);
+    if let Err(err_response) = validate_chat_completion_fields_generic(&request, max_top_logprobs) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -4917,25 +4919,45 @@ fn validate_request_fields_generic<R: ValidateRequest>(
     request: &R,
     request_kind: &str,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    request
+        .validate()
+        .map_err(|e| validation_error_response(e, request_kind))
+}
+
+/// Maps a request-validation failure to an OpenAI-compatible error response,
+/// as described on [`validate_request_fields_generic`].
+fn validation_error_response(e: anyhow::Error, request_kind: &str) -> ErrorResponse {
+    if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+        return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
+    }
+    ErrorMessage::from_http_error(
+        ErrorClass::InvalidRequest,
+        HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        },
+    )
+}
+
+/// The log-probability limit of the model serving a request that asks for
+/// `requested` entries: what the model's workers publish as `max_logprobs`,
+/// or the OpenAI limit. A request that asks for none skips the model lookup.
+fn request_max_logprobs(state: &service_v2::State, model: &str, requested: Option<u8>) -> u8 {
+    match requested {
+        Some(count) if count > 0 => state.manager().max_logprobs(model),
+        _ => crate::protocols::openai::validate::MAX_TOP_LOGPROBS,
+    }
 }
 
 /// Validates a chat completion request and returns an error response if validation fails.
+/// `max_top_logprobs` is the serving model's limit for `top_logprobs`.
 pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
+    max_top_logprobs: u8,
 ) -> Result<(), ErrorResponse> {
-    validate_request_fields_generic(request, "chat completion")
+    request
+        .validate_with_max_top_logprobs(max_top_logprobs)
+        .map_err(|e| validation_error_response(e, "chat completion"))
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -4958,10 +4980,14 @@ pub fn validate_completion_stream_options(
 }
 
 /// Validates a completion request and returns an error response if validation fails.
+/// `max_logprobs` is the serving model's limit for `logprobs`.
 pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
+    max_logprobs: u8,
 ) -> Result<(), ErrorResponse> {
-    validate_request_fields_generic(request, "completion")
+    request
+        .validate_with_max_logprobs(max_logprobs)
+        .map_err(|e| validation_error_response(e, "completion"))
 }
 
 /// OpenAI Responses input-token counting handler.
@@ -5144,6 +5170,14 @@ async fn responses(
         return Err(err_response);
     }
 
+    // A `top_logprobs` above the model's limit is lowered to it, not refused.
+    // Done here so the chat request and the echoed response field agree.
+    let max_top_logprobs = request_max_logprobs(&state, &model, request.inner.top_logprobs);
+    request.inner.top_logprobs = request
+        .inner
+        .top_logprobs
+        .map(|count| count.min(max_top_logprobs));
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
@@ -5221,7 +5255,7 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
-    if let Err(error) = chat_request.validate() {
+    if let Err(error) = chat_request.validate_with_max_top_logprobs(max_top_logprobs) {
         let err_response = ErrorMessage::from_anyhow(
             invalid_argument(error.to_string()).into(),
             "Invalid responses request",
@@ -7029,6 +7063,7 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
+    use crate::protocols::openai::validate::{MAX_LOGPROBS, MAX_TOP_LOGPROBS};
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
@@ -10111,7 +10146,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10136,7 +10171,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10161,7 +10196,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10186,7 +10221,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10213,7 +10248,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10237,7 +10272,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10271,7 +10306,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_ok());
 
         // Verify metadata is accessible
@@ -10307,7 +10342,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10342,7 +10377,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10377,7 +10412,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10412,7 +10447,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10449,7 +10484,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10484,7 +10519,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10517,7 +10552,7 @@ mod tests {
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
 
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10550,7 +10585,7 @@ mod tests {
         );
         assert!(request.unsupported_fields.contains_key("response_format"));
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);

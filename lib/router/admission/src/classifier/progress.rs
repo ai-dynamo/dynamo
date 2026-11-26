@@ -83,6 +83,7 @@ impl RequestProgressUpdater {
             .fetch_max(1 + u8::from(tool_call), Ordering::Relaxed);
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
