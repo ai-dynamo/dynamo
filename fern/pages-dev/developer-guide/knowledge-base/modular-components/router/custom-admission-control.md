@@ -74,7 +74,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -88,7 +88,7 @@ impl RequestClassifier for QueueBudget {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let deadline = request.ingress_at() + self.budget;
         if Instant::now() >= deadline {
             return Err(Box::new(
@@ -97,7 +97,7 @@ impl RequestClassifier for QueueBudget {
                     .diagnostic("admission wait budget exhausted")
                     .public_message("Admission wait budget exhausted; retry later")
                     .build(),
-            ) as Box<ClassifierError>);
+            ) as Box<RequestClassifierError>);
         }
         request.set_due_at(deadline);
         Ok(request)
@@ -203,6 +203,9 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
+| `expected_output_tokens()` | Output length expected for the request, in tokens, if the frontend that received it supplies one. The OpenAI-compatible endpoints pass the caller's estimate (`nvext.agent_hints.osl`); vLLM's `/inference/v1/generate` passes the request's `max_tokens`, which is a cap and not an estimate; the Decision APIs pass the zero or one token their scoring request generates |
+| `priority_jump()` | The caller's priority within its strict tier of the router queue; zero when the caller sent none. A larger value is served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is a head start in seconds); `edf` does not use it. The queue treats a negative value as zero |
+| `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. A queue with the `fcfs`, `lcfs`, or `wspt` policy serves a larger value first; `edf`, the default for a policy class in the policy file, does not use it |
 
 What exists only while a request is classified is on the `ClassifyRequest` itself:
 
@@ -239,7 +242,7 @@ A classifier reads workers through `WorkerCandidates`, the view a [worker-select
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 use dynamo_kv_router::plugins::WorkerInputs;
 
@@ -256,7 +259,7 @@ impl RequestClassifier for LoadAwareClass {
         &mut self,
         mut request: ClassifyRequest,
         workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // Count only observed loads, and require at least one.
         let mut loads = workers
             .iter()
@@ -281,7 +284,7 @@ The rows and their accessors are the ones worker selection uses, so `CACHE`, `LO
 
 Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the request's `reject_thresholds()` with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
 
-To test a classifier, use `dynamo_kv_router::plugins::testing` from the classifier crate's test module. `SelectionCase::classify` runs the classifier on a case a test describes: it builds the request and the worker rows from the case, as the Router builds both from one request, so the request's ID, session, pinned worker, and cached tokens agree with the workers the classifier reads. For a classifier that reads no workers, `plugins::testing::classify_request` builds a request from its input length, request ID, session, and pinned worker, and `plugins::testing::classify` runs the classifier on it with no worker rows. For a registration test, `plugins::testing::registered_classifier` builds the classifier a registry holds under a type name from parameters written as a policy file writes them, in YAML, so a test can check that the provider accepts good parameters and rejects bad ones.
+To test a classifier, use `dynamo_kv_router::plugins::testing` from the classifier crate's test module. `SelectionCase::classify` runs the classifier on a case a test describes: it builds the request and the worker rows from the case, as the Router builds both from one request, so the request's ID, session, pinned worker, and cached tokens agree with the workers the classifier reads. To set the expected output length and the priorities that `request.info()` returns, call `SelectionCase::expected_output_tokens` and `SelectionCase::priority` on the case. For a classifier that reads no workers, `plugins::testing::classify_request` builds a request from its input length, request ID, session, and pinned worker, with the expected output length and the priorities unset, and `plugins::testing::classify` runs the classifier on it with no worker rows. To test a [dispatch gate](#hold-queued-requests-with-a-dispatch-gate), call `SelectionCase::dispatch_head`, which builds the queue head the gate is shown from the same case; it returns the experimental `DispatchHead`. For a registration test, `plugins::testing::registered_classifier` builds the classifier a registry holds under a type name from parameters written as a policy file writes them, in YAML, so a test can check that the provider accepts good parameters and rejects bad ones.
 
 ### Admission Decisions
 
@@ -319,7 +322,7 @@ impl RequestClassifier for SessionClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // One lane per session: a held turn waits behind its own session only.
         if let Some(session) = request.info().session_context().map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);
