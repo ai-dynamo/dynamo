@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::Args;
 use dynamo_backend_common::CommonArgs;
+use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec};
 
 use crate::GrpcEndpoint;
 
@@ -88,6 +89,22 @@ pub struct SidecarArgs {
 
     #[command(flatten)]
     pub grpc: GrpcTransportArgs,
+}
+
+/// The arguments a sidecar named `binary` would be started with for `spec`,
+/// an engine a frontend dials directly.
+pub fn direct_engine_args(
+    binary: &str,
+    options: &DirectEngineOptions,
+    spec: &DirectEngineSpec,
+) -> Vec<String> {
+    vec![
+        binary.to_string(),
+        "--grpc-endpoint".to_string(),
+        spec.url.clone(),
+        "--namespace".to_string(),
+        options.namespace.clone(),
+    ]
 }
 
 #[derive(Clone, Copy, Debug)]

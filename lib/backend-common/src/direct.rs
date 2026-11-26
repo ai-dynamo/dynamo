@@ -101,17 +101,6 @@ pub struct DirectEngineOptions {
 }
 
 impl DirectEngineOptions {
-    /// The arguments a sidecar named `binary` for `spec` would be started with.
-    pub fn sidecar_args(&self, binary: &str, spec: &DirectEngineSpec) -> Vec<String> {
-        vec![
-            binary.to_string(),
-            "--grpc-endpoint".to_string(),
-            spec.url.clone(),
-            "--namespace".to_string(),
-            self.namespace.clone(),
-        ]
-    }
-
     /// Apply the settings a sidecar's arguments cannot carry.
     pub fn apply(&self, config: &mut WorkerConfig) {
         if let Some(model_path) = &self.model_path {

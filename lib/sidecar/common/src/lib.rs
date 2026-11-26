@@ -27,7 +27,7 @@ pub mod v14 {
     include!("transport.rs");
 }
 
-pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
+pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs, direct_engine_args};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{
     SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_shutdown,
