@@ -564,6 +564,10 @@ mod tests {
                 .iter()
                 .map(|ids| LLMEngineOutput {
                     token_ids: ids.clone(),
+                    log_probs: request
+                        .output_options
+                        .logprobs
+                        .map(|_| vec![-0.5; ids.len()]),
                     ..Default::default()
                 })
                 .collect();
@@ -580,6 +584,15 @@ mod tests {
 
     #[tokio::test]
     async fn reasoning_usage_estimator_counts_coalesced_qwen3_opener_like_split_tokens() {
+        check_qwen3_opener_usage("<think>", false).await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_uses_decoded_opener_when_vocab_lookup_misses() {
+        check_qwen3_opener_usage("[THINK]", true).await;
+    }
+
+    async fn check_qwen3_opener_usage(opener_piece: &str, logprobs: bool) {
         use dynamo_runtime::pipeline::AsyncEngine;
         use futures::StreamExt;
 
@@ -590,10 +603,16 @@ mod tests {
         .unwrap();
         card.runtime_config.reasoning_parser = Some("qwen3".into());
         let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
-            "version": "1.0", "decoder": {"type": "Fuse"},
+            "version": "1.0",
+            "decoder": {"type": "Replace", "pattern": {"String": "[THINK]"}, "content": "<think>"},
             "model": {"type": "WordLevel", "unk_token": "<unk>",
-                      "vocab": {"<unk>": 0, "<think>": 1, "\n": 2, "</think>": 3, "answer": 4, "<think>\n": 5}}
+                      "vocab": {"<unk>": 0, (opener_piece): 1, "\n": 2, "</think>": 3, "answer": 4, "<think>\n": 5}}
         })).unwrap();
+        assert_eq!(
+            hf.token_to_id("<think>"),
+            (opener_piece == "<think>").then_some(1)
+        );
+        assert_eq!(hf.decode(&[1], false).unwrap(), "<think>");
         let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
             Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
 
@@ -619,7 +638,7 @@ mod tests {
             .unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
-                "logprobs": false
+                "logprobs": logprobs
             }))
             .unwrap();
             let responses = pipeline

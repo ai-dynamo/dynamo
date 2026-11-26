@@ -775,7 +775,8 @@ struct ChoiceReasoningState {
 /// This is intentionally chunk-granular: if one decoded chunk contains both reasoning
 /// and visible content, every token in that chunk is counted as reasoning. The estimate
 /// therefore overcounts visible-content tokens in mixed chunks. A positive count supplied
-/// by the backend remains authoritative.
+/// by the backend remains authoritative. Only parsers that consume the literal
+/// `<think>` opener get the one-token adjustment for a coalesced opening chunk.
 #[derive(Debug, Default)]
 struct ReasoningUsageEstimator {
     total: u32,
