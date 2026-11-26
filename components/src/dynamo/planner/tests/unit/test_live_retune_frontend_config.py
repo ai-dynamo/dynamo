@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
 
 import pytest
 
@@ -61,15 +62,20 @@ def capability():
 @pytest.mark.parametrize(
     "mode,worker_types", [("agg", ("aggregated",)), ("disagg", ("prefill", "decode"))]
 )
-def test_profile_resolves_complete_config_without_pod_templates(mode, worker_types):
+def test_settings_resolve_complete_config_without_pod_templates(mode, worker_types):
     graph = deployment()
     launch = dataclasses.replace(
         capability(), overlap_score_credit=0.7, temperature=0.1
     )
     startup = fc.resolve_startup(graph, planner_mode=mode, capability=launch)
     assert isinstance(startup, FrontendStartup), startup
-    canonical = KvRouterConfig.retune_profile("kv-v1", 0.7, 1.0, 0.1)
-    assert startup.router_config == dict(canonical.frontend_kwargs())
+    canonical = KvRouterConfig(
+        overlap_score_credit=0.7,
+        prefill_load_scale=1.0,
+        router_temperature=0.1,
+        router_replica_sync=True,
+    )
+    assert startup.router_config == json.loads(canonical.to_json())
     assert startup.startup_maps == {
         wt: dict(canonical.policy_parameters(wt)) for wt in worker_types
     }
@@ -138,20 +144,29 @@ def test_unknown_worker_model_status_remains_optional():
     assert any("cannot determine the served model" in item for item in report.warnings)
 
 
+def test_peer_launch_syntax_is_not_a_runtime_compatibility_interface():
+    graph = deployment()
+    graph["spec"]["components"][0]["podTemplate"] = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "main",
+                    "args": ["--router-session-affinity-ttl-secs=60"],
+                    "env": [{"name": "DYN_ROUTER_MODE", "value": "round-robin"}],
+                }
+            ]
+        }
+    }
+    report = fc.evaluate_premises(
+        graph, planner_config=live_config(), capability=capability()
+    )
+    assert report.spec_ok and report.p4_ok
+
+
 def test_missing_launch_disables_only_retune():
     report = fc.evaluate_premises(deployment(), planner_config=live_config())
     assert not report.p4_ok and not report.spec_ok
     assert any("launch binding" in reason for reason in report.reasons)
-
-
-def test_older_sdk_without_profile_support_makes_retune_unavailable(monkeypatch):
-    monkeypatch.setattr(fc, "KvRouterConfig", object)
-    report = fc.evaluate_premises(
-        deployment(), planner_config=live_config(), capability=capability()
-    )
-    assert not report.p4_ok and any(
-        "runtime does not support" in reason for reason in report.reasons
-    )
 
 
 @pytest.mark.parametrize(
@@ -160,7 +175,7 @@ def test_older_sdk_without_profile_support_makes_retune_unavailable(monkeypatch)
         ("version", 2),
         ("version", True),
         ("configHash", ""),
-        ("router", {"profile": "future"}),
+        ("router", None),
     ],
 )
 def test_invalid_or_unsupported_launch_contract(field, value):
@@ -174,7 +189,7 @@ def test_invalid_or_unsupported_launch_contract(field, value):
     "parameter", ["overlapScoreCredit", "prefillLoadScale", "temperature"]
 )
 @pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), True, "0.1", None])
-def test_profile_parameters_are_finite_nonnegative_numbers(parameter, value):
+def test_router_parameters_are_finite_nonnegative_numbers(parameter, value):
     payload = retune_launch_contract()
     payload["router"][parameter] = value
     with pytest.raises(ValueError, match="finite and non-negative"):

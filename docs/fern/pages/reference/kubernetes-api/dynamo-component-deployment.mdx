@@ -136,7 +136,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     </ParamField>
   </Indent>
   <ParamField path="router" type="RetuneRouterSpec">
-    Optional startup values for the versioned `kv-v1` router profile, not Planner search domains. All three fields must be finite and non-negative. Frontend and Planner use the same runtime profile for the complete replay configuration; conflicting explicit runtime settings are rejected by the frontend.
+    Optional router startup values, not Planner search domains. All three fields must be finite and non-negative. The operator supplies them to frontend and Planner. Other replay-relevant settings must match ordinary router defaults; the frontend validates effective configuration, including explicit overrides, before acknowledging Retune support.
   </ParamField>
   <Indent>
     <ParamField path="overlapScoreCredit" type="number" default="1.0">

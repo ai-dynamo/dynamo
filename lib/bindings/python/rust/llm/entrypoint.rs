@@ -92,18 +92,6 @@ impl KvRouterConfig {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct KvRouterConfigInput {
-    #[serde(default)]
-    router_approximate_cache_policy: RsApproximateCachePolicyKind,
-    #[serde(default)]
-    router_prefill_policy: Option<String>,
-    #[serde(default)]
-    router_decode_policy: Option<String>,
-    #[serde(flatten)]
-    config: RsKvRouterConfig,
-}
-
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AisPerfConfig {
@@ -256,105 +244,10 @@ impl KvRouterConfig {
     }
 
     #[staticmethod]
-    fn retune_profile(
-        profile: &str,
-        overlap_score_credit: f64,
-        prefill_load_scale: f64,
-        temperature: f64,
-    ) -> PyResult<Self> {
-        Ok(Self {
-            inner: dynamo_llm::retune::profile_config(
-                profile,
-                overlap_score_credit,
-                prefill_load_scale,
-                temperature,
-            )
-            .map_err(|error| PyValueError::new_err(error.to_string()))?,
-        })
-    }
-
-    fn frontend_kwargs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let config = &self.inner;
-        let mut value = serde_json::to_value(config).map_err(to_pyerr)?;
-        let fields = value
-            .as_object_mut()
-            .ok_or_else(|| PyValueError::new_err("router config is not an object"))?;
-        fields.extend([
-            (
-                "decode_active_request_weight".into(),
-                serde_json::json!(config.decode_active_request_weight),
-            ),
-            (
-                "router_tracking_hash".into(),
-                serde_json::json!(config.router_tracking_hash),
-            ),
-            (
-                "router_tracking_key_file".into(),
-                serde_json::json!(config.router_tracking_key_file),
-            ),
-            (
-                "router_tracking_key_id".into(),
-                serde_json::json!(config.router_tracking_key_id),
-            ),
-            (
-                "router_approximate_cache_policy".into(),
-                serde_json::json!(config.router_approximate_cache_policy.to_string()),
-            ),
-            (
-                "router_prefill_policy".into(),
-                serde_json::json!(config.router_prefill_policy),
-            ),
-            (
-                "router_decode_policy".into(),
-                serde_json::json!(config.router_decode_policy),
-            ),
-            (
-                "enable_session_prefix_index".into(),
-                serde_json::json!(config.enable_session_prefix_index),
-            ),
-            (
-                "shared_cache_multiplier".into(),
-                serde_json::json!(config.shared_cache_multiplier),
-            ),
-            (
-                "conditional_disagg_enabled".into(),
-                serde_json::json!(config.conditional_disagg_enabled),
-            ),
-            (
-                "conditional_disagg_policy".into(),
-                serde_json::json!(config.conditional_disagg_policy),
-            ),
-            (
-                "conditional_disagg_eff_isl_threshold".into(),
-                serde_json::json!(config.conditional_disagg_eff_isl_threshold),
-            ),
-            (
-                "conditional_disagg_eff_isl_ratio_threshold".into(),
-                serde_json::json!(config.conditional_disagg_eff_isl_ratio_threshold),
-            ),
-            (
-                "conditional_disagg_prefill_busy_threshold".into(),
-                serde_json::json!(config.conditional_disagg_prefill_busy_threshold),
-            ),
-            (
-                "conditional_disagg_decode_busy_threshold".into(),
-                serde_json::json!(config.conditional_disagg_decode_busy_threshold),
-            ),
-        ]);
-        pythonize::pythonize(py, &value)
-            .map(Bound::unbind)
-            .map_err(to_pyerr)
-    }
-
-    #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let input: KvRouterConfigInput = serde_json::from_str(config_json).map_err(|e| {
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
-        let mut inner = input.config;
-        inner.router_approximate_cache_policy = input.router_approximate_cache_policy;
-        inner.router_prefill_policy = input.router_prefill_policy;
-        inner.router_decode_policy = input.router_decode_policy;
         inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })

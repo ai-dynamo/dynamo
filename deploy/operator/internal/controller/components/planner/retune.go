@@ -39,9 +39,8 @@ type RetuneTraceStorage struct {
 	WindowsDir  string `json:"windowsDir"`
 }
 
-// RetuneRouterConfiguration names the runtime-owned profile and its typed inputs.
+// RetuneRouterConfiguration supplies the typed router startup values.
 type RetuneRouterConfiguration struct {
-	Profile            string  `json:"profile"`
 	OverlapScoreCredit float64 `json:"overlapScoreCredit"`
 	PrefillLoadScale   float64 `json:"prefillLoadScale"`
 	Temperature        float64 `json:"temperature"`
@@ -90,7 +89,7 @@ func ResolveRetuneConfiguration(dgd *v1beta1.DynamoGraphDeployment) (string, *Re
 			MountPath: "/trace", SegmentsDir: "segments", WindowsDir: "windows",
 		},
 		AdminPort: 8002,
-		Router:    RetuneRouterConfiguration{Profile: "kv-v1", OverlapScoreCredit: 1, PrefillLoadScale: 1},
+		Router:    RetuneRouterConfiguration{OverlapScoreCredit: 1, PrefillLoadScale: 1},
 	}
 
 	// Default the three public inputs identically for admission-bypassed objects.
@@ -169,6 +168,11 @@ func retuneFrontendEnvironment(dgdName string, configuration *RetuneLaunchConfig
 	// DYN_POD_NAME precedes DYN_REQUEST_TRACE_FILE_PATH even in legacy sorted
 	// environments; POD_NAME does not. Bind the DGD directory without an alias.
 	return []corev1.EnvVar{
+		{Name: "DYN_ROUTER_MODE", Value: "kv"},
+		{Name: "DYN_ROUTER_REPLICA_SYNC", Value: "true"},
+		{Name: "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", Value: strconv.FormatFloat(configuration.Router.OverlapScoreCredit, 'g', -1, 64)},
+		{Name: "DYN_ROUTER_PREFILL_LOAD_SCALE", Value: strconv.FormatFloat(configuration.Router.PrefillLoadScale, 'g', -1, 64)},
+		{Name: "DYN_ROUTER_TEMPERATURE", Value: strconv.FormatFloat(configuration.Router.Temperature, 'g', -1, 64)},
 		{Name: "DYN_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 		{Name: "DYN_REQUEST_TRACE", Value: "1"},
 		{Name: "DYN_REQUEST_TRACE_RECORDS", Value: "request_end"},

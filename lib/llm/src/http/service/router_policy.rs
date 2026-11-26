@@ -249,7 +249,7 @@ mod tests {
         crate::retune::RetuneContract::from_json(&serde_json::json!({
             "version": 1, "configHash": "a".repeat(64), "frontendComponentName": "gateway", "adminPort": 8002,
             "traceStorage": {"claimName": "traces", "mountPath": "/trace", "segmentsDir": "segments", "windowsDir": "windows"},
-            "router": {"profile": "kv-v1", "overlapScoreCredit": 1.0, "prefillLoadScale": 1.0, "temperature": 0.0},
+            "router": {"overlapScoreCredit": 1.0, "prefillLoadScale": 1.0, "temperature": 0.0},
         }).to_string()).unwrap()
     }
 
@@ -281,7 +281,7 @@ mod tests {
 
         let manager = Arc::new(ModelManager::new());
         manager.configure_retune(retune_contract()).unwrap();
-        let config = crate::retune::profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
+        let config = retune_contract().router.config().unwrap();
         let (app, _core, router_id, _) = fixture_with_config(manager.clone(), config).await;
         for path in ["/router_policy", "/router_policy?model=first"] {
             let (_, response) = call(&app, Method::GET, path, Value::Null).await;
@@ -310,7 +310,7 @@ mod tests {
     async fn retune_acknowledgment_requires_the_returned_router_set() {
         let manager = Arc::new(ModelManager::new());
         manager.configure_retune(retune_contract()).unwrap();
-        let config = crate::retune::profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
+        let config = retune_contract().router.config().unwrap();
         let (app, _core, router_id, _) = fixture_with_config(manager.clone(), config.clone()).await;
         commit_retune_group(&manager, "first");
         commit_retune_group(&manager, "second");

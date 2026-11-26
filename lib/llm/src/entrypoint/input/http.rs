@@ -89,7 +89,7 @@ impl HttpFrontend {
             && (self.plugins.has_custom_plugins()
                 || !matches!(&engine_config, EngineConfig::Dynamic { .. }))
         {
-            anyhow::bail!("Retune kv-v1 does not support custom router plugins");
+            anyhow::bail!("Retune does not support custom router plugins");
         }
 
         // Hosts that pass no resolved plugins resolve the policy file later, so read its

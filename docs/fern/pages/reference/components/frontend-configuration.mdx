@@ -1098,9 +1098,10 @@ When frontend TLS is configured, the admin listener uses the same certificate an
 settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
 routes; `generate-frontend-openapi` does.
 
-Live Retune requires a reachable HTTP admin listener without TLS. Enabling Retune on a
-TLS-enabled frontend is rejected at startup; the HTTPS guidance above applies to frontends
-without Retune.
+Live Retune requires the HTTP frontend with a reachable admin listener, etcd or Kubernetes
+discovery, and no TLS. The frontend fails at startup if Retune is enabled together with TLS,
+interactive mode, the KServe gRPC server, or another discovery backend. The HTTPS guidance above
+applies only to frontends without Retune.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -1124,16 +1125,19 @@ without Retune.
   frontend fails to start. A value that is not a valid port number falls back to `8002`.
 </ParamField>
 
-<ParamField path="DYN_FRONTEND_RETUNE_CAPABILITY" type="JSON object">
+<ParamField path="--frontend-retune-capability" type="JSON object" default="null">
   Operator-owned, versioned semantic launch contract for
   [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md). Omitted by
   default. Configure `retune` on the DGD's Planner component instead of authoring this binding.
   It carries `version`, an opaque `configHash`, selected frontend identity, trace storage/layout,
-  admin port, and the `kv-v1` router profile with three typed startup values.
+  admin port, and three typed router startup values. Its environment variable is
+  `DYN_FRONTEND_RETUNE_CAPABILITY`.
 
-  The profile supplies complete router startup settings, including replica synchronization,
-  through the runtime SDK. Equivalent explicit frontend settings are accepted; conflicting
-  parsed settings fail startup. Effective discovered routers, including worker-advertised
+  The binding validates configuration; it does not rewrite parser defaults. The operator
+  separately supplies the existing KV-routing, replica-synchronization, and startup-value
+  environment variables. Other replay-relevant settings must match ordinary router defaults.
+  Equivalent explicit frontend settings are accepted; conflicting parsed settings, including
+  session affinity, fail startup. Effective discovered routers, including worker-advertised
   overrides, must also be compatible before the runtime acknowledges the contract. This opt-in
   does not change ordinary frontend startup when absent.
 </ParamField>

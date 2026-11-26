@@ -50,7 +50,6 @@ def test_frontend_acknowledges_retune_and_records_replay_traces(
                 "windowsDir": "windows",
             },
             "router": {
-                "profile": "kv-v1",
                 "overlapScoreCredit": 1.5,
                 "prefillLoadScale": 0.7,
                 "temperature": 0.2,
@@ -63,6 +62,10 @@ def test_frontend_acknowledges_retune_and_records_replay_traces(
             router_mode="kv",
             extra_args=["--namespace", namespace],
             extra_env={
+                "DYN_ROUTER_REPLICA_SYNC": "true",
+                "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "1.5",
+                "DYN_ROUTER_PREFILL_LOAD_SCALE": "0.7",
+                "DYN_ROUTER_TEMPERATURE": "0.2",
                 "DYN_FRONTEND_RETUNE_CAPABILITY": json.dumps(contract),
                 "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
                 "DYN_FRONTEND_ADMIN_HOST": "0.0.0.0",

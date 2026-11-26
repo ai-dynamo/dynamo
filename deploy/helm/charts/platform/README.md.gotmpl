@@ -293,10 +293,6 @@ Retune state now checkpoints the previous wiring and router process identities i
 The new Planner reads v1 state, but older Planners cannot read v2 state. Before downgrading,
 use the new Planner to finish rollback and cleanup, then remove its Retune Leases.
 
-The runtime-validated profile also requires cleanup before upgrading from the initial semantic
-wiring: saved launch bindings without a router profile cannot be read by the profile-aware
-Planner, even in Lease format v2. Finish rollback with the old Planner before removing its Leases.
-
 **Existing deployments:** An absent or disabled component setting leaves workload templates
 unchanged. Ordinary replica autoscaling needs no Retune setting. A new Planner image cannot activate
 Live Retune from a manual trace recipe alone. Enabling, disabling, or changing the setting updates

@@ -33,7 +33,6 @@ from dynamo.common.configuration.utils import (
 )
 
 from . import __version__
-from .retune import apply_retune_defaults
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
@@ -446,10 +445,7 @@ class FrontendArgGroup(ArgGroup):
     """
 
     def __init__(self, *, env: Optional[ArgEnv] = None) -> None:
-        self._is_local = env is None
         self.env = env
-        if env is None and os.environ.get("DYN_FRONTEND_RETUNE_CAPABILITY"):
-            self.env = ArgEnv(environ=dict(os.environ), emit_warnings=True)
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
@@ -652,7 +648,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup(env=self.env).add_arguments(parser)
-        if self._is_local:
+        if self.env is None:
             AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
@@ -714,7 +710,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_MODEL_PATH",
             default=None,
             help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
-            arg_type=validate_model_path if self._is_local else str,
+            arg_type=validate_model_path if self.env is None else str,
             env=self.env,
         )
         add_argument(
@@ -1078,12 +1074,15 @@ class FrontendArgGroup(ArgGroup):
             ),
             env=self.env,
         )
-        if self.env is not None and (
-            capability := self.env.environ.get("DYN_FRONTEND_RETUNE_CAPABILITY")
-        ):
-            apply_retune_defaults(
-                parser, capability, self.env.environ, self.env.env_dests
-            )
+        add_argument(
+            g,
+            flag_name="--frontend-retune-capability",
+            env_var="DYN_FRONTEND_RETUNE_CAPABILITY",
+            dest="retune_capability",
+            default=None,
+            help="Operator-provided Retune binding for runtime compatibility validation.",
+            env=self.env,
+        )
 
 
 def build_frontend_parser(

@@ -876,8 +876,8 @@ class RouterActuator:
         known = 0
         unknown = 0
         for outcome in outcomes:
-            # Historical cleanup is allowed without the current profile; it
-            # cannot establish that profile's serving parity.
+            # Historical cleanup needs no current acknowledgment, but cannot
+            # establish compatibility for a new tuning round.
             if not outcome.contract_acknowledged:
                 continue
             for router in outcome.routers:

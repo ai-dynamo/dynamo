@@ -21,9 +21,9 @@ func TestRetuneSemanticBinding(t *testing.T) {
 	}}}
 	_, baseline, err := ResolveRetuneConfiguration(dgd)
 	require.NoError(t, err)
-	require.Equal(t, "9c71d5750148c53a4cf5009d87c1a750cde7679bdeded10479dbaf295e099096", baseline.ConfigHash)
+	require.Equal(t, "cccbbeb808b576cbf2bc711a4d1697b7508683c88b8d15cc2a821f9952b9bfda", baseline.ConfigHash)
 	require.Equal(t, 1, baseline.Version)
-	require.Equal(t, RetuneRouterConfiguration{Profile: "kv-v1", OverlapScoreCredit: 1, PrefillLoadScale: 1}, baseline.Router)
+	require.Equal(t, RetuneRouterConfiguration{OverlapScoreCredit: 1, PrefillLoadScale: 1}, baseline.Router)
 
 	t.Log("Replica changes and explicit defaults do not alter the immutable process binding")
 	unchanged := dgd.DeepCopy()

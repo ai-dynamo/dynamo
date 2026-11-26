@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Versioned semantic configuration shared by the frontend and live replay.
+//! Effective frontend configuration checks for Live Retune.
 
 use std::sync::OnceLock;
 
@@ -19,7 +19,7 @@ pub struct RetuneContract {
     pub frontend_component_name: String,
     pub admin_port: u16,
     pub trace_storage: TraceStorage,
-    pub router: RouterProfile,
+    pub router: RouterSettings,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -33,8 +33,7 @@ pub struct TraceStorage {
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RouterProfile {
-    pub profile: String,
+pub struct RouterSettings {
     pub overlap_score_credit: f64,
     pub prefill_load_scale: f64,
     pub temperature: f64,
@@ -94,7 +93,7 @@ impl RetuneContract {
         ensure!(
             config.session_affinity_ttl_secs.is_none()
                 && !config.load_threshold_config.is_configured(),
-            "Retune kv-v1 does not support session affinity or busy thresholds"
+            "Retune does not support session affinity or busy thresholds"
         );
         self.router.validate(&config.kv_router_config, None)
     }
@@ -142,14 +141,17 @@ impl RetuneContract {
     }
 }
 
-impl RouterProfile {
+impl RouterSettings {
     pub fn config(&self) -> anyhow::Result<KvRouterConfig> {
-        profile_config(
-            &self.profile,
-            self.overlap_score_credit,
-            self.prefill_load_scale,
-            self.temperature,
-        )
+        let config = KvRouterConfig {
+            overlap_score_credit: self.overlap_score_credit,
+            prefill_load_scale: self.prefill_load_scale,
+            router_temperature: self.temperature,
+            router_replica_sync: true,
+            ..Default::default()
+        };
+        config.validate().map_err(anyhow::Error::msg)?;
+        Ok(config)
     }
 
     pub fn validate(
@@ -162,7 +164,7 @@ impl RouterProfile {
         if let Some(policy) = actual.policy_config_cache.get() {
             ensure!(
                 !policy.has_routing_profiles() && policy.request_classifier().is_none(),
-                "Retune kv-v1 does not support custom queue profiles or request classifiers"
+                "Retune does not support custom queue profiles or request classifiers"
             );
         }
         for role in role.into_iter().chain(
@@ -179,15 +181,17 @@ impl RouterProfile {
                 actual
                     .selected_worker_selection_policy_instance_for(role)?
                     .is_none(),
-                "Retune kv-v1 requires the builtin default worker-selection policy"
+                "Retune requires the builtin default worker-selection policy"
             );
         }
         actual.router_policy_config = None;
         actual.policy_config_cache = OnceLock::new();
 
+        let mut expected = self.config()?;
+
         // Process-local fields are omitted by KvRouterConfig's wire serialization.
         ensure!(
-            actual.router_approximate_cache_policy == "ttl".parse().map_err(anyhow::Error::msg)?
+            actual.router_approximate_cache_policy == expected.router_approximate_cache_policy
                 && actual
                     .router_prefill_policy
                     .as_deref()
@@ -196,78 +200,20 @@ impl RouterProfile {
                     .router_decode_policy
                     .as_deref()
                     .is_none_or(|value| value == "default"),
-            "Retune kv-v1 conflicts with process-local router settings"
+            "Retune conflicts with process-local router settings"
         );
         actual.router_prefill_policy = None;
         actual.router_decode_policy = None;
-        let mut expected = self.config()?;
         if role == Some(WorkerType::Prefill) {
             expected.router_track_active_blocks = false;
             expected.router_track_output_blocks = false;
         }
         ensure!(
             serde_json::to_value(&actual)? == serde_json::to_value(&expected)?,
-            "router configuration conflicts with the Retune kv-v1 profile"
+            "router configuration conflicts with the Retune replay settings"
         );
         Ok(())
     }
-}
-
-/// Immutable v1 settings. New KvRouterConfig fields must make an explicit versioning decision.
-pub fn profile_config(
-    profile: &str,
-    overlap_score_credit: f64,
-    prefill_load_scale: f64,
-    temperature: f64,
-) -> anyhow::Result<KvRouterConfig> {
-    ensure!(
-        profile == "kv-v1",
-        "unsupported Retune router profile {profile}"
-    );
-    let config = KvRouterConfig {
-        overlap_score_credit,
-        overlap_score_credit_decay: 0.0,
-        prefill_load_scale,
-        decode_active_request_weight: 0.0,
-        host_cache_hit_weight: 0.75,
-        disk_cache_hit_weight: 0.25,
-        router_temperature: temperature,
-        use_kv_events: true,
-        router_replica_sync: true,
-        router_track_active_blocks: true,
-        router_track_output_blocks: false,
-        router_assume_kv_reuse: true,
-        router_track_prefill_tokens: true,
-        router_tracking_hash: "public-xxh3-v1".parse().map_err(anyhow::Error::msg)?,
-        router_tracking_key_file: None,
-        router_tracking_key_id: None,
-        router_prefill_load_model: "none".parse().map_err(anyhow::Error::msg)?,
-        router_ttl_secs: 120.0,
-        router_approximate_cache_policy: "ttl".parse().map_err(anyhow::Error::msg)?,
-        router_queue_threshold: None,
-        router_policy_config: None,
-        router_prefill_policy: None,
-        router_decode_policy: None,
-        policy_model_name: None,
-        policy_config_cache: OnceLock::new(),
-        router_event_threads: 4,
-        skip_initial_worker_wait: false,
-        router_queue_policy: "fcfs".parse().map_err(anyhow::Error::msg)?,
-        use_remote_indexer: false,
-        serve_indexer: false,
-        enable_session_prefix_index: false,
-        shared_cache_multiplier: None,
-        shared_cache_type: "none".parse().map_err(anyhow::Error::msg)?,
-        router_predicted_ttl_secs: None,
-        conditional_disagg_enabled: false,
-        conditional_disagg_policy: "isl_bounding".parse().map_err(anyhow::Error::msg)?,
-        conditional_disagg_eff_isl_threshold: 2048,
-        conditional_disagg_eff_isl_ratio_threshold: 0.7,
-        conditional_disagg_prefill_busy_threshold: None,
-        conditional_disagg_decode_busy_threshold: None,
-    };
-    config.validate().map_err(anyhow::Error::msg)?;
-    Ok(config)
 }
 
 #[cfg(test)]
@@ -290,8 +236,7 @@ mod tests {
                 segments_dir: "segments".into(),
                 windows_dir: "windows".into(),
             },
-            router: RouterProfile {
-                profile: "kv-v1".into(),
+            router: RouterSettings {
                 overlap_score_credit: 1.0,
                 prefill_load_scale: 1.0,
                 temperature: 0.0,
@@ -360,55 +305,36 @@ mod tests {
     }
 
     #[test]
-    fn kv_v1_conformance() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/data/retune-kv-v1.json")).unwrap();
-        let config = profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
-        assert_eq!(
-            serde_json::to_value(&config).unwrap(),
-            fixture["router_config"]
-        );
-        for role in [
-            WorkerType::Aggregated,
-            WorkerType::Prefill,
-            WorkerType::Decode,
-        ] {
-            let parameters = dynamo_router_policies::startup_policy_parameters(
-                &dynamo_worker_selection::host::SelectionConfig::from(&config),
-                role,
-            );
-            assert_eq!(
-                serde_json::json!(parameters),
-                fixture["policy_parameters"][role.as_str()]
-            );
-        }
-        assert_eq!(config.router_approximate_cache_policy.to_string(), "ttl");
-        assert!(config.router_prefill_policy.is_none() && config.router_decode_policy.is_none());
-    }
-
-    #[test]
-    fn profile_versions_and_values_are_explicit() {
-        assert!(profile_config("future", 1.0, 1.0, 0.0).is_err());
-        assert!(profile_config("kv-v1", f64::NAN, 1.0, 0.0).is_err());
-        let profile = RouterProfile {
-            profile: "kv-v1".into(),
+    fn effective_router_settings_must_match_replay() {
+        let settings = RouterSettings {
             overlap_score_credit: 1.0,
             prefill_load_scale: 1.0,
             temperature: 0.0,
         };
-        let mut config = profile.config().unwrap();
-        profile.validate(&config, None).unwrap();
+        assert!(
+            RouterSettings {
+                temperature: f64::NAN,
+                ..settings.clone()
+            }
+            .config()
+            .is_err()
+        );
+        let mut config = settings.config().unwrap();
+        settings.validate(&config, None).unwrap();
         config.router_replica_sync = false;
-        assert!(profile.validate(&config, None).is_err());
+        assert!(settings.validate(&config, None).is_err());
         config.router_replica_sync = true;
         config.router_track_active_blocks = false;
-        profile
+        settings
             .validate(&config, Some(WorkerType::Prefill))
             .unwrap();
         assert!(
-            profile
+            settings
                 .validate(&config, Some(WorkerType::Aggregated))
                 .is_err()
         );
+        config = settings.config().unwrap();
+        config.router_approximate_cache_policy = "lru".parse().unwrap();
+        assert!(settings.validate(&config, None).is_err());
     }
 }

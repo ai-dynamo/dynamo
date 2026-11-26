@@ -377,7 +377,7 @@ def test_capability_is_part_of_the_retune_fingerprint():
         )
 
 
-@pytest.mark.parametrize("mutation", ["version", "profile", "malformed"])
+@pytest.mark.parametrize("mutation", ["version", "malformed"])
 def test_unreadable_checkpointed_binding_cannot_be_treated_as_resettable_corruption(
     mutation,
 ):
@@ -389,8 +389,6 @@ def test_unreadable_checkpointed_binding_cannot_be_treated_as_resettable_corrupt
     body = json.loads(annotations[STATE_ANNOTATION])
     if mutation == "version":
         body["retune_capability"]["version"] = 2
-    elif mutation == "profile":
-        body["retune_capability"]["router"]["profile"] = "kv-v2"
     else:
         body["retune_capability"]["traceStorage"] = None
     annotations[STATE_ANNOTATION] = json.dumps(body)

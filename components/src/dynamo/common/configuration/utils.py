@@ -55,17 +55,19 @@ class Deprecated:
 
 @dataclass
 class ArgEnv:
-    """Explicit env defaults and destination tracking for argument registration.
+    """The env of another process, for registering that process's arguments.
 
+    Argument groups read their env defaults from ``os.environ`` and warn
+    about deprecated or removed settings. A process that parses another
+    process's configuration (the planner reads its frontend's from the
+    DynamoGraphDeployment spec) passes an ``ArgEnv`` instead: env defaults
+    come from ``environ`` only, deprecation and removal notices are skipped
+    because they belong to the process that runs with that env, and
     ``env_dests`` records the env var -> dest of every argument registered.
-    Inspecting another process's configuration is quiet by default. Local
-    parsing can opt into deprecation and removal notices with ``emit_warnings``
-    while still using an explicit environment and destination tracking.
     """
 
     environ: Mapping[str, str]
     env_dests: dict[str, str] = field(default_factory=dict)
-    emit_warnings: bool = False
 
 
 def parse_bool(value: str) -> bool:
@@ -189,7 +191,7 @@ def add_argument(
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
         deprecated: Warn on explicit CLI/env use and show the migration in help.
-        env: Explicit env, destination tracking and warning policy (see ``ArgEnv``).
+        env: Another process's env (see ``ArgEnv``); skips ``deprecated``.
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env = env_value_type
@@ -202,8 +204,7 @@ def add_argument(
     )
     if env is not None:
         env.env_dests[env_var] = arg_dest
-        if not env.emit_warnings:
-            deprecated = None
+        deprecated = None
 
     names = [flag_name]
 
@@ -227,7 +228,7 @@ def add_argument(
     kwargs.update(add_arg_opts)
 
     if deprecated is not None:
-        if env_var in (os.environ if env is None else env.environ):
+        if env_var in os.environ:
             deprecated.warn(env_var)
         if help != argparse.SUPPRESS:
             kwargs["help"] = deprecated.message(flag_name) + " " + env_help
