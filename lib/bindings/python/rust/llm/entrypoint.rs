@@ -541,7 +541,6 @@ pub(crate) struct EntrypointArgs {
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
     ais_perf_config: Option<AisPerfConfig>,
-    /// Engines a dynamic frontend dials itself instead of reaching sidecars.
     direct: Option<DirectEngines>,
 }
 
