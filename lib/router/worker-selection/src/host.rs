@@ -154,10 +154,17 @@ pub trait SelectionConfigHostExt: sealed::Sealed + Sized {
 }
 
 /// The facts about a request that every stage reads. It takes every value, so a place that
-/// builds a [`RequestInfo`] fails to compile until it supplies a fact added later.
+/// builds a [`RequestInfo`] fails to compile until it supplies an argument added later. The
+/// caller's hints are one argument, so that check does not cover a hint added to
+/// [`CallerHints`]: it fails to compile only where a host names every field of one, as the
+/// kernel does where it builds its scheduling request, and not at a site that lends
+/// [`CallerHints::NONE`].
 /// `pinned_worker` is the exact worker and rank the request's host requires, the same value
 /// at every stage. An affinity target is not a pin, even when the selector treats it as
-/// exclusive. `caller_hints` is [`CallerHints::default`] where no caller sent the request.
+/// exclusive. `caller_hints` is borrowed, so this reads none of its values. A host with no
+/// hints to pass lends [`CallerHints::NONE`]: a test, or the hosted path, whose request
+/// carries only the input length, so a hosted picker reads no hint even when the caller
+/// sent one.
 #[inline]
 pub fn request_info<'a>(
     request_id: Option<&'a str>,
