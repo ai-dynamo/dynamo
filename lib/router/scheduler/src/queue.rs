@@ -25,7 +25,7 @@ use super::overlap_refresh::{
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
     CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
-    WorkerSelectionInput, WorkerSelector, caller_hints_of, request_info_of, worker_input_rows,
+    WorkerSelectionInput, WorkerSelector, request_info_of, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
@@ -2276,8 +2276,8 @@ impl<
         let due_at = queued.due_at;
         // A head that expiry exposes may be able to run, so every refusal below still reports it.
         let mut exposed = self.expire_due_classes(now);
-        let priority_jump = queued.request.priority_jump;
-        let strict_priority = queued.request.strict_priority;
+        let priority_jump = queued.request.caller_hints.priority_jump;
+        let strict_priority = queued.request.caller_hints.strict_priority;
         let placement = self
             .eligibility
             .lane(&queued.request, queue_metadata.lane_key);
@@ -3330,7 +3330,7 @@ impl<
             request_id,
             token_sequence: request.token_seq.take(),
             track_prefill_tokens: request.track_prefill_tokens,
-            expected_output_tokens: request.expected_output_tokens,
+            expected_output_tokens: request.caller_hints.expected_output_tokens,
             prefill_load_hint,
             worker: selected.selection.worker,
             lora_name: request
@@ -3554,7 +3554,7 @@ pub fn classify_inputs<C: WorkerConfigLike>(
     let mut classification =
         ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
             .with_pinned_worker(request.pinned_worker)
-            .with_caller_hints(caller_hints_of(request))
+            .with_caller_hints(request.caller_hints)
             .with_sequence_hashes(request.token_seq.as_deref())
             .with_busy_thresholds(reject_thresholds);
     if let Some(request_id) = request.mode.request_id() {
@@ -4439,11 +4439,9 @@ mod tests {
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: Default::default(),
             policy_class: None,
             session_context: None,
-            expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -6648,11 +6646,11 @@ mod tests {
         first_rx.await.unwrap().unwrap();
 
         let (mut low, mut low_rx) = make_request("low", isl);
-        low.priority_jump = 10_000.0;
+        low.caller_hints.priority_jump = 10_000.0;
         queue.enqueue(low).await;
 
         let (mut high, high_rx) = make_request("high", isl);
-        high.strict_priority = 1;
+        high.caller_hints.strict_priority = 1;
         queue.enqueue(high).await;
         assert_eq!(queue.pending_count(), 2);
 
@@ -7403,8 +7401,8 @@ mod tests {
             ("explicit-early", 25, Some(900), 0),
         ] {
             let (mut request, response_rx) = make_request(request_id, 64);
-            request.strict_priority = strict_priority;
-            request.priority_jump = f64::from(strict_priority) * 100.0;
+            request.caller_hints.strict_priority = strict_priority;
+            request.caller_hints.priority_jump = f64::from(strict_priority) * 100.0;
             let ingress_at = start + Duration::from_millis(ingress_ms);
             let classified = explicit_due_ms.map(|due_ms| {
                 let mut classified = queue

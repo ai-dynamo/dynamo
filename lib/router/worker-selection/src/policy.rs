@@ -1221,7 +1221,7 @@ mod row_source_tests {
 
     fn request() -> WorkerSelectionRequest<'static> {
         let request = WorkerSelectionRequest::new(
-            request_info(Some("stage"), 64, None, None, CallerHints::default()),
+            request_info(Some("stage"), 64, None, None, &CallerHints::NONE),
             16,
         )
         .with_prefill_tracking(true)
@@ -1507,7 +1507,7 @@ mod row_source_tests {
                 None
             };
             let request = WorkerSelectionRequest::new(
-                request_info(None, 64, None, None, CallerHints::default()),
+                request_info(None, 64, None, None, &CallerHints::NONE),
                 16,
             )
             .with_decode_progress(has_source.then_some(&provider));

@@ -227,15 +227,13 @@ impl SelectionCase {
                 isl_tokens,
                 lora_name: None,
                 accounting_attribution: AccountingAttribution::default(),
-                expected_output_tokens: None,
+                caller_hints: Default::default(),
                 affinity_target: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: RoutingConstraints::default(),
                 router_config_override: None,
                 track_prefill_tokens: true,
-                priority_jump: 0.0,
-                strict_priority: 0,
                 policy_class: None,
                 session_context: None,
                 overlap: OverlapSignals::default(),
@@ -281,15 +279,15 @@ impl SelectionCase {
     /// The output length `RequestInfo::expected_output_tokens` returns, to a policy and to a
     /// classifier.
     pub fn expected_output_tokens(mut self, tokens: u32) -> Self {
-        self.request.expected_output_tokens = Some(tokens);
+        self.request.caller_hints.expected_output_tokens = Some(tokens);
         self
     }
 
     /// The caller's priorities, as `RequestInfo::priority_jump` and
     /// `RequestInfo::strict_priority` return them.
     pub fn priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
-        self.request.priority_jump = priority_jump;
-        self.request.strict_priority = strict_priority;
+        self.request.caller_hints.priority_jump = priority_jump;
+        self.request.caller_hints.strict_priority = strict_priority;
         self
     }
 

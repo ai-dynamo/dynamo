@@ -73,7 +73,7 @@ impl ClassifyRequest {
             self.input_tokens,
             self.session_context.as_ref(),
             self.pinned_worker,
-            self.caller_hints,
+            &self.caller_hints,
         )
     }
 
@@ -365,7 +365,7 @@ impl<'a> DispatchHead<'a> {
                 isl_tokens,
                 session_context,
                 pinned_worker,
-                CallerHints::default(),
+                &CallerHints::NONE,
             ),
             policy_class,
             queued_at,

@@ -164,7 +164,7 @@ pub fn request_info<'a>(
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    caller_hints: CallerHints,
+    caller_hints: &'a CallerHints,
 ) -> RequestInfo<'a> {
     RequestInfo::new(
         request_id,

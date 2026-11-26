@@ -31,8 +31,7 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use dynamo_worker_selection::host::{
-    CallerHints, WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, request_info,
-    worker_copy_input,
+    WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, request_info, worker_copy_input,
 };
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
@@ -595,18 +594,8 @@ pub(crate) fn request_info_of(
         request.isl_tokens,
         request.session_context.as_ref(),
         pinned_worker,
-        caller_hints_of(request),
+        &request.caller_hints,
     )
-}
-
-/// What the caller sent with `request`. Every field is named, so a hint added to
-/// [`CallerHints`] fails to compile here until the request supplies it.
-pub(crate) fn caller_hints_of(request: &SchedulingRequest) -> CallerHints {
-    CallerHints {
-        expected_output_tokens: request.expected_output_tokens,
-        priority_jump: request.priority_jump,
-        strict_priority: request.strict_priority,
-    }
 }
 
 /// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them,
@@ -1060,11 +1049,9 @@ mod test_support {
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: Default::default(),
             policy_class: None,
             session_context: None,
-            expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,

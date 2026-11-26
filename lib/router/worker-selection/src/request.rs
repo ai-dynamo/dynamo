@@ -20,17 +20,33 @@ pub struct RequestInfo<'a> {
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    caller_hints: CallerHints,
+    caller_hints: &'a CallerHints,
 }
 
 /// What a caller sends with a request: the output length it expects and its two priorities.
-/// A host passes one to `host::request_info`; a plugin reads the values through
-/// [`RequestInfo`]. The default is a request whose caller sent none.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// A host keeps one with the request and lends it to `host::request_info`, so building a
+/// [`RequestInfo`] reads none of the three; a plugin reads the values through
+/// [`RequestInfo`]. The default, [`CallerHints::NONE`], is a request whose caller sent none.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CallerHints {
     pub expected_output_tokens: Option<u32>,
     pub priority_jump: f64,
     pub strict_priority: u32,
+}
+
+impl CallerHints {
+    /// The hints of a request whose caller sent none.
+    pub const NONE: Self = Self {
+        expected_output_tokens: None,
+        priority_jump: 0.0,
+        strict_priority: 0,
+    };
+}
+
+impl Default for CallerHints {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl<'a> RequestInfo<'a> {
@@ -40,7 +56,7 @@ impl<'a> RequestInfo<'a> {
         isl_tokens: usize,
         session_context: Option<&'a SessionContext>,
         pinned_worker: Option<WorkerWithDpRank>,
-        caller_hints: CallerHints,
+        caller_hints: &'a CallerHints,
     ) -> Self {
         Self {
             request_id,

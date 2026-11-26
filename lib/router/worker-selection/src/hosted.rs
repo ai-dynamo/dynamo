@@ -47,7 +47,7 @@ impl HostedSelectionRequest {
     fn selection_request(&self) -> WorkerSelectionRequest<'_> {
         // The host applies pins and session affinity before selecting.
         WorkerSelectionRequest::new(
-            request_info(None, self.isl_tokens, None, None, CallerHints::default()),
+            request_info(None, self.isl_tokens, None, None, &CallerHints::NONE),
             0,
         )
         .with_preview(self.preview)
