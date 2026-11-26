@@ -94,6 +94,8 @@ pub type DirectEngineFactory = Arc<
 /// Frontend settings an engine factory applies to every engine it builds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DirectEngineOptions {
+    /// The namespace the engines register in. The frontend's model filter
+    /// must admit it.
     pub namespace: String,
     /// The model's files on the frontend host, when an engine reports a path
     /// the frontend cannot read.
@@ -101,8 +103,12 @@ pub struct DirectEngineOptions {
 }
 
 impl DirectEngineOptions {
-    /// Apply the settings a sidecar's arguments cannot carry.
+    /// Set these on the configuration a sidecar's arguments resolved. The
+    /// namespace is not passed as `--namespace`: the sidecar appends
+    /// `DYN_NAMESPACE_WORKER_SUFFIX` to that, and the frontend's filter would
+    /// then drop the engine.
     pub fn apply(&self, config: &mut WorkerConfig) {
+        config.namespace = self.namespace.clone();
         if let Some(model_path) = &self.model_path {
             config.model_name = model_path.clone();
         }

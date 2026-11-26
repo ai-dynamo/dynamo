@@ -25,7 +25,7 @@ const BINARY: &str = "dynamo-sglang-sidecar";
 pub fn direct_engine_factory(options: DirectEngineOptions) -> DirectEngineFactory {
     Arc::new(move |spec: &DirectEngineSpec| {
         let options = options.clone();
-        let argv = direct_engine_args(BINARY, &options, spec);
+        let argv = direct_engine_args(BINARY, spec);
         async move {
             let mut args = <Args as clap::Parser>::try_parse_from(argv)
                 .map_err(|error| SidecarStartupError::from(error).into_dynamo())?;
