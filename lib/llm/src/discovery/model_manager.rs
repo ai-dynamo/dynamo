@@ -115,6 +115,9 @@ pub enum ModelManagerError {
     #[error("Model unavailable: {0}")]
     ModelUnavailable(String),
 
+    #[error("Model {0} does not support {1}")]
+    EndpointNotSupported(String, &'static str),
+
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
 }

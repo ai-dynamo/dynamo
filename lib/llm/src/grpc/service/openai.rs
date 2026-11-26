@@ -95,6 +95,9 @@ pub async fn completion_response_stream(
             crate::discovery::ModelManagerError::ModelUnavailable(_) => {
                 Status::unavailable("model temporarily unavailable")
             }
+            crate::discovery::ModelManagerError::EndpointNotSupported(_, endpoint) => {
+                Status::invalid_argument(format!("model does not support {endpoint}"))
+            }
             _ => Status::not_found("model not found"),
         })?;
 

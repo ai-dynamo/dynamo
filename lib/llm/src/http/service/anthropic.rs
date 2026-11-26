@@ -635,6 +635,12 @@ async fn anthropic_messages(
                 ErrorType::Unavailable,
             )
             .into_marked_response(&mut inflight_guard),
+            crate::discovery::ModelManagerError::EndpointNotSupported(_, endpoint) => {
+                AnthropicHandlerError::validation(format!(
+                    "Model '{model}' does not support {endpoint} requests"
+                ))
+                .into_marked_response(&mut inflight_guard)
+            }
             _ => AnthropicHandlerError::new(
                 ErrorClass::NotFound,
                 StatusCode::NOT_FOUND,

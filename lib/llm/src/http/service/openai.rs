@@ -625,10 +625,20 @@ impl ErrorMessage {
     /// registered model with no servable worker set (whichever role is missing).
     /// It returns the identical canonical 503 body so both code paths speak with
     /// one voice to the client.
+    ///
+    /// `EndpointNotSupported` is a registered model asked for an endpoint its
+    /// engines do not implement (e.g. `/v1/embeddings` on a text-generation
+    /// model). The request can never succeed by retrying, so it gets a 400
+    /// whose message names the model and the capability.
     pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
         match e {
             crate::discovery::ModelManagerError::ModelUnavailable(model) => {
                 Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
+            crate::discovery::ModelManagerError::EndpointNotSupported(model, endpoint) => {
+                Self::bad_request(format!(
+                    "Model '{model}' does not support {endpoint} requests"
+                ))
             }
             _ => Self::model_not_found(),
         }
@@ -11289,6 +11299,17 @@ mod tests {
         assert_eq!(
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // A registered model asked for an endpoint its engines do not
+        // implement must be distinguishable from a genuinely unknown model:
+        // 400 with a message naming the model and the capability.
+        let unsupported = ModelManagerError::EndpointNotSupported("x".to_string(), "embedding");
+        let response = ErrorMessage::from_model_error(&unsupported);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Model 'x' does not support embedding requests"
         );
     }
 
