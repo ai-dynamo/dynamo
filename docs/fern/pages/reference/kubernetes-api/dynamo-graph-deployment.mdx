@@ -11,19 +11,10 @@ A DGD is the resource that persists and serves traffic. Author one directly when
 
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
-After CRD schema and CEL validation succeed, the validating webhook reports independent new-state
-and immutable-field errors together and preserves validation warnings. For terminating DGDs, the
-webhook validates only durable metadata rules and skips specification checks so those checks cannot
-block finalizer removal. CRD schema and CEL validation still apply and may reject the update.
-
 LPX components are experimental and require the operator's `lpx.enabled` setting. When disabled,
 admission rejects new or changed LPX components but permits otherwise valid updates that leave them
 unchanged, and deletion. Existing LPX DGDs report a disabled status without further workload
 reconciliation; installed CRDs and workloads are preserved.
-Updates that change only ignored legacy settings, such as a disabled alpha scaling adapter, remain
-allowed. For updates through `v1alpha1`, changes to alpha-only resource annotations, labels,
-subcomponent types, and Ingress remain blocked while LPX is disabled, with each error reported at the
-changed field.
 
 <Info>
   Each entry in `spec.components` is a `DynamoComponentDeploymentSharedSpec` — the same fields documented on the [DCD Reference](dynamo-component-deployment.mdx#shared-component-spec). This page covers the **graph-level** fields; per-component fields live there.
