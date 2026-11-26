@@ -67,6 +67,7 @@ impl ClassifyRequest {
     /// The request facts every stage reads: the request id, the input length, the session,
     /// the pinned worker, and the caller's expected output length and priorities. A view over
     /// this request's own fields; nothing is copied.
+    #[inline]
     pub fn info(&self) -> RequestInfo<'_> {
         request_info(
             self.request_id.as_deref(),
@@ -387,6 +388,7 @@ impl<'a> DispatchHead<'a> {
     /// The request facts every stage reads: the request id, the input length, the session,
     /// the pinned worker, which a `Go` target cannot override, and the caller's expected
     /// output length and priorities.
+    #[inline]
     pub fn info(&self) -> RequestInfo<'a> {
         self.info
     }
