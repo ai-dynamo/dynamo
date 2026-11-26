@@ -73,9 +73,11 @@ pub struct DirectEngineSpec {
 /// constructor that sidecar runs, which usually asks the engine what it is
 /// (its role, model and parsers).
 ///
-/// The host calls it on every probe, so an engine that is down while it is
-/// built is built again later. An error the next call would repeat, a
-/// configuration error, stops the probing of that engine.
+/// The host calls it on every probe and retries every error. A build fails on
+/// the engine's state: it is down, or it reports something about itself that
+/// its sidecar would not run with, and a restart of the engine changes either.
+/// The frontend's own input, such as a malformed address, is rejected before
+/// the engines are served.
 ///
 /// The host never cancels or times out the build or `LLMEngine::start`, as
 /// `Worker` does not: the engine must bound them itself (the sidecar
@@ -224,13 +226,13 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// it serves, register it, and keep it registered while it serves. Returns once
 /// every engine's supervisor runs, without waiting for any engine to serve; an
 /// engine that is down is probed with backoff until it serves, and the others
-/// serve meanwhile. Fails only on configuration errors, including an engine the
-/// factory cannot build. An engine that starts but whose configuration this
+/// serve meanwhile. Fails only on shared discovery, an empty list or an engine
+/// listed twice. An engine the factory builds but whose configuration this
 /// frontend rejects (an `InvalidArgument` error, such as KV events it cannot
 /// subscribe to) is logged as an error and not probed again.
 ///
-/// `config` is the worker configuration a sidecar for these engines would run
-/// with. Each engine's role comes from its spec, not from `config`.
+/// Each engine's worker configuration, and with it its role, comes from the
+/// factory on every probe.
 ///
 /// `drt` must use process-local discovery: the engines are listed by the
 /// operator, not discovered, and their records name addresses only this
@@ -420,18 +422,14 @@ impl DirectEngineHost {
     /// when it stops, withdraw it and probe again. Probes back off from
     /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`, and so do the returns of
     /// an engine that is lost again soon after it registers. A probe's start runs
-    /// to completion even on shutdown. Stops probing, with an error, when the
-    /// engine's configuration is rejected, since every later probe would fail
-    /// the same way.
+    /// to completion even on shutdown. Stops probing, with an error, when this
+    /// frontend rejects the configuration of an engine it has built.
     async fn supervise(self, shutdown: CancellationToken) {
         let mut delay = REPROBE_INITIAL_DELAY;
         loop {
             let hosted = loop {
                 let probe = match (self.factory)(&self.spec).await {
                     Ok((engine, config)) => self.start(engine, &config).await,
-                    Err(build_error) if is_configuration_error(&build_error) => {
-                        Err(ProbeError::NotRegistered(build_error))
-                    }
                     Err(build_error) => Err(ProbeError::NotServing(build_error)),
                 };
                 match probe {
@@ -574,16 +572,17 @@ impl DirectEngineHost {
     }
 }
 
-/// Why a probe did not leave its engine serving. The engine is released either way.
+/// Why a probe did not leave its engine serving. An engine that was started
+/// is released either way.
 enum ProbeError {
-    /// `engine.start()` failed: the engine does not serve yet.
+    /// The engine could not be built, or `engine.start()` failed: it does not
+    /// serve yet.
     NotServing(DynamoError),
-    /// The engine started, but this frontend could not register it.
+    /// The engine was built, but this frontend could not register it.
     NotRegistered(DynamoError),
 }
 
-/// An error every later probe would repeat: the engine's configuration, not
-/// its state, is wrong.
+/// Whether this frontend rejects the configuration of an engine it has built.
 fn is_configuration_error(error: &DynamoError) -> bool {
     matches!(
         error.error_type(),
@@ -1275,9 +1274,9 @@ mod tests {
         drt.shutdown();
     }
 
-    /// The engine's own constructor contacts it, so an engine that is down
-    /// while it is built is built again, as an engine whose start fails is
-    /// started again.
+    /// The engine's own constructor contacts it, so a build fails while the
+    /// engine is down, or while it reports a setting its sidecar would not
+    /// run with. A restart of the engine changes either, so it is built again.
     #[tokio::test]
     async fn an_engine_that_cannot_be_built_yet_is_built_again() {
         let drt = DistributedRuntime::new(
@@ -1292,14 +1291,18 @@ mod tests {
         let serving = fake_factory(&state, WorkerConfig::default());
         let factory_builds = builds.clone();
         let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
-            if factory_builds.fetch_add(1, Ordering::SeqCst) == 0 {
-                let down = error(
+            let failed = match factory_builds.fetch_add(1, Ordering::SeqCst) {
+                0 => error(
                     ErrorType::Backend(BackendError::CannotConnect),
                     "engine is not up",
-                );
-                return futures::future::ready(Err(down)).boxed();
-            }
-            serving(spec)
+                ),
+                1 => error(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "engine reports a setting its sidecar would not run with",
+                ),
+                _ => return serving(spec),
+            };
+            futures::future::ready(Err(failed)).boxed()
         });
         let endpoint = DiscoveryQuery::Endpoint {
             namespace: WorkerConfig::default().namespace,
@@ -1322,7 +1325,7 @@ mod tests {
         })
         .await
         .expect("the engine must be built again and served");
-        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
         drt.shutdown();
     }
 
