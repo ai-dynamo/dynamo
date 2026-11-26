@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use dynamo_backend_common::DisaggregationMode;
 use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec, serve_direct_engines};
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_sglang_sidecar::direct::direct_engine_factory;
 use dynamo_sidecar_testkit::{bounded, control::Controller};
@@ -175,6 +176,17 @@ async fn disaggregated_requests_use_the_engines_that_report_prefill_and_decode()
     let decode = Engine::start(&env, DisaggregationMode::Decode).await;
     // Both are listed the same way: each engine says which role it serves.
     let frontend = direct_frontend(&env, &[&prefill, &decode], RouterMode::RoundRobin).await;
+
+    // The mock reports only loopback for its host, so the prefill engine's
+    // bootstrap host is the host it is dialed at. A sidecar would advertise its
+    // own address.
+    let cards = env.cards().await;
+    let endpoint = cards
+        .iter()
+        .find(|card| card.worker_type == Some(WorkerType::Prefill))
+        .and_then(|card| card.runtime_config.disaggregated_endpoint.as_ref())
+        .expect("the prefill engine publishes its bootstrap endpoint");
+    assert_eq!(endpoint.bootstrap_host.as_deref(), Some("127.0.0.1"));
 
     let (prefill_before, decode_before) = (prefill.served(), decode.served());
     for _ in 0..2 {
