@@ -4,7 +4,8 @@
 //! A Model represents a named model (e.g., "llama-3-70b") that may be served by
 //! one or more WorkerSets. Each WorkerSet corresponds to a namespace.
 //!
-//! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
+//! Requests are routed to a WorkerSet selected by weighted random: proportional to worker
+//! count, or to paired prefill/decode capacity for disaggregated namespaces.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1016,8 +1017,8 @@ impl Model {
     /// Select a WorkerSet and extract a value from it.
     ///
     /// When there's only one set (steady state), returns from that set directly.
-    /// With multiple sets, uses weighted random selection proportional
-    /// to worker count, filtering to sets that have the requested engine.
+    /// With multiple sets, uses weighted random selection over the sets that have
+    /// the requested engine; see [`Self::weighted_candidates`] for the weights.
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
@@ -1038,9 +1039,38 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
     {
-        // One immutable membership map drives both the readiness filter and
-        // candidate eligibility, so a concurrent add/remove can't make us treat a
-        // namespace as complete while routing to a set that lost a peer.
+        let mut candidates = self.weighted_candidates(extract, count_workers);
+        if candidates.len() > 1 {
+            let total_weight: f64 = candidates.iter().map(|(_, weight)| weight).sum();
+            let mut pick = rand::rng().random_range(0.0..total_weight);
+            for index in 0..candidates.len() {
+                if pick < candidates[index].1 {
+                    return Some(candidates.swap_remove(index).0);
+                }
+                pick -= candidates[index].1;
+            }
+        }
+        // Single candidate, or float rounding left `pick` past the last weight.
+        candidates.pop().map(|(val, _)| val)
+    }
+
+    /// Candidates for [`Self::select_worker_set_with_worker_count`] with their
+    /// selection weights.
+    ///
+    /// A candidate's weight is its worker count. When every candidate's namespace
+    /// also has live prefill workers (disaggregated deployments, e.g. overlapping
+    /// rolling-update generations), prefill and decode only pair within a namespace,
+    /// so each namespace is instead weighted by `min(P / ΣP, D / ΣD)`: the smaller of
+    /// its share of the prefill and of the decode workers across candidate namespaces.
+    /// That weight is split across the namespace's candidates by worker count.
+    fn weighted_candidates<T, F, C>(&self, extract: F, count_workers: C) -> Vec<(T, f64)>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+    {
+        // One immutable membership map drives the readiness filter, candidate
+        // eligibility and the prefill counts, so a concurrent add/remove can't make us
+        // treat a namespace as complete while routing to a set that lost a peer.
         let worker_sets = self.worker_sets.load();
         let snapshot: Vec<&WorkerSet> = worker_sets.values().map(Arc::as_ref).collect();
 
@@ -1064,45 +1094,56 @@ impl Model {
         if snapshot.len() == 1 {
             let ws = snapshot[0];
             if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
-                return None;
+                return Vec::new();
             }
-            return extract(ws);
+            return extract(ws).map(|val| (val, 1.0)).into_iter().collect();
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let eligible: Vec<(T, &str, usize)> = snapshot
             .iter()
             .filter_map(|&ws| {
                 let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (val, ws.namespace(), count))
             })
             .collect();
 
-        if eligible.is_empty() {
-            return None;
-        }
-
-        if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
-        }
-
-        // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
-        let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
-            if pick < weight {
-                return Some(val);
+        let mut prefill_counts: HashMap<&str, usize> = HashMap::new();
+        for ws in &snapshot {
+            if ws.card().worker_type == Some(crate::worker_type::WorkerType::Prefill) {
+                *prefill_counts.entry(ws.namespace()).or_default() += count_workers(ws);
             }
-            pick -= weight;
         }
-        // Should not reach here, but fallback to None
-        None
+        let mut decode_counts: HashMap<&str, usize> = HashMap::new();
+        for (_, ns, count) in &eligible {
+            *decode_counts.entry(ns).or_default() += count;
+        }
+        let prefill_count = |ns: &str| prefill_counts.get(ns).copied().unwrap_or(0);
+
+        if eligible.len() < 2 || decode_counts.keys().any(|ns| prefill_count(ns) == 0) {
+            return eligible
+                .into_iter()
+                .map(|(val, _, count)| (val, count as f64))
+                .collect();
+        }
+
+        let total_prefill: usize = decode_counts.keys().map(|ns| prefill_count(ns)).sum();
+        let total_decode: usize = decode_counts.values().sum();
+        eligible
+            .into_iter()
+            .map(|(val, ns, count)| {
+                let decode = decode_counts[ns];
+                let share = (prefill_count(ns) as f64 / total_prefill as f64)
+                    .min(decode as f64 / total_decode as f64);
+                (val, share * count as f64 / decode as f64)
+            })
+            .collect()
     }
 }
 
@@ -2835,5 +2876,138 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    /// Register one disaggregated generation: `prefill` and `decode` live workers
+    /// in namespace `ns`, with the decode set as the serving front door.
+    fn add_pd_generation(
+        model: &Model,
+        ns: &str,
+        prefill: usize,
+        decode: usize,
+    ) -> [watch::Sender<Vec<u64>>; 2] {
+        let (prefill_ws, prefill_tx) = ws_with_type(
+            ns,
+            &format!("{ns}-p"),
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            (0..prefill as u64).collect(),
+        );
+        let (decode_ws, decode_tx) = ws_serving_role(
+            ns,
+            &format!("{ns}-d"),
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            (0..decode as u64).collect(),
+        );
+        model.add_worker_set(format!("{ns}:prefill"), prefill_ws);
+        model.add_worker_set(format!("{ns}:decode"), decode_ws);
+        [prefill_tx, decode_tx]
+    }
+
+    /// Normalized selection weight per namespace, for sets serving chat.
+    fn chat_weights(model: &Model) -> HashMap<String, f64> {
+        let candidates = model.weighted_candidates(
+            |ws| ws.chat_engine.as_ref().map(|_| ws.namespace().to_string()),
+            WorkerSet::worker_count,
+        );
+        let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
+        candidates
+            .into_iter()
+            .map(|(ns, weight)| (ns, weight / total))
+            .collect()
+    }
+
+    #[test]
+    fn select_weights_aggregated_by_worker_count() {
+        let model = Model::new("llama".to_string());
+        let (one, _tx1) = ws_serving_role("one", "mdc-1", WorkerType::Aggregated, vec![], vec![1]);
+        let (three, _tx3) = ws_serving_role(
+            "three",
+            "mdc-3",
+            WorkerType::Aggregated,
+            vec![],
+            vec![1, 2, 3],
+        );
+        model.add_worker_set("one".to_string(), one);
+        model.add_worker_set("three".to_string(), three);
+
+        let weights = chat_weights(&model);
+        assert!((weights["one"] - 0.25).abs() < 1e-9);
+        assert!((weights["three"] - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn select_disagg_single_generation_unchanged() {
+        let model = Model::new("llama".to_string());
+        let _txs = add_pd_generation(&model, "gen", 4, 1);
+
+        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["gen"]);
+        assert!(model.get_chat_engine().is_ok());
+    }
+
+    /// Desired 6P:4D mid-rollout, generations at 4P:1D and 2P:3D. Weighting by
+    /// decode count alone sends 75% to the generation with 2 of the 6 prefills;
+    /// paired weighting gives min(4/6, 1/4) : min(2/6, 3/4) = 3/7 : 4/7.
+    #[test]
+    fn select_disagg_generations_weighted_by_paired_capacity() {
+        let model = Model::new("llama".to_string());
+        let _old = add_pd_generation(&model, "old", 4, 1);
+        let _new = add_pd_generation(&model, "new", 2, 3);
+
+        let weights = chat_weights(&model);
+        assert!((weights["old"] - 3.0 / 7.0).abs() < 1e-9);
+        assert!((weights["new"] - 4.0 / 7.0).abs() < 1e-9);
+
+        let samples = 20_000;
+        let picked_old = (0..samples)
+            .filter(|_| {
+                model.select_worker_set_with(|ws| {
+                    ws.chat_engine.as_ref().map(|_| ws.namespace() == "old")
+                }) == Some(true)
+            })
+            .count();
+        let observed = picked_old as f64 / samples as f64;
+        assert!(
+            (observed - 3.0 / 7.0).abs() < 0.03,
+            "old generation picked {observed:.3} of the time, expected ~0.429"
+        );
+    }
+
+    #[test]
+    fn select_disagg_generation_missing_role_excluded() {
+        let model = Model::new("llama".to_string());
+        let _ready = add_pd_generation(&model, "ready", 2, 2);
+        let _no_prefill = add_pd_generation(&model, "no-prefill", 0, 3);
+        let _no_decode = add_pd_generation(&model, "no-decode", 3, 0);
+
+        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["ready"]);
+    }
+
+    /// Prefill counts come from the same membership snapshot as readiness and
+    /// eligibility, so a set removed mid-selection doesn't skew that selection.
+    #[test]
+    fn select_disagg_weights_use_one_membership_snapshot() {
+        let model = Model::new("llama".to_string());
+        let _old = add_pd_generation(&model, "old", 4, 1);
+        let _new = add_pd_generation(&model, "new", 2, 3);
+
+        let candidates = model.weighted_candidates(
+            |ws| {
+                model.remove_worker_set("new:prefill");
+                ws.chat_engine.as_ref().map(|_| ws.namespace().to_string())
+            },
+            WorkerSet::worker_count,
+        );
+        let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
+        let weights: HashMap<String, f64> = candidates
+            .into_iter()
+            .map(|(ns, weight)| (ns, weight / total))
+            .collect();
+        assert!((weights["old"] - 3.0 / 7.0).abs() < 1e-9);
+        assert!((weights["new"] - 4.0 / 7.0).abs() < 1e-9);
+
+        // The next selection sees the removal: "new" lost its prefill peer.
+        assert_eq!(chat_weights(&model).keys().collect::<Vec<_>>(), ["old"]);
     }
 }
