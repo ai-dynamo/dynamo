@@ -17,7 +17,7 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
         .await
         .expect("native abort must not wait for stream closure or its pending peer");
         let expected = if status == 429 {
-            super::super::super::error::overload_status_code()
+            dynamo_error::http::overload_status_code()
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
@@ -69,7 +69,7 @@ async fn unknown_native_abort_is_unavailable_not_client_error_or_cancellation() 
                 .is_none()
         );
         let body = response_body(response).await;
-        assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+        assert_eq!(body["detail"], "scoring worker is unavailable");
         assert!(body.get("answers").is_none());
         assert!(!body.to_string().contains("private worker detail"));
         assert!(parent.is_killed());

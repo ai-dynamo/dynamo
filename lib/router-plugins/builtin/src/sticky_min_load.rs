@@ -17,19 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 use parking_lot::Mutex;
 
 /// Policy type selected under a `worker_selection` role.
@@ -164,7 +152,7 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let load = input
@@ -176,7 +164,8 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
                 "load input does not match candidates",
             ));
         }
-        let session_id = context
+        let session_id = request
+            .info()
             .session_context()
             .map(|session| session.session_id());
         self.0
@@ -198,18 +187,15 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
 
-    Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(SharedStickyMinLoadPicker(Mutex::new(
-                    StickyMinLoadPicker::new(parameters),
-                ))),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(SharedStickyMinLoadPicker(Mutex::new(
+                StickyMinLoadPicker::new(parameters),
+            ))),
+        )
+    }))
 }
 
 pub fn register(

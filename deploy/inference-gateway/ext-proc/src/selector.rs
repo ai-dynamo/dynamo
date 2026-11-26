@@ -13,13 +13,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, RouterPluginRegistry, SelectAndReserveRequest as CoreSelectAndReserveRequest,
-    SelectionError, SelectionService, SelectionServiceBuilder,
-    warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP;
+use dynamo_scheduler::host::{
+    PromptRequest, RoutingConstraints, SelectAndReserveRequest as CoreSelectAndReserveRequest,
+    SelectionError,
+};
 use kube::Client;
 use tokio_util::sync::CancellationToken;
 
@@ -258,24 +261,18 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+    use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyFactory,
-    };
-    use dynamo_kv_router::services::selection::{
-        CatalogReconciler, WorkerRequest, WorkerSelectionPolicyParameters,
-    };
+    use dynamo_kv_router::plugins::worker_selection::*;
+    use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 
     use super::*;
 
     /// Custom picker that records the expected output length observed in the
-    /// worker-selection context so tests can assert the value propagated from
+    /// worker-selection request so tests can assert the value propagated from
     /// the EPP request into the scheduling policy.
     #[derive(Clone)]
     struct ExpectedOutputRecorder(Arc<Mutex<Option<u32>>>);
@@ -290,10 +287,10 @@ mod tests {
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
             &self,
-            context: &WorkerSelectionContext<'_>,
+            request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = context.expected_output_tokens();
+            *self.0.lock().unwrap() = request.expected_output_tokens();
             assert!(!input.candidates().is_empty());
             Ok(0)
         }
@@ -371,7 +368,7 @@ models:
     /// non-zero `block_size`, and a well-formed KV-event endpoint per dp_rank.
     /// The KV-event endpoint is only a `tcp://` address string — the core's ZMQ
     /// SUB listener connects lazily and never needs a live publisher (see the
-    /// `WorkerRegistry` register tests in `lib/kv-router`), so no network infra is
+    /// `WorkerRegistry` register tests in `lib/router/kv-router`), so no network infra is
     /// required. Queueing is disabled under the default router policy, so
     /// `max_num_batched_tokens` is not required here.
     fn schedulable_registration(worker_id: u64) -> WorkerRequest {
@@ -450,7 +447,7 @@ models:
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(!input.candidates().is_empty());
@@ -479,17 +476,15 @@ worker_selection:
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         provider_calls.fetch_add(1, Ordering::Relaxed);
                         let factory_calls = Arc::clone(&factory_calls);
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |config, worker_type, _partition| {
-                                factory_calls.fetch_add(1, Ordering::Relaxed);
-                                assert_eq!(worker_type, WorkerType::Aggregated);
-                                WorkerSelectionPolicy::new(
-                                    config.clone(),
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(FirstEligiblePicker),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            factory_calls.fetch_add(1, Ordering::Relaxed);
+                            assert_eq!(context.worker_type(), WorkerType::Aggregated);
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(FirstEligiblePicker),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),
@@ -745,9 +740,9 @@ worker_selection:
 
     /// Regression test for the scheduling-metadata propagation gap: a request
     /// that carries `expected_output_tokens` must forward the value all the way
-    /// into the worker-selection context, not silently drop it to `None`.
+    /// into the worker-selection request, not silently drop it to `None`.
     #[tokio::test]
-    async fn expected_output_tokens_reaches_worker_selection_context() {
+    async fn expected_output_tokens_reaches_worker_selection_request() {
         let (picker, recorded) = ExpectedOutputRecorder::new();
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
         std::fs::write(
@@ -767,15 +762,13 @@ worker_selection:
                     let picker = picker.clone();
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         let picker = picker.clone();
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |config, worker_type, _partition| {
-                                WorkerSelectionPolicy::new(
-                                    config.clone(),
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(picker.clone()),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(picker.clone()),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),
@@ -814,7 +807,7 @@ worker_selection:
     /// resolve directly; any other name fails with a 400 scheduler error.
     #[tokio::test]
     async fn unknown_policy_class_is_rejected() {
-        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_scheduler::host::KvSchedulerError;
 
         let is_unknown = |error: &SelectionError, expected: &str| {
             matches!(

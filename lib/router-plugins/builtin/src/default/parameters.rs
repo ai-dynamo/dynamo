@@ -3,14 +3,13 @@
 
 //! Startup parameters and provider registration for the default policy.
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::config::SharedCacheType;
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 use std::sync::Arc;
 
-use super::policy_for_role;
+use super::{Preset, policy_for_role};
+
+/// Policy type of the `kvcr` preset, selected under a `worker_selection` role.
+pub const KVCR_POLICY_TYPE: &str = "kvcr";
 
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -38,8 +37,8 @@ pub(super) struct PolicyParameters {
     pub(super) router_temperature: f64,
 }
 
-impl From<&KvRouterConfig> for PolicyParameters {
-    fn from(config: &KvRouterConfig) -> Self {
+impl From<&SelectionConfig> for PolicyParameters {
+    fn from(config: &SelectionConfig) -> Self {
         Parameters::default().resolve(config)
     }
 }
@@ -71,10 +70,10 @@ impl Parameters {
         Ok(())
     }
 
-    fn resolve(&self, config: &KvRouterConfig) -> PolicyParameters {
+    fn resolve(&self, config: &SelectionConfig) -> PolicyParameters {
         let overlap_score_credit = self
             .overlap_score_credit
-            .unwrap_or(config.overlap_score_credit);
+            .unwrap_or(config.overlap_score_credit());
         // Legacy load-only configs retain tier weights for host accounting. Only explicit
         // policy parameters enable tier scoring independently of device credit.
         let inherited_cache_weight = |weight| {
@@ -88,26 +87,30 @@ impl Parameters {
             overlap_score_credit,
             overlap_score_credit_decay: self
                 .overlap_score_credit_decay
-                .unwrap_or(config.overlap_score_credit_decay),
-            prefill_load_scale: self.prefill_load_scale.unwrap_or(config.prefill_load_scale),
+                .unwrap_or(config.overlap_score_credit_decay()),
+            prefill_load_scale: self
+                .prefill_load_scale
+                .unwrap_or(config.prefill_load_scale()),
             decode_active_request_weight: self
                 .decode_active_request_weight
-                .unwrap_or(config.decode_active_request_weight),
+                .unwrap_or(config.decode_active_request_weight()),
             host_cache_hit_weight: self
                 .host_cache_hit_weight
-                .unwrap_or(inherited_cache_weight(config.host_cache_hit_weight)),
+                .unwrap_or(inherited_cache_weight(config.host_cache_hit_weight())),
             disk_cache_hit_weight: self
                 .disk_cache_hit_weight
-                .unwrap_or(inherited_cache_weight(config.disk_cache_hit_weight)),
+                .unwrap_or(inherited_cache_weight(config.disk_cache_hit_weight())),
             shared_cache_multiplier: self.shared_cache_multiplier.unwrap_or_else(|| {
-                inherited_cache_weight(config.shared_cache_multiplier.unwrap_or(
-                    match config.shared_cache_type {
+                inherited_cache_weight(config.shared_cache_multiplier().unwrap_or(
+                    match config.shared_cache_type() {
                         SharedCacheType::None => 0.0,
                         SharedCacheType::Hicache => 0.5,
                     },
                 ))
             }),
-            router_temperature: self.router_temperature.unwrap_or(config.router_temperature),
+            router_temperature: self
+                .router_temperature
+                .unwrap_or(config.router_temperature()),
         }
     }
 }
@@ -122,9 +125,8 @@ impl PolicyParameters {
 
     pub(super) fn from_runtime(
         values: serde_json::Map<String, serde_json::Value>,
-        config: &KvRouterConfig,
-    ) -> Result<Self, dynamo_kv_router::plugins::worker_selection::RuntimePolicyError> {
-        use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
+        config: &SelectionConfig,
+    ) -> Result<Self, RuntimePolicyError> {
         // Runtime maps are resolved; startup parameters may be absent or null.
         if values.values().any(serde_json::Value::is_null) {
             return Err(RuntimePolicyError::InvalidParameters(
@@ -140,19 +142,29 @@ impl PolicyParameters {
     }
 }
 
+/// Register the named default and the `kvcr` preset, which take the same parameters.
 pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register_worker_selection(
-        "dynamo-default-cost-fn",
-        Arc::new(|parameters| {
-            let parameters: Parameters = parameters.deserialize()?;
-            parameters.validate()?;
-            Ok(Arc::new(
-                move |config: &KvRouterConfig, role, _partition| {
-                    policy_for_role(config.clone(), role, parameters.resolve(config))
-                },
-            ))
-        }),
-    )
+    for (policy_type, preset) in [
+        ("dynamo-default-cost-fn", Preset::Default),
+        (KVCR_POLICY_TYPE, Preset::Kvcr),
+    ] {
+        registry.register_worker_selection(
+            policy_type,
+            Arc::new(move |parameters| {
+                let parameters: Parameters = parameters.deserialize()?;
+                parameters.validate()?;
+                Ok(Arc::new(move |context| {
+                    policy_for_role(
+                        context.selection_config().clone(),
+                        context.worker_type(),
+                        parameters.resolve(context.selection_config()),
+                        preset,
+                    )
+                }))
+            }),
+        )?;
+    }
+    Ok(())
 }

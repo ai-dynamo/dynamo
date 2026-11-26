@@ -3,20 +3,35 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, StorageTier,
+use aisim_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventDomain, KvEventTier};
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
 use crate::common::protocols::ForwardPassSnapshot;
 
 /// Router storage tier of a native KV event. `HostPinned` events describe a
-/// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
+/// host pool (a per-rank or cluster-shared G2, or a rank's KVCR-owned memory)
+/// and `Disk` events a rank's KVCR disk cache (G3); neither may enter the
+/// device (G1) index.
 pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
     match tier {
         KvEventTier::Device => StorageTier::Device,
         KvEventTier::HostPinned => StorageTier::HostPinned,
+        KvEventTier::Disk => StorageTier::Disk,
+    }
+}
+
+/// Whether a cache owner beside the worker (the rank's KVCR store), not the worker,
+/// holds the residency a native KV event describes. A real worker reports it with
+/// `ownership=kvcr`, which the router accepts only as cache-owner residency through
+/// a KV state agent.
+pub(crate) fn cache_owned(event: &KvEvent) -> bool {
+    match event.domain {
+        KvEventDomain::Worker => false,
+        KvEventDomain::CacheOwner => true,
     }
 }
 
@@ -98,11 +113,11 @@ pub(crate) fn dynamo_forward_pass_snapshot(
 mod tests {
     use std::sync::Arc;
 
-    use aisimulate_core::engine::{KvBlock, StoredBlocks};
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_kv_router::protocols::{
-        KvCacheEventData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    };
+    use aisim_core::engine::{KvBlock, StoredBlocks};
+    use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+    use dynamo_kv_hashing::LocalBlockHash;
+    use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -115,7 +130,8 @@ mod tests {
         blocks: &[(u64, u64, &[u32])],
     ) -> KvEvent {
         KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -130,6 +146,7 @@ mod tests {
                     })
                     .collect(),
                 session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }
@@ -159,7 +176,8 @@ mod tests {
         assert_eq!(token_ids, Some(vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]));
 
         let (event, token_ids, session_id) = dynamo_kv_event(KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -211,7 +229,8 @@ mod tests {
         assert_eq!(matches.scores.get(&worker), Some(&2));
 
         let removed = dynamo_kv_event(KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {

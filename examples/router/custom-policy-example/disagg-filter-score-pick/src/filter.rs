@@ -3,10 +3,7 @@
 
 //! Device-cache filter shared by prefill and decode workers.
 
-use dynamo_kv_router::WorkerSelectionPolicyError;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
 pub(crate) struct MinimumDeviceOverlapFilter {
     pub(crate) min_device_overlap_blocks: f64,
@@ -19,7 +16,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
 
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::discovery::DiscoveryEvent;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryInstanceId, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;

@@ -63,13 +63,13 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+use dynamo_http_server::metrics::generate_log_buckets;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-use dynamo_kv_router::indexer::ApproximateLruStats;
-use dynamo_kv_router::sequences::LocalWorkerLoad;
+use dynamo_kv_indexer::host::ApproximateLruStats;
+use dynamo_slot_tracker::host::LocalWorkerLoad;
 use worker_registered::RouterWorkerRegistered;
 pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 
@@ -496,9 +496,7 @@ impl ActiveSequenceIngressMetrics {
     }
 }
 
-impl dynamo_kv_router::services::selection::ReplicaIngressObserver
-    for ActiveSequenceIngressMetricHandles
-{
+impl dynamo_scheduler::host::ReplicaIngressObserver for ActiveSequenceIngressMetricHandles {
     fn observe_drain(&self, queue_depth: usize, applied: usize) {
         self.queue_depth.set(queue_depth as i64);
         self.events_applied_total.inc_by(applied as u64);
@@ -1171,7 +1169,7 @@ impl RouterRequestMetrics {
         let shared_cache_beyond_blocks = metrics
             .create_histogram(
                 &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                "Shared cache blocks beyond device overlap for the selected worker",
+                "Shared cache blocks the selected worker can load past its local prefix",
                 extra_labels,
                 Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
             )

@@ -4,9 +4,7 @@
 //! `random`: a uniform random worker.
 
 use super::{Samples, ThreadRandom, no_candidates};
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// A uniform random worker.
 pub const RANDOM: &str = "random";
@@ -16,7 +14,7 @@ pub(super) struct RandomPicker;
 impl WorkerPicker for RandomPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         random(input.len(), &mut ThreadRandom).ok_or_else(no_candidates)

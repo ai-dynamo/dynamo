@@ -11,18 +11,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
-use aisimulate_core::engine::KvEventData;
-use aisimulate_core::engine::generalized::{
+use aisim_core::engine::KvEventData;
+use aisim_core::engine::generalized::{
     EngineEffects, EngineIdentity, EnginePassCompleted, GeneralizedMockerEngine, RankIdentity,
     SchedulerCommand as EngineSchedulerCommand,
 };
-use aisimulate_core::engine::{
+use aisim_core::engine::{
     Admission, Command, CommandEffects, CommandResult, ForwardPassMetrics, KvEvent, Metrics,
     PassCompletionEffects,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 #[cfg(test)]
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use futures::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -37,7 +37,7 @@ use crate::common::protocols::{
 };
 use crate::engine_adapter::{EngineComponents, engine_components, engine_factory};
 use crate::engine_observations::{
-    dynamo_forward_pass_snapshot, dynamo_kv_event, dynamo_storage_tier,
+    cache_owned, dynamo_forward_pass_snapshot, dynamo_kv_event, dynamo_storage_tier,
 };
 use crate::generalized_live::{
     GroupedLiveDriverConfig, GroupedLiveEngineHandle, GroupedLiveEvent, GroupedLiveRuntime,

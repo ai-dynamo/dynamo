@@ -8,6 +8,9 @@
 {% if framework != "dynamo" %}
     {% include "templates/dynamo_base.Dockerfile" %}
     {% include "templates/wheel_builder.Dockerfile" %}
+    {% if device in ("xpu", "cpu") %}
+        {% include "templates/nixl_source.Dockerfile" %}
+    {% endif %}
 {% elif framework == "dynamo" %}
     {% if target == "frontend" %}
         {% include "templates/dynamo_base.Dockerfile" %}
@@ -31,9 +34,6 @@
 
 # --- SGLang Stages
 {% if framework == "sglang" %}
-    {% if device == "xpu" %}
-        {% include "templates/sglang_xpu_framework.Dockerfile" %}
-    {% endif %}
     # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}

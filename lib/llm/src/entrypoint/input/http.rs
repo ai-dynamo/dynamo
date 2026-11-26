@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::plugins::host::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +23,6 @@ use crate::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
-use dynamo_kv_router::plugins::{RouterPlugins, request_classifier::RequestClassifierFactory};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
@@ -101,7 +102,13 @@ impl HttpFrontend {
         }
 
         let plugins = RouterPluginBuilder::new(self.plugins);
-        plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+        let router_config = engine_config.local_model().router_config();
+        plugins.validate_config(&router_config.kv_router_config)?;
+        crate::kv_router::check_hint_policies_route_on_kv_path(
+            router_config.router_mode,
+            &router_config.kv_router_config,
+            &crate::kv_router::EVERY_ROLE,
+        )?;
 
         // Callers that reach the frontend without going through `run_input`
         // still have to drain the trace sinks before the process exits. The
@@ -207,8 +214,10 @@ async fn run_with_router_plugins(
         .migration_limit(local_model.migration_limit())
         .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
-    // Inject the DRT's metrics registry so that component-scoped metrics
-    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    // Share the DRT's metrics registry: the HTTP service attaches its own
+    // registry to it, so the DRT's OTLP export includes the frontend's metrics,
+    // and /metrics (default port 8000) serves the merged tree, including
+    // component-scoped metrics such as KvIndexerMetrics.
     http_service_builder =
         http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
 
@@ -343,9 +352,9 @@ async fn run_watcher(
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
-    metrics: Arc<crate::http::service::metrics::Metrics>,
+    metrics: Arc<dynamo_http_server::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
@@ -381,7 +390,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;
@@ -397,7 +406,7 @@ async fn run_watcher(
             if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
                 tracing::error!(%error, "failed to update HTTP endpoints");
             }
-            update_model_metrics(model_update, metrics.clone());
+            update_model_metrics(model_update, metrics.clone(), migration_limit);
         }
     });
 
@@ -448,14 +457,17 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
 /// Updates metrics for model type changes
 fn update_model_metrics(
     model_type: ModelUpdate,
-    metrics: Arc<crate::http::service::metrics::Metrics>,
+    metrics: Arc<dynamo_http_server::metrics::Metrics>,
+    migration_limit: u32,
 ) {
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
-                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
-            }
+            crate::http::service::metrics::update_metrics_from_mdc(
+                &metrics,
+                &card,
+                migration_limit,
+            );
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
@@ -471,7 +483,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-    use dynamo_kv_router::KvRouterConfig;
+    use dynamo_kv_router::config::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {

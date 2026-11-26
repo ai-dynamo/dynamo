@@ -41,19 +41,18 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
-        monitor_for_disconnects_with_activity_and_error_signal,
+        StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, invalid_argument},
+    error::{ContextLengthDetails, Protocol, invalid_argument, public_message_for},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
-        process_chat_response_and_observe_metrics,
+        EventConverter, process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
+    response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -63,13 +62,19 @@ use crate::preprocessor::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
-    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
+    agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
+    session_affinity_from_headers, upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
-use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::common::metadata_upload::UniqueJsonValue;
+use crate::protocols::openai::chat_completions::{
+    aggregator::ChatCompletionAggregator,
+    allowed_tools::{AllowedToolsRequest, ToolAllowlist},
+    tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
+};
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -96,15 +101,22 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{CancellationLabels, Endpoint, ErrorType},
+};
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::FinishReason;
 use dynamo_protocols::types::responses::{
     CountInputTokensRequest, CountInputTokensResponse, ResponseError, ResponseErrorCode,
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
+
+use dynamo_http_server::request::{get_body_limit, is_json_content_type};
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -121,9 +133,9 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{
-    BackendStatusAction, ClientErrorAction, SanitizedError, find_canonical_error_in_chain,
-    http_action_for_error, overload_status_code,
+use dynamo_error::http::{
+    BackendStatusAction, ClientErrorAction, HttpError, SanitizedError,
+    find_canonical_error_in_chain, http_action_for_error, overload_status_code,
 };
 
 pub(super) fn rl_router(
@@ -132,17 +144,6 @@ pub(super) fn rl_router(
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
     let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
     Ok(dynamo_rl::rl_router(state))
-}
-
-// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
-/// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
-pub(super) fn get_body_limit() -> usize {
-    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(45 * 1024 * 1024)
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
@@ -247,6 +248,11 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    /// Typed context-length bounds for protocol re-rendering. Skipped on the
+    /// wire: `details` already carries the same bounds, and re-parsing it here
+    /// would silently fall back to the OpenAI wording if the shape ever drifts.
+    #[serde(skip)]
+    context_length: Option<ContextLengthDetails>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
 }
@@ -254,6 +260,10 @@ pub(crate) struct ErrorMessage {
 impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn context_length_details(&self) -> Option<ContextLengthDetails> {
+        self.context_length
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -357,7 +367,7 @@ pub(super) fn record_local_failure(class: ErrorClass) {
     if class == ErrorClass::Cancelled {
         return;
     }
-    super::metrics::record_failure(&DynamoError::builder().class(class).build());
+    dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
 }
 
 fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
@@ -459,6 +469,7 @@ fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
                 .to_string(),
             code: status.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: Some(ErrorType::UnsupportedModality),
         }),
     ))
@@ -530,7 +541,7 @@ fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
 }
 
 fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
-    use super::metrics::{
+    use dynamo_http_server::metrics::{
         request_was_cancelled, request_was_rejected, request_was_timed_out, request_was_unavailable,
     };
 
@@ -577,12 +588,10 @@ pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static))
 
 fn find_queue_rejection_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
+) -> Option<&'a dynamo_admission::host::QueueRejection> {
     let mut current = Some(err);
     while let Some(error) = current {
-        if let Some(rejection) =
-            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
-        {
+        if let Some(rejection) = error.downcast_ref::<dynamo_admission::host::QueueRejection>() {
             return Some(rejection);
         }
         current = error.source();
@@ -603,6 +612,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -643,6 +653,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -664,6 +675,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -686,6 +698,7 @@ impl ErrorMessage {
                 error_type: reason,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
@@ -703,6 +716,7 @@ impl ErrorMessage {
                 error_type: bad_request_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -727,6 +741,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -754,6 +769,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -802,6 +818,7 @@ impl ErrorMessage {
                 error_type,
                 code: status.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type,
             }),
         )
@@ -842,6 +859,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -864,6 +882,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
@@ -880,6 +899,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -902,7 +922,7 @@ impl ErrorMessage {
         };
 
         if record_failure {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
         }
 
         if matches!(
@@ -928,7 +948,8 @@ impl ErrorMessage {
         Some((
             status,
             Json(ErrorMessage {
-                message: error.public_message().unwrap_or(public_message).to_string(),
+                message: public_message_for(error, Protocol::OpenAi)
+                    .unwrap_or_else(|| public_message.to_string()),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
@@ -941,6 +962,9 @@ impl ErrorMessage {
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
+                context_length: error
+                    .public_details()
+                    .and_then(ContextLengthDetails::from_public_details),
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -961,27 +985,30 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    context_length: None,
                     metric_error_type: None,
                 }),
             );
         }
 
-        if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
-            super::metrics::record_failure(error);
+        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(err.as_ref()) {
+            dynamo_http_server::metrics::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
             return (
                 code,
                 Json(ErrorMessage {
-                    message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+                    message: dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE
+                        .to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: Some(ErrorType::Cancelled),
                 }),
             );
         }
 
-        if super::metrics::request_was_cancelled(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -997,7 +1024,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if super::metrics::request_was_rejected(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -1005,7 +1032,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if super::metrics::request_was_unavailable(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -1056,6 +1083,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             ),
@@ -1112,6 +1140,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            context_length: None,
             metric_error_type: None,
         }
     }
@@ -1145,6 +1174,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -1240,6 +1270,18 @@ where
     Ok(request)
 }
 
+/// Record how long a gateway held the request before forwarding it, from its routing header.
+/// Like the other routing headers it is honored only while NvExt is enabled.
+pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    if nvext_enabled && let Some(upstream_elapsed) = upstream_elapsed_from_headers(headers) {
+        request.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, upstream_elapsed);
+    }
+}
+
 /// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
 ///
 /// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
@@ -1278,6 +1320,9 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
             SESSION_AFFINITY_CONTEXT_KEY,
             session_affinity.as_ref().clone(),
         );
+    }
+    if let Ok(upstream_elapsed) = source.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY) {
+        target.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, *upstream_elapsed);
     }
 }
 
@@ -1341,10 +1386,11 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
+    let mut request =
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_completion_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 
     // create the connection handles
@@ -1387,7 +1433,8 @@ async fn completions(
     // Validate stream_options is only used when streaming (NVBug 5662680)
     validate_completion_stream_options(&request)?;
 
-    validate_completion_fields_generic(&request)?;
+    let max_logprobs = request_max_logprobs(&state, &request.inner.model, request.inner.logprobs);
+    validate_completion_fields_generic(&request, max_logprobs)?;
 
     // Detect batch prompts
     let batch_size = get_prompt_batch_size(&request.inner.prompt);
@@ -1464,10 +1511,10 @@ async fn completions_single(
     // Covers preprocessing, routing and the wire handoff to the worker.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1810,10 +1857,10 @@ async fn completions_batch(
         // prompt's preprocessing, routing and wire handoff.
         let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2067,10 +2114,11 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                dynamo_http_server::metrics::Endpoint::Embeddings,
+            );
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2209,10 +2257,10 @@ async fn classify(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Classify);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2295,7 +2343,7 @@ async fn rerank(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
-        if super::metrics::request_was_rejected(error.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, Endpoint::Rerank);
@@ -2575,10 +2623,10 @@ async fn pooling(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Pooling);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2629,6 +2677,42 @@ async fn pooling(
     Ok(response)
 }
 
+fn parse_chat_completion_request(
+    body: &[u8],
+) -> Result<(NvCreateChatCompletionRequest, Option<ToolAllowlist>), ErrorResponse> {
+    match parse_json_request("chat completions", body) {
+        Ok(request) => Ok((request, None)),
+        Err(original) => {
+            let request: AllowedToolsRequest = match parse_json_request("chat completions", body) {
+                Ok(request) => request,
+                Err(error) if names_allowed_tools_choice(body) => return Err(error),
+                Err(_) => return Err(original),
+            };
+            let (request, allowlist) = request.normalize().map_err(|error| {
+                ErrorMessage::from_anyhow(
+                    invalid_argument(error.to_string()).into(),
+                    "Invalid allowed_tools",
+                )
+            })?;
+            Ok((request, Some(allowlist)))
+        }
+    }
+}
+
+fn names_allowed_tools_choice(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        tool_choice: Option<serde_json::Value>,
+    }
+
+    serde_json::from_slice::<Probe>(body)
+        .ok()
+        .and_then(|probe| probe.tool_choice)
+        .is_some_and(|choice| {
+            choice.get("type").and_then(|kind| kind.as_str()) == Some("allowed_tools")
+        })
+}
+
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2649,15 +2733,14 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let mut request: NvCreateChatCompletionRequest =
-        match parse_json_request("chat completions", &body) {
-            Ok(request) => request,
-            Err(error) => {
-                lifecycle_request.record_session(&request_id, None);
-                terminal.finish(terminal_outcome_for_error_response(&error));
-                return Err(error);
-            }
-        };
+    let (mut request, allowed_tools) = match parse_chat_completion_request(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2716,11 +2799,19 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
             captured,
         );
+    }
+    // Headers the chat engine sets on this response. The request carries them
+    // only when the engine's stream is read before the response is committed;
+    // otherwise the engine would race the commit.
+    let response_headers = ResponseHeaders::default();
+    if !streaming || state.streaming_backend_error_check() != BackendErrorCheck::Skip {
+        request.insert(RESPONSE_HEADERS_CONTEXT_KEY, response_headers.clone());
     }
     let context = request.context();
 
@@ -2755,7 +2846,7 @@ async fn handler_chat_completions(
             chat_completions(
                 state,
                 template,
-                request,
+                (request, allowed_tools),
                 stream_handle,
                 lifecycle,
                 request_lifecycle.clone(),
@@ -2783,7 +2874,22 @@ async fn handler_chat_completions(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    response
+    with_response_headers(response, response_headers.take())
+}
+
+/// Add the headers a chat engine set to its response, error responses included.
+fn with_response_headers(
+    response: Result<Response, ErrorResponse>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    if headers.is_empty() {
+        return response;
+    }
+    let mut response = response.unwrap_or_else(IntoResponse::into_response);
+    for (name, value) in &headers {
+        response.headers_mut().append(name, value.clone());
+    }
+    Ok(response)
 }
 
 /// Parse typed JSON with the existing control-character recovery and error mapping.
@@ -2791,11 +2897,11 @@ pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Resu
 where
     T: DeserializeOwned,
 {
-    match serde_json::from_slice(body) {
+    match from_slice_dedup_reasoning(endpoint, body) {
         Ok(request) => Ok(request),
         Err(original_error) => {
             if let Some(escaped_body) = escape_json_string_control_chars(body) {
-                match serde_json::from_slice(&escaped_body) {
+                match from_slice_dedup_reasoning(endpoint, &escaped_body) {
                     Ok(request) => {
                         tracing::warn!(
                             endpoint,
@@ -2814,18 +2920,78 @@ where
     }
 }
 
+/// Deserialize `body`, retrying once without `reasoning` on messages that also carry
+/// `reasoning_content`. `reasoning` is an alias of `reasoning_content` on assistant
+/// messages, so a client that echoes both (as some SDKs do) trips serde's duplicate-field
+/// check. Every recovery path (control-character escaping, lossy UTF-8) goes through
+/// here, so a body needing both fixes still parses.
+fn from_slice_dedup_reasoning<T>(
+    endpoint: &'static str,
+    body: &[u8],
+) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(error)
+            if error
+                .to_string()
+                .contains("duplicate field `reasoning_content`") =>
+        {
+            match drop_duplicate_reasoning(body).map(|deduped| serde_json::from_slice(&deduped)) {
+                Some(Ok(request)) => {
+                    tracing::warn!(
+                        endpoint,
+                        "Dropped `reasoning` duplicating `reasoning_content` in a message"
+                    );
+                    Ok(request)
+                }
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Collapse `reasoning` / `reasoning_content` pairs to a single key per message.
+///
+/// `reasoning_content` is authoritative. It is dropped only when it is null and `reasoning`
+/// carries a value, so a null on one side never erases the real reasoning on the other.
+fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
+    // A plain `Value` keeps the last copy of a repeated key, so it would accept a second
+    // `model` or `messages` that the typed parse rejects.
+    let UniqueJsonValue(mut value) = serde_json::from_slice(body).ok()?;
+    let messages = value.get_mut("messages")?.as_array_mut()?;
+    for message in messages.iter_mut() {
+        if let Some(object) = message.as_object_mut()
+            && object.contains_key("reasoning_content")
+            && object.contains_key("reasoning")
+        {
+            let content_is_null = object["reasoning_content"].is_null();
+            let reasoning_is_null = object["reasoning"].is_null();
+            if content_is_null && !reasoning_is_null {
+                object.remove("reasoning_content");
+            } else {
+                object.remove("reasoning");
+            }
+        }
+    }
+    serde_json::to_vec(&value).ok()
+}
+
 fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
 {
     let lossy_body = String::from_utf8_lossy(body);
     if lossy_body.as_bytes() == body {
-        return serde_json::from_slice(body);
+        return from_slice_dedup_reasoning(endpoint, body);
     }
 
     let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
         .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
-    let request = serde_json::from_slice(&escaped_body)?;
+    let request = from_slice_dedup_reasoning(endpoint, &escaped_body)?;
     tracing::warn!(
         endpoint,
         "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
@@ -2916,20 +3082,6 @@ pub(super) async fn read_json_request_body(
                 failed_to_read_request_body_error()
             }
         })
-}
-
-fn is_json_content_type(content_type: &str) -> bool {
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    let Some((media_type, subtype)) = media_type.split_once('/') else {
-        return false;
-    };
-
-    media_type.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json")
-            || subtype
-                .to_ascii_lowercase()
-                .rsplit_once('+')
-                .is_some_and(|(_, suffix)| suffix == "json"))
 }
 
 fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
@@ -3083,11 +3235,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let overloaded = event
             .error
             .as_ref()
-            .is_some_and(|error| super::metrics::request_was_rejected(error));
+            .is_some_and(|error| dynamo_http_server::metrics::request_was_rejected(error));
         let metric_error_type = event
             .error
             .as_ref()
-            .filter(|error| super::metrics::request_was_timed_out(*error))
+            .filter(|error| dynamo_http_server::metrics::request_was_timed_out(*error))
             .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
@@ -3114,10 +3266,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
+            // Keep the typed error when it carries a public message, so the
+            // unary response renders it. Other messages stay diagnostic.
+            let keep_semantic =
+                overloaded || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: if keep_semantic {
+                    semantic.cloned()
+                } else {
+                    None
+                },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3383,7 +3543,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(error) = &semantic
             && error.class().normalized() == sanitized_error_class(variant)
         {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
             render_record_failure = false;
         }
         return ErrorMessage::sanitized_with_details_recording(
@@ -3394,10 +3554,11 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     }
 
     if let Some(error) = &semantic {
-        let is_classified = !matches!(
-            error.reason().as_str(),
-            "backend.unknown" | "runtime.unclassified"
-        );
+        let is_classified = error.public_message().is_some()
+            || !matches!(
+                error.reason().as_str(),
+                "backend.unknown" | "runtime.unclassified"
+            );
         if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
@@ -3437,6 +3598,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             )
@@ -3581,20 +3743,389 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
         })
 }
 
-/// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
-/// streaming response chunk, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+/// Outcome of feeding one argument fragment to [`JsonStructureScanner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOutcome {
+    /// The accumulated argument string is not yet a self-delimiting root value.
+    Incomplete,
+    /// The root container closed and only whitespace followed it. This is a
+    /// *candidate* boundary; `serde_json` still has to confirm it.
+    RootClosed,
+    /// The accumulated argument string can never become valid JSON. Sticky.
+    Malformed,
+}
+
+/// Incremental, O(total argument bytes) structural scanner over a tool call's
+/// `function.arguments` fragments.
 ///
-/// Dynamo backends emit each tool call as a single complete chunk (id + name + arguments
-/// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
-/// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
-/// for correct disambiguation when `n > 1`.
+/// Each fragment is scanned exactly once, and container-depth / in-string /
+/// pending-escape state is carried across fragment boundaries, so a quoted
+/// brace, an escaped quote, or a backslash split across two chunks cannot
+/// create a false boundary. Re-running `serde_json::from_str` over the whole
+/// accumulated buffer on every fragment would be quadratic in exactly the
+/// long-argument case that motivates this change, so structural scanning
+/// *proposes* a boundary and `serde_json` *confirms* it, once.
 ///
-/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
-/// backend may reuse the same tool call id across choices, and keying on the id alone
-/// would silently drop every choice after the first.
+/// Only a top-level object or array is treated as self-delimiting. A top-level
+/// scalar is never an early-dispatch candidate: `1` may still legally receive
+/// a further `2`. Such a value waits for the terminal `finish_reason` pass.
+#[derive(Debug, Default)]
+struct JsonStructureScanner {
+    /// Open `{`/`[` containers not yet closed.
+    depth: u32,
+    in_string: bool,
+    pending_escape: bool,
+    /// The first non-whitespace byte has been seen.
+    root_started: bool,
+    /// The root value is a top-level scalar (or leading junk), so no early
+    /// dispatch is possible and scanning stops.
+    scalar_root: bool,
+    /// The root container opened and closed.
+    root_closed: bool,
+    /// Sticky: the accumulated string is structurally impossible.
+    malformed: bool,
+}
+
+impl JsonStructureScanner {
+    /// Consume one fragment in full and report the state of the accumulated
+    /// argument string. The *entire* fragment is consumed before a candidate
+    /// is declared, so `{}junk` cannot be reported complete at the first `}`.
+    fn consume(&mut self, fragment: &str) -> ScanOutcome {
+        for byte in fragment.bytes() {
+            if self.malformed {
+                break;
+            }
+            if self.scalar_root {
+                // Nothing a scalar root can do makes it an early candidate.
+                break;
+            }
+            if self.in_string {
+                if self.pending_escape {
+                    self.pending_escape = false;
+                } else if byte == b'\\' {
+                    self.pending_escape = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+                continue;
+            }
+            if self.root_closed {
+                // Trailing junk after a closed root: `{}junk`, `{}{}`.
+                self.malformed = true;
+                break;
+            }
+            if !self.root_started {
+                self.root_started = true;
+                if byte == b'}' || byte == b']' {
+                    // A closing token with nothing open: `}{"x":1}` is a
+                    // permanent non-dispatch, not a depth-clamped completion.
+                    self.malformed = true;
+                    break;
+                }
+                if byte != b'{' && byte != b'[' {
+                    // Top-level scalar, or leading junk. Either way the
+                    // terminal pass — not the scanner — decides.
+                    self.scalar_root = true;
+                    break;
+                }
+            }
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => self.depth += 1,
+                b'}' | b']' => {
+                    if self.depth == 0 {
+                        self.malformed = true;
+                        break;
+                    }
+                    self.depth -= 1;
+                    if self.depth == 0 {
+                        self.root_closed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if self.malformed {
+            ScanOutcome::Malformed
+        } else if self.root_closed && self.depth == 0 && !self.in_string {
+            ScanOutcome::RootClosed
+        } else {
+            ScanOutcome::Incomplete
+        }
+    }
+}
+
+/// Lifecycle of one `(choice.index, tool_call_chunk.index)` assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssemblyState {
+    /// Still collecting fragments.
+    Accumulating,
+    /// Failed closed — a producer violation or unparseable arguments. Never
+    /// emits, and later fragments for the key are ignored.
+    Invalid,
+    /// Tombstone: the dispatch event was emitted. Exactly-once emission comes
+    /// from this, not from a separate set of already-dispatched ids.
+    Emitted,
+}
+
+/// Request-local assembly state for a single streamed tool call.
+#[derive(Debug)]
+struct ToolCallAssembly {
+    /// Merged identity plus the concatenated argument string, and the payload
+    /// the dispatch event borrows. Never fed back into the ordinary deltas.
+    accumulated: ChatCompletionMessageToolCallChunk,
+    scanner: JsonStructureScanner,
+    state: AssemblyState,
+    /// `serde_json` has already confirmed the accumulated arguments, so the
+    /// confirmation pass does not repeat while identity is still missing.
+    json_confirmed: bool,
+}
+
+/// Request-local assembly state for the whole stream, keyed by
+/// `(choice.index, tool_call_chunk.index)`.
+type ToolCallAssemblies = HashMap<(u32, u32), ToolCallAssembly>;
+
+/// True when `chunk` is a byte-identical replay of what has already been
+/// emitted for its key, rather than a continuation of it.
+fn is_exact_replay(entry: &ToolCallAssembly, chunk: &ChatCompletionMessageToolCallChunk) -> bool {
+    entry.accumulated.index == chunk.index
+        && entry.accumulated.id == chunk.id
+        && entry.accumulated.r#type == chunk.r#type
+        && entry
+            .accumulated
+            .function
+            .as_ref()
+            .map(|f| (&f.name, &f.arguments))
+            == chunk.function.as_ref().map(|f| (&f.name, &f.arguments))
+}
+
+fn emit_tool_call_dispatch(
+    choice_index: u32,
+    entry: &mut ToolCallAssembly,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    let payload = ToolCallDispatchPayload {
+        choice_index,
+        tool_call: &entry.accumulated,
+    };
+    push_dispatch_event("tool_call_dispatch", &payload, out);
+    entry.state = AssemblyState::Emitted;
+}
+
+/// True once the accumulated call carries both an id and a function name.
+/// Assembly proceeds without them; emission does not.
+fn assembly_has_identity(entry: &ToolCallAssembly) -> bool {
+    entry.accumulated.id.is_some()
+        && entry
+            .accumulated
+            .function
+            .as_ref()
+            .is_some_and(|f| f.name.is_some())
+}
+
+/// Fold one incoming tool-call chunk into its assembly, emitting the dispatch
+/// event if this fragment completed the call.
+fn update_tool_call_assembly(
+    choice_index: u32,
+    chunk: &ChatCompletionMessageToolCallChunk,
+    assemblies: &mut ToolCallAssemblies,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    let entry = assemblies
+        .entry((choice_index, chunk.index))
+        .or_insert_with(|| ToolCallAssembly {
+            // An entry is created for *every* chunk: arguments legally
+            // arrive before identity.
+            accumulated: ChatCompletionMessageToolCallChunk {
+                index: chunk.index,
+                id: None,
+                r#type: None,
+                function: None,
+                custom: None,
+            },
+            scanner: JsonStructureScanner::default(),
+            state: AssemblyState::Accumulating,
+            json_confirmed: false,
+        });
+
+    match entry.state {
+        AssemblyState::Invalid => return,
+        AssemblyState::Emitted => {
+            // An exact replay is the duplicate-backend-chunk case; an emitted
+            // SSE event cannot be retracted, so a differing continuation is dropped.
+            if !is_exact_replay(entry, chunk) {
+                tracing::warn!(
+                    choice_index,
+                    tool_call_index = chunk.index,
+                    "tool_call_dispatch: continuation after the call was already \
+                     dispatched; suppressing"
+                );
+            }
+            return;
+        }
+        AssemblyState::Accumulating => {}
+    }
+
+    // Scan only the arriving fragment's bytes, never the accumulated buffer.
+    // `merge_tool_call_chunk` is the aggregator's own first-wins policy.
+    let fragment = chunk
+        .function
+        .as_ref()
+        .and_then(|f| f.arguments.as_deref())
+        .unwrap_or("");
+
+    if let ToolCallMergeOutcome::IdentityConflict { field } =
+        merge_tool_call_chunk(&mut entry.accumulated, chunk.clone())
+    {
+        tracing::warn!(
+            choice_index,
+            tool_call_index = chunk.index,
+            field = field.as_str(),
+            "tool_call_dispatch: conflicting tool call identity; failing closed"
+        );
+        entry.state = AssemblyState::Invalid;
+        return;
+    }
+
+    match entry.scanner.consume(fragment) {
+        ScanOutcome::Malformed => {
+            tracing::warn!(
+                choice_index,
+                tool_call_index = chunk.index,
+                "tool_call_dispatch: tool call arguments are structurally invalid; \
+                 will not dispatch"
+            );
+            entry.state = AssemblyState::Invalid;
+        }
+        ScanOutcome::Incomplete => {}
+        ScanOutcome::RootClosed => {
+            // Structural scanning proposed the boundary; `serde_json` confirms
+            // it once, over the whole accumulated string.
+            if !entry.json_confirmed {
+                let accumulated_args = entry
+                    .accumulated
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.as_deref())
+                    .unwrap_or("");
+                if serde_json::from_str::<serde::de::IgnoredAny>(accumulated_args).is_err() {
+                    tracing::warn!(
+                        choice_index,
+                        tool_call_index = chunk.index,
+                        "tool_call_dispatch: tool call arguments closed but did not \
+                         parse; will not dispatch"
+                    );
+                    entry.state = AssemblyState::Invalid;
+                    return;
+                }
+                entry.json_confirmed = true;
+            }
+            // Syntax only. This does not validate the arguments against the
+            // requested tool schema, and does not authorize execution.
+            if assembly_has_identity(entry) {
+                emit_tool_call_dispatch(choice_index, entry, out);
+            }
+        }
+    }
+}
+
+/// Terminal pass for one choice. `finish_reason` ends the *choice*, not each
+/// individual call, so this is the only point at which a call that never
+/// produced a self-delimiting root value can be resolved.
+fn finalize_choice_assemblies(
+    choice_index: u32,
+    finish_reason: FinishReason,
+    assemblies: &mut ToolCallAssemblies,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    // Deterministic emission order for a choice that finishes with several
+    // calls still open; `HashMap` iteration order is not stable.
+    let mut keys: Vec<(u32, u32)> = assemblies
+        .keys()
+        .filter(|(ci, _)| *ci == choice_index)
+        .copied()
+        .collect();
+    keys.sort_unstable();
+
+    for key in keys {
+        let Some(entry) = assemblies.get_mut(&key) else {
+            continue;
+        };
+        if entry.state != AssemblyState::Accumulating {
+            continue;
+        }
+
+        // A tool-call turn arrives under either reason: the aggregator rewrites
+        // `Stop` to `ToolCalls` for exactly that case, and a parameterless call
+        // never reaches `RootClosed`, so it depends on this pass. `length`, a
+        // backend error, and a content filter stay fail-closed; the `usable`
+        // check below still rejects incomplete arguments.
+        if !matches!(finish_reason, FinishReason::ToolCalls | FinishReason::Stop) {
+            entry.state = AssemblyState::Invalid;
+            continue;
+        }
+
+        let accumulated_args = entry
+            .accumulated
+            .function
+            .as_ref()
+            .and_then(|f| f.arguments.as_deref());
+        let usable = match accumulated_args {
+            // Absent or empty arguments for a parameterless tool: only safe
+            // here, where the choice has stopped producing arguments.
+            None | Some("") => true,
+            Some(args) => {
+                entry.json_confirmed || serde_json::from_str::<serde::de::IgnoredAny>(args).is_ok()
+            }
+        };
+
+        if !usable {
+            tracing::warn!(
+                choice_index,
+                tool_call_index = key.1,
+                "tool_call_dispatch: choice finished with incomplete tool call \
+                 arguments; will not dispatch"
+            );
+            entry.state = AssemblyState::Invalid;
+            continue;
+        }
+
+        if assembly_has_identity(entry) {
+            // The accumulated argument string is emitted verbatim; model
+            // output is never rewritten.
+            emit_tool_call_dispatch(choice_index, entry, out);
+        } else {
+            entry.state = AssemblyState::Invalid;
+        }
+    }
+}
+
+/// Emits `event: tool_call_dispatch` SSE events for tool calls assembled out of
+/// the streamed deltas, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+///
+/// Chat Completions has no per-tool-call `done` bit — `finish_reason` ends the
+/// choice, not each call — so JSON closure is a Dynamo early-dispatch
+/// convention rather than proof supplied by the OpenAI protocol. A call is
+/// dispatched as soon as its accumulated `function.arguments` form a
+/// self-delimiting root value that `serde_json` accepts and its id and name are
+/// known, and otherwise at the terminal `finish_reason: "tool_calls"` pass.
+///
+/// State is keyed by `(choice.index, tool_call_chunk.index)`, not by id: with
+/// `n > 1` the backend may reuse both the same id and the same inner index
+/// across choices, and keying on either alone would silently drop every choice
+/// after the first. Exactly-once emission comes from the per-key `Emitted`
+/// tombstone.
+///
+/// This function only *observes*. It never consumes, rewrites, duplicates, or
+/// re-aggregates the ordinary deltas, which continue through `EventConverter`
+/// untouched.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<(u32, String)>,
+    assemblies: &mut ToolCallAssemblies,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -3602,29 +4133,13 @@ fn streaming_tool_dispatch_events(
     };
 
     for choice in &data.inner.choices {
-        let Some(tool_calls) = &choice.delta.tool_calls else {
-            continue;
-        };
-        for chunk in tool_calls {
-            // Only dispatch when the tool call is fully formed (id + name + arguments)
-            let has_name_and_args = chunk
-                .function
-                .as_ref()
-                .is_some_and(|f| f.name.is_some() && f.arguments.is_some());
-
-            if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
-                // Skip already-dispatched tool calls (dedup guard, matches
-                // the stopped/done flags in Anthropic/Responses converters).
-                // Scoped per choice so repeated ids across choices still dispatch.
-                if !dispatched_ids.insert((choice.index, id.clone())) {
-                    continue;
-                }
-                let payload = ToolCallDispatchPayload {
-                    choice_index: choice.index,
-                    tool_call: chunk,
-                };
-                push_dispatch_event("tool_call_dispatch", &payload, out);
+        if let Some(tool_calls) = &choice.delta.tool_calls {
+            for chunk in tool_calls {
+                update_tool_call_assembly(choice.index, chunk, assemblies, out);
             }
+        }
+        if let Some(finish_reason) = choice.finish_reason {
+            finalize_choice_assemblies(choice.index, finish_reason, assemblies, out);
         }
     }
 }
@@ -3668,6 +4183,7 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+#[allow(deprecated)]
 fn apply_chat_completions_request_template(
     request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
     template: Option<&RequestTemplate>,
@@ -3679,7 +4195,14 @@ fn apply_chat_completions_request_template(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
-        if request.max_completion_tokens.unwrap_or(0) == 0 {
+        // `max_completion_tokens` wins over the deprecated `max_tokens` downstream, so
+        // filling it here would discard a limit the client sent as `max_tokens`.
+        if request
+            .max_completion_tokens
+            .or(request.max_tokens)
+            .unwrap_or(0)
+            == 0
+        {
             request.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -3696,7 +4219,10 @@ fn apply_chat_completions_request_template(
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
-    mut request: Context<NvCreateChatCompletionRequest>,
+    (mut request, allowed_tools): (
+        Context<NvCreateChatCompletionRequest>,
+        Option<ToolAllowlist>,
+    ),
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
     request_lifecycle: tracing::Span,
@@ -3747,13 +4273,27 @@ async fn chat_completions(
     state
         .chat_template_defaults()
         .apply_to_request(&mut request);
+    if allowed_tools.is_some()
+        && request
+            .chat_template_args
+            .as_ref()
+            .is_some_and(|args| args.contains_key("builtin_tools"))
+    {
+        let response = ErrorMessage::from_anyhow(
+            invalid_argument("allowed_tools cannot be combined with builtin_tools".to_owned())
+                .into(),
+            "Invalid allowed_tools",
+        );
+        inflight_guard.mark_error(extract_error_type_from_response(&response));
+        return Err(response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
 
     // Retain API identity here while all engine/parser paths receive functions.
-    let custom_tools =
+    let mut custom_tools =
         crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
             &mut request,
         )
@@ -3800,14 +4340,33 @@ async fn chat_completions(
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    // Text-input WorkerSets never run the preprocessor gate, so admit custom
+    // content only where a WorkerSet advertises it.
+    let (engine, parsing_options) = if crate::preprocessor::has_custom_content(request.content()) {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+    } else {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing(&model)
+            .map(Some)
+    }
+    .map_err(|e| ErrorMessage::from_model_error(&e))
+    .and_then(|selected| {
+        selected.ok_or_else(|| {
+            ErrorMessage::from_anyhow(
+                invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
+                crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
+            )
+        })
+    })
+    .inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
     drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what this normalizes): a
@@ -3820,7 +4379,8 @@ async fn chat_completions(
     );
 
     // Handle Rest of Validation Errors
-    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
+    let max_top_logprobs = request_max_logprobs(&state, &model, request.inner.top_logprobs);
+    if let Err(err_response) = validate_chat_completion_fields_generic(&request, max_top_logprobs) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -3848,6 +4408,14 @@ async fn chat_completions(
     let parsing_options =
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+    custom_tools.keep_parser_confirmed_calls(
+        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ) == Some(
+            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+        ),
+    );
 
     // Any force_nonempty_content=true request: surface reasoning as content when
     // the turn produced none. See `wants_reasoning_as_content_when_empty`.
@@ -3874,10 +4442,11 @@ async fn chat_completions(
     // between the validated request and a live response stream.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model,
+                dynamo_http_server::metrics::Endpoint::ChatCompletions,
+            );
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3920,6 +4489,16 @@ async fn chat_completions(
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
+        // Reassembling delayed tool identity can put partial arguments in the
+        // same delta as the name. Only regular SSE is safe for these requests.
+        let tool_dispatch_enabled =
+            state.streaming_tool_dispatch_enabled() && allowed_tools.is_none();
+        let stream = match allowed_tools {
+            Some(allowlist) => {
+                futures::future::Either::Left(allowlist.stream(stream, enforce_single_tool_call))
+            }
+            None => futures::future::Either::Right(stream),
+        };
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
@@ -3931,11 +4510,12 @@ async fn chat_completions(
         })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
+        // Request-local tool-call assembly, keyed by
+        // `(choice.index, tool_call_chunk.index)`. Dies with the HTTP stream.
+        let mut tool_call_assemblies: ToolCallAssemblies = HashMap::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -4014,7 +4594,7 @@ async fn chat_completions(
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
-                        &mut dispatched_tool_ids,
+                        &mut tool_call_assemblies,
                         &mut events,
                     );
                 }
@@ -4157,6 +4737,14 @@ async fn chat_completions(
                 response
             })?;
 
+        if let Some(allowlist) = allowed_tools {
+            allowlist.validate_response(&response).map_err(|error| {
+                let response = ErrorMessage::from_anyhow(error, "Invalid tool call output");
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
+        }
+
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -4273,25 +4861,45 @@ fn validate_request_fields_generic<R: ValidateRequest>(
     request: &R,
     request_kind: &str,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    request
+        .validate()
+        .map_err(|e| validation_error_response(e, request_kind))
+}
+
+/// Maps a request-validation failure to an OpenAI-compatible error response,
+/// as described on [`validate_request_fields_generic`].
+fn validation_error_response(e: anyhow::Error, request_kind: &str) -> ErrorResponse {
+    if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+        return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
+    }
+    ErrorMessage::from_http_error(
+        ErrorClass::InvalidRequest,
+        HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        },
+    )
+}
+
+/// The log-probability limit of the model serving a request that asks for
+/// `requested` entries: what the model's workers publish as `max_logprobs`,
+/// or the OpenAI limit. A request that asks for none skips the model lookup.
+fn request_max_logprobs(state: &service_v2::State, model: &str, requested: Option<u8>) -> u8 {
+    match requested {
+        Some(count) if count > 0 => state.manager().max_logprobs(model),
+        _ => crate::protocols::openai::validate::MAX_TOP_LOGPROBS,
+    }
 }
 
 /// Validates a chat completion request and returns an error response if validation fails.
+/// `max_top_logprobs` is the serving model's limit for `top_logprobs`.
 pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
+    max_top_logprobs: u8,
 ) -> Result<(), ErrorResponse> {
-    validate_request_fields_generic(request, "chat completion")
+    request
+        .validate_with_max_top_logprobs(max_top_logprobs)
+        .map_err(|e| validation_error_response(e, "chat completion"))
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -4314,10 +4922,14 @@ pub fn validate_completion_stream_options(
 }
 
 /// Validates a completion request and returns an error response if validation fails.
+/// `max_logprobs` is the serving model's limit for `logprobs`.
 pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
+    max_logprobs: u8,
 ) -> Result<(), ErrorResponse> {
-    validate_request_fields_generic(request, "completion")
+    request
+        .validate_with_max_logprobs(max_logprobs)
+        .map_err(|e| validation_error_response(e, "completion"))
 }
 
 /// OpenAI Responses input-token counting handler.
@@ -4394,6 +5006,7 @@ async fn handler_responses(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_response_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4499,6 +5112,14 @@ async fn responses(
         return Err(err_response);
     }
 
+    // A `top_logprobs` above the model's limit is lowered to it, not refused.
+    // Done here so the chat request and the echoed response field agree.
+    let max_top_logprobs = request_max_logprobs(&state, &model, request.inner.top_logprobs);
+    request.inner.top_logprobs = request
+        .inner
+        .top_logprobs
+        .map(|count| count.min(max_top_logprobs));
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
@@ -4536,6 +5157,7 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
@@ -4575,7 +5197,7 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
-    if let Err(error) = chat_request.validate() {
+    if let Err(error) = chat_request.validate_with_max_top_logprobs(max_top_logprobs) {
         let err_response = ErrorMessage::from_anyhow(
             invalid_argument(error.to_string()).into(),
             "Invalid responses request",
@@ -4596,6 +5218,16 @@ async fn responses(
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
+    // Clients get public tool names and namespaces, not backend aliases;
+    // request traces record them. Skip the map clone when traces are off.
+    if crate::request_trace::policy().emit_request_end_records()
+        && let Some(tool_names) = response_params.tool_names.clone()
+    {
+        request.insert(
+            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
+            crate::request_trace::ClientToolNames(std::sync::Arc::new(tool_names)),
+        );
     }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
@@ -4658,10 +5290,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4695,6 +5327,14 @@ async fn responses(
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
+        converter.keep_parser_confirmed_calls(
+            crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+            ) == Some(
+                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+            ),
+        );
 
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
@@ -4971,6 +5611,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorRespo
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: None,
         }),
     )
@@ -5544,10 +6185,10 @@ async fn images_with_request(
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
         connection_handle.disarm();
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5585,7 +6226,21 @@ async fn images_with_request(
 
     connection_handle.disarm();
     inflight.mark_ok();
-    Ok(Json(response).into_response())
+    // The body and header `Json(response)` would send, but each b64_json
+    // image is copied instead of checked for escapes byte by byte.
+    // TODO: back to `Json(response)` once serde_json escapes faster; see
+    // `NvImagesResponse::to_json_vec`.
+    let body = response.to_json_vec().map_err(|e| {
+        ErrorMessage::internal_server_error_with_details("Failed to serialize images response", e)
+    })?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response())
 }
 
 /// Accept ordered uploads or the JSON reference extension for image edits.
@@ -5663,10 +6318,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5791,10 +6446,10 @@ async fn video_stream(
     let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6086,10 +6741,10 @@ async fn audio_speech(
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6324,6 +6979,7 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
+    use crate::protocols::openai::validate::{MAX_LOGPROBS, MAX_TOP_LOGPROBS};
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
@@ -6520,14 +7176,28 @@ mod tests {
     }
 
     #[test]
-    fn test_is_json_content_type() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-        assert!(is_json_content_type("Application/JSON"));
-        assert!(is_json_content_type("application/vnd.dynamo+json"));
-        assert!(!is_json_content_type("text/plain"));
-        assert!(!is_json_content_type("application/json-patch"));
-        assert!(!is_json_content_type("application"));
+    #[allow(deprecated)]
+    fn test_chat_completions_template_preserves_client_max_tokens() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            max_tokens: Some(16),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        // `max_completion_tokens` wins over `max_tokens` downstream, so filling it
+        // from the template would discard the limit the client asked for.
+        assert_eq!(request.max_tokens, Some(16));
+        assert_eq!(request.max_completion_tokens, None);
+
+        request.max_tokens = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.max_completion_tokens, Some(128));
     }
 
     #[test]
@@ -6663,6 +7333,83 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"},{"role":"user","content":"again"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 3);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_when_reasoning_content_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"real thinking","reasoning_content":null}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_content_when_reasoning_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":null,"reasoning_content":"real thinking"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_non_null_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"real\",\"reasoning_content\":null}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_still_rejects_other_duplicate_fields() {
+        let pair = r#"{"role":"assistant","content":"a","reasoning":"r","reasoning_content":"r"}"#;
+        for body in [
+            format!(r#"{{"model":"m","messages":[{pair}],"model":"n"}}"#),
+            format!(r#"{{"model":"m","messages":[{pair}],"messages":[{{"role":"user","content":"x"}}]}}"#),
+            r#"{"model":"m","messages":[{"role":"assistant","content":"a","reasoning_content":"x","reasoning_content":"y"}]}"#.to_string(),
+        ] {
+            assert!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body.as_bytes())
+                    .is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"r1\",\"reasoning_content\":\"r2\"}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_invalid_utf8() {
+        let mut body = br#"{"model":"m","messages":[{"role":"user","content":"bad "#.to_vec();
+        body.push(0xff);
+        body.extend_from_slice(
+            br#" byte"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"}]}"#,
+        );
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", &body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
     }
 
     #[test]
@@ -7049,6 +7796,35 @@ mod tests {
     }
 
     #[test]
+    fn test_upstream_elapsed_follows_the_nvext_switch_and_survives_a_context_copy() {
+        use std::time::Duration;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-elapsed-since-arrival-ms", "1500".parse().unwrap());
+
+        let mut disabled = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut disabled, &headers, false);
+        assert!(
+            disabled
+                .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                .is_err()
+        );
+
+        let mut source = context_from_headers((), "request-2".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut source, &headers, true);
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        for context in [&source, &target] {
+            assert_eq!(
+                *context
+                    .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                    .unwrap(),
+                Duration::from_millis(1500)
+            );
+        }
+    }
+
+    #[test]
     fn test_context_metadata_preserves_session_affinity() {
         let mut headers = HeaderMap::new();
         headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
@@ -7118,6 +7894,7 @@ mod tests {
             error_type: "Unprocessable Entity".to_string(),
             code: 422,
             details: None,
+            context_length: None,
             metric_error_type: None,
         })
         .unwrap();
@@ -7513,7 +8290,7 @@ mod tests {
         // same rejected overload whether it is the whole worker's or one DP
         // rank's.
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         let delivered_refusal = |error_type: ErrorType| -> anyhow::Error {
             let refusal = DynamoError::builder()
@@ -7531,7 +8308,7 @@ mod tests {
         ] {
             let err = delivered_refusal(error_type);
             assert!(
-                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                dynamo_http_server::metrics::request_was_rejected(err.as_ref()),
                 "{error_type:?}"
             );
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
@@ -7709,7 +8486,7 @@ mod tests {
 
         // The legacy shape has no capacity signal, so the overload override does
         // not engage.
-        assert!(!super::super::metrics::request_was_rejected(
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
             event.error.as_ref().expect("error is set")
         ));
 
@@ -7831,6 +8608,7 @@ mod tests {
                 error_type: "service_unavailable".to_string(),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Overload),
             }),
         );
@@ -8159,7 +8937,9 @@ mod tests {
             .message("internal deadline detail")
             .build()
             .into();
-        assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
+            error.as_ref()
+        ));
 
         let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
@@ -8169,7 +8949,7 @@ mod tests {
 
     #[test]
     fn queue_rejection_maps_to_structured_http_529() {
-        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+        use dynamo_admission::host::{QueueLimitKind, QueueRejection};
 
         let rejection = QueueRejection {
             policy_class: "latency".to_string(),
@@ -8259,6 +9039,181 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn frontend_context_length_rejection_renders_limit_and_actual() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/preprocessor.rs:42")
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        assert!(
+            response
+                .1
+                .message
+                .contains("maximum context length is 8192 tokens"),
+            "message must carry LiteLLM's context-overflow substring, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("9000 tokens"),
+            "message must carry the actual token count, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("requested output"),
+            "a combined input and output budget must not blame the messages alone, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        assert_eq!(
+            response.1.context_length_details(),
+            Some(ContextLengthDetails {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+        );
+        let details: dynamo_runtime::error::PublicDetails =
+            serde_json::from_value(*response.1.details.clone().expect("details are preserved"))
+                .expect("context details deserialize");
+        assert_eq!(
+            details,
+            dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            }
+        );
+    }
+
+    /// The native Generate endpoints render through the same helper, so a
+    /// context overflow there must not fall back to "Invalid request".
+    #[test]
+    fn frontend_context_length_rejection_reaches_generate_format_policy() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let message =
+            crate::generate_format::WorkerError::canonical_invalid_request_message(&error)
+                .expect("context overflow is an invalid-request error");
+
+        assert!(
+            message.contains("maximum context length is 8192 tokens"),
+            "native Generate endpoints must classify overflows, got: {message}"
+        );
+        assert!(message.contains("9000 tokens"), "got: {message}");
+    }
+
+    #[test]
+    fn frontend_context_length_prompt_at_limit_reports_no_room_for_output() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 64,
+                actual: Some(64),
+                prompt_tokens: Some(64),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 64 tokens. However, your messages resulted \
+             in 64 tokens, which leaves no room for output. Please reduce the length of the \
+             messages."
+        );
+    }
+
+    /// For a combined budget, `actual` includes the requested output, so the
+    /// count attributed to the messages must be the prompt count.
+    #[test]
+    fn frontend_context_length_prompt_overflow_reports_prompt_tokens() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8200),
+                prompt_tokens: Some(8193),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .1
+                .message
+                .contains("your messages resulted in 8193 tokens"),
+            "a prompt-only overflow must report prompt tokens, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("8200 tokens"));
+    }
+
+    #[test]
+    fn frontend_context_length_without_actual_falls_back_to_class_message() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: None,
+                prompt_tokens: None,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "Invalid request");
+        assert!(!response.1.message.contains("None tokens"));
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_http_body() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported video media");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported media type");
+        assert!(!response.1.message.contains("secret"));
     }
 
     #[test]
@@ -8387,7 +9342,7 @@ mod tests {
     fn test_pre_stream_refusal_surfaces_as_400() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         let prologue_error = StreamPrologueError::new(
             "Generate Error: multimodal input is not supported by this backend",
@@ -8412,7 +9367,7 @@ mod tests {
     fn test_pre_stream_refusal_does_not_parse_python_error_envelope() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         let refuse = |message: &str| {
             let prologue = StreamPrologueError::new(
@@ -8453,7 +9408,7 @@ mod tests {
     fn test_pre_stream_refusal_ignores_envelope_cancellation_status() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         let envelope = serde_json::json!({
             "message": "Context id abc-123 stopped at /opt/dynamo/worker.py:42",
@@ -8492,7 +9447,7 @@ mod tests {
     fn test_pre_stream_refusal_classifies_metrics_from_the_semantic_class() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         let refuse = |message: String| {
             let prologue = StreamPrologueError::new(
@@ -8530,7 +9485,7 @@ mod tests {
     fn test_pre_stream_connect_failure_uses_semantic_class() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         // The worker died rather than refused: typed, but not a request problem.
         let engine_shutdown = StreamPrologueError::new(
@@ -8864,6 +9819,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8896,6 +9852,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8977,7 +9934,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9002,7 +9959,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9027,7 +9984,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9052,7 +10009,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9079,7 +10036,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9103,7 +10060,7 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9137,7 +10094,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_ok());
 
         // Verify metadata is accessible
@@ -9151,6 +10108,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9172,7 +10130,7 @@ mod tests {
             unsupported_fields: Default::default(),
         };
 
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9186,6 +10144,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9206,7 +10165,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9220,6 +10179,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9240,7 +10200,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9254,6 +10214,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9274,7 +10235,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9288,6 +10249,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9310,7 +10272,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9324,6 +10286,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9344,7 +10307,7 @@ mod tests {
             thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9377,7 +10340,7 @@ mod tests {
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
 
-        let result = validate_chat_completion_fields_generic(&request);
+        let result = validate_chat_completion_fields_generic(&request, MAX_TOP_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -9410,7 +10373,7 @@ mod tests {
         );
         assert!(request.unsupported_fields.contains_key("response_format"));
 
-        let result = validate_completion_fields_generic(&request);
+        let result = validate_completion_fields_generic(&request, MAX_LOGPROBS);
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
@@ -10625,10 +11588,73 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<(u32, String)>,
+        assemblies: &mut ToolCallAssemblies,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
-        streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
+        streaming_tool_dispatch_events(response, assemblies, &mut events);
+        events
+    }
+
+    /// Build a tool-call delta chunk at an explicit inner tool-call index.
+    fn tool_call_chunk(
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index: tool_call_index,
+            id: id.map(|s| s.to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: name.map(|s| s.to_string()),
+                arguments: arguments.map(|s| s.to_string()),
+            }),
+            custom: None,
+        }
+    }
+
+    fn make_choice_with_tool_calls(
+        index: u32,
+        tool_calls: Vec<ChatCompletionMessageToolCallChunk>,
+        finish: Option<FinishReason>,
+    ) -> ChatChoiceStream {
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: finish,
+            logprobs: None,
+        }
+    }
+
+    fn make_finish_choice(index: u32, finish: FinishReason) -> ChatChoiceStream {
+        make_choice_with_tool_calls(index, vec![], Some(finish))
+    }
+
+    fn drive_to_tool_calls_finish(
+        choices: Vec<ChatChoiceStream>,
+        finish_choice_index: u32,
+    ) -> Vec<Result<Event, axum::Error>> {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events =
+            collect_tool_dispatch_events(&make_stream_response(choices), &mut assemblies);
+        let terminator = make_stream_response(vec![make_finish_choice(
+            finish_choice_index,
+            FinishReason::ToolCalls,
+        )]);
+        events.extend(collect_tool_dispatch_events(&terminator, &mut assemblies));
         events
     }
 
@@ -10662,36 +11688,20 @@ mod tests {
         }
     }
 
+    /// `tool_call_index` is explicit so that two calls in one choice, and a
+    /// call filtered out by `parallel_tool_calls=false`, are both expressible.
     fn make_choice_with_tool_call(
         index: u32,
+        tool_call_index: u32,
         id: Option<&str>,
         name: Option<&str>,
         arguments: Option<&str>,
     ) -> ChatChoiceStream {
-        let tool_call = ChatCompletionMessageToolCallChunk {
-            custom: None,
-            index: 0,
-            id: id.map(|s| s.to_string()),
-            r#type: Some(FunctionType::Function),
-            function: Some(FunctionCallStream {
-                name: name.map(|s| s.to_string()),
-                arguments: arguments.map(|s| s.to_string()),
-            }),
-        };
-        #[allow(deprecated)]
-        ChatChoiceStream {
+        make_choice_with_tool_calls(
             index,
-            delta: ChatCompletionStreamResponseDelta {
-                content: None,
-                function_call: None,
-                tool_calls: Some(vec![tool_call]),
-                role: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: None,
-            logprobs: None,
-        }
+            vec![tool_call_chunk(tool_call_index, id, name, arguments)],
+            None,
+        )
     }
 
     // ── streaming_tool_dispatch_events tests ──
@@ -10700,12 +11710,13 @@ mod tests {
     fn test_tool_dispatch_emits_event_for_complete_tool_call() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 1);
 
         let event = events[0].as_ref().unwrap();
@@ -10724,12 +11735,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_id() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             None, // no id
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without id");
     }
 
@@ -10737,12 +11749,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_name() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             None, // no name
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without name");
     }
 
@@ -10750,12 +11763,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_arguments() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             Some("get_weather"),
             None, // no arguments
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without arguments");
     }
 
@@ -10797,7 +11811,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 2, "should dispatch both tool calls");
 
         // Verify each dispatched event has the correct tool call data
@@ -10819,14 +11833,14 @@ mod tests {
             comment: None,
             error: None,
         };
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_tool_dispatch_empty_choices() {
         let response = make_stream_response(vec![]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty());
     }
 
@@ -10870,7 +11884,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(
             events.len(),
             1,
@@ -10907,23 +11921,29 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "function: None should not dispatch");
     }
 
     #[test]
-    fn test_tool_dispatch_empty_arguments_still_dispatches() {
-        // arguments: Some("") is considered complete — intentional.
-        // Some backends emit empty-string arguments for parameterless tools.
-        let response = make_stream_response(vec![make_choice_with_tool_call(
+    fn test_tool_dispatch_empty_arguments_dispatch_at_terminal_pass() {
+        // `Some("")` is ambiguous mid-stream, so the parameterless-tool
+        // compatibility resolves at `finish_reason: "tool_calls"`.
+        let events = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_empty"),
+                Some("no_params_tool"),
+                Some(""),
+            )],
             0,
-            Some("call_empty"),
-            Some("no_params_tool"),
-            Some(""),
-        )]);
-
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
-        assert_eq!(events.len(), 1, "empty arguments should still dispatch");
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "empty arguments dispatch exactly once, at the terminal pass"
+        );
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["tool_call"]["id"], "call_empty");
@@ -10937,19 +11957,21 @@ mod tests {
         // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
+            0,
             Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
+            0,
             Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
 
         let response = make_stream_response(vec![choice_0, choice_1]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 2, "should dispatch from both choices");
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -10964,23 +11986,471 @@ mod tests {
     #[test]
     fn test_tool_dispatch_dedup_skips_already_dispatched_id() {
         // Simulate a backend that sends the same complete tool call in two consecutive chunks.
-        // The HashSet should prevent the second dispatch.
+        // The per-key `Emitted` tombstone prevents the second dispatch.
         let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
             0,
             Some("call_dup"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let mut dispatched = HashSet::new();
+        let mut assemblies = ToolCallAssemblies::new();
 
         // First call — should dispatch
-        let events = collect_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut assemblies);
         assert_eq!(events.len(), 1);
 
         // Second call with same response — should be deduped
-        let events = collect_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut assemblies);
         assert!(events.is_empty(), "duplicate id should not dispatch twice");
+    }
+
+    /// Read the assembled arguments for a key directly, so quoted-brace
+    /// payloads never go through `extract_sse_data_json`'s brace-only,
+    /// string-unaware scan.
+    fn assembled_arguments(assemblies: &ToolCallAssemblies, key: (u32, u32)) -> Option<String> {
+        assemblies
+            .get(&key)
+            .and_then(|e| e.accumulated.function.as_ref())
+            .and_then(|f| f.arguments.clone())
+    }
+
+    /// Feed a sequence of deltas for choice 0 / inner index 0, where each entry
+    /// is `(id, name, arguments)`, and return the events plus the final state.
+    fn feed_fragments(
+        fragments: &[(Option<&str>, Option<&str>, Option<&str>)],
+    ) -> (Vec<Result<Event, axum::Error>>, ToolCallAssemblies) {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+        for (id, name, args) in fragments {
+            let response =
+                make_stream_response(vec![make_choice_with_tool_call(0, 0, *id, *name, *args)]);
+            events.extend(collect_tool_dispatch_events(&response, &mut assemblies));
+        }
+        (events, assemblies)
+    }
+
+    #[test]
+    fn test_13972_identity_opener_then_argument_fragments() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("create_file"), None),
+            (None, None, Some(r#"{"path":"/a/very"#)),
+            (None, None, Some(r#"/long/file"}"#)),
+        ]);
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one dispatch, on the fragment that closes the JSON"
+        );
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["choice_index"], 0);
+        assert_eq!(json["tool_call"]["index"], 0);
+        assert_eq!(json["tool_call"]["id"], "call_1");
+        assert_eq!(json["tool_call"]["type"], "function");
+        assert_eq!(json["tool_call"]["function"]["name"], "create_file");
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"path":"/a/very/long/file"}"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_truncated_prefix_never_dispatches() {
+        let (events, _) = feed_fragments(&[(
+            Some("call_1"),
+            Some("create_file"),
+            Some(r#"{"path":"/a/very"#),
+        )]);
+        assert!(
+            events.is_empty(),
+            "a truncated argument prefix must not dispatch"
+        );
+    }
+
+    #[test]
+    fn test_13972_empty_opener_then_fragments_does_not_dispatch_early() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("search"), Some("")),
+            (None, None, Some(r#"{"q":"#)),
+        ]);
+        assert!(
+            events.is_empty(),
+            "the empty opener must not dispatch, and the prefix is incomplete"
+        );
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"q":"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_identity_after_arguments_still_assembles() {
+        let (events, _) = feed_fragments(&[
+            (None, None, Some(r#"{"a":1}"#)),
+            (Some("call_1"), None, None),
+            (None, Some("calculator"), None),
+        ]);
+        assert_eq!(
+            events.len(),
+            1,
+            "arguments may precede identity; dispatch waits for both"
+        );
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_1");
+        assert_eq!(json["tool_call"]["function"]["name"], "calculator");
+        assert_eq!(json["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_13972_invalid_whitespace_before_identity_never_dispatches() {
+        let (events, assemblies) = feed_fragments(&[
+            (None, None, Some("{}")),
+            (None, None, Some("\u{c}")),
+            (Some("call_1"), Some("calculator"), None),
+        ]);
+        assert!(events.is_empty());
+        assert_eq!(assemblies[&(0, 0)].state, AssemblyState::Invalid);
+    }
+
+    // A magnitude `f64` cannot hold is still valid JSON syntax. Confirmation
+    // is a syntax check, so such a call dispatches; deserializing into
+    // `serde_json::Value` would reject it as `number out of range` and drop a
+    // call the model legitimately made.
+    #[test]
+    fn test_13972_out_of_range_exponent_dispatches() {
+        let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"{"a":1e400}"#))]);
+        assert_eq!(
+            early.len(),
+            1,
+            "an out-of-range exponent is syntactically valid and must dispatch early"
+        );
+        let json = extract_sse_data_json(early[0].as_ref().unwrap());
+        assert_eq!(
+            json["tool_call"]["function"]["arguments"], r#"{"a":1e400}"#,
+            "the argument string is forwarded verbatim, not renormalized"
+        );
+
+        // The terminal pass confirms independently when the scanner never
+        // reached a candidate boundary, so it needs the same syntax-only rule.
+        let terminal = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_2"),
+                Some("f"),
+                Some("-1e400"),
+            )],
+            0,
+        );
+        assert_eq!(
+            terminal.len(),
+            1,
+            "a top-level out-of-range scalar resolves at the terminal pass"
+        );
+    }
+
+    #[test]
+    fn test_13972_conflicting_identity_fails_closed() {
+        let (events, _) = feed_fragments(&[
+            (Some("call_1"), Some("calculator"), Some(r#"{"a":"#)),
+            (Some("call_2"), None, None),
+            (None, None, Some("1}")),
+        ]);
+        assert!(
+            events.is_empty(),
+            "a conflicting id must fail closed, not dispatch on either identity"
+        );
+    }
+
+    // Quoted braces, escaped quotes, and a split backslash must not create a
+    // false boundary. Asserted on typed state.
+    #[test]
+    fn test_13972_quoted_and_escaped_braces_do_not_close_early() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("write"), Some(r#"{"body":"a } b \"#)),
+            (None, None, Some(r#""quoted\" }"#)),
+            (None, None, Some(r#""}"#)),
+        ]);
+        assert_eq!(events.len(), 1, "only the real closing brace completes");
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"body":"a } b \"quoted\" }"}"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_nested_and_array_roots_complete() {
+        let (nested, _) = feed_fragments(&[
+            (Some("call_1"), Some("f"), Some(r#"{"a":{"b":[1,2]"#)),
+            (None, None, Some("}}")),
+        ]);
+        assert_eq!(nested.len(), 1, "nested mixed containers complete");
+
+        let (array, _) = feed_fragments(&[
+            (Some("call_2"), Some("g"), Some("[1, {\"a\": 2}")),
+            (None, None, Some("]")),
+        ]);
+        assert_eq!(array.len(), 1, "a top-level array is self-delimiting");
+    }
+
+    #[test]
+    fn test_13972_trailing_junk_never_dispatches() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some("{}junk"))]);
+        assert!(
+            events.is_empty(),
+            "the whole fragment is consumed before a candidate is declared"
+        );
+    }
+
+    // `}{\"x\":1}` read as complete under #6845's depth-clamping scanner; it
+    // must be a permanent non-dispatch.
+    #[test]
+    fn test_13972_mismatched_containers_never_dispatch() {
+        let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"}{"x":1}"#))]);
+        assert!(early.is_empty(), "a leading close must not dispatch");
+
+        // Not even the terminal pass rescues it.
+        let terminal = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("f"),
+                Some(r#"}{"x":1}"#),
+            )],
+            0,
+        );
+        assert!(
+            terminal.is_empty(),
+            "a structurally invalid call stays a non-dispatch through the terminal pass"
+        );
+    }
+
+    #[test]
+    fn test_13972_leading_junk_never_dispatches() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"junk{"a":1}"#))]);
+        assert!(events.is_empty(), "leading junk must not dispatch");
+    }
+
+    #[test]
+    fn test_13972_canonical_empty_object_dispatches_early() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("no_params"), Some("{}"))]);
+        assert_eq!(
+            events.len(),
+            1,
+            "an empty JSON object is a complete root value"
+        );
+    }
+
+    #[test]
+    fn test_13972_interleaved_inner_indexes_complete_out_of_order() {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+
+        let opener = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![
+                tool_call_chunk(0, Some("call_0"), Some("slow"), Some(r#"{"a":"#)),
+                tool_call_chunk(1, Some("call_1"), Some("fast"), Some(r#"{"b":"#)),
+            ],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&opener, &mut assemblies));
+        assert!(events.is_empty(), "neither call is complete yet");
+
+        let close_1 = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(1, None, None, Some("2}"))],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&close_1, &mut assemblies));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            extract_sse_data_json(events[0].as_ref().unwrap())["tool_call"]["id"],
+            "call_1"
+        );
+
+        let close_0 = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(0, None, None, Some("1}"))],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&close_0, &mut assemblies));
+        assert_eq!(events.len(), 2);
+        let second = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(second["tool_call"]["id"], "call_0");
+        assert_eq!(second["tool_call"]["index"], 0);
+        assert_eq!(second["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_13972_same_id_and_inner_index_across_choices_do_not_collide() {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+
+        let opener = make_stream_response(vec![
+            make_choice_with_tool_call(0, 0, Some("call_1"), Some("f"), Some(r#"{"choice":"#)),
+            make_choice_with_tool_call(1, 0, Some("call_1"), Some("f"), Some(r#"{"choice":"#)),
+        ]);
+        events.extend(collect_tool_dispatch_events(&opener, &mut assemblies));
+        assert!(events.is_empty());
+
+        let closer = make_stream_response(vec![
+            make_choice_with_tool_call(0, 0, None, None, Some("0}")),
+            make_choice_with_tool_call(1, 0, None, None, Some("1}")),
+        ]);
+        events.extend(collect_tool_dispatch_events(&closer, &mut assemblies));
+        assert_eq!(events.len(), 2, "each choice dispatches independently");
+
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["choice_index"], 0);
+        assert_eq!(
+            json0["tool_call"]["function"]["arguments"],
+            r#"{"choice":0}"#
+        );
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["choice_index"], 1);
+        assert_eq!(
+            json1["tool_call"]["function"]["arguments"],
+            r#"{"choice":1}"#
+        );
+    }
+
+    #[test]
+    fn test_13972_terminal_pass_outcomes() {
+        // Valid JSON that only closes on the terminating chunk is not lost.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let close = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(0, None, None, Some("1}"))],
+            Some(FinishReason::ToolCalls),
+        )]);
+        assert_eq!(
+            collect_tool_dispatch_events(&close, &mut assemblies).len(),
+            1,
+            "closing on the terminal chunk dispatches exactly once"
+        );
+
+        // Absent arguments dispatch under the parameterless compatibility rule.
+        let absent = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("no_params"),
+                None,
+            )],
+            0,
+        );
+        assert_eq!(absent.len(), 1, "absent arguments dispatch at the terminal");
+
+        // A producer may report a tool-call turn as `Stop`; a parameterless
+        // call never closes a JSON root, so it depends on the terminal pass.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("no_params"),
+            None,
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert_eq!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).len(),
+            1,
+            "a parameterless call dispatches on a `Stop` finish"
+        );
+
+        // `Stop` stays fail-closed for arguments that never became valid JSON.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).is_empty(),
+            "truncated arguments must not dispatch on a `Stop` finish either"
+        );
+
+        let invalid = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("f"),
+                Some(r#"{"a":"#),
+            )],
+            0,
+        );
+        assert!(
+            invalid.is_empty(),
+            "truncated arguments must not dispatch at the terminal pass"
+        );
+
+        // `finish_reason: "length"` clears without emitting.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let truncated = make_stream_response(vec![make_finish_choice(0, FinishReason::Length)]);
+        assert!(
+            collect_tool_dispatch_events(&truncated, &mut assemblies).is_empty(),
+            "a truncated stream must not dispatch"
+        );
+    }
+
+    // Ordering is a property of the handler loop rather than of assembly, so it
+    // is covered over real SSE frames in `tests/streaming_tool_dispatch_http.rs`.
+
+    fn scan_all(fragments: &[&str]) -> ScanOutcome {
+        let mut scanner = JsonStructureScanner::default();
+        let mut last = ScanOutcome::Incomplete;
+        for fragment in fragments {
+            last = scanner.consume(fragment);
+        }
+        last
+    }
+
+    #[test]
+    fn test_json_scanner_boundaries() {
+        assert_eq!(scan_all(&[r#"{"a":1}"#]), ScanOutcome::RootClosed);
+        assert_eq!(scan_all(&["[", "1,2", "]"]), ScanOutcome::RootClosed);
+        assert_eq!(scan_all(&[r#"{"a":"}"#, r#"" }"#]), ScanOutcome::RootClosed);
+        // Backslash split across fragments: the `"` that follows is escaped.
+        assert_eq!(
+            scan_all(&[r#"{"a":"x\"#, r#""y"}"#]),
+            ScanOutcome::RootClosed
+        );
+        assert_eq!(scan_all(&[r#"{"a":1"#]), ScanOutcome::Incomplete);
+        assert_eq!(scan_all(&["{}junk"]), ScanOutcome::Malformed);
+        assert_eq!(scan_all(&[r#"}{"x":1}"#]), ScanOutcome::Malformed);
+        assert_eq!(scan_all(&["{}", "{}"]), ScanOutcome::Malformed);
+        // Trailing whitespace after the root is allowed.
+        assert_eq!(scan_all(&["{}", "  \n"]), ScanOutcome::RootClosed);
+        // A top-level scalar is never an early candidate.
+        assert_eq!(scan_all(&["1"]), ScanOutcome::Incomplete);
+        assert_eq!(scan_all(&["1", "2"]), ScanOutcome::Incomplete);
     }
 
     // ── accumulate_reasoning_dispatch tests ──

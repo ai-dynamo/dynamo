@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default worker selection with the `kv_fetch` hint policy listed, for replay tests that expect
+# KV fetch hints without the `kvcr` scorer.
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: kv_fetch
+  prefill:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: kv_fetch
+  decode:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: kv_fetch

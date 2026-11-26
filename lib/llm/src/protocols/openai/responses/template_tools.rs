@@ -471,45 +471,20 @@ impl NvCreateChatCompletionRequest {
         messages
     }
 
-    fn allowed_template_tools(&self) -> Option<Vec<RequestTool>> {
+    /// Renderer view: the full declared catalog. `allowed_tools` narrows only
+    /// the backend view (`inner.tools`) and call enforcement, never the prompt.
+    fn template_catalog(&self) -> Option<&[RequestTool]> {
         let context = self.responses_tools.as_ref()?;
-        let Some(selected) = &context.selected_tools else {
-            // Templates can distinguish absent tools from an empty tool list.
-            return Some(context.declared_tools.clone()).filter(|tools| !tools.is_empty());
-        };
-        Some(
-            context
-                .declared_tools
-                .iter()
-                .filter_map(|tool| {
-                    let mut tool = tool.clone();
-                    let keep = match &mut tool.inner {
-                        Tool::Namespace(namespace) => {
-                            namespace.tools.retain(|member| {
-                                selected.contains(&(
-                                    Some(namespace.name.clone()),
-                                    namespace_member_name(member).to_owned(),
-                                ))
-                            });
-                            !namespace.tools.is_empty()
-                        }
-                        Tool::Function(f) => selected.contains(&(None, f.name.clone())),
-                        Tool::Custom(f) => selected.contains(&(None, f.name.clone())),
-                        Tool::ToolSearch(_) => selected.contains(&(None, "tool_search".to_owned())),
-                        _ => false,
-                    };
-                    keep.then_some(tool)
-                })
-                .collect(),
-        )
+        // Templates can distinguish absent tools from an empty tool list.
+        Some(context.declared_tools.as_slice()).filter(|tools| !tools.is_empty())
     }
 
     pub(crate) fn declared_template_tools(&self) -> Option<serde_json::Value> {
         let context = self.responses_tools.as_ref()?;
         let declared: Vec<_> = self
-            .allowed_template_tools()?
-            .into_iter()
-            .map(|tool| tool.inner)
+            .template_catalog()?
+            .iter()
+            .map(|tool| tool.inner.clone())
             .collect();
         let names = if context.native {
             context.names.native()
@@ -521,7 +496,7 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub(crate) fn native_template_tools(&self) -> Option<minijinja::Value> {
-        let tools = self.allowed_template_tools()?;
+        let tools = self.template_catalog()?;
         let wants_native = tools.iter().any(|tool| match &tool.inner {
             Tool::Namespace(_) | Tool::ToolSearch(_) => true,
             Tool::Function(f) => f.defer_loading == Some(true),
@@ -529,7 +504,7 @@ impl NvCreateChatCompletionRequest {
             _ => false,
         });
         wants_native
-            .then(|| minijinja::Value::from_serialize(native_tools_for_chat_template(&tools)))
+            .then(|| minijinja::Value::from_serialize(native_tools_for_chat_template(tools)))
     }
 }
 

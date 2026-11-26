@@ -16,8 +16,8 @@ Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines
 ## Experimental Sidecar
 
 The experimental sidecar path runs the Dynamo worker outside SGLang and
-connects through SGLang's native gRPC API. It keeps SGLang's native server and
-argument surface while separating Dynamo and engine dependencies. See
+connects to SGLang's Rust server (`SGLANG_RUST_SERVER=1`) over native gRPC. It
+keeps SGLang's argument surface while separating Dynamo and engine dependencies. See
 [SGLang Sidecar](sidecar.md) for current readiness and launch examples.
 
 ## Prerequisites
@@ -81,7 +81,7 @@ docker run --gpus all -it --rm \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE --ipc host \
     -v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface \
-    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0
 ```
 
 Mount the host Hugging Face cache (`-v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface`) so each container restart doesn't re-download model weights. The container runs as user `dynamo` (UID 1000), which is why the in-container path is `/home/dynamo/.cache/huggingface`.
@@ -146,18 +146,17 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
-| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
-| **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | ✅ | — | 🚧 | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | — | | | | |
+| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | ✅ | — | | | |
+| **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🚧 | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | — | 🚧 | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Media-aware routing requires compatible SGLang cache identities. Builds without hash-forwarding support and [wide-token SGLang builds](multimodal.md#wide-token-sglang-builds) use text-prefix routing. Requests still run with this routing fallback. See [SGLang Multimodal KV Routing](multimodal.md#multimodal-kv-routing) for build requirements and supported models.

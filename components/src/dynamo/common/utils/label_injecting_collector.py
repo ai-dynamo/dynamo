@@ -93,5 +93,5 @@ class LabelInjectingCollector(Collector):
             yield new_metric_family
 
     def describe(self) -> Iterator["MetricFamily"]:
-        """Describe metrics from source registry (forwards to source)."""
-        return iter(self.source_registry.collect())
+        """Return no metric families, so registering this collector skips a full collection."""
+        return iter(())

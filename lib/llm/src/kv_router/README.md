@@ -1,6 +1,6 @@
 # Router Host Layer
 
-This module is the router's host layer. It embeds the selection core from `lib/kv-router`
+This module is the router's host layer. It embeds the selection core from `lib/router/kv-router`
 (scoring, queues, load tracking) and adds what a running request needs around it: session
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
@@ -38,16 +38,18 @@ RoutingHost
  │   ├─ Kv(KvRouter)                 KV candidate state; selects and books, never dispatches
  │   │   ├─ Indexer                  which blocks each worker holds
  │   │   ├─ RequestLeaseManager      booking leases, reaper
- │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+ │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/router/kv-router)
  │   │                               classify, queue, score, admit, account load
  │   ├─ Builtin                      round-robin, random, least-loaded
  │   ├─ Direct                       the worker the request names
  │   └─ DeviceAwareWeighted
  ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)
  ├─ hosted_occupancy                 in-flight tracking for load-based builtin modes (optional)
- ├─ lora: LoraRouting                LoRA filter (optional)
+ ├─ candidate_policy                 hosted worker selection hook (optional)
  └─ request_metrics
 ```
+
+An optional hosted candidate policy selects a worker before dispatch. The legacy LoRA policy intersects eligible workers with currently available capacity and keeps its attempt lease in the request guard; transport fallback stays within those candidates. Hosted requests without a policy selection continue through the usual affinity and occupancy paths. KV routing uses a separate admission policy in its availability callback; the KV routing host holds no hosted candidate policy.
 
 What a KV request does in `RoutingHost::generate` (call order):
 
@@ -57,7 +59,9 @@ What a KV request does in `RoutingHost::generate` (call order):
 3. affinity: acquire the session's slot (hard mode pins the worker; soft mode prefers it)
 4. KvRouter → SelectionCore: select and book the worker (Lease admission)
 5. track: RequestGuard takes ownership of the booking and records the routing decision
-6. PushRouter: dispatch to the worker
+6. PushRouter: dispatch to the worker, stamped with `elapsed_since_arrival_ms` (time since the
+   frontend received the request, plus the time a gateway in front of it reports in
+   `x-dynamo-elapsed-since-arrival-ms`) so a backend can order admission by the original arrival
 7. affinity: bind the session to the worker once the stream starts
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
@@ -114,6 +118,8 @@ hops.
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
+- Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
+  set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's
@@ -148,9 +154,14 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+| Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |
+
+The token-only Runtime EPP selection API has no output options and retains its existing cache
+behavior. Worker sampling options are unaffected by this conservative accounting rule.
 
 ## Admission modes
 
@@ -185,7 +196,10 @@ releasing it.
    release. `finish()` waits for the scheduler to acknowledge it.
 5. **Expire.** The reaper scans once per active-request expiry interval with a second-chance
    clock: one scan marks an idle lease quiet and the next reclaims it. A lease is reclaimed one
-   to two intervals after its last progress.
+   to two intervals after its last progress. With replica sync on, a second timer runs every
+   half interval and re-sends the prefill-complete event for each booking this router made
+   that is past prefill. Peer routers count that event as progress on their mirrored lease, so
+   a long stream is not reclaimed there. A booking still in prefill gets no keepalive.
 
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.

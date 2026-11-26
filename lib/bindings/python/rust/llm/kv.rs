@@ -22,26 +22,38 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
+};
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
-use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::protocols::compute_block_hash_for_seq;
-use dynamo_kv_router::protocols::*;
+use dynamo_kv_router::plugins::host::RouterPlugins;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyContext;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
-    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
-    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
-    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
-    warn_for_unserved_worker_selection_policies,
+    self, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
+use dynamo_scheduler::host::RouterConfigOverride;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::{
+    OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, WorkerPatchRequest, WorkerRequest,
+};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
@@ -61,6 +73,82 @@ use super::ais_callback::create_ais_prefill_load_estimator;
 use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
+
+#[cfg(feature = "select-service")]
+#[pyclass(frozen)]
+pub(crate) struct WorkerSequenceEventPublisher {
+    // Methods take this lock while attached to Python. Never call `py.detach` or
+    // run Python code while holding it: a thread that waits for the lock keeps
+    // the GIL, so the holder cannot attach again and both threads deadlock.
+    inner: std::sync::Mutex<Option<selection::WorkerSequenceEventPublisher>>,
+    endpoint: String,
+}
+
+#[cfg(feature = "select-service")]
+impl WorkerSequenceEventPublisher {
+    fn publisher(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<selection::WorkerSequenceEventPublisher>> {
+        // Like the RefCell it replaces, a panic does not block later calls.
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl WorkerSequenceEventPublisher {
+    #[new]
+    #[pyo3(signature = (*, model_name, routing_group, worker_id, dp_rank=0, bind_endpoint="tcp://*:*"))]
+    fn new(
+        model_name: String,
+        routing_group: String,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        bind_endpoint: &str,
+    ) -> PyResult<Self> {
+        let publisher = selection::WorkerSequenceEventPublisher::new(
+            bind_endpoint,
+            model_name,
+            routing_group,
+            dynamo_router_protocol::worker::WorkerWithDpRank::new(worker_id, dp_rank),
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self {
+            endpoint: publisher.endpoint().to_string(),
+            inner: std::sync::Mutex::new(Some(publisher)),
+        })
+    }
+
+    #[getter]
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn mark_prefill_completed(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
+            publisher
+                .mark_prefill_completed(request_id)
+                .map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn free(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
+            publisher.free(request_id).map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let publisher = self.publisher().take();
+        // Dropping the publisher terminates its ZMQ context, which can block.
+        py.detach(move || drop(publisher));
+        Ok(())
+    }
+}
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
 
@@ -209,6 +297,11 @@ struct KvIndexerCli {
     #[arg(long)]
     engine_owned_mm_identity: bool,
 
+    /// Initial workers registered via --workers send one remove per block however
+    /// many times they stored it (SGLang), so repeated stores are not counted
+    #[arg(long)]
+    idempotent_stores: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -259,6 +352,7 @@ where
             model_name: cli.model_name,
             routing_group: cli.routing_group,
             engine_owned_mm_identity: cli.engine_owned_mm_identity,
+            idempotent_stores: cli.idempotent_stores,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -587,7 +681,7 @@ fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
     prompt: impl FnOnce(&mut T) -> &mut PromptRequest,
 ) -> PyResult<T> {
     let invalid = |e: pythonize::PythonizeError| PyValueError::new_err(e.to_string());
-    let Ok(dict) = request.downcast::<pyo3::types::PyDict>() else {
+    let Ok(dict) = request.cast::<pyo3::types::PyDict>() else {
         return depythonize(request).map_err(invalid);
     };
     let Some(tokens) = dict
@@ -617,29 +711,7 @@ fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
             .extract::<Vec<u32>>()
             .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
     };
-    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
-        return generic();
-    };
-    let mut token_ids = Vec::with_capacity(list.len());
-    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
-    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
-    // list cannot change, every index is in range, and the borrowed items stay valid.
-    unsafe {
-        for index in 0..list.len() {
-            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
-            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
-                return generic();
-            }
-            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
-            // values past `u32::MAX` fail `try_from`, and the generic path raises.
-            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
-                pyo3::ffi::PyErr_Clear();
-                return generic();
-            };
-            token_ids.push(id);
-        }
-    }
-    Ok(token_ids)
+    super::py_convert::read_exact_u32_list(tokens).map_or_else(generic, Ok)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -653,7 +725,7 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     let message = err.to_string();
     let kind = err.kind();
     let status_code = err.status_code();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let pyerr = crate::errors::SelectionServiceError::new_err(message);
         let value = pyerr.value(py);
         let _ = value.setattr("kind", kind);
@@ -687,7 +759,7 @@ fn selection_cache_config_from_overrides(
 /// Bounds for the in-flight selection cache. Each field defaults to the
 /// service default when omitted.
 #[cfg(feature = "select-service")]
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub(crate) struct SelectionCacheConfig {
     inner: RsSelectionCacheConfig,
@@ -747,7 +819,7 @@ impl SessionBindingStream {
             let events = updates.recv_many().await.ok_or_else(|| {
                 pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
             })?;
-            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 }
@@ -804,7 +876,7 @@ impl SelectionService {
             builder = builder.session_binding_replication(writer_id);
         }
         let inner = py
-            .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
+            .detach(|| crate::bridge_runtime().block_on(builder.build()))
             .map_err(to_pyerr)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -818,7 +890,7 @@ impl SelectionService {
     /// dropped. Idempotent, and also run automatically on drop.
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
-        py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
+        py.detach(|| crate::bridge_runtime().block_on(service.shutdown()));
     }
 
     /// Session bindings this replica commits or refreshes, for the host to
@@ -833,7 +905,7 @@ impl SelectionService {
         })
     }
 
-    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+    fn apply_session_binding(&self, py: Python<'_>, update: Py<PyAny>) -> PyResult<()> {
         let event =
             depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.inner
@@ -851,13 +923,13 @@ impl SelectionService {
     }
 
     /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
-    fn upsert_worker<'p>(&self, py: Python<'p>, worker: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn upsert_worker<'p>(&self, py: Python<'p>, worker: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req: WorkerRequest =
             depythonize(worker.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let record = core.upsert_worker(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -866,7 +938,7 @@ impl SelectionService {
         &self,
         py: Python<'p>,
         worker_id: u64,
-        patch: PyObject,
+        patch: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let patch: WorkerPatchRequest =
             depythonize(patch.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -876,7 +948,7 @@ impl SelectionService {
                 .patch_worker(worker_id, patch)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -888,7 +960,7 @@ impl SelectionService {
                 .delete_worker(worker_id)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -899,7 +971,7 @@ impl SelectionService {
         py: Python<'_>,
         model_name: Option<String>,
         routing_group: Option<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let workers = self
             .inner
             .list_workers(model_name.as_deref(), routing_group.as_deref());
@@ -909,32 +981,32 @@ impl SelectionService {
     }
 
     /// Readiness: whether at least one worker is schedulable, plus catalog state.
-    fn ready(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn ready(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.inner.ready())
             .map(|o| o.unbind())
             .map_err(to_pyerr)
     }
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
-    fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn overlap_scores<'p>(&self, py: Python<'p>, request: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<OverlapScoresRequest>(request.bind(py), |req| {
             &mut req.prompt
         })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
-    fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn select<'p>(&self, py: Python<'p>, request: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req =
             depythonize_prompt_request::<SelectRequest>(request.bind(py), |req| &mut req.prompt)?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -942,7 +1014,7 @@ impl SelectionService {
     fn select_and_reserve<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<SelectAndReserveRequest>(request.bind(py), |req| {
             &mut req.prompt
@@ -953,7 +1025,7 @@ impl SelectionService {
                 .select_and_reserve(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -962,7 +1034,7 @@ impl SelectionService {
     fn create_reservation<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<ReservationRequest>(request.bind(py), |req| {
             &mut req.prompt
@@ -973,7 +1045,7 @@ impl SelectionService {
                 .create_reservation(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1022,7 +1094,7 @@ impl SelectionService {
         py: Python<'_>,
         model_name: Option<String>,
         routing_group: Option<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let loads = self
             .inner
             .loads(model_name.as_deref(), routing_group.as_deref());
@@ -1030,7 +1102,11 @@ impl SelectionService {
     }
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
-    fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn potential_loads<'p>(
+        &self,
+        py: Python<'p>,
+        request: Py<PyAny>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<PotentialLoadsRequest>(request.bind(py), |req| {
             &mut req.prompt
         })?;
@@ -1040,7 +1116,7 @@ impl SelectionService {
                 .potential_loads(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1079,12 +1155,48 @@ impl SelectionService {
         self.inner.list_replica_peers()
     }
 
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Returns `true` if the subscription was added.
+    fn register_worker_publisher<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        crate::future_into_py(py, async move {
+            service
+                .register_worker_publisher(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Unsubscribe from a worker publisher. Returns `true` if the subscription was removed.
+    fn deregister_worker_publisher<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        crate::future_into_py(py, async move {
+            service
+                .deregister_worker_publisher(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// List subscribed worker publishers.
+    fn list_worker_publishers(&self) -> Vec<String> {
+        self.inner.list_worker_publishers()
+    }
+
     /// Export the current indexer state in the standalone `/dump` shape.
     fn indexer_snapshot<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
         crate::future_into_py(py, async move {
             let snapshot = service.indexer_snapshot().await;
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &snapshot)
                     .map(|o| o.unbind())
                     .map_err(to_pyerr)
@@ -1114,12 +1226,12 @@ mod selection_service_lifecycle_tests {
 
     #[test]
     fn idempotent_shutdown() {
-        pyo3::prepare_freethreaded_python();
-        let service = Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        let service = Python::attach(|py| {
             SelectionService::new(py, 1, None, None, None, None, None, "hard", None)
         })
         .unwrap();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             service.shutdown(py);
             service.shutdown(py);
         });
@@ -1410,8 +1522,9 @@ impl KvEventPublisher {
     ///         format (after sgl-project/sglang#43043), including for caller hashes,
     ///         so every event token at or above 1,000,000 is excluded from the
     ///         index. Otherwise only values that do not fit in 32 bits are.
+    ///     idempotent_stores: Do not refcount repeated stores. Set for SGLang.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false, idempotent_stores=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1426,6 +1539,7 @@ impl KvEventPublisher {
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
@@ -1435,6 +1549,7 @@ impl KvEventPublisher {
             image_token_id,
             video_token_id,
             engine_owned_mm_identity,
+            idempotent_stores,
             recovery: None,
         });
 
@@ -1489,7 +1604,7 @@ impl KvEventPublisher {
             .map(depythonize_block_mm_infos)
             .transpose()?;
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let event = self.stored_event(
                 inner.next_event_id(),
                 &token_ids,
@@ -1508,7 +1623,7 @@ impl KvEventPublisher {
     fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
         let inner = self.inner.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let event = self.removed_event(inner.next_event_id(), block_hashes);
             inner.publish(event).map_err(to_pyerr)
         })
@@ -1522,7 +1637,7 @@ impl KvEventPublisher {
     fn publish_batch(&self, py: Python, events: Bound<PyAny>) -> PyResult<()> {
         let inputs = depythonize_kv_event_inputs(&events)?;
         let inner = self.inner.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut converted = Vec::with_capacity(inputs.len());
             for input in inputs {
                 let event_id = inner.next_event_id();
@@ -1570,7 +1685,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: dynamo_kv_router::protocols::OverlapScores,
+    inner: dynamo_kv_indexer::host::OverlapScores,
 }
 
 #[pymethods]
@@ -1596,7 +1711,7 @@ enum RadixTreeRequest {
     FindMatches {
         local_block_hashes: Vec<LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<dynamo_kv_router::protocols::OverlapScores>,
+        response_tx: mpsc::SyncSender<dynamo_kv_indexer::host::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -1631,7 +1746,7 @@ impl RadixTree {
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
-            let mut radix_tree = dynamo_kv_router::indexer::RadixTree::new();
+            let mut radix_tree = dynamo_kv_indexer::host::RadixTree::new();
 
             loop {
                 match request_rx.recv() {
@@ -1662,8 +1777,7 @@ impl RadixTree {
     ) -> PyResult<OverlapScores> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let local_block_hashes =
-            py.allow_threads(|| sequence.into_iter().map(LocalBlockHash).collect());
+        let local_block_hashes = py.detach(|| sequence.into_iter().map(LocalBlockHash).collect());
 
         let request = RadixTreeRequest::FindMatches {
             local_block_hashes,
@@ -1678,7 +1792,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        let result = py.allow_threads(move || {
+        let result = py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1708,7 +1822,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        let result = py.allow_threads(move || response_rx.recv());
+        let result = py.detach(move || response_rx.recv());
 
         result.map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
@@ -1730,7 +1844,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        py.allow_threads(move || {
+        py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1752,7 +1866,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        py.allow_threads(move || {
+        py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1769,7 +1883,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response from dedicated thread
-        let events = py.allow_threads(move || {
+        let events = py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     "Failed to receive dump tree response",
@@ -1778,7 +1892,7 @@ impl RadixTree {
         })?;
 
         // Serialize RouterEvent structs to JSON strings with GIL released
-        py.allow_threads(move || {
+        py.detach(move || {
             events
                 .into_iter()
                 .map(|event| {
@@ -1796,7 +1910,7 @@ impl RadixTree {
 
 impl RadixTree {
     fn handle_request(
-        radix_tree: &mut dynamo_kv_router::indexer::RadixTree,
+        radix_tree: &mut dynamo_kv_indexer::host::RadixTree,
         request: RadixTreeRequest,
     ) {
         match request {
@@ -2047,7 +2161,7 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     plugins: RouterPlugins,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
@@ -2178,15 +2292,15 @@ async fn create_kv_router_from_endpoint(
         let policy_worker_role = policy_worker_role
             .expect("a configured worker-selection policy waits for a typed model card above");
         let policy_model_name = policy_model_name.unwrap_or_default();
-        plugins.with_worker_selection(Arc::new(move |config, _worker_type, _partition| {
-            factory(
-                config,
+        plugins.with_worker_selection(Arc::new(move |context| {
+            factory(WorkerSelectionPolicyContext::new(
+                context.selection_config(),
                 policy_worker_role,
-                dynamo_kv_router::RoutingPartitionRef::new(
+                dynamo_router_protocol::identity::RoutingPartitionRef::new(
                     &policy_model_name,
-                    dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP,
                 ),
-            )
+            ))
         }))
     } else {
         plugins
@@ -2263,32 +2377,17 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
             let (tx, rx) =
-                tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
+                tokio::sync::mpsc::channel::<RsAnnotated<Py<PyAny>>>(response_buffer_size);
 
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
-                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
-                        }
-                    }
-
-                    if !first_token_gauges_observed {
-                        let has_tokens = response
-                            .data
-                            .as_ref()
-                            .map(|d| !d.token_ids.is_empty())
-                            .unwrap_or(false);
-                        if has_tokens {
-                            if let Some(ref tracker) = tracker {
-                                tracker.observe_first_token_gauges();
-                            }
-                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -2301,7 +2400,7 @@ impl KvRouter {
                     }
 
                     let response = response.map_data(|data| {
-                        Python::with_gil(|py| {
+                        Python::attach(|py| {
                             pythonize(py, &data)
                                 .map(|obj| obj.unbind())
                                 .map_err(|error| error.to_string())
@@ -2315,10 +2414,6 @@ impl KvRouter {
                     if is_error {
                         break;
                     }
-                }
-
-                if let Some(ref tracker) = tracker {
-                    tracker.observe_finish_gauges();
                 }
             });
 
@@ -2384,7 +2479,7 @@ impl KvRouter {
         let plugins = crate::router_plugins(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = ais_perf_config
             .map(|config| {
-                Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
+                Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
             })
             .transpose()
             .map_err(to_pyerr)?;
@@ -2392,7 +2487,7 @@ impl KvRouter {
         // The initial-worker wait can be unbounded. Releasing the GIL makes it
         // supervisable from another thread, but not cancellable.
         let runtime = crate::bridge_runtime();
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
@@ -2442,16 +2537,16 @@ impl KvRouter {
         py: Python<'p>,
         token_ids: Vec<u32>,
         model: String,
-        stop_conditions: Option<PyObject>,
-        sampling_options: Option<PyObject>,
-        output_options: Option<PyObject>,
-        router_config_override: Option<PyObject>,
+        stop_conditions: Option<Py<PyAny>>,
+        sampling_options: Option<Py<PyAny>>,
+        output_options: Option<Py<PyAny>>,
+        router_config_override: Option<Py<PyAny>>,
         worker_id: Option<WorkerId>,
         dp_rank: Option<DpRank>,
-        extra_args: Option<PyObject>,
-        block_mm_infos: Option<PyObject>,
-        multi_modal_data: Option<PyObject>,
-        mm_routing_info: Option<PyObject>,
+        extra_args: Option<Py<PyAny>>,
+        block_mm_infos: Option<Py<PyAny>>,
+        multi_modal_data: Option<Py<PyAny>>,
+        mm_routing_info: Option<Py<PyAny>>,
         routing_constraints: Option<RoutingConstraints>,
         response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2560,7 +2655,7 @@ impl KvRouter {
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         response_buffer_size: isize,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2569,15 +2664,9 @@ impl KvRouter {
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
-        // Create tracker if not already set, to capture worker routing info
-        let tracker = match request.tracker {
-            Some(ref t) => t.clone(),
-            None => {
-                let t = Arc::new(RequestTracker::new());
-                request.tracker = Some(t.clone());
-                t
-            }
-        };
+        // The tracker captures worker routing info, and carries on from the age an upstream
+        // router stamped on the request.
+        let tracker = request.ensure_tracker().clone();
         let request = crate::create_request_context(request, &context);
         let dispatch_span = context
             .as_ref()
@@ -2601,10 +2690,10 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
+        router_config_override: Option<Py<PyAny>>,
         request_id: Option<String>,
         update_indexer: bool,
-        block_mm_infos: Option<PyObject>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
@@ -2732,7 +2821,7 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        block_mm_infos: Option<PyObject>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2755,7 +2844,7 @@ impl KvRouter {
 
             // Return loads without aggregation - each (worker_id, dp_rank) pair is a separate entry
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &loads)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
@@ -2769,8 +2858,8 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
-        block_mm_infos: Option<PyObject>,
+        router_config_override: Option<Py<PyAny>>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         include_shared: bool,
         cache_namespace: Option<String>,
@@ -2794,7 +2883,7 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)

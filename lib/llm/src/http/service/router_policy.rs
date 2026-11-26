@@ -71,6 +71,8 @@ fn policy_error(error_value: RuntimePolicyError) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY
         }
         RuntimePolicyError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // An error this endpoint has no status for is the server's, not the caller's.
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, error_value)
 }
@@ -174,16 +176,17 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use dynamo_kv_router::services::selection::{
-        SelectionCacheConfig, SelectionCore, WorkerRequest,
-    };
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::services::selection::local_selection_core;
     use dynamo_router_policies::default_factory;
+    use dynamo_router_protocol::identity::RoutingPartitionId;
+    use dynamo_router_protocol::worker_type::WorkerType;
     use dynamo_runtime::protocols::EndpointId;
+    use dynamo_scheduler::host::{SelectionCacheConfig, SelectionCore, WorkerRequest};
     use tower::ServiceExt;
 
     async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
-        let core = SelectionCore::try_new_local(
+        let core = local_selection_core(
             KvRouterConfig {
                 use_kv_events: false,
                 ..Default::default()
