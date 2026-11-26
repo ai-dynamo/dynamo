@@ -5,7 +5,7 @@ title: OTLP Metrics Export
 subtitle: Push the same metrics Dynamo serves at /metrics to an OpenTelemetry collector, and how the Prometheus-to-OTLP conversion behaves.
 ---
 
-Dynamo can push its metrics to an OpenTelemetry collector over OTLP, in addition to serving them at `/metrics`. Both surfaces carry the same metrics, including engine metrics from vLLM, SGLang, and TensorRT-LLM, and the frontend's own metrics (`dynamo_frontend_*`) on both the HTTP and KServe frontends. Earlier releases left the frontend's own metrics out of OTLP ([#18906](https://github.com/ai-dynamo/dynamo/issues/18906)); that gap is fixed.
+Dynamo can push its metrics to an OpenTelemetry collector over OTLP, in addition to serving them at `/metrics`. Both surfaces carry the same metrics, including engine metrics from vLLM, SGLang, TensorRT-LLM, and Triton, and the frontend's own metrics (`dynamo_frontend_*`) on both the HTTP and KServe frontends. Earlier releases left the frontend's own metrics out of OTLP ([#18906](https://github.com/ai-dynamo/dynamo/issues/18906)); that gap is fixed. The one exception is the Planner: its `dynamo_planner_*` metrics are exported over OTLP but stay on the planner's own port rather than the runtime's `/metrics`, as described under [Triton and Planner metrics](#triton-and-planner-metrics).
 
 Export is **off by default**. With it off, nothing is collected and nothing is sent.
 
@@ -37,6 +37,11 @@ Enabling OTLP export does not change `/metrics` in any way. The scrape path rend
 On the frontend, HTTP or KServe, Dynamo's own metrics on `/metrics` are one block sorted by family name. Each family is declared once, a series that appears twice keeps the first sample merged, and a family whose help or type conflicts is dropped, as described under [Dropped and flagged data](#dropped-and-flagged-data). Earlier releases served the frontend's own registry first and the runtime's after it, so a scraper that parses the output by position, rather than by family name, may need updating.
 
 The two surfaces are fed independently — the scrape collects when Prometheus scrapes it, the exporter collects on its own interval — so enabling export adds one collection per interval and changes nothing about the scrape.
+
+### Triton and Planner metrics
+
+- **Triton engine metrics are typed from their exposition text.** Triton renders its metrics only as text, so for the OTLP export the Triton backend parses that text, and each family's type comes from its `# TYPE` line. They are exported when the backend runs with `--allow-metrics`, the same condition as for `/metrics`.
+- **Planner metrics are exported only from a live planner with collection on.** The `dynamo_planner_*` families are exported when the planner runs with a Dynamo runtime and a non-zero `metric_reporting_prometheus_port`, and stop at planner shutdown. They are not added to the runtime's `/metrics`: scrapers keep reading them from the planner's own port, so a scraper that reads both ports does not count them twice.
 
 ## Conversion principles
 
@@ -87,6 +92,4 @@ The original Prometheus type word travels with each metric in `metric.metadata` 
 ### Known gaps
 
 - **Exemplars are not converted**, so a backend cannot jump from a histogram bucket to the trace that produced it. This is a limitation of the data model rather than a choice: upstream Prometheus defines `Bucket.exemplar` and `Counter.exemplar`, but the `prometheus` Rust crate vendors a reduced copy of that schema without them, so an exemplar has nowhere to arrive. Nothing is being discarded.
-- **Triton engine metrics are typed from their exposition text.** Triton renders its metrics only as text, so for the OTLP export the Triton backend parses that text, and each family's type comes from its `# TYPE` line. They are exported when the backend runs with `--allow-metrics`, the same condition as for `/metrics`.
-- **Planner metrics are exported only from a live planner with collection on.** The `dynamo_planner_*` families are exported when the planner runs with a Dynamo runtime and a non-zero `metric_reporting_prometheus_port`, and stop at planner shutdown. They are not added to the runtime's `/metrics`: scrapers keep reading them from the planner's own port, so a scraper that reads both ports does not count them twice.
 - **`target_info` and `job`/`instance` handling** are scrape-side concerns and do not apply, since Dynamo pushes rather than being scraped by the collector.

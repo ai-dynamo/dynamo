@@ -378,6 +378,9 @@ def _make_planner_with_port(
             no_operation=True,
             metric_pulling_prometheus_endpoint="http://localhost:9090",
             metric_reporting_prometheus_port=port,
+            # 0 disables the dashboard and control API so _async_init binds no ports
+            live_dashboard_port=0,
+            control_api_port=0,
             load_predictor="constant",
             environment="kubernetes",
             namespace="test-namespace",

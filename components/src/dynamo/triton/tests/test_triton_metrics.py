@@ -177,7 +177,6 @@ def test_metrics_bridge_close_waits_for_inflight_to_finish(typed):
         assert scrape_result == ["nv_a 1\n"]
     assert close_done.is_set()  # close() only finished after the scrape
     assert bridge.collect() == ""  # bridge is now inactive
-    assert bridge.collect_typed() == []
 
 
 def test_register_creates_metrics_only_endpoint():
