@@ -368,13 +368,14 @@ impl DirectEngineHost {
         };
 
         let engine_cleanup = CancellationToken::new();
-        self.dispatch.adapters.write().insert(
-            self.instance_id,
-            Arc::new(
-                EngineAdapter::new(engine.clone(), config.disaggregation_mode)
-                    .with_engine_cleanup(engine_cleanup.clone()),
-            ),
+        let adapter = Arc::new(
+            EngineAdapter::new(engine.clone(), config.disaggregation_mode)
+                .with_engine_cleanup(engine_cleanup.clone()),
         );
+        self.dispatch
+            .adapters
+            .write()
+            .insert(self.instance_id, adapter);
         let mut hosted = HostedEngine {
             engine,
             registered: Vec::with_capacity(2),
