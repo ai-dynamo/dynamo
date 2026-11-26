@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
@@ -228,7 +229,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
     chat_processor_config: Optional[Dict[str, Any]] = None
@@ -279,6 +280,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
+        # Check what was asked for before --load-aware forces KV routing, so a
+        # policy file with a conflicting --router-mode still fails.
+        self.router_mode = resolve_router_mode(
+            self.router_mode, self.router_policy_config
+        )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
@@ -624,7 +630,7 @@ class FrontendArgGroup(ArgGroup):
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin",
+            default_router_mode=None,
             include_frontend_only=True,
             env=self.env,
         ).add_arguments(parser)
@@ -782,8 +788,12 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
-            default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            default=None,
+            help=(
+                "Select the response transport. Frontend and workers must match. "
+                "When unset, the runtime uses tcp. velo has no TLS, so it falls "
+                "back to tcp while any DYN_TCP_TLS_* setting is present."
+            ),
             choices=["tcp", "quic", "velo"],
             env=self.env,
         )

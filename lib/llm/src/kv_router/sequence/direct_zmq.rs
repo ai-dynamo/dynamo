@@ -222,6 +222,7 @@ mod tests {
                 prefill_load_hint: None,
             },
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }

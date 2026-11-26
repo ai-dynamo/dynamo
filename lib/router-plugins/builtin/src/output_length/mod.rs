@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::request_classifier::*;
 use serde::Deserialize;
 
 use self::predictor::{Features, MAX_TOKENS, Predictor};
@@ -93,20 +93,21 @@ impl OutputLengthClassifier {
     }
 
     fn predict(&mut self, request: &mut ClassifyRequest, now: Instant) {
-        let session = request
+        let info = request.info();
+        let session = info
             .session_context()
             .map(|session| session_key(session.session_id()));
-        let isl = request.isl_tokens();
+        let isl = info.isl_tokens();
         let prediction = self.predictor.predict(session, isl, now);
         tracing::trace!(
             target: "output_length_prediction",
-            request_id = request.request_id(),
+            request_id = info.request_id(),
             predicted_tokens = prediction.tokens,
             source = ?prediction.source,
             "predicted output length"
         );
         request.set_backend_priority(backend_priority(prediction.tokens));
-        if let Some(request_id) = request.request_id()
+        if let Some(request_id) = request.info().request_id()
             && self.pending.len() < MAX_PENDING
         {
             self.pending.insert(
@@ -175,7 +176,7 @@ impl RequestClassifier for OutputLengthClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.predict(&mut request, Instant::now());
         Ok(request)
@@ -188,6 +189,8 @@ impl RequestClassifier for OutputLengthClassifier {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::plugins::testing::{classify_request, registered_classifier};
+
     use super::*;
 
     const WORKER: WorkerWithDpRank = WorkerWithDpRank {
@@ -196,9 +199,12 @@ mod tests {
     };
 
     fn request(request_id: &str, session: &str, isl: usize) -> ClassifyRequest {
-        ClassifyRequest::with_timing(isl, 0, tokio::time::Instant::now())
-            .with_request_id(request_id)
-            .with_session_context(SessionContext::new(session.to_owned(), None, None, None))
+        classify_request(
+            isl,
+            Some(request_id),
+            Some(SessionContext::new(session.to_owned(), None, None, None)),
+            None,
+        )
     }
 
     fn priority(
@@ -272,35 +278,30 @@ mod tests {
         priority(&mut classifier, "a1", "s", 1_000, now);
         complete(&mut classifier, "a1", Some(1_250), now);
 
-        let mut anonymous = ClassifyRequest::with_timing(2_000, 0, tokio::time::Instant::now());
+        let mut anonymous = classify_request(2_000, None, None, None);
         classifier.predict(&mut anonymous, now);
         assert_eq!(anonymous.backend_priority(), Some(-250));
         assert!(classifier.pending.is_empty());
     }
 
     #[test]
-    fn the_policy_file_selects_it_and_rejects_parameters() {
-        let resolve = |yaml: &str| {
-            let mut registry = crate::default_registry();
-            crate::register(&mut registry).unwrap();
-            let policy = tempfile::NamedTempFile::new().unwrap();
-            std::fs::write(policy.path(), yaml).unwrap();
-            let config = dynamo_kv_router::config::KvRouterConfig {
-                router_policy_config: Some(policy.path().display().to_string()),
-                ..Default::default()
-            };
-            registry.resolve_plugins(&config)
+    fn the_crate_registers_it_under_its_type_name_and_it_rejects_parameters() {
+        // Built as a host builds it, so the case fails if the crate stops registering it.
+        let mut registry = crate::default_registry();
+        crate::register(&mut registry).unwrap();
+        let build = |parameters| {
+            registered_classifier(
+                &registry,
+                "output_length_prediction",
+                parameters,
+                RequestClassifierContext::new(16, Vec::new),
+            )
         };
 
-        let plugins = resolve("request_classifier:\n  type: output_length_prediction\n").unwrap();
-        let factory = plugins.request_classifier().unwrap();
-        let _classifier = factory(RequestClassifierContext::new(16, Vec::new));
-
-        assert!(
-            resolve(
-                "request_classifier:\n  type: output_length_prediction\n  parameters:\n    predictor: ridge\n"
-            )
-            .is_err()
-        );
+        assert!(build("").is_ok());
+        assert!(matches!(
+            build("predictor: ridge"),
+            Err(RequestClassifierRegistryError::Provider { .. })
+        ));
     }
 }

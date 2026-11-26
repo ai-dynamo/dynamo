@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import struct
 import sys
 import types
 from pathlib import Path
@@ -92,14 +93,19 @@ def handler_with_router():
 
 
 @pytest.mark.asyncio
-async def test_best_worker_id_forwards_cache_namespace() -> None:
+@pytest.mark.parametrize(
+    "token_ids", [[300, 1024], struct.pack("<2i", 300, 1024)], ids=["list", "packed"]
+)
+async def test_best_worker_id_forwards_token_ids_and_cache_namespace(
+    token_ids: list[int] | bytes,
+) -> None:
     handler, router = handler_with_router()
     router.best_worker.return_value = (7, 0, 3)
 
     results = [
         worker_id
         async for worker_id in handler.best_worker_id(
-            [1, 2, 3, 4],
+            token_ids,
             {"temperature": 0.0},
             cache_namespace="tenant-a",
         )
@@ -107,10 +113,21 @@ async def test_best_worker_id_forwards_cache_namespace() -> None:
 
     assert results == [7]
     router.best_worker.assert_awaited_once_with(
-        [1, 2, 3, 4],
+        [300, 1024],
         {"temperature": 0.0},
         cache_namespace="tenant-a",
     )
+
+
+@pytest.mark.asyncio
+async def test_best_worker_id_rejects_truncated_packed_token_ids() -> None:
+    handler, router = handler_with_router()
+    router.best_worker.return_value = (7, 0, 3)
+
+    with pytest.raises(ValueError, match="packed token_ids byte length 3"):
+        await anext(handler.best_worker_id(b"\x2c\x01\x00"))
+
+    router.best_worker.assert_not_called()
 
 
 @pytest.mark.asyncio

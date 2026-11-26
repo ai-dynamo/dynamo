@@ -12,7 +12,8 @@ use dynamo_mocker::common::protocols::{
 };
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
-    TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis, WekaResolvedTimestampBasis,
+    TraceFileFormat, WekaChatTemplate, WekaClient, WekaImportOptions, WekaNestedTimestampBasis,
+    WekaResolvedTimestampBasis,
 };
 use dynamo_mocker::replay::{
     AgenticReplayOptions, ReplayArgsMode, ReplayDeterminism, ReplayRouterControls,
@@ -89,12 +90,12 @@ impl OfflineReplayResult {
 #[pymethods]
 impl OfflineReplayResult {
     #[getter]
-    fn summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         replay_summary_to_python(py, &self.report, self.weka_nested_timestamp_basis)
     }
 
     #[getter]
-    fn per_request(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn per_request(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if !self.capture_per_request {
             return Ok(py.None());
         }
@@ -104,21 +105,21 @@ impl OfflineReplayResult {
     }
 
     #[getter]
-    fn coverage(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.coverage)
             .map(Bound::unbind)
             .map_err(to_pyerr)
     }
 
     #[getter]
-    fn lifecycle_operations(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn lifecycle_operations(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.lifecycle_operations)
             .map(Bound::unbind)
             .map_err(to_pyerr)
     }
 
     #[getter]
-    fn telemetry(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn telemetry(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(telemetry) = self.telemetry.as_ref() else {
             return Ok(py.None());
         };
@@ -132,7 +133,7 @@ fn replay_summary_to_python(
     py: Python<'_>,
     report: &dynamo_mocker::replay::TraceSimulationReport,
     weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let summary = pythonize(py, report).map_err(to_pyerr)?;
     if let Some(basis) = weka_nested_timestamp_basis {
         summary.set_item(
@@ -242,7 +243,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false, conversation_affinity=None, agentic_warmup_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false, conversation_affinity=None, agentic_warmup_policy=None, weka_client=None, weka_chat_template=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -286,7 +287,9 @@ pub fn run_mocker_trace_replay(
     deterministic: bool,
     conversation_affinity: Option<&Bound<'_, PyAny>>,
     agentic_warmup_policy: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyObject> {
+    weka_client: Option<&Bound<'_, PyAny>>,
+    weka_chat_template: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let conversation_affinity = conversation_affinity
         .map(pythonize::depythonize::<dynamo_mocker::replay::ConversationAffinityConfig>)
         .transpose()?;
@@ -371,8 +374,21 @@ pub fn run_mocker_trace_replay(
             ));
         }
     }
-    let weka_options =
-        parse_weka_import_options(trace_format, weka_nested_timestamp_basis).map_err(to_pyerr)?;
+    let weka_client = weka_client
+        .map(pythonize::depythonize)
+        .transpose()
+        .map_err(|e| PyValueError::new_err(format!("weka_client: {e}")))?;
+    let weka_chat_template = weka_chat_template
+        .map(pythonize::depythonize)
+        .transpose()
+        .map_err(|e| PyValueError::new_err(format!("weka_chat_template: {e}")))?;
+    let weka_options = parse_weka_import_options(
+        trace_format,
+        weka_nested_timestamp_basis,
+        weka_client,
+        weka_chat_template,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let execution_model = match execution_model {
         Some(model) if model.trim().is_empty() => {
             return Err(PyValueError::new_err("execution_model must be non-empty"));
@@ -679,7 +695,7 @@ pub fn run_mocker_trace_replay(
         })
         .and_then(|result| result)
     } else {
-        py.allow_threads(move || {
+        py.detach(move || {
             with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
@@ -703,7 +719,7 @@ pub fn run_mocker_trace_replay(
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
     if let Some(path) = jsonl_path_for_emit.as_deref() {
-        py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+        py.detach(|| write_per_request_jsonl(path, &report.per_request))
             .map_err(to_pyerr)?;
     }
     if is_offline {
@@ -971,7 +987,7 @@ pub fn run_mocker_synthetic_trace_replay(
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
     kv_event_lag_ms: Option<f64>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
@@ -1311,7 +1327,7 @@ pub fn run_mocker_synthetic_trace_replay(
         })
         .and_then(|result| result)
     } else {
-        py.allow_threads(move || {
+        py.detach(move || {
             with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
@@ -1536,7 +1552,7 @@ pub(super) fn mocker_config_from_python(
     let json: String = if let Ok(json) = value.extract::<String>() {
         json
     } else {
-        let mapping = value.downcast::<pyo3::types::PyMapping>()?;
+        let mapping = value.cast::<pyo3::types::PyMapping>()?;
         let mapping = py.import("builtins")?.call_method1("dict", (mapping,))?;
         let options = pyo3::types::PyDict::new(py);
         options.set_item("allow_nan", false)?;
@@ -1570,7 +1586,7 @@ fn resolve_mocker_capacity(py: Python<'_>, args: &mut MockerConfig) -> PyResult<
             .call_method(
                 "estimate_canonical_num_gpu_blocks",
                 (pythonize(py, config)?,),
-                Some(options.downcast::<pyo3::types::PyDict>()?),
+                Some(options.cast::<pyo3::types::PyDict>()?),
             )?
             .extract()?;
         args.num_gpu_blocks = blocks;
@@ -1581,7 +1597,7 @@ fn resolve_mocker_capacity(py: Python<'_>, args: &mut MockerConfig) -> PyResult<
 }
 
 #[pyfunction]
-pub fn _normalize_mocker_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+pub fn _normalize_mocker_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let mut args = mocker_config_from_python(py, config)?;
     resolve_mocker_capacity(py, &mut args)?;
     pythonize(py, &args).map(Bound::unbind).map_err(to_pyerr)
@@ -1679,9 +1695,24 @@ fn parse_replay_router_mode(
 fn parse_weka_import_options(
     trace_format: TraceFileFormat,
     nested_timestamp_basis: Option<&str>,
+    client: Option<WekaClient>,
+    chat_template: Option<WekaChatTemplate>,
 ) -> anyhow::Result<WekaImportOptions> {
+    anyhow::ensure!(
+        trace_format == TraceFileFormat::Weka || client.is_none(),
+        "weka_client requires trace_format='weka'"
+    );
+    anyhow::ensure!(
+        trace_format == TraceFileFormat::Weka || chat_template.is_none(),
+        "weka_chat_template requires trace_format='weka'"
+    );
+    let options = WekaImportOptions {
+        client: client.unwrap_or_default(),
+        chat_template,
+        ..WekaImportOptions::default()
+    };
     let Some(basis) = nested_timestamp_basis else {
-        return Ok(WekaImportOptions::default());
+        return Ok(options);
     };
     let nested_timestamp_basis = match basis {
         "auto" => WekaNestedTimestampBasis::Auto,
@@ -1695,10 +1726,9 @@ fn parse_weka_import_options(
         trace_format == TraceFileFormat::Weka,
         "weka_nested_timestamp_basis requires trace_format='weka'"
     );
-    // Defaults: the recorded client and the trace's own token counts.
     Ok(WekaImportOptions {
         nested_timestamp_basis,
-        ..Default::default()
+        ..options
     })
 }
 
@@ -2032,13 +2062,13 @@ struct PyReplayTelemetryObserver {
 impl ReplayTelemetryObserver for PyReplayTelemetryObserver {
     fn on_sample(&mut self, snapshot: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
         if let Some(callback) = self.callback.as_ref() {
-            let result = Python::with_gil(|py| -> PyResult<()> {
+            let result = Python::attach(|py| -> PyResult<()> {
                 let sample = pythonize(py, &snapshot).map_err(to_pyerr)?;
                 callback.bind(py).call1((sample,))?;
                 Ok(())
             });
             if let (Err(error), Some(callback_error)) = (&result, &self.callback_error) {
-                Python::with_gil(|py| callback_error.record(py, error));
+                Python::attach(|py| callback_error.record(py, error));
             }
             result.map_err(anyhow::Error::new)?;
         }
@@ -2253,14 +2283,14 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
     }
 
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
-        let result = Python::with_gil(|py| {
+        let result = Python::attach(|py| {
             self.callback
                 .bind(py)
                 .call_method0("initial_tick_ms")?
                 .extract::<f64>()
         });
         if let Err(error) = &result {
-            Python::with_gil(|py| self.callback_error.record(py, error));
+            Python::attach(|py| self.callback_error.record(py, error));
         }
         result.map_err(anyhow::Error::new)
     }
@@ -2282,7 +2312,7 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             draining_prefill_ids,
             draining_decode_ids,
         } = snapshot;
-        let result = Python::with_gil(|py| -> PyResult<ReplayScalingDecision> {
+        let result = Python::attach(|py| -> PyResult<ReplayScalingDecision> {
             let router_policies = self.router_policies().map_err(to_pyerr)?;
             let non_draining_prefill_count = active_prefill_ids.len() + starting_prefill_ids.len();
             let non_draining_decode_count = active_decode_ids.len() + starting_decode_ids.len();
@@ -2349,7 +2379,7 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             Ok(scaling)
         });
         if let Err(error) = &result {
-            Python::with_gil(|py| self.callback_error.record(py, error));
+            Python::attach(|py| self.callback_error.record(py, error));
         }
         result.map_err(anyhow::Error::new)
     }

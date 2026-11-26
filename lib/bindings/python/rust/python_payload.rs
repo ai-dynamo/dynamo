@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for PythonPayload {
         D: Deserializer<'de>,
     {
         let dp_rank = Cell::new(None);
-        let object = Python::with_gil(|py| {
+        let object = Python::attach(|py| {
             serde_transcode::transcode(
                 DpRankProbe::body(deserializer, &dp_rank),
                 Pythonizer::new(py),
@@ -117,7 +117,7 @@ impl<'de> Deserialize<'de> for BidirectionalFrame {
     where
         D: Deserializer<'de>,
     {
-        let object = Python::with_gil(|py| {
+        let object = Python::attach(|py| {
             serde_transcode::transcode(deserializer, Pythonizer::new(py))
                 .map(Bound::unbind)
                 .map_err(D::Error::custom)
@@ -131,7 +131,7 @@ impl Serialize for PythonPayload {
     where
         S: Serializer,
     {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut depythonizer = Depythonizer::from_object(self.object.bind(py));
             serde_transcode::transcode(&mut depythonizer, serializer).map_err(S::Error::custom)
         })
@@ -500,7 +500,7 @@ fn encode_python_response(
     classify: bool,
 ) -> EncodedPythonResponse {
     let (annotated, stop_stream, output) = match item {
-        Ok(item) => match Python::with_gil(|py| {
+        Ok(item) => match Python::attach(|py| {
             parse_python_response(item, py).map(|annotated| {
                 let output = if classify {
                     response_output(&annotated, py)
@@ -590,7 +590,7 @@ pub(crate) fn response_output(
         Some(data) if !annotated.is_error() => data,
         _ => return ResponseOutput::INTERIM,
     };
-    let Ok(response) = data.object.bind(py).downcast::<PyDict>() else {
+    let Ok(response) = data.object.bind(py).cast::<PyDict>() else {
         return ResponseOutput::INTERIM;
     };
     let generated_token = non_null_item(response, pyo3::intern!(py, "token_ids"))
@@ -620,21 +620,21 @@ fn choices_output(response: &Bound<'_, PyDict>, py: Python<'_>) -> ResponseOutpu
     let Some(choices) = non_null_item(response, pyo3::intern!(py, "choices")) else {
         return output;
     };
-    let Ok(choices) = choices.downcast::<PyList>() else {
+    let Ok(choices) = choices.cast::<PyList>() else {
         return output;
     };
     for choice in choices.iter() {
-        let Ok(choice) = choice.downcast::<PyDict>() else {
+        let Ok(choice) = choice.cast::<PyDict>() else {
             continue;
         };
         output.completion |= non_null_item(choice, pyo3::intern!(py, "finish_reason")).is_some();
         output.generated_token |= non_null_item(choice, pyo3::intern!(py, "delta"))
             .and_then(|delta| {
-                let delta = delta.downcast::<PyDict>().ok()?;
+                let delta = delta.cast::<PyDict>().ok()?;
                 non_null_item(delta, pyo3::intern!(py, "content"))
             })
             .is_some_and(|content| {
-                content.downcast::<PyString>().is_ok() && content.len().is_ok_and(|len| len > 0)
+                content.cast::<PyString>().is_ok() && content.len().is_ok_and(|len| len > 0)
             });
     }
     output
@@ -665,7 +665,7 @@ pub(crate) fn parse_python_response(
     py: Python<'_>,
 ) -> Result<Annotated<PythonPayload>, String> {
     let bound = item.bind(py);
-    let Some(dict) = bound.downcast::<PyDict>().ok() else {
+    let Some(dict) = bound.cast::<PyDict>().ok() else {
         return Ok(Annotated::from_data(PythonPayload::new(item)));
     };
     let is_envelope = dict
@@ -714,10 +714,14 @@ fn extract_optional<'py, T>(
     name: &Bound<'py, PyString>,
 ) -> Result<Option<T>, String>
 where
-    T: FromPyObject<'py>,
+    T: FromPyObjectOwned<'py>,
 {
     optional_item(dict, name)?
-        .map(|value| value.extract().map_err(|error| error.to_string()))
+        .map(|value| {
+            value
+                .extract::<T>()
+                .map_err(|error| Into::<PyErr>::into(error).to_string())
+        })
         .transpose()
 }
 

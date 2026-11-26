@@ -705,12 +705,14 @@ mod tests {
     fn only_prefill_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
             fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+            with_kv_fetch_hints,
         };
+        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
 
         let args =
             MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
         let mut composition =
-            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, None, None, None);
+            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, hinted, None, None);
         let (mut prefill, mut decode) = composition
             .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
             .unwrap();
@@ -723,12 +725,10 @@ mod tests {
         let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
         assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
 
-        // Decode workers accept hints too, but the P/D decode router forces
-        // overlap credit 0, so its policy reads no KV index and, as in production,
-        // retains no transfer chain. Decode balances the two targets over both
-        // workers, so one of them lands away from worker 1's G2 prefix unhinted.
+        // Decode workers accept hints too, but replay feeds no decode-pool KV events to
+        // the decode router, so it computes no copy sources. Decode balances the two
+        // targets over both workers, so one lands away from worker 1's G2 prefix unhinted.
         assert!(!decode.router.indexer.retain_kv_transfer_chain);
-        assert!(decode.router.kv_transfer_gate_warned);
         decode
             .router
             .on_kv_events(vec![target_prefix_in_g2(1, 0)])
@@ -742,11 +742,13 @@ mod tests {
     fn aggregated_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
             fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+            with_kv_fetch_hints,
         };
+        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
 
         let args =
             MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
-        let mut composition = KvReplayComposition::aggregated(args, 2, None, None, None);
+        let mut composition = KvReplayComposition::aggregated(args, 2, hinted, None, None);
         let mut placement = composition
             .create_aggregated_placement(1, topology(2, 1, true))
             .unwrap();

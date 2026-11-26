@@ -33,7 +33,6 @@ AISIMULATE_REQUIREMENTS = ROOT / "container/deps/requirements.aisimulate.txt"
 LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
-    ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
 
 
