@@ -781,11 +781,11 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DIRECT",
             default=False,
             help=(
-                "Dial inference engines directly over their native gRPC API instead of "
-                "discovering Dynamo workers. Requires --engine-url. The engines run "
-                "without a Dynamo sidecar; routing, prefill/decode orchestration and "
-                "migration run in this frontend. Uses in-process discovery, so "
-                "--discovery-backend is ignored."
+                "Dial inference engines directly over their native gRPC API, with no "
+                "Dynamo sidecar beside them, instead of discovering Dynamo workers. "
+                "Requires --engine-url. Routing, disaggregated prefill/decode serving "
+                "and request migration work as they do with sidecars. Uses in-process "
+                "discovery, so --discovery-backend is ignored."
             ),
             env=self.env,
         )
