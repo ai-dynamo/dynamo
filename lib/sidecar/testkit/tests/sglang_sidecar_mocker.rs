@@ -335,7 +335,7 @@ async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
     .expect("request cancellation and engine shutdown must finish promptly");
 }
 
-#[path = "../../tests/common/mod.rs"]
+#[path = "../../../mocker/servers/tests/common/mod.rs"]
 mod common;
 
 #[tokio::test]

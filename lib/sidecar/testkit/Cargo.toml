@@ -40,6 +40,10 @@ tonic-health-v14 = { workspace = true }
 serde_json = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
+# The SGLang KV-event test shares `lib/mocker/servers/tests/common/mod.rs` with the vLLM Mocker.
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 libc = { workspace = true }

@@ -30,13 +30,3 @@ tonic-v14 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
-
-[dev-dependencies]
-dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
-dynamo-llm = { workspace = true }
-dynamo-kv-events = { workspace = true }
-dynamo-kv-hashing = { workspace = true }
-dynamo-kv-indexer = { workspace = true }
-dynamo-runtime = { workspace = true }
-dynamo-backend-common = { workspace = true, features = ["testing"] }
-tokio-stream = { workspace = true, features = ["net"] }
