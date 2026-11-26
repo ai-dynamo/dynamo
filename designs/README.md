@@ -46,7 +46,7 @@ rule itself need explicit review and decision context.
 - Add new documents to the table above and link them from the relevant
   `AGENTS.md` scopes. Keep one canonical copy of each rule set.
 - Declare ownership in `.github/codeowners/areas.yaml` and regenerate
-  `CODEOWNERS`. Global component boundaries are reviewed by Runtime and Operator;
+  `CODEOWNERS`. Global design rules and the index belong to Architecture;
   `operator/` belongs to Operator. Multiple CODEOWNERS provide review visibility;
   GitHub accepts approval from any listed owner, rather than requiring each team.
 

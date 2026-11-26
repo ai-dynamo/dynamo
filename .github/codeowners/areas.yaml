@@ -1,6 +1,10 @@
 meta:
   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
 areas:
+- label: architecture
+  github_team: '@ai-dynamo/dynamo-architecture-codeowners'
+  path_globs:
+  - designs/
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'
   path_globs:
@@ -204,7 +208,6 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
-  - designs/
   - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
@@ -533,8 +536,6 @@ required_owners:
   owners:
   - operator
 shared:
-- glob: designs/COMPONENT_BOUNDARIES.md
-  owners: [runtime, operator]
 - glob: Cargo.lock
   owners:
   - ops
