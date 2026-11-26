@@ -28,7 +28,7 @@ pub struct RequestProgressUpdater {
 }
 
 impl RequestProgress {
-    pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
+    pub(crate) fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
         let observed = Arc::new(Observed {
             context_tokens: AtomicUsize::new(initial_context_tokens),
             reply_end: AtomicU8::new(0),
@@ -83,6 +83,7 @@ impl RequestProgressUpdater {
             .fetch_max(1 + u8::from(tool_call), Ordering::Relaxed);
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -65,10 +65,6 @@ inputs:
     description: 'Enable operator checkpoint/restore injection'
     required: false
     default: 'false'
-  dgdr_v1beta2_enabled:
-    description: 'Deprecated compatibility input; DGDR v1beta2 is always available and this value is ignored'
-    required: false
-    default: 'false'
   planner_image:
     description: 'Planner image configured on the operator for DGDR execution'
     required: false

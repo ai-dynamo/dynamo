@@ -20,6 +20,7 @@ use dynamo_scheduler::{
     RejectThresholdsProvider, ScheduleMode, SchedulerQueue, SchedulingRequest, SchedulingResponse,
     WorkerCapacityExt, WorkerConfigLike,
 };
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SchedulerBookingDescriptor};
 use dynamo_worker_selection::WorkerCapacity;
 use dynamo_worker_selection::WorkerInputs;
@@ -165,11 +166,9 @@ fn make_request(
         track_prefill_tokens: true,
         router_config_override: None,
         lora_name: None,
-        priority_jump: 0.0,
-        strict_priority: 0,
+        caller_hints: Default::default(),
         policy_class: None,
         session_context: None,
-        expected_output_tokens: None,
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
@@ -194,10 +193,8 @@ policy_classes:
     prefill_busy_threshold_frac: 0.25
 "#,
     );
-    let reject = dynamo_slot_tracker::BusyThresholds {
-        prefill_busy_threshold_frac: Some(1.0),
-        ..Default::default()
-    };
+    let reject =
+        dynamo_slot_tracker::BusyThresholds::default().with_prefill_busy_threshold_frac(Some(1.0));
     let (queue, _slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
         1,
         16,

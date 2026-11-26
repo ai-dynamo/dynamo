@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 from aisim_core import _native
 from aisim_core.datasets import Identity, configuration_id
-from aisim_core.sdk import engine
+from aisim_core.sdk import engine, perf_database
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -310,6 +310,11 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     bundled = Path(engine.__file__).parents[1] / "systems"
+    # The data files are stored per version. Use the version that the pinned
+    # AISim marks as current, as the profiler does.
+    vllm_version = perf_database.get_latest_database_version(
+        "b200_sxm", "vllm", systems_paths=str(bundled)
+    )
     root = tmp_path / "dataset"
     systems = root / "systems"
     artifacts = []
@@ -337,7 +342,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
     # Retain the published tables unchanged and compile their actual op graphs.
     files = [
         bundled / "b200_sxm.yaml",
-        *sorted((bundled / "data/b200_sxm").glob("*/vllm/0.24.0/*")),
+        *sorted((bundled / "data/b200_sxm").glob(f"*/vllm/{vllm_version}/*")),
     ]
     for source in files:
         relative = str(source.relative_to(bundled))
@@ -353,7 +358,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
                 "Qwen/Qwen3-0.6B",
                 "b200_sxm",
                 "vllm",
-                "0.24.0",
+                vllm_version,
                 systems_path=str(systems),
                 database_mode="SILICON",
                 shared_layer=False,
@@ -380,7 +385,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
         model="Qwen/Qwen3-0.6B",
         system="b200_sxm",
         backend="vllm",
-        backend_version="0.24.0",
+        backend_version=vllm_version,
         worker_type=role,
         estimation_mode="op_level",
         fallback_policy="deny",

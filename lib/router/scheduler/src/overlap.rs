@@ -337,9 +337,9 @@ pub fn build_overlap_scores_response(
     let shared_cache = match shared_cache_hits {
         Some(hits) => SharedCacheOverlapScore {
             enabled: shared_cache_enabled,
-            total_hit_blocks: hits.total_hits,
+            total_hit_blocks: hits.total_hits(),
             ranges: hits
-                .ranges
+                .ranges()
                 .iter()
                 .map(|range| (range.start, range.end))
                 .collect(),

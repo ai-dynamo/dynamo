@@ -52,8 +52,6 @@ _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
 _LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
-# Re-check the launch shape when the supported pin moves.
-_VERIFIED_VLLM_VERSIONS = ("0.33.0",)
 
 
 def is_embedding_process_child() -> bool:
@@ -399,11 +397,9 @@ def _short_rpc_directory() -> tempfile.TemporaryDirectory:
 def _unrecognized_launch_shape(detail: str) -> RuntimeError:
     """Name the installed vLLM and the shape it yielded, not just the symptom."""
     return RuntimeError(
-        f"vLLM {vllm.__version__} yields {detail} from launch_core_engines. "
-        f"This unpacking was verified against vLLM "
-        f"{' and '.join(_VERIFIED_VLLM_VERSIONS)}; the result shape has most "
-        "likely changed upstream and _unpack_core_engine_launch needs "
-        "updating to match."
+        f"vLLM {vllm.__version__} yields {detail} from launch_core_engines; "
+        "the result shape has most likely changed upstream and "
+        "_unpack_core_engine_launch needs updating to match."
     )
 
 

@@ -24,9 +24,8 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
-    http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
     local_model::runtime_config::{
@@ -61,6 +60,7 @@ use crate::{
     utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
@@ -102,7 +102,8 @@ fn worker_set_key(
 }
 
 /// Refresh committed capability records without changing controller admission.
-fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+fn update_member_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    worker_set.update_max_logprobs(members.iter().map(|member| &member.card));
     if let Some(admission) = &worker_set.image_edit_admission {
         admission.replace(members.iter().map(|member| {
             (
@@ -605,6 +606,17 @@ impl ModelWatcher {
                 None
             };
 
+            let chat_runtime_configs = if tokenizer.is_some() && needs_local_chat_pipeline {
+                Some(chat_runtime_configs_or_unknown(
+                    self.manager
+                        .get_or_create_runtime_config_watcher(&endpoint)
+                        .await,
+                    card.name(),
+                ))
+            } else {
+                None
+            };
+
             // Routing is required whenever any pipeline (factory chat or local) will exist.
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
@@ -727,7 +739,25 @@ impl ModelWatcher {
             if needs_systemone_preprocessor {
                 worker_set.systemone_preprocessor = match tokenizer.clone() {
                     Some(tokenizer) => {
-                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                        let preprocessor = async {
+                            let runtime_configs = match chat_runtime_configs.clone() {
+                                Some(runtime_configs) => runtime_configs,
+                                None => chat_runtime_configs_or_unknown(
+                                    self.manager
+                                        .get_or_create_runtime_config_watcher(&endpoint)
+                                        .await,
+                                    card.name(),
+                                ),
+                            };
+                            worker_set_chat_preprocessor(
+                                card,
+                                tokenizer,
+                                &cancellation,
+                                runtime_configs,
+                            )
+                        }
+                        .await;
+                        match preprocessor {
                             Ok(preprocessor) => Some(preprocessor),
                             Err(error) => {
                                 tracing::warn!(
@@ -795,7 +825,14 @@ impl ModelWatcher {
                     // Only chat pipelines use speculative prefill.
                     let preprocessor = match worker_set.systemone_preprocessor.clone() {
                         Some(preprocessor) => preprocessor,
-                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                        None => worker_set_chat_preprocessor(
+                            card,
+                            tk.clone(),
+                            &cancellation,
+                            chat_runtime_configs
+                                .clone()
+                                .expect("chat preprocessor requires runtime configurations"),
+                        )?,
                     };
                     Some(
                         routing
@@ -1276,7 +1313,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1365,7 +1402,7 @@ impl ControllerHost for ModelWatcher {
             .get_committed_model(&key.model_name)
             .and_then(|model| model.get_worker_set(&key.worker_set_key))
         {
-            update_image_edit_capabilities(&worker_set, members);
+            update_member_capabilities(&worker_set, members);
         }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
@@ -1417,7 +1454,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1636,21 +1673,45 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
+/// Keep response-grammar metadata optional without trusting a representative card.
+///
+/// A failed subscription returns a closed, empty watch, keeping this WorkerSet
+/// conservative until rebuilt. `None` would enable the static-card fast path.
+fn chat_runtime_configs_or_unknown(
+    result: anyhow::Result<RuntimeConfigWatch>,
+    model_name: &str,
+) -> RuntimeConfigWatch {
+    match result {
+        Ok(configs) => configs,
+        Err(error) => {
+            tracing::warn!(
+                model = model_name,
+                error = %format!("{error:#}"),
+                "Runtime configuration watch is unavailable; response parsing stays conservative for this WorkerSet"
+            );
+            let (_, configs) = tokio::sync::watch::channel(HashMap::new());
+            configs
+        }
+    }
+}
+
 fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
     cancellation: &CancellationToken,
+    runtime_configs: RuntimeConfigWatch,
 ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
     let PromptFormatter::OAI(formatter) =
         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
     // A retained pipeline must stop its warmups when its WorkerSet is retired.
-    OpenAIPreprocessor::new_with_parts_and_cancel(
+    OpenAIPreprocessor::new_with_parts_and_runtime_configs(
         card.clone(),
         formatter,
         tokenizer,
         Some(cancellation.clone()),
+        runtime_configs,
     )
-    .context("OpenAIPreprocessor.new_with_parts_and_cancel")
+    .context("OpenAIPreprocessor.new_with_parts_and_runtime_configs")
 }
 
 #[cfg(test)]
@@ -1660,6 +1721,7 @@ mod tests {
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
     use crate::session_affinity::SessionAffinityMode;
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
     use dynamo_runtime::discovery::DiscoveryEvent;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;
@@ -1741,6 +1803,304 @@ mod tests {
         }
         assert!(check_unified_family_tokens(&card, &mut None).is_err());
         Ok(())
+    }
+
+    /// Keep endpoint discovery live while only model-metadata subscription is broken.
+    struct UnavailableChatRuntimeConfigFixture {
+        runtime: Runtime,
+        watcher: ModelWatcher,
+        endpoint: dynamo_runtime::component::Endpoint,
+        spec: GroupSpec,
+        admitted: tokio::sync::watch::Receiver<Vec<u64>>,
+        _admission_tx: tokio::sync::watch::Sender<Vec<u64>>,
+        _store: tempfile::TempDir,
+        _template: tempfile::TempDir,
+    }
+
+    /// Isolate the optional metadata failure from routing and tokenizer failures.
+    async fn unavailable_chat_runtime_config_fixture(
+        worker_type: WorkerType,
+    ) -> UnavailableChatRuntimeConfigFixture {
+        use crate::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY;
+        use dynamo_runtime::{distributed::DiscoveryBackend, storage::kv};
+
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store.path().join("v1")).unwrap();
+        // Endpoint discovery uses v1/instances; only model-metadata subscription fails.
+        std::fs::write(store.path().join("v1/mdc"), b"not a directory").unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            runtime.clone(),
+            DistributedConfig {
+                discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(
+                    store.path().into(),
+                )),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("unavailable-chat-runtime-config")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let template = tempfile::tempdir().unwrap();
+        let template_path = template.path().join("chat_template.jinja");
+        std::fs::write(&template_path, "<think>").unwrap();
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card =
+            ModelDeploymentCard::load_from_disk(model_path, Some(&template_path)).unwrap();
+        card.set_name("unavailable-chat-runtime-config");
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        card.worker_type = Some(worker_type);
+        card.kv_cache_block_size = 16;
+        card.runtime_config.reasoning_parser = Some("glm45".into());
+        card.runtime_config.tool_call_parser = Some("glm47".into());
+        // A discovered representative cannot prove how the selected worker gates JSON.
+        card.runtime_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                false,
+            )
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        let DiscoveryEvent::Added(discovery) =
+            discovered_card("unavailable-chat-runtime-config", worker_id, &card)
+        else {
+            unreachable!()
+        };
+        let desired = watcher
+            .normalize(discovery, &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        let spec = GroupSpec {
+            key: desired.group_key.clone(),
+            mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
+            generation: 1,
+            video_contract: desired.video_contract.clone(),
+            representative: desired,
+        };
+        let (admission_tx, admitted) = tokio::sync::watch::channel(vec![worker_id]);
+        UnavailableChatRuntimeConfigFixture {
+            runtime,
+            watcher,
+            endpoint,
+            spec,
+            admitted,
+            _admission_tx: admission_tx,
+            _store: store,
+            _template: template,
+        }
+    }
+
+    /// Failed optional discovery must preserve serving without exposing private JSON
+    /// through the representative card's immediate-grammar claim.
+    #[tokio::test]
+    async fn encode_chat_survives_unavailable_runtime_metadata_without_trusting_representative() {
+        use crate::protocols::common::llm_backend::{
+            FinishReason, LLMEngineOutput, PreprocessedRequest,
+        };
+        use dynamo_protocols::types::ChatCompletionMessageContent;
+        use dynamo_runtime::engine::AsyncEngineContextProvider;
+        use dynamo_runtime::pipeline::{ResponseStream, network::Ingress};
+
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::encode_chat_survives_unavailable_runtime_metadata_without_trusting_representative"
+            ),
+            &[
+                ("DYN_PARSER_VERSION", "2"),
+                ("DYN_TCP_RPC_HOST", "127.0.0.1"),
+                ("DYN_TCP_RPC_PORT", "0"),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+                ("DYN_TCP_RESPONSE_STREAM_PORT", "0"),
+            ],
+        ) {
+            return;
+        }
+
+        #[derive(Debug)]
+        struct ControlledJsonWorker {
+            output: parking_lot::Mutex<
+                Option<futures::channel::mpsc::UnboundedReceiver<Annotated<LLMEngineOutput>>>,
+            >,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+            for ControlledJsonWorker
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+                let output = self.output.lock().take().expect("one test request");
+                Ok(ResponseStream::new(Box::pin(output), request.context()))
+            }
+        }
+
+        /// Observe both channels so an unsafe fallback cannot hide a reasoning leak.
+        fn record_text(
+            chunk: &Annotated<NvCreateChatCompletionStreamResponse>,
+            content: &mut String,
+            reasoning: &mut String,
+        ) {
+            assert!(!chunk.is_error(), "pipeline returned an error: {chunk:?}");
+            if let Some(data) = &chunk.data {
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        content.push_str(text);
+                    }
+                    if let Some(text) = &choice.delta.reasoning_content {
+                        reasoning.push_str(text);
+                    }
+                }
+            }
+        }
+
+        let fixture = unavailable_chat_runtime_config_fixture(WorkerType::Encode).await;
+        let (output_tx, output_rx) = futures::channel::mpsc::unbounded();
+        let serving = fixture
+            .endpoint
+            .endpoint_builder()
+            .handler(
+                Ingress::for_engine(Arc::new(ControlledJsonWorker {
+                    output: parking_lot::Mutex::new(Some(output_rx)),
+                }))
+                .unwrap(),
+            )
+            .start_with_registration()
+            .await
+            .unwrap();
+        let prepared = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.watcher.prepare_worker_set(
+                &fixture.spec,
+                fixture.admitted.clone(),
+                fixture.runtime.child_token(),
+            ),
+        )
+        .await
+        .expect("WorkerSet preparation must finish")
+        .expect("optional chat metadata failure must not disable public Encode surfaces");
+        let worker_set = prepared.worker_set.as_ref().unwrap();
+        assert!(worker_set.completions_engine.is_some());
+        let engine = worker_set.chat_engine.as_ref().expect("chat pipeline");
+        let request = serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+            "model": "unavailable-chat-runtime-config",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "stream": true,
+            "response_format": {"type": "json_object"},
+        }))
+        .unwrap();
+        let mut response = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.generate(SingleIn::new(request)),
+        )
+        .await
+        .expect("request must reach the worker")
+        .unwrap();
+        let chunk = |text: &str, terminal: bool| {
+            Annotated::from_data(LLMEngineOutput {
+                text: Some(text.into()),
+                index: Some(0),
+                finish_reason: terminal.then_some(FinishReason::Stop),
+                ..Default::default()
+            })
+        };
+        output_tx
+            .unbounded_send(chunk(r#"{"private":"plan"}"#, false))
+            .unwrap();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let before_boundary = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let next = response.next().await.expect("worker stream remains open");
+                record_text(&next, &mut content, &mut reasoning);
+                assert!(
+                    content.is_empty(),
+                    "unknown selected-worker metadata must not trust the immediate representative: {content:?}"
+                );
+            }
+        })
+        .await;
+        assert!(
+            before_boundary.is_err(),
+            "worker has not finished its response"
+        );
+        output_tx
+            .unbounded_send(chunk(r#"</think>{"answer":"ok"}"#, false))
+            .unwrap();
+        output_tx.unbounded_send(chunk("", true)).unwrap();
+        drop(output_tx);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(next) = response.next().await {
+                record_text(&next, &mut content, &mut reasoning);
+            }
+        })
+        .await
+        .expect("response must finish after its terminal chunk");
+        assert_eq!(content, r#"{"answer":"ok"}"#);
+        assert_eq!(reasoning, r#"{"private":"plan"}"#);
+        serving.shutdown().await.unwrap();
+        fixture.runtime.shutdown();
+    }
+
+    /// Optional grammar metadata must not hide a mandatory routing-load failure.
+    #[tokio::test]
+    async fn aggregated_chat_still_requires_its_routing_load_runtime_metadata() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::aggregated_chat_still_requires_its_routing_load_runtime_metadata"
+            ),
+            &[
+                ("DYN_PARSER_VERSION", "2"),
+                ("DYN_TCP_RPC_HOST", "127.0.0.1"),
+                ("DYN_TCP_RPC_PORT", "0"),
+            ],
+        ) {
+            return;
+        }
+        let fixture = unavailable_chat_runtime_config_fixture(WorkerType::Aggregated).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.watcher.prepare_worker_set(
+                &fixture.spec,
+                fixture.admitted.clone(),
+                fixture.runtime.child_token(),
+            ),
+        )
+        .await
+        .expect("WorkerSet preparation must finish");
+        let error = result
+            .err()
+            .expect("mandatory routing load metadata must fail");
+        assert!(
+            format!("{error:#}").contains("Bucket name is not a directory"),
+            "unexpected construction failure: {error:#}"
+        );
+        fixture.runtime.shutdown();
     }
 
     #[test]
@@ -1869,10 +2229,16 @@ mod tests {
             let card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
             let runtime_cancellation = CancellationToken::new();
             let cancellation = runtime_cancellation.child_token();
-            let preprocessor =
-                worker_set_chat_preprocessor(&card, card.tokenizer().unwrap(), &cancellation)
-                    .unwrap()
-                    .into_operator();
+            let (_runtime_configs_tx, runtime_configs) =
+                tokio::sync::watch::channel(HashMap::new());
+            let preprocessor = worker_set_chat_preprocessor(
+                &card,
+                card.tokenizer().unwrap(),
+                &cancellation,
+                runtime_configs,
+            )
+            .unwrap()
+            .into_operator();
             let backend = Arc::new(CompletingBackend::default());
             let source = SegmentSource::<
                 SingleIn<NvCreateChatCompletionRequest>,
@@ -2452,6 +2818,56 @@ mod tests {
         runtime.shutdown();
     }
 
+    /// A replica joining or leaving a committed set refreshes the set's
+    /// log-probability limit, the smallest among its admitted workers.
+    #[tokio::test]
+    async fn max_logprobs_follows_replicas_joining_and_leaving() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use dynamo_runtime::discovery::DiscoveryInstanceId;
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut unpublished = ModelDeploymentCard::with_name_only("logprobs-model");
+        unpublished.model_input = ModelInput::Text;
+        unpublished.model_type = ModelType::Chat;
+        unpublished.worker_type = Some(WorkerType::Aggregated);
+        let mut raised = unpublished.clone();
+        raised
+            .runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) =
+            watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+        apply_discovery_event(&events, discovered_card("dgd-v1", 1, &raised)).await;
+        wait_for_model(&manager, "logprobs-model", |_| true).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        // A replica that publishes nothing counts as the default of 20.
+        apply_discovery_event(&events, discovered_card("dgd-v1", 2, &unpublished)).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 20);
+
+        let left = ModelCardInstanceId {
+            namespace: "dgd-v1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 2,
+            model_suffix: None,
+        };
+        apply_discovery_event(
+            &events,
+            DiscoveryEvent::Removed(DiscoveryInstanceId::Model(left)),
+        )
+        .await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn versioned_namespaces_serve_different_configurations_concurrently() {
         let runtime = Runtime::from_current().unwrap();
@@ -2544,8 +2960,9 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier, WorkerView,
+            ClassifyEvent, ClassifyRequest, RequestClassifier, RequestClassifierError,
         };
+        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct RejectingClassifier {
@@ -2558,8 +2975,8 @@ mod tests {
             fn classify(
                 &mut self,
                 _request: ClassifyRequest,
-                _workers: &dyn WorkerView,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+                _workers: WorkerCandidates<'_>,
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
@@ -2621,11 +3038,13 @@ request_classifier:
                     let selectors = selectors.clone();
                     move |_| {
                         let selectors = selectors.clone();
-                        Ok(Arc::new(move |config, role, partition| {
-                            selectors.lock().push((role, partition.into_owned()));
+                        Ok(Arc::new(move |context| {
+                            selectors
+                                .lock()
+                                .push((context.worker_type(), context.partition().into_owned()));
                             dynamo_router_policies::default_policy(
-                                config.clone(),
-                                role.default_selector_label(),
+                                context.selection_config().clone(),
+                                context.worker_type().default_selector_label(),
                             )
                         }))
                     }
@@ -3698,9 +4117,9 @@ request_classifier:
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
         let custom = RouterPluginBuilder::new(
-            dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
-                |_, _, _| unreachable!("role validation never constructs the policy"),
-            )),
+            dynamo_kv_router::plugins::host::RouterPlugins::default().with_worker_selection(
+                Arc::new(|_| unreachable!("role validation never constructs the policy")),
+            ),
         );
         let mut card = ModelDeploymentCard::with_name_only("model");
         assert!(validate_policy_worker_role(&card, &unresolved).is_ok());

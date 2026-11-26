@@ -60,19 +60,19 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// Detect whether the Python `generate` callable accepts a `context`
 /// keyword argument for backwards compatibility with the legacy positional-only call.
-fn detect_has_context(generator: &PyObject) -> bool {
-    Python::with_gil(|py| {
+fn detect_has_context(generator: &Py<PyAny>) -> bool {
+    Python::attach(|py| {
         let callable = generator.bind(py);
         callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
     })
 }
 
 /// Boxed Rust stream of items yielded by a Python async generator. Each
-/// item is either a `PyObject` frame or the `PyErr` the generator raised.
+/// item is either a `Py<PyAny>` frame or the `PyErr` the generator raised.
 pub(crate) type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 
 /// Invoke the Python `generate` callable and convert the async generator it
-/// returns into a Rust [`Stream`] of `PyObject` items.
+/// returns into a Rust [`Stream`] of `Py<PyAny>` items.
 ///
 /// `to_python_input` converts this engine's `generate` input into the Python
 /// object passed as the generator's positional argument.
@@ -86,8 +86,8 @@ pub(crate) type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + 
 /// The returned stream polls `__anext__` only when its consumer requests an
 /// item, preventing Python from mutating a reused object before it is consumed.
 pub(crate) async fn invoke_generator<F, G>(
-    generator: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    generator: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     to_python_input: F,
     to_python_kwargs: Option<G>,
 ) -> Result<PyItemStream>
@@ -100,7 +100,7 @@ where
         // request object and calls the handler's `generate`. Not token
         // generation: the generator has not been advanced when this range ends.
         let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let python_input = to_python_input(py)?;
 
             // The closure returns the FULL kwarg list rather than just the
@@ -140,7 +140,7 @@ fn demand_driven_python_stream(
         // the Python generator (and, for a worker, the engine) producing the item,
         // so leaving it outside the range keeps engine time out of the bridge cost.
         let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
-        let next = Python::with_gil(|py| {
+        let next = Python::attach(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
         drop(nvtx_anext);
@@ -149,9 +149,7 @@ fn demand_driven_python_stream(
             Err(error) => Err(error),
         };
         if item.as_ref().is_err_and(|error| {
-            Python::with_gil(|py| {
-                error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py)
-            })
+            Python::attach(|py| error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py))
         }) {
             None
         } else {
@@ -188,7 +186,7 @@ fn demand_driven_python_stream(
 ///     service.add_engine("model_name", engine)
 ///     loop.run_until_complete(service.run())
 /// ```
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PythonAsyncEngine(PythonServerStreamingEngine);
 
@@ -205,7 +203,7 @@ impl PythonAsyncEngine {
     /// could accept a different type of request or return a different type of response
     /// and we would not know until runtime.
     #[new]
-    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+    pub fn new(generator: Py<PyAny>, event_loop: Py<PyAny>) -> PyResult<Self> {
         let cancel_token = CancellationToken::new();
         Ok(PythonAsyncEngine(PythonServerStreamingEngine::new(
             cancel_token,
@@ -269,7 +267,7 @@ impl
                     // Named passthrough fields (`stop_token_ids`, ...) are not
                     // serialized with the request; add them at the top level, as
                     // the client sent them.
-                    let dict = object.downcast::<PyDict>()?;
+                    let dict = object.cast::<PyDict>()?;
                     if let Some(tools) = &request.chat_template_tools {
                         dict.set_item("chat_template_tools", pythonize(py, tools.as_ref())?)?;
                     }
@@ -388,16 +386,16 @@ where
 #[derive(Clone)]
 pub struct PythonServerStreamingEngine {
     _cancel_token: CancellationToken,
-    generator: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    generator: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     has_context: bool,
 }
 
 impl PythonServerStreamingEngine {
     pub fn new(
         cancel_token: CancellationToken,
-        generator: Arc<PyObject>,
-        event_loop: Arc<PyObject>,
+        generator: Arc<Py<PyAny>>,
+        event_loop: Arc<Py<PyAny>>,
     ) -> Self {
         let has_context = detect_has_context(&generator);
 
@@ -506,7 +504,7 @@ where
     Resp: for<'de> Deserialize<'de>,
 {
     let is_envelope = bound
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .ok()
         .and_then(|d| {
             d.get_item(pyo3::intern!(bound.py(), "_dynamo_annotated"))
@@ -534,7 +532,7 @@ where
         // Per-response Python->Rust deserialization: pure Dynamo overhead paid
         // once per streamed chunk.
         let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
-        Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
+        Python::attach(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
@@ -544,7 +542,7 @@ where
 }
 
 pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         error.display(py);
 
         // Checked before the backend mapping, whose `DynamoException` fallback
@@ -619,7 +617,7 @@ pub(crate) const RESPONSE_CHANNEL_DEPTH: usize = 128;
 /// an error to the client rather than a silently truncated stream.
 /// On a deserialize mismatch the request context is told to stop generating.
 /// The generator is not polled again until [`process_item`] has converted the
-/// current `PyObject` into an owned Rust value, so this channel never buffers
+/// current `Py<PyAny>` into an owned Rust value, so this channel never buffers
 /// mutable Python objects that a generator could reuse for a later yield.
 fn spawn_response_forwarder<Resp>(
     stream: PyItemStream,
@@ -754,7 +752,7 @@ fn unbuffered_python_response_stream(
 ) -> DataStream<PythonResponseItem> {
     // Do not poll the generator again until ingress has encoded the current
     // Python object. A generator may reuse and mutate the same dict/list for
-    // later yields; buffering raw PyObject handles would make earlier frames
+    // later yields; buffering raw Py<PyAny> handles would make earlier frames
     // observe those later mutations.
     Box::pin(DirectPythonResponseStream {
         stream: Some(stream),
@@ -847,12 +845,12 @@ const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
 ///    cancellation observation is the Python engine's responsibility via the
 ///    `context` argument. Input stream can end early if no more inputs are expected.
 /// 2. Invokes the Python generator with `(request_stream, context)`, then
-///    wraps the returned async generator into a Rust `Stream<Item = PyResult<PyObject>>`.
+///    wraps the returned async generator into a Rust `Stream<Item = PyResult<Py<PyAny>>>`.
 /// 3. Forwards each raw Python response to the ingress payload adapter, which
 ///    performs annotation handling and wire serialization in one blocking step.
 pub struct PythonBidirectionalEngine {
-    generator: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    generator: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     has_context: bool,
 }
 
@@ -861,7 +859,7 @@ impl PythonBidirectionalEngine {
     /// callable should be an `async def generate(request_stream)` or
     /// `async def generate(request_stream, context)` returning an async
     /// generator of JSON-shaped response frames.
-    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+    pub fn new(generator: Py<PyAny>, event_loop: Py<PyAny>) -> PyResult<Self> {
         let has_context = detect_has_context(&generator);
         Ok(Self {
             generator: Arc::new(generator),
@@ -895,7 +893,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         // iterator. The `frame_tx.closed()` arm cancels the forwarder as soon
         // as the Python iterator drops the receiver, so it shuts down promptly
         // instead of blocking on the next inbound frame.
-        let (frame_tx, frame_rx) = mpsc::channel::<PyObject>(BIDIRECTIONAL_INPUT_CHANNEL_DEPTH);
+        let (frame_tx, frame_rx) = mpsc::channel::<Py<PyAny>>(BIDIRECTIONAL_INPUT_CHANNEL_DEPTH);
         let forwarder_request_id = request_id.clone();
         tokio::spawn(async move {
             loop {

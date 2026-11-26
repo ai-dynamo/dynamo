@@ -17,3 +17,7 @@ The set mirrors the SPDX identifiers on the `[licenses].allow` list in
 `../policy/licenses.toml` — i.e. every license that can legally appear in a shipped
 image (anything else fails the policy gate). To refresh after editing the allow-list,
 re-fetch the corresponding `text/<ID>.txt` files from the SPDX data repo.
+
+The four GPL texts (`GPL-2.0-only`, `GPL-2.0-or-later`, `GPL-3.0-only`,
+`GPL-3.0-or-later`) are the exception: they are not on the allow-list, and are here so
+`THIRD-PARTY.txt` can reproduce the license of the base image's GPL packages.

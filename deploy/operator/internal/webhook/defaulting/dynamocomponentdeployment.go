@@ -22,7 +22,7 @@ func defaultDynamoComponentDeployment(
 
 	// Only standalone CREATEs acquire a creation origin. Graph children already
 	// carry their parent's origin in the template, even when created much later.
-	if operation == admissionv1.Create && dcd.GetParentGraphDeploymentName() == "" {
+	if operation == admissionv1.Create && dcd.GetGraphDeploymentController() == nil {
 		if dcd.Annotations == nil {
 			dcd.Annotations = map[string]string{}
 		}

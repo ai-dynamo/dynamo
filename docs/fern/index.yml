@@ -156,6 +156,9 @@ navigation:
             path: pages/kubernetes/model-deployment/introduction.mdx
           - page: Deploy with DGD
             path: pages/kubernetes/model-deployment/deploy-with-dgd.md
+          - link: Generate a DGD with AISim
+            href: /dynamo/dev/kubernetes/auto-deployment/generate-a-dgd-with-aisim
+            icon: link
           - page: Expose the Frontend
             path: pages/kubernetes/model-deployment/expose-the-frontend.md
           - page: Deploy on Intel GPUs
@@ -233,6 +236,9 @@ navigation:
             path: pages/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
           - page: Search with DGDR v1beta2
             path: pages/kubernetes/auto-deployment/dgdr-v1beta2.md
+          - page: Generate a DGD with AISim
+            slug: generate-a-dgd-with-aisim
+            path: pages/kubernetes/auto-deployment/aisimulate-dgd.mdx
           - page: Dynamo Profiler
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
@@ -447,6 +453,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
                   - page: Python Route Extensions
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
+                  - page: Generate Format Plugins
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/generate-format-plugins.md
                   - page: Custom Chat Processors
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md
                   - page: Tokenizer
@@ -1364,6 +1372,9 @@ navigation:
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
             path: pages/reference/components/profiler-configuration.mdx
+          - page: AISim DGD Output Adapter
+            slug: aisim-dgd-output-adapter
+            path: pages/reference/components/aisimulate-dgd-output.md
           - page: Mocker CLI Reference
             path: pages/reference/components/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference

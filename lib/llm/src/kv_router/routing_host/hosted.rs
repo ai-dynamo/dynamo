@@ -4,7 +4,7 @@
 use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
-/// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
+/// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionRequest::request_blocks) reads 0.
 pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len())
 }

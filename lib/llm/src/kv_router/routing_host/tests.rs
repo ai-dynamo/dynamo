@@ -13,10 +13,13 @@ use std::{
 use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, RequestClassifier, WorkerView,
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifyEvent, ClassifyRequest, RequestClassifier, RequestClassifierError,
+};
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Instance},
@@ -36,7 +39,6 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::*;
 use crate::lora::{LoadEstimator, LoraFilter};
 use crate::{
-    http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
@@ -47,6 +49,7 @@ use crate::{
         timing::RequestTracker,
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 fn request() -> PreprocessedRequest {
     PreprocessedRequest::builder()
@@ -1919,11 +1922,11 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn decode_progress_collection_follows_picker_declaration() {
-    use dynamo_kv_router::plugins::prelude::{
-        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    };
-    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    use dynamo_kv_router::plugins::experimental::decode_progress::{
         DECODE_PROGRESS, DecodeProgressByRow,
+    };
+    use dynamo_kv_router::plugins::worker_selection::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
 
@@ -1941,7 +1944,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
         }
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
@@ -1969,10 +1972,9 @@ async fn decode_progress_collection_follows_picker_declaration() {
             HashMap::from([(7, ModelRuntimeConfig::default())]),
             config,
             None::<RecordingClassifier>,
-            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+            SelectionPolicySource::Factory(Arc::new(move |context| {
                 WorkerSelectionPolicy::new(
-                    config.clone(),
-                    role.as_str(),
+                    context.worker_type().as_str(),
                     Vec::new(),
                     Box::new(Probe {
                         declare,
@@ -2816,8 +2818,8 @@ impl RequestClassifier for RecordingClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(request)
     }
@@ -2845,8 +2847,8 @@ impl RequestClassifier for BackendPriorityClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         request.set_backend_priority(self.0);
         Ok(request)
     }
@@ -2944,10 +2946,10 @@ impl RequestClassifier for RejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        Err(Box::new(ClassifierRejected) as Box<ClassifierError>)
+        Err(Box::new(ClassifierRejected) as Box<RequestClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -3018,15 +3020,15 @@ impl RequestClassifier for TypedRejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(
             DynamoError::builder()
                 .error_type(self.error_type)
                 .message("classifier shed load")
                 .build(),
-        ) as Box<ClassifierError>)
+        ) as Box<RequestClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -3261,10 +3263,14 @@ impl RequestClassifier for PausingClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // Held heads must wait in their own lanes, as ThunderAgent keys them.
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request
+            .info()
+            .session_context()
+            .map(|s| s.session_id().to_owned())
+        {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -3643,10 +3649,10 @@ impl RequestClassifier for TokenContractClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        _workers: WorkerCandidates<'_>,
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.classified
-            .send((request.isl_tokens(), request.progress().clone()))
+            .send((request.info().isl_tokens(), request.progress().clone()))
             .unwrap();
         Ok(request)
     }
@@ -4741,6 +4747,7 @@ async fn two_worker_migration_harness(
         None,
         load_context.scheduler_load_sender(),
         load_context.cancellation_token(),
+        false,
     )
     .await
     .unwrap();
