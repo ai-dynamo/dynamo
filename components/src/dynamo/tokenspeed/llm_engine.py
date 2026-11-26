@@ -41,6 +41,10 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
 )
+from dynamo.common.backend.metrics import (
+    ensure_prometheus_multiproc_dir,
+    register_engine_registry,
+)
 from dynamo.common.backend.publisher import KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
@@ -105,6 +109,8 @@ class TokenspeedLLMEngine(LLMEngine):
         self._bootstrap_endpoint: tuple[str, int] | None = None
         self._kv_sources: list[ZmqSource] = []
         self._kv_event_dir: tempfile.TemporaryDirectory | None = None
+        # PROMETHEUS_MULTIPROC_DIR the engine ranks write tokenspeed: metrics to.
+        self._metrics_dir: tempfile.TemporaryDirectory | None = None
         self._model_max_len: int | None = None
         # The connected tokenspeed_engine.Frontend.
         self.frontend: Any = None
@@ -156,6 +162,9 @@ class TokenspeedLLMEngine(LLMEngine):
             )
             bootstrap_host, bootstrap_port = self._bootstrap_endpoint
         engine_overrides = self._configure_kv_events()
+        if getattr(self.server_args, "enable_metrics", False):
+            # Set before the launch: the ranks inherit it and write there.
+            self._metrics_dir = ensure_prometheus_multiproc_dir("dynamo-tokenspeed-")
 
         native = _tokenspeed_engine_module()
         self._loop = asyncio.get_running_loop()
@@ -268,6 +277,19 @@ class TokenspeedLLMEngine(LLMEngine):
 
     async def kv_event_sources(self) -> list[KvEventSource]:
         return list(self._kv_sources)
+
+    async def register_prometheus(self, metrics: Any) -> None:
+        """Serve the ranks' ``tokenspeed:`` series, which they write to
+        multiprocess files, on the worker's ``/metrics``."""
+        if not getattr(self.server_args, "enable_metrics", False):
+            return
+        from prometheus_client import CollectorRegistry, multiprocess
+
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(
+            registry, path=os.environ["PROMETHEUS_MULTIPROC_DIR"]
+        )
+        register_engine_registry(metrics, registry, prefix_filters=["tokenspeed:"])
 
     async def is_quiescent(self) -> bool | None:
         """A prefill engine finishes a request only once its KV reached the
@@ -567,6 +589,11 @@ class TokenspeedLLMEngine(LLMEngine):
             if self._kv_event_dir is not None:
                 self._kv_event_dir.cleanup()
                 self._kv_event_dir = None
+            if self._metrics_dir is not None:
+                self._metrics_dir.cleanup()
+                self._metrics_dir = None
+                # Unset it too, so a later start() creates and owns a fresh directory.
+                os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
 
 
 class _Request:
