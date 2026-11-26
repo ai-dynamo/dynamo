@@ -52,6 +52,7 @@ impl Environment {
     }
 
     /// An environment whose discovery is in-memory, as a direct frontend's is.
+    #[allow(dead_code)] // the direct suite only
     pub async fn process_local() -> Self {
         Self::with_discovery(|_| DistributedConfig::process_local()).await
     }
@@ -231,6 +232,7 @@ impl Frontend {
         Self::start_with(env, migration_limit, RouterMode::RoundRobin).await
     }
 
+    #[allow(dead_code)] // the direct suite only
     pub async fn start_with_router_mode(env: &Environment, router_mode: RouterMode) -> Self {
         Self::start_with(env, 0, router_mode).await
     }
@@ -287,6 +289,7 @@ impl Frontend {
     }
 
     /// A non-streaming completion of `prompt`.
+    #[allow(dead_code)] // the direct suite only
     pub fn complete(&self, model: &str, prompt: &str) -> reqwest::RequestBuilder {
         self.client.post(&self.url).json(&serde_json::json!({
             "model": model, "prompt": prompt, "max_tokens": 2,
