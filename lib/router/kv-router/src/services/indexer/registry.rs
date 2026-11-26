@@ -452,7 +452,15 @@ async fn join_then_remove(
         };
         match removal {
             Removal::Worker => indexer.remove_worker(worker_id).await,
-            Removal::DpRank(dp_rank) => indexer.remove_worker_dp_rank(worker_id, dp_rank).await,
+            // Waits for the lane, so a lookup after deregistration no longer scores the rank.
+            Removal::DpRank(dp_rank) => {
+                if let Err(error) = indexer
+                    .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                    .await
+                {
+                    tracing::error!(worker_id, dp_rank, %error, "Failed to remove worker rank");
+                }
+            }
         }
     });
     if let Err(error) = task.await {
@@ -1598,7 +1606,6 @@ mod tests {
             self.exit_seen
         }
 
-        /// Releases the gate, then waits for the listener loop to be dropped.
         async fn release_and_wait_for_exit(&mut self) {
             // The listener may already be gone, which closes the receiver.
             let (spare, _) = oneshot::channel();
