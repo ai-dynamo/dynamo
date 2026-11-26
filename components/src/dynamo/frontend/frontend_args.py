@@ -650,10 +650,11 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
-                "'ns-def456'). A prefix of 'dynamo' discovers models from all namespaces. "
-                "With DYN_NAMESPACE_PREFIX_STRICT set, matches only the prefix itself and "
-                "operator worker-generation namespaces. Takes precedence over --namespace if "
-                "both are specified."
+                "'ns-def456'). A prefix of 'dynamo' discovers models from all namespaces, "
+                "even in strict mode. When DYN_NAMESPACE_PREFIX_STRICT is truthy (1, true, on, "
+                "or yes), any other prefix matches only the prefix itself and operator "
+                "worker-generation namespaces. Takes precedence over --namespace if both are "
+                "specified."
             ),
             env=self.env,
         )
