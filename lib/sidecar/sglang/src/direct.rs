@@ -19,9 +19,12 @@ const BINARY: &str = "dynamo-sglang-sidecar";
 /// Build each listed engine as the SGLang sidecar builds its own, from what the
 /// engine reports: its role, model, parsers, listeners and KV publishers.
 ///
-/// Only a prefill engine's bootstrap host differs. Where the sidecar falls back
-/// to its own address, which in direct mode is the frontend's, this falls back
-/// to the host the engine is dialed at.
+/// Three things differ from what the sidecar builds:
+/// - A prefill engine's bootstrap host. Where the sidecar falls back to its own
+///   address, which in direct mode is the frontend's, this falls back to the
+///   host the engine is dialed at, and `--bootstrap-host` is not read.
+/// - The namespace, which is the frontend's.
+/// - The tokenizer path, which is the frontend's `--model-path` when it has one.
 pub fn direct_engine_factory(options: DirectEngineOptions) -> DirectEngineFactory {
     Arc::new(move |spec: &DirectEngineSpec| {
         let options = options.clone();
