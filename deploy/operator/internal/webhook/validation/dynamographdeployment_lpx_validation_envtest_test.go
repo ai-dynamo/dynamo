@@ -231,6 +231,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component.Replicas = new(int32(9))
 				component.Roles[1].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					// The shared renderer supplies the authored device volume after admission.
+					InitContainers: []corev1.Container{{Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
 					Containers: []corev1.Container{{Name: "main", Image: "gpu-runtime", VolumeMounts: []corev1.VolumeMount{
 						{Name: "infiniband", MountPath: "/dev/infiniband"},
 					}}},
@@ -437,6 +438,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "LPX rejects an unknown Pod role",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[1].Name = "unknown"
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = nil
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[0].roles[1].name: Unsupported value: "unknown": supported values: "conductor", "agent"`,
@@ -472,7 +474,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				for _, role := range dgd.Spec.Components[0].Roles {
 					role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
-					role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+					role.PodTemplate.Spec.InitContainers = append(role.PodTemplate.Spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
 				}
 			}),
 		},
@@ -500,6 +502,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
+				component.Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
 				component.Roles[1].PodTemplate.Spec.Containers = append(
 					component.Roles[1].PodTemplate.Spec.Containers,
 					corev1.Container{Name: "conductor", Image: "sidecar"},
@@ -511,6 +514,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
+				component.Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
 				component.Roles[0].PodTemplate.Spec.Containers = append(
 					component.Roles[0].PodTemplate.Spec.Containers,
 					corev1.Container{Name: "conductor", Image: "sidecar"},
@@ -591,12 +595,26 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX admits a conductor runtime sidecar",
+			name: "LPX rejects a conductor without the runtime sidecar",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
-					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
-				}}
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = nil
 			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[1].podTemplate.spec.initContainers: Required value: LPX conductor requires the "runtime" init container`,
+			},
+		},
+		{
+			name: "LPX rejects a conductor on the target of a shared pair",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				conductor := dgd.Spec.Components[0].Roles[1]
+				setBetaLPXSpecDec(dgd, nil)
+				target := &dgd.Spec.Components[1]
+				target.Roles[0].PodTemplate.Spec.InitContainers = nil
+				target.Roles = append(target.Roles, conductor)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[1]: Forbidden: a shared draft and target pair has no conductor; the target serves from its agent "runtime" sidecar`,
+			},
 		},
 		{
 			name: "physical LPU rejects Grove opt out",
@@ -679,8 +697,8 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "v1alpha1 LPX conductor template error identifies the converted component and authored role indices",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, new(int32(1)))
-				target := dgd.Spec.Services["target"]
+				first, target := dgd.Spec.Services["lpx"], dgd.Spec.Services["lpx"].DeepCopy()
+				dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"first": first, "target": target}
 				target.Roles[0], target.Roles[1] = target.Roles[1], target.Roles[0]
 				target.Roles[0].PodTemplate = nil
 			}),
@@ -736,7 +754,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
-			name: "LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
+			name: "LPX admits SpecDecode UPDATE with one serving target and Agent-only draft",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, new(int32(1)))
 			}),
@@ -745,7 +763,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "v1alpha1 LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
+			name: "v1alpha1 LPX admits SpecDecode UPDATE with one serving target and Agent-only draft",
 			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaLPXSpecDec(dgd, new(int32(1)))
 			}),
@@ -1183,7 +1201,8 @@ func betaLPXDGDForAdmission(
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
 					{Name: nvidiacomv1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
+						InitContainers: []corev1.Container{{Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
+						Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
 					}}},
 				},
 			},
@@ -1209,7 +1228,8 @@ func alphaLPXDGDForAdmission(
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
 					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
+						InitContainers: []corev1.Container{{Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
+						Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
 					}}},
 				},
 			},
@@ -1229,6 +1249,12 @@ func setBetaLPXSpecDec(dgd *nvidiacomv1beta1.DynamoGraphDeployment, draftReplica
 	draft.LPX.BuildID, target.LPX.BuildID = "test/draft", "test/target"
 	draft.Roles = draft.Roles[:1]
 	draft.Replicas = draftReplicas
+
+	// The target of a shared pair serves from its agent sidecar and has no conductor.
+	target.Roles = target.Roles[:1]
+	target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+	}}
 	dgd.Spec.Components = []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{*draft, *target}
 }
 
@@ -1239,5 +1265,11 @@ func setAlphaLPXSpecDec(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, draftRepli
 	draft.LPX.BuildID, target.LPX.BuildID = "test/draft", "test/target"
 	draft.Roles = draft.Roles[:1]
 	draft.Replicas = draftReplicas
+
+	// The target of a shared pair serves from its agent sidecar and has no conductor.
+	target.Roles = target.Roles[:1]
+	target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name: consts.RuntimeContainerName, Image: "dynamo-sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+	}}
 	dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"draft": draft, "target": target}
 }

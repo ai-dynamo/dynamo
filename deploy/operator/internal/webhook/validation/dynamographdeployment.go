@@ -496,8 +496,20 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if role.Name != nvidiacomv1beta1.ComponentRoleLPXConductor {
 				continue
 			}
+			rolePath := componentsPath.Index(index).Child("roles").Index(roleIndex)
+
+			// A shared pair runs LPU-only builds, and only a hybrid build has a conductor.
+			if lpxComponentCount == 2 && independentEngineCount == 1 {
+				allErrs = append(allErrs, field.Forbidden(rolePath, fmt.Sprintf(
+					"a shared draft and target pair has no conductor; the target serves from its agent %q sidecar", consts.RuntimeContainerName)))
+				continue
+			}
 			if role.PodTemplate == nil {
-				allErrs = append(allErrs, field.Required(componentsPath.Index(index).Child("roles").Index(roleIndex).Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
+				allErrs = append(allErrs, field.Required(rolePath.Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
+			} else if !hasContainerNamed(role.PodTemplate.Spec.InitContainers, consts.RuntimeContainerName) {
+				// The conductor runs a hybrid GPU engine, which serves only through the sidecar.
+				allErrs = append(allErrs, field.Required(rolePath.Child("podTemplate", "spec", "initContainers"), fmt.Sprintf(
+					"LPX conductor requires the %q init container", consts.RuntimeContainerName)))
 			}
 		}
 	}
