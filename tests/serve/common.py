@@ -187,8 +187,9 @@ def _prepare_deployment(
 
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    # CPU-only (gpu_0) deployments run no GPU memory profiling, so skip it.
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
+    if worker_id.startswith("gw") and request.node.get_closest_marker("gpu_0") is None:
         worker_num = int(worker_id.removeprefix("gw"))
         if worker_num > 0:
             stagger_s = worker_num * 15

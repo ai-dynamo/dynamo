@@ -24,9 +24,7 @@ mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
-mod server;
 mod transcriptions;
-mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
@@ -49,7 +47,6 @@ pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
     validate_extension_route_method, validate_extension_route_path,
 };
-pub use metrics::Metrics;
 
 use crate::{
     preprocessor::OpenAIPreprocessor,

@@ -3317,7 +3317,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request and Run admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />The operator runs the AISimulate version from its configured planner image;<br />Requests and Runs cannot select a different image or version.<br />Request and Run creation validate the merged input against the bundled AISimulate input<br />schema. Request spec changes require the same validation; Run specs are immutable.<br />Unchanged specs remain metadata-updatable after a bundled schema change. |  | Type: object <br />Optional: \{\} <br /> |
+| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The exact `{"$null":true}` alias is valid only as an object-field value<br />outside arrays; all other uses of $null are rejected on every write.<br />Use the alias with client-side kubectl apply, which removes native nulls;<br />kubectl create and server-side apply preserve them. A null document supplies<br />no overrides. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request and Run admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />The operator runs the AISimulate version from its configured planner image;<br />Requests and Runs cannot select a different image or version.<br />Request and Run creation validate the merged input against the bundled AISimulate input<br />schema. Request spec changes require the same validation; Run specs are immutable.<br />Unchanged specs remain metadata-updatable after a bundled schema change. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### Backend
@@ -3692,6 +3692,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `interconnect` _[InterconnectSpec](#interconnectspec)_ | Interconnect describes the links between candidate workers. Like gpu, it makes the<br />hardware object nonempty, so admission still discovers omitted GPU fields. |  | Optional: \{\} <br /> |
+
+
+#### InterconnectSpec
+
+
+
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+
+_Appears in:_
+- [HardwareSpec](#v1beta2-hardwarespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferBandwidthGBps` _float_ | KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that<br />one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU<br />value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's<br />engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation<br />(https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)<br />describes how candidates use it, including link sharing. When omitted, no bandwidth is<br />lowered and AISimulate's default applies, which models the transfer as instantaneous. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange
