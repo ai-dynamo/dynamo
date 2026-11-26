@@ -12,6 +12,7 @@ use dashmap::mapref::one::Ref;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_indexer::KvIndexerMetrics;
@@ -19,6 +20,8 @@ use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
 
 use super::backend::Indexer;
+#[cfg(test)]
+use super::listener::BatchGate;
 use super::listener::spawn_zmq_listener;
 
 pub use dynamo_kv_indexer::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
@@ -138,6 +141,10 @@ struct ListenerRuntime {
     last_error: Option<String>,
     cancel_token: Option<CancellationToken>,
     generation: u64,
+    /// The newest attempt's task. Each attempt waits for the one before it, so joining
+    /// this joins them all. Kept while paused or failed: a cancelled task may not have
+    /// exited yet.
+    task: Option<JoinHandle<()>>,
 }
 
 pub struct ListenerRecord {
@@ -149,6 +156,13 @@ pub struct ListenerRecord {
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
     runtime: Mutex<ListenerRuntime>,
+    /// Cancelled by deregistration, which drops every attempt at its next await point.
+    /// Pausing cancels only the attempt's own token, which lets a batch finish. Read and
+    /// cancelled under `runtime`, so a resume never starts after the retirement.
+    retired: CancellationToken,
+    /// Test hook: handed to the first listener attempt that reaches its receive loop.
+    #[cfg(test)]
+    batch_gate: Mutex<Option<BatchGate>>,
 }
 
 impl ListenerRecord {
@@ -174,8 +188,17 @@ impl ListenerRecord {
                 last_error: None,
                 cancel_token: None,
                 generation: 0,
+                task: None,
             }),
+            retired: CancellationToken::new(),
+            #[cfg(test)]
+            batch_gate: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_batch_gate(&self) -> Option<BatchGate> {
+        self.batch_gate.lock().take()
     }
 
     pub(super) fn endpoint(&self) -> &str {
@@ -206,25 +229,62 @@ impl ListenerRecord {
         self.watermark.clone()
     }
 
-    pub(super) fn start_pending(
-        &self,
+    pub(super) fn retired(&self) -> CancellationToken {
+        self.retired.clone()
+    }
+
+    /// Start every listener through here, with the runtime lock held: a listener whose
+    /// handle is not yet in the record cannot be joined by a deregistration.
+    fn spawn_attempt_locked(
+        self: &Arc<Self>,
+        runtime: &mut ListenerRuntime,
+        worker_id: WorkerId,
+        dp_rank: u32,
         root_cancel_token: &CancellationToken,
-    ) -> (u64, CancellationToken) {
-        let mut runtime = self.runtime.lock();
+        ready: watch::Receiver<bool>,
+    ) {
         runtime.generation += 1;
         let cancel_token = root_cancel_token.child_token();
         runtime.status = ListenerStatus::Pending;
         runtime.last_error = None;
         runtime.cancel_token = Some(cancel_token.clone());
-        (runtime.generation, cancel_token)
+        let previous = runtime.task.take();
+        runtime.task = Some(spawn_zmq_listener(
+            worker_id,
+            dp_rank,
+            self.clone(),
+            ready,
+            runtime.generation,
+            cancel_token.child_token(),
+            previous,
+        ));
     }
 
+    pub(super) fn start(
+        self: &Arc<Self>,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        root_cancel_token: &CancellationToken,
+        ready: watch::Receiver<bool>,
+    ) {
+        let mut runtime = self.runtime.lock();
+        self.spawn_attempt_locked(&mut runtime, worker_id, dp_rank, root_cancel_token, ready);
+    }
+
+    /// Stops the attempt once its current batch is applied, so the watermark covers what
+    /// it indexed.
     pub(super) fn pause(
         &self,
         instance_id: WorkerId,
         dp_rank: u32,
-    ) -> std::result::Result<CancellationToken, ListenerControlError> {
+    ) -> std::result::Result<(), ListenerControlError> {
         let mut runtime = self.runtime.lock();
+        if self.retired.is_cancelled() {
+            return Err(ListenerControlError::ListenerNotFound {
+                instance_id,
+                dp_rank,
+            });
+        }
         match runtime.status {
             ListenerStatus::Pending | ListenerStatus::Active => {
                 let cancel_token =
@@ -236,9 +296,10 @@ impl ListenerRecord {
                             dp_rank,
                             status: runtime.status,
                         })?;
+                cancel_token.cancel();
                 runtime.status = ListenerStatus::Paused;
                 runtime.last_error = None;
-                Ok(cancel_token)
+                Ok(())
             }
             status => Err(ListenerControlError::InvalidPauseState {
                 instance_id,
@@ -249,20 +310,30 @@ impl ListenerRecord {
     }
 
     pub(super) fn resume(
-        &self,
+        self: &Arc<Self>,
         instance_id: WorkerId,
         dp_rank: u32,
         root_cancel_token: &CancellationToken,
-    ) -> std::result::Result<(u64, CancellationToken), ListenerControlError> {
+        ready: watch::Receiver<bool>,
+    ) -> std::result::Result<(), ListenerControlError> {
         let mut runtime = self.runtime.lock();
+        if self.retired.is_cancelled() {
+            // The caller cloned this record out of the map before it was deregistered.
+            return Err(ListenerControlError::ListenerNotFound {
+                instance_id,
+                dp_rank,
+            });
+        }
         match runtime.status {
             ListenerStatus::Paused | ListenerStatus::Failed => {
-                runtime.generation += 1;
-                let cancel_token = root_cancel_token.child_token();
-                runtime.status = ListenerStatus::Pending;
-                runtime.last_error = None;
-                runtime.cancel_token = Some(cancel_token.clone());
-                Ok((runtime.generation, cancel_token))
+                self.spawn_attempt_locked(
+                    &mut runtime,
+                    instance_id,
+                    dp_rank,
+                    root_cancel_token,
+                    ready,
+                );
+                Ok(())
             }
             status => Err(ListenerControlError::InvalidResumeState {
                 instance_id,
@@ -297,8 +368,15 @@ impl ListenerRecord {
         runtime.cancel_token = None;
     }
 
-    fn take_cancel(&self) -> Option<CancellationToken> {
-        self.runtime.lock().cancel_token.take()
+    /// Stops this record for good and returns its task for the caller to join. A retired
+    /// record cannot be paused or resumed, and `try_mark_*` refuse once the token is gone.
+    fn retire(&self) -> Option<JoinHandle<()>> {
+        let mut runtime = self.runtime.lock();
+        self.retired.cancel();
+        if let Some(cancel_token) = runtime.cancel_token.take() {
+            cancel_token.cancel();
+        }
+        runtime.task.take()
     }
 
     fn snapshot(&self) -> ListenerInfo {
@@ -321,6 +399,44 @@ impl ListenerRecord {
 pub struct WorkerEntry {
     key: RoutingPartitionId,
     listeners: HashMap<u32, Arc<ListenerRecord>>,
+}
+
+/// A retired listener's task, by dp_rank.
+type ListenerTask = (u32, JoinHandle<()>);
+
+/// What to remove from the indexer once a worker's listeners are joined.
+enum Removal {
+    Worker,
+    DpRank(u32),
+}
+
+/// Joins the listeners, then enqueues the removal behind everything they sent.
+///
+/// Both run in a task of their own: the worker has already left the registry, so a
+/// caller dropped in between (a client gone from `/unregister`) must not leave it indexed.
+async fn join_then_remove(
+    worker_id: WorkerId,
+    tasks: Vec<ListenerTask>,
+    indexer: Option<Indexer>,
+    removal: Removal,
+) {
+    let task = tokio::spawn(async move {
+        for (dp_rank, task) in tasks {
+            if let Err(error) = task.await {
+                tracing::error!(worker_id, dp_rank, %error, "ZMQ listener task ended abnormally");
+            }
+        }
+        let Some(indexer) = indexer else {
+            return;
+        };
+        match removal {
+            Removal::Worker => indexer.remove_worker(worker_id).await,
+            Removal::DpRank(dp_rank) => indexer.remove_worker_dp_rank(worker_id, dp_rank).await,
+        }
+    });
+    if let Err(error) = task.await {
+        tracing::error!(worker_id, %error, "Worker removal task ended abnormally");
+    }
 }
 
 pub struct WorkerRegistry {
@@ -463,7 +579,14 @@ impl WorkerRegistry {
             indexer,
             watermark,
         ));
-        let attempt = record.start_pending(&self.root_cancel_token);
+        // Start before the record is visible in the map, so a deregistration that finds the
+        // record also finds its task.
+        record.start(
+            instance_id,
+            dp_rank,
+            &self.root_cancel_token,
+            self.ready_rx(),
+        );
 
         {
             let mut entry = self
@@ -473,11 +596,10 @@ impl WorkerRegistry {
                     key: key.clone(),
                     listeners: HashMap::new(),
                 });
-            entry.listeners.insert(dp_rank, record.clone());
+            entry.listeners.insert(dp_rank, record);
         }
 
         drop(registration);
-        self.spawn_listener(instance_id, dp_rank, attempt, record);
         Ok(())
     }
 
@@ -501,24 +623,38 @@ impl WorkerRegistry {
             bail!("instance {instance_id} not found");
         }
 
-        if let Some((_, entry)) = self.workers.remove(&instance_id) {
-            for record in entry.listeners.values() {
-                if let Some(cancel_token) = record.take_cancel() {
-                    cancel_token.cancel();
-                }
-            }
-            for &dp_rank in entry.listeners.keys() {
-                self.watermarks.remove(&(instance_id, dp_rank));
-            }
-        }
-
-        // Registration needs this map's write lock while removal can wait on indexer queues.
-        let indexer = self.index.indexer(&key);
-        if let Some(indexer) = indexer {
-            indexer.remove_worker(instance_id).await;
-        }
-        self.release_indexer_if_unused(&key).await;
+        self.remove_worker_entry(instance_id, &key).await;
         Ok(())
+    }
+
+    /// Takes the worker out of the registry, joins its listeners, then removes it from the
+    /// indexer. The maps change before the first await, so no map guard is held across one.
+    async fn remove_worker_entry(&self, instance_id: WorkerId, key: &RoutingPartitionId) {
+        let (tasks, indexer) = match self.workers.remove(&instance_id) {
+            Some((_, entry)) => {
+                for &dp_rank in entry.listeners.keys() {
+                    self.watermarks.remove(&(instance_id, dp_rank));
+                }
+                // The listeners' own indexer: while they are joined, the partition may be
+                // released or created again.
+                let indexer = entry
+                    .listeners
+                    .values()
+                    .next()
+                    .map(|record| record.indexer());
+                let tasks = entry
+                    .listeners
+                    .iter()
+                    .filter_map(|(&dp_rank, record)| record.retire().map(|task| (dp_rank, task)))
+                    .collect();
+                (tasks, indexer)
+            }
+            None => (Vec::new(), None),
+        };
+        // Registration needs this map's write lock while removal can wait on indexer queues.
+        let indexer = indexer.or_else(|| self.index.indexer(key));
+        join_then_remove(instance_id, tasks, indexer, Removal::Worker).await;
+        self.release_indexer_if_unused(key).await;
     }
 
     pub async fn deregister_dp_rank(
@@ -530,7 +666,7 @@ impl WorkerRegistry {
     ) -> Result<()> {
         let key = RoutingPartitionId::new(model_name, routing_group);
 
-        let (record, remove_worker) = {
+        let (record, last_rank) = {
             let mut entry = self
                 .workers
                 .get_mut(&instance_id)
@@ -547,32 +683,33 @@ impl WorkerRegistry {
             let record = entry.listeners.remove(&dp_rank).ok_or_else(|| {
                 anyhow::anyhow!("instance {instance_id} dp_rank {dp_rank} not found")
             })?;
-            let remove_worker = entry.listeners.is_empty();
-            (record, remove_worker)
+            let last_rank = entry.listeners.is_empty();
+            (record, last_rank)
         };
 
-        if let Some(cancel_token) = record.take_cancel() {
-            cancel_token.cancel();
-        }
+        // Everything that changes the maps stays before the first await.
+        let tasks = record
+            .retire()
+            .map(|task| (dp_rank, task))
+            .into_iter()
+            .collect();
         self.watermarks.remove(&(instance_id, dp_rank));
-
-        if remove_worker {
-            let actually_removed = self
+        let remove_whole_worker = last_rank
+            && self
                 .workers
                 .remove_if(&instance_id, |_, entry| entry.listeners.is_empty())
                 .is_some();
-            if actually_removed {
-                let indexer = self.index.indexer(&key);
-                if let Some(indexer) = indexer {
-                    indexer.remove_worker(instance_id).await;
-                }
-                self.release_indexer_if_unused(&key).await;
-            }
+
+        // When the last rank lost a race with a new registration of this worker, remove
+        // only the detached rank.
+        let removal = if remove_whole_worker {
+            Removal::Worker
         } else {
-            let indexer = self.index.indexer(&key);
-            if let Some(indexer) = indexer {
-                indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
-            }
+            Removal::DpRank(dp_rank)
+        };
+        join_then_remove(instance_id, tasks, Some(record.indexer()), removal).await;
+        if remove_whole_worker {
+            self.release_indexer_if_unused(&key).await;
         }
 
         Ok(())
@@ -596,22 +733,7 @@ impl WorkerRegistry {
             bail!("instance {instance_id} not found");
         };
 
-        if let Some((_, entry)) = self.workers.remove(&instance_id) {
-            for record in entry.listeners.values() {
-                if let Some(cancel_token) = record.take_cancel() {
-                    cancel_token.cancel();
-                }
-            }
-            for &dp_rank in entry.listeners.keys() {
-                self.watermarks.remove(&(instance_id, dp_rank));
-            }
-        }
-
-        let indexer = self.index.indexer(&key);
-        if let Some(indexer) = indexer {
-            indexer.remove_worker(instance_id).await;
-        }
-        self.release_indexer_if_unused(&key).await;
+        self.remove_worker_entry(instance_id, &key).await;
         Ok(())
     }
 
@@ -631,8 +753,7 @@ impl WorkerRegistry {
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
-        let cancel_token = record.pause(instance_id, dp_rank)?;
-        cancel_token.cancel();
+        record.pause(instance_id, dp_rank)?;
         tracing::info!(instance_id, dp_rank, "Paused ZMQ listener");
         Ok(())
     }
@@ -653,8 +774,12 @@ impl WorkerRegistry {
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
-        let attempt = record.resume(instance_id, dp_rank, &self.root_cancel_token)?;
-        self.spawn_listener(instance_id, dp_rank, attempt, record);
+        record.resume(
+            instance_id,
+            dp_rank,
+            &self.root_cancel_token,
+            self.ready_rx(),
+        )?;
         tracing::info!(instance_id, dp_rank, "Resumed ZMQ listener");
         Ok(())
     }
@@ -774,6 +899,33 @@ impl WorkerRegistry {
     }
 
     #[cfg(test)]
+    pub(crate) fn record_for_test(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> Option<Arc<ListenerRecord>> {
+        self.workers
+            .get(&instance_id)
+            .and_then(|entry| entry.listeners.get(&dp_rank).cloned())
+    }
+
+    /// `resume_listener` on a record the caller cloned out of the map earlier.
+    #[cfg(test)]
+    pub(crate) fn resume_record_for_test(
+        &self,
+        record: &Arc<ListenerRecord>,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(), ListenerControlError> {
+        record.resume(
+            instance_id,
+            dp_rank,
+            &self.root_cancel_token,
+            self.ready_rx(),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn listener_cancelled(&self, instance_id: WorkerId, dp_rank: u32) -> Option<bool> {
         self.workers.get(&instance_id).and_then(|entry| {
             entry.listeners.get(&dp_rank).and_then(|record| {
@@ -785,23 +937,6 @@ impl WorkerRegistry {
                     .map(|t| t.is_cancelled())
             })
         })
-    }
-
-    fn spawn_listener(
-        &self,
-        instance_id: WorkerId,
-        dp_rank: u32,
-        (generation, cancel_token): (u64, CancellationToken),
-        record: Arc<ListenerRecord>,
-    ) {
-        spawn_zmq_listener(
-            instance_id,
-            dp_rank,
-            record,
-            self.ready_rx(),
-            generation,
-            cancel_token.child_token(),
-        );
     }
 
     /// Drop the partition's indexer once no registered worker names it (unless the
@@ -826,6 +961,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
+    use tokio::sync::oneshot;
 
     fn test_registry() -> WorkerRegistry {
         WorkerRegistry::new(1)
@@ -1335,5 +1471,432 @@ mod tests {
              got {} entries",
             workers.len()
         );
+    }
+
+    // ── deregistration vs an in-flight listener batch ────────────────
+    //
+    // Timeouts below are watchdogs against a deadlock; ordering comes from the batch gate.
+
+    const WATCHDOG: Duration = Duration::from_secs(10);
+
+    /// A PUB socket standing in for an engine's KV event publisher.
+    struct TestPublisher {
+        socket: zmq::Socket,
+        endpoint: String,
+    }
+
+    fn test_zmq_context() -> &'static zmq::Context {
+        static CONTEXT: std::sync::LazyLock<zmq::Context> =
+            std::sync::LazyLock::new(zmq::Context::new);
+        &CONTEXT
+    }
+
+    impl TestPublisher {
+        fn bind() -> Self {
+            let socket = test_zmq_context().socket(zmq::PUB).unwrap();
+            socket.set_linger(0).unwrap();
+            socket.bind("tcp://127.0.0.1:*").unwrap();
+            let endpoint = socket.get_last_endpoint().unwrap().unwrap();
+            Self { socket, endpoint }
+        }
+
+        fn publish(&self, seq: u64, payload: Vec<u8>) {
+            self.socket
+                .send_multipart(
+                    [b"kv-events".to_vec(), seq.to_be_bytes().to_vec(), payload],
+                    0,
+                )
+                .unwrap();
+        }
+    }
+
+    /// One `BlockStored` per hash, each a root block with its own tokens, so a block is
+    /// accepted whether or not the ones before it in the batch were indexed.
+    fn root_batch(dp_rank: i32, hashes: &[u64]) -> Vec<u8> {
+        let events: Vec<_> = hashes
+            .iter()
+            .map(|&hash| {
+                (
+                    "BlockStored",
+                    vec![hash],
+                    Option::<u64>::None,
+                    vec![hash as u32; 4],
+                    4_usize,
+                    Option::<u64>::None,
+                    "GPU",
+                )
+            })
+            .collect();
+        rmp_serde::to_vec(&(0.0_f64, events, Some(dp_rank))).unwrap()
+    }
+
+    /// The test's side of a [`BatchGate`].
+    struct GateHandle {
+        reached: oneshot::Receiver<()>,
+        resume: oneshot::Sender<()>,
+        /// Resolves with `Err` once the listener loop holding the gate is dropped.
+        exited: oneshot::Receiver<()>,
+        exit_seen: bool,
+    }
+
+    impl GateHandle {
+        /// Whether the listener loop is already gone, without waiting for it.
+        fn listener_exited(&mut self) -> bool {
+            self.exit_seen = self.exit_seen
+                || matches!(
+                    self.exited.try_recv(),
+                    Err(oneshot::error::TryRecvError::Closed)
+                );
+            self.exit_seen
+        }
+
+        /// Releases the gate, then waits for the listener loop to be dropped.
+        async fn release_and_wait_for_exit(&mut self) {
+            // The listener may already be gone, which closes the receiver.
+            let (spare, _) = oneshot::channel();
+            let _ = std::mem::replace(&mut self.resume, spare).send(());
+            if !self.exit_seen {
+                tokio::time::timeout(WATCHDOG, &mut self.exited)
+                    .await
+                    .expect("listener did not exit")
+                    .unwrap_err();
+                self.exit_seen = true;
+            }
+        }
+    }
+
+    /// Parks the listener of `(instance_id, dp_rank)` after the first event of batch `seq`.
+    /// Install it before `signal_ready`: the listener takes it when its receive loop starts.
+    fn install_gate(
+        registry: &WorkerRegistry,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        seq: u64,
+    ) -> GateHandle {
+        let (reached_tx, reached) = oneshot::channel();
+        let (resume, resume_rx) = oneshot::channel();
+        let (alive, exited) = oneshot::channel();
+        let record = registry.record_for_test(instance_id, dp_rank).unwrap();
+        *record.batch_gate.lock() = Some(BatchGate {
+            seq,
+            reached: Some(reached_tx),
+            resume: Some(resume_rx),
+            _alive: alive,
+        });
+        GateHandle {
+            reached,
+            resume,
+            exited,
+            exit_seen: false,
+        }
+    }
+
+    async fn register_for_test(
+        registry: &WorkerRegistry,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        endpoint: &str,
+        replay_endpoint: Option<String>,
+    ) {
+        registry
+            .register(
+                instance_id,
+                endpoint.to_string(),
+                dp_rank,
+                "test-model".into(),
+                "default".into(),
+                4,
+                replay_endpoint,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Events of `worker_id`'s `dp_rank` the indexer holds, after everything queued so far.
+    async fn indexed_events(indexer: &Indexer, worker_id: WorkerId, dp_rank: u32) -> usize {
+        indexer
+            .dump_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.worker_id == worker_id && e.event.dp_rank == dp_rank)
+            .count()
+    }
+
+    /// Publishes batch `seq = 0` until the listener, whose SUB socket may still be
+    /// connecting, has indexed it.
+    async fn publish_probe(publisher: &TestPublisher, indexer: &Indexer, worker_id: WorkerId) {
+        tokio::time::timeout(WATCHDOG, async {
+            loop {
+                publisher.publish(0, root_batch(0, &[1]));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if indexed_events(indexer, worker_id, 0).await > 0 {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("listener never indexed the probe batch");
+    }
+
+    /// A registry with worker 1 (rank 0) listening to `rank0` and worker 2 (so the partition
+    /// survives). With `sibling_rank`, worker 1 also has rank 1, which holds a seeded block.
+    /// The rank 0 listener is parked after the first event of batch 1, with the probe indexed.
+    async fn registry_with_parked_listener(
+        threads: usize,
+        sibling_rank: bool,
+        rank0: &TestPublisher,
+        replay_endpoint: Option<String>,
+    ) -> (WorkerRegistry, Indexer, GateHandle, Vec<TestPublisher>) {
+        let registry = WorkerRegistry::new(threads);
+        let key = RoutingPartitionId::new("test-model", "default");
+        let mut others = vec![TestPublisher::bind()];
+        register_for_test(&registry, 1, 0, &rank0.endpoint, replay_endpoint).await;
+        register_for_test(&registry, 2, 0, &others[0].endpoint, None).await;
+        if sibling_rank {
+            others.push(TestPublisher::bind());
+            register_for_test(&registry, 1, 1, &others[1].endpoint, None).await;
+        }
+        let indexer = registry.index().indexer(&key).unwrap();
+        indexer
+            .apply_event_routed(store_event(2, 0, 0, &[], &[21], StorageTier::Device))
+            .await
+            .unwrap();
+        if sibling_rank {
+            indexer
+                .apply_event_routed(store_event(1, 1, 0, &[], &[11], StorageTier::Device))
+                .await
+                .unwrap();
+        }
+
+        let mut gate = install_gate(&registry, 1, 0, 1);
+        registry.signal_ready();
+        publish_probe(rank0, &indexer, 1).await;
+        rank0.publish(1, root_batch(0, &[100, 101, 102]));
+        tokio::time::timeout(WATCHDOG, &mut gate.reached)
+            .await
+            .expect("listener never reached the batch gate")
+            .unwrap();
+        (registry, indexer, gate, others)
+    }
+
+    /// After the listener is gone, the rank has no block and its neighbours are intact.
+    async fn assert_rank_gone(indexer: &Indexer, sibling_rank: bool) {
+        assert_eq!(
+            indexed_events(indexer, 1, 0).await,
+            0,
+            "deregistered rank came back from its in-flight batch"
+        );
+        assert!(
+            indexed_events(indexer, 2, 0).await > 0,
+            "unrelated worker was removed"
+        );
+        if sibling_rank {
+            assert!(
+                indexed_events(indexer, 1, 1).await > 0,
+                "sibling rank was removed"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Deregistration {
+        Worker,
+        LastRank,
+        OtherRank,
+    }
+
+    #[rstest::rstest]
+    #[case::single_worker(1, Deregistration::Worker)]
+    #[case::single_last_rank(1, Deregistration::LastRank)]
+    #[case::single_other_rank(1, Deregistration::OtherRank)]
+    #[case::concurrent_worker(2, Deregistration::Worker)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deregister_stops_listener_mid_batch(
+        #[case] threads: usize,
+        #[case] removal: Deregistration,
+    ) {
+        let sibling_rank = matches!(removal, Deregistration::OtherRank);
+        let rank0 = TestPublisher::bind();
+        let (registry, indexer, mut gate, _others) =
+            registry_with_parked_listener(threads, sibling_rank, &rank0, None).await;
+
+        // The listener is parked mid-batch. A fix that cannot stop it makes this time out.
+        let deregistration = tokio::time::timeout(WATCHDOG, async {
+            match removal {
+                Deregistration::Worker => registry.deregister(1, "test-model", "default").await,
+                Deregistration::LastRank | Deregistration::OtherRank => {
+                    registry
+                        .deregister_dp_rank(1, 0, "test-model", "default")
+                        .await
+                }
+            }
+        })
+        .await
+        .expect("deregistration did not finish");
+        deregistration.unwrap();
+        let stopped_before_return = gate.listener_exited();
+
+        gate.release_and_wait_for_exit().await;
+
+        assert_rank_gone(&indexer, sibling_rank).await;
+        assert!(
+            stopped_before_return,
+            "deregistration returned while the listener was still running"
+        );
+        registry.root_cancel_token.cancel();
+    }
+
+    /// A pause lets the batch in flight finish, so the watermark covers what was indexed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_finishes_in_flight_batch() {
+        let rank0 = TestPublisher::bind();
+        let (registry, indexer, mut gate, _others) =
+            registry_with_parked_listener(1, false, &rank0, None).await;
+
+        registry.pause_listener(1, 0).unwrap();
+        gate.release_and_wait_for_exit().await;
+
+        assert_eq!(
+            indexed_events(&indexer, 1, 0).await,
+            4,
+            "pause dropped the rest of the batch (expected the probe and blocks 100-102)"
+        );
+        let watermark = registry.watermarks.get(&(1, 0)).unwrap().clone();
+        assert_eq!(watermark.load(Ordering::Acquire), 1);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deregister_joins_paused_listener() {
+        let rank0 = TestPublisher::bind();
+        let (registry, indexer, mut gate, _others) =
+            registry_with_parked_listener(1, false, &rank0, None).await;
+
+        registry.pause_listener(1, 0).unwrap();
+        tokio::time::timeout(WATCHDOG, registry.deregister(1, "test-model", "default"))
+            .await
+            .expect("deregistration did not finish")
+            .unwrap();
+        let stopped_before_return = gate.listener_exited();
+
+        gate.release_and_wait_for_exit().await;
+
+        assert_rank_gone(&indexer, false).await;
+        assert!(stopped_before_return);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_resume_deregister_while_batch_in_flight() {
+        let rank0 = TestPublisher::bind();
+        let (registry, indexer, mut gate, _others) =
+            registry_with_parked_listener(1, false, &rank0, None).await;
+
+        registry.pause_listener(1, 0).unwrap();
+        registry.resume_listener(1, 0).await.unwrap();
+        tokio::time::timeout(WATCHDOG, registry.deregister(1, "test-model", "default"))
+            .await
+            .expect("deregistration did not finish")
+            .unwrap();
+        let stopped_before_return = gate.listener_exited();
+
+        gate.release_and_wait_for_exit().await;
+
+        assert_rank_gone(&indexer, false).await;
+        assert!(stopped_before_return);
+        registry.root_cancel_token.cancel();
+    }
+
+    /// A gap makes the listener request a replay from an engine that never answers;
+    /// deregistering must still stop it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deregister_returns_when_replay_hangs() {
+        let replay = test_zmq_context().socket(zmq::ROUTER).unwrap();
+        replay.set_linger(0).unwrap();
+        replay.bind("tcp://127.0.0.1:*").unwrap();
+        let replay_endpoint = replay.get_last_endpoint().unwrap().unwrap();
+        let rank0 = TestPublisher::bind();
+        let other = TestPublisher::bind();
+        let registry = WorkerRegistry::new(1);
+        register_for_test(&registry, 1, 0, &rank0.endpoint, Some(replay_endpoint)).await;
+        register_for_test(&registry, 2, 0, &other.endpoint, None).await;
+        // Never reached: the gate is only here to tell when the listener loop is dropped.
+        let mut gate = install_gate(&registry, 1, 0, u64::MAX);
+        registry.signal_ready();
+
+        // The first batch seen is seq 5, so the listener requests a replay of 0..5. Publish
+        // until the request arrives: the SUB socket may still be connecting.
+        tokio::time::timeout(WATCHDOG, async {
+            loop {
+                rank0.publish(5, root_batch(0, &[100]));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if replay.recv_multipart(zmq::DONTWAIT).is_ok() {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("listener never requested a replay");
+
+        tokio::time::timeout(WATCHDOG, registry.deregister(1, "test-model", "default"))
+            .await
+            .expect("deregistration hung behind the replay request")
+            .unwrap();
+        assert!(
+            gate.listener_exited(),
+            "deregistration returned while the listener was still waiting on the replay"
+        );
+        registry.root_cancel_token.cancel();
+    }
+
+    /// The removal still lands when the caller of `deregister` goes away part-way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_deregister_still_removes_worker() {
+        let rank0 = TestPublisher::bind();
+        let (registry, indexer, mut gate, _others) =
+            registry_with_parked_listener(1, false, &rank0, None).await;
+
+        {
+            let deregistration = registry.deregister(1, "test-model", "default");
+            tokio::pin!(deregistration);
+            let _ = deregistration
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
+        }
+        gate.release_and_wait_for_exit().await;
+
+        tokio::time::timeout(WATCHDOG, async {
+            while indexed_events(&indexer, 1, 0).await > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker stayed indexed after its deregistration was dropped");
+        assert!(!registry.has_worker(1));
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn retired_record_cannot_resume() {
+        let registry = test_registry();
+        register_for_test(&registry, 1, 0, "tcp://127.0.0.1:15590", None).await;
+        let stale = registry.record_for_test(1, 0).unwrap();
+        registry.pause_listener(1, 0).unwrap();
+
+        registry
+            .deregister(1, "test-model", "default")
+            .await
+            .unwrap();
+
+        // A resume that cloned the record before the deregistration must not restart it.
+        let resumed = registry.resume_record_for_test(&stale, 1, 0);
+        assert!(
+            matches!(resumed, Err(ListenerControlError::ListenerNotFound { .. })),
+            "a deregistered record started a listener: {resumed:?}"
+        );
+        registry.root_cancel_token.cancel();
     }
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_events::cursor::{CursorObservation, CursorState};
@@ -178,6 +179,17 @@ fn apply_block_refcounts(
     Some(placement_event)
 }
 
+/// Test hook: parks one listener inside `apply_live_batch`, after the first event of batch
+/// `seq` reached the indexer.
+#[cfg(test)]
+pub(super) struct BatchGate {
+    pub(super) seq: u64,
+    pub(super) reached: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(super) resume: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Dropped with the listener loop, which is how a test sees the listener exit.
+    pub(super) _alive: tokio::sync::oneshot::Sender<()>,
+}
+
 struct ListenerLoop {
     worker_id: WorkerId,
     dp_rank: u32,
@@ -192,6 +204,8 @@ struct ListenerLoop {
     dedup: EventDedupFilter,
     dedup_policy: EventDedupPolicy,
     messages_processed: u64,
+    #[cfg(test)]
+    gate: Option<BatchGate>,
 }
 
 impl ListenerLoop {
@@ -225,6 +239,29 @@ impl ListenerLoop {
                 EventDedupPolicy::RefCounted
             },
             messages_processed: 0,
+            #[cfg(test)]
+            gate: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_gate(mut self, gate: Option<BatchGate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Parks here until the test resumes the listener. A cancelled listener drops this
+    /// future, and the gate with it.
+    #[cfg(test)]
+    async fn park_at_gate(&mut self, seq: u64) {
+        let Some(gate) = self.gate.as_mut().filter(|gate| gate.seq == seq) else {
+            return;
+        };
+        if let Some(reached) = gate.reached.take() {
+            let _ = reached.send(());
+        }
+        if let Some(resume) = gate.resume.take() {
+            let _ = resume.await;
         }
     }
 
@@ -423,12 +460,18 @@ impl ListenerLoop {
         let effective_dp_rank = batch
             .data_parallel_rank
             .map_or(self.dp_rank, |rank| rank.cast_unsigned());
+        #[cfg(test)]
+        let mut first_event = true;
         for raw_event in batch.events {
             if self
                 .apply_raw_event(raw_event, seq, effective_dp_rank, "live")
                 .await?
             {
                 self.messages_processed += 1;
+            }
+            #[cfg(test)]
+            if std::mem::take(&mut first_event) {
+                self.park_at_gate(seq).await;
             }
         }
         self.watermark.store(seq, Ordering::Release);
@@ -502,29 +545,57 @@ impl ListenerLoop {
     }
 }
 
-pub fn spawn_zmq_listener(
+/// Spawns one listener attempt. Joining the returned handle also joins `previous`, the
+/// attempt this one replaces: this one waits for it before it runs.
+///
+/// Cancelling `cancel` (a pause) stops the attempt between batches. Retiring the record
+/// drops it at its next await point, also in the middle of a batch or a replay request.
+#[must_use = "a deregistration joins this handle before it removes the worker"]
+pub(super) fn spawn_zmq_listener(
     worker_id: WorkerId,
     dp_rank: u32,
     record: Arc<ListenerRecord>,
     ready: watch::Receiver<bool>,
     generation: u64,
     cancel: CancellationToken,
-) {
+    previous: Option<JoinHandle<()>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_listener(
-            worker_id,
-            dp_rank,
-            record.clone(),
-            ready,
-            generation,
-            cancel,
-        )
-        .await
+        // Outside the select below: retiring must not skip waiting for the old attempt.
+        if let Some(previous) = previous
+            && let Err(error) = previous.await
         {
+            tracing::error!(
+                worker_id,
+                dp_rank,
+                %error,
+                "Previous ZMQ listener attempt ended abnormally"
+            );
+        }
+
+        let retired = record.retired();
+        let result = tokio::select! {
+            biased;
+            _ = retired.cancelled() => {
+                tracing::info!(worker_id, dp_rank, "ZMQ listener exiting after deregistration");
+                Ok(())
+            }
+            // Dropped mid-send, the event is not queued (mpsc send is cancel safe); one
+            // already queued stays ahead of the removal enqueued after the join.
+            result = run_listener(
+                worker_id,
+                dp_rank,
+                record.clone(),
+                ready,
+                generation,
+                cancel.clone(),
+            ) => result,
+        };
+        if let Err(error) = result {
             tracing::error!(worker_id, dp_rank, error = %error, "ZMQ listener failed");
             record.try_mark_failed(generation, error);
         }
-    });
+    })
 }
 
 async fn run_listener(
@@ -574,7 +645,7 @@ async fn run_listener(
         return Ok(());
     }
 
-    ListenerLoop::new(
+    let listener = ListenerLoop::new(
         worker_id,
         dp_rank,
         block_size,
@@ -585,9 +656,10 @@ async fn run_listener(
         socket,
         replay_endpoint,
         watermark,
-    )
-    .run()
-    .await
+    );
+    #[cfg(test)]
+    let listener = listener.with_gate(record.take_batch_gate());
+    listener.run().await
 }
 
 #[cfg(test)]
