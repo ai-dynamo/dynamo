@@ -85,12 +85,7 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 ## Prerequisites
 
 - **Operator with DGDR v1beta2 traces.** Use an operator that accepts `spec.workload.trace`.
-  Set both `dynamo-operator.dgdrV1Beta2.enabled=true` and
-  `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
-  ServiceAccount the access it needs (see [RBAC](#rbac)).
-  In a cluster-wide install, the operator must also hold the DGDR v1beta2 Run and Candidate
-  permissions of [ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308); see
-  [RBAC](#rbac).
+  The platform chart grants the Planner ServiceAccount the required [RBAC](#rbac).
 - **Run Job scheduling.** The namespace needs a LimitRange for the Run Jobs, and the operator
   must discover GPUs, through DCGM or GPU discovery with labeled nodes. See
   [Auto Deploy with DGDR](auto-deploy-with-dgdr.md#prerequisites).
@@ -384,8 +379,8 @@ The Planner only warns when AISimulate does not list the model among its default
    kubectl delete lease -n <namespace> <dgd>-planner-retune <dgd>-planner-retune-state
    ```
 
-   While the chart still grants the live retune RBAC, a Planner without `retune` does this on
-   its own: it looks for the Leases in the background after it starts (once more after a
+   A Planner started without `retune` also cleans up automatically. It looks for the Leases
+   in the background after startup (once more after a
    transient API error), resets any router the removed retune changed, then deletes the
    Requests and both Leases.
 
@@ -452,10 +447,8 @@ without `ports` admits every port, so list the frontend's other ports in it.
 
 ### RBAC
 
-With `dynamo-operator.dgdrV1Beta2.enabled=true` and
-`dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true`, the platform chart adds these rules to the
-Planner Role (namespace-restricted installs) and ClusterRole (cluster-wide installs). Both values
-default to `false`; `dgdrV1Beta2.enabled` alone grants the Planner nothing new.
+The platform chart includes these rules in the Planner Role for namespace-restricted installs
+and the Planner ClusterRole for cluster-wide installs.
 
 | API group | Resources | Verbs |
 |---|---|---|
@@ -477,13 +470,9 @@ ServiceAccount can:
   election.
 
 In a cluster-wide install, the operator binds the Planner ClusterRole into each DGD namespace with
-a RoleBinding, and Kubernetes lets it bind only permissions it holds itself. Set
-`dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` there only with an operator whose own role
-grants `get` on `dynamographdeploymentruns` and `list` on `dynamographdeploymentcandidates`,
-which the DGDR v1beta2 operator change in
-[ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308) adds.
-Without it, the API server rejects the Planner RoleBinding in every namespace that does not have
-one yet, and the DGDs there fail to reconcile their Planner RBAC, with or without live retune.
+a RoleBinding. Kubernetes requires the operator to hold every permission it binds. If you
+manage operator RBAC separately, include the rules above so the operator can reconcile the
+Planner RoleBinding in new DGD namespaces.
 
 ## Metrics
 

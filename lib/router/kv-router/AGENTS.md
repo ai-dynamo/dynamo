@@ -22,6 +22,7 @@ cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets   # n
 cargo bench -p dynamo-kv-router --bench policy_queue
 cargo bench -p dynamo-kv-router --bench tracking_hash
 cargo bench -p dynamo-kv-router --features bench --bench worker_selection
+cargo bench -p dynamo-kv-router --features bench --bench admission_core
 cargo bench -p dynamo-kv-router --features ingest-zmq,replica-sync-zmq,peer-recovery,bench --bench selection_core
 ```
 

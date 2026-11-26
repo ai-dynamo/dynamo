@@ -5,17 +5,16 @@
 
 mod inputs;
 mod progress;
-pub mod runtime;
+mod runtime;
+
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
 
-use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
 use dynamo_router_protocol::columns::WorkerInputs;
@@ -23,9 +22,11 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::host::request_info;
 use dynamo_worker_selection::{RequestInfo, WorkerCandidates};
 
+use crate::lane_key::LaneKey;
 use crate::queue::QueueSnapshot;
 
 #[derive(Debug)]
@@ -44,7 +45,7 @@ pub struct ClassifyRequest {
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
     strict_priority: u32,
-    reject_thresholds: Option<BusyThresholds>,
+    reject_thresholds: BusyThresholds,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,19 +60,10 @@ pub struct ClassificationOverrides {
 }
 
 impl ClassifyRequest {
-    #[cfg(test)]
-    pub fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
-        <Self as crate::host::ClassifyRequestHostExt>::with_timing(
-            input_tokens,
-            initial_cached_tokens,
-            Instant::now(),
-        )
-    }
-
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
     pub fn reject_thresholds(&self) -> BusyThresholds {
-        self.reject_thresholds.unwrap_or_default()
+        self.reject_thresholds
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
@@ -204,7 +196,7 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
             expected_output_tokens: None,
             priority_jump: 0.0,
             strict_priority: 0,
-            reject_thresholds: None,
+            reject_thresholds: BusyThresholds::default(),
         }
     }
 
@@ -246,7 +238,7 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
     }
 
     fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
-        self.reject_thresholds = Some(reject);
+        self.reject_thresholds = reject;
         self
     }
 
