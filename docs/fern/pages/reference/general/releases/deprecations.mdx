@@ -244,7 +244,7 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 | `dynamo_llm::kv_router::{install_worker_selection_policy_registry, worker_selection_policy_registry}` | `dynamo_llm::kv_router::plugins::{install_router_plugin_registry, router_plugin_registry}` |
 | `HttpFrontend::worker_selection_policy_factory` | `HttpFrontend::plugins(RouterPlugins::default().with_worker_selection(...))`, called before `request_classifier_factory`, because `plugins` replaces every plugin set earlier |
 
-  > **Migrate:** Update `use` paths and registry calls in custom policy crates and catalogs. Apart from the synchronous `classify` above, the types and traits are unchanged.
+  > **Migrate:** Update `use` paths and registry calls in custom policy crates and catalogs. The types and traits are unchanged.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **AISimulate is installed as the `aisim` distribution** ([#18014](https://github.com/ai-dynamo/dynamo/pull/18014), [#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). `ai-dynamo` requires `aisim` 0.14 in place of `aisimulate` 0.13, and the Python packages are `aisim` and `aisim_core`; the old import names `aisimulate` and `aisimulate_core` still work. An upgrade in place, such as `pip install -U ai-dynamo`, installs `aisim` and leaves `aisimulate` installed. The two own overlapping files, and `import aisim` then fails with an `ImportError` that names both.
 
