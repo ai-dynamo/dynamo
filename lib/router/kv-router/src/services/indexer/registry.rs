@@ -868,16 +868,29 @@ impl WorkerRegistry {
 
     /// Drop what a rank's listener fed into the index after the listener itself
     /// is gone (its deregistration was cancelled before reaching this step).
+    /// Waits for a removal of this worker still in flight, whose listener could
+    /// otherwise add blocks after this removal.
     pub async fn remove_dp_rank_blocks(
         &self,
         worker_id: WorkerId,
         dp_rank: u32,
         key: &RoutingPartitionId,
     ) {
+        let _lifecycle = self.lock_worker(worker_id).await;
         // Clone the handle so the shard guard drops before the await.
         let indexer = self.index.indexer(key);
         if let Some(indexer) = indexer {
             indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        }
+    }
+
+    /// Drop what a worker with no listener here fed into the index, after a removal
+    /// of this worker still in flight.
+    pub async fn remove_worker_blocks(&self, worker_id: WorkerId, key: &RoutingPartitionId) {
+        let _lifecycle = self.lock_worker(worker_id).await;
+        let indexer = self.index.indexer(key);
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(worker_id).await;
         }
     }
 
@@ -1819,7 +1832,6 @@ mod tests {
         registry.root_cancel_token.cancel();
     }
 
-    /// A pause lets the batch in flight finish, so the watermark covers what was indexed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_finishes_in_flight_batch() {
         let rank0 = TestPublisher::bind();
@@ -1922,7 +1934,6 @@ mod tests {
         registry.root_cancel_token.cancel();
     }
 
-    /// The removal still lands when the caller of `deregister` goes away part-way.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropped_deregister_still_removes_worker() {
         let rank0 = TestPublisher::bind();
@@ -2047,6 +2058,43 @@ mod tests {
         );
         drop(registry.lock_worker(1).await);
         assert!(registry.worker_locks.is_empty());
+    }
+
+    /// The lock stands in for a removal of worker 1 still joining its listeners.
+    #[rstest::rstest]
+    #[case::worker(None)]
+    #[case::rank(Some(0))]
+    #[tokio::test]
+    async fn fallback_removal_waits_for_removal_in_flight(#[case] dp_rank: Option<u32>) {
+        let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        register_for_test(&registry, 2, 0, "tcp://127.0.0.1:15557", None).await;
+        let indexer = registry.index().indexer(&key).unwrap();
+        indexer
+            .apply_event_routed(store_event(1, 0, 0, &[], &[11], StorageTier::Device))
+            .await
+            .unwrap();
+        let in_flight = registry.lock_worker(1).await;
+
+        let fallback = async {
+            match dp_rank {
+                None => registry.remove_worker_blocks(1, &key).await,
+                Some(dp_rank) => registry.remove_dp_rank_blocks(1, dp_rank, &key).await,
+            }
+        };
+        tokio::pin!(fallback);
+        assert!(poll_once(fallback.as_mut()).is_pending());
+        assert!(
+            indexed_events(&indexer, 1, 0).await > 0,
+            "the fallback removed the worker before the removal in flight finished"
+        );
+
+        drop(in_flight);
+        tokio::time::timeout(WATCHDOG, fallback)
+            .await
+            .expect("fallback removal did not finish");
+        assert_eq!(indexed_events(&indexer, 1, 0).await, 0);
+        registry.root_cancel_token.cancel();
     }
 
     #[tokio::test]
