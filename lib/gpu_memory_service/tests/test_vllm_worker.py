@@ -15,6 +15,9 @@ pytest.importorskip("vllm")
 
 from gpu_memory_service.integrations.vllm import worker as gms_worker  # noqa: E402
 from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
+    backend as gms_v1_backend,
+)
+from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
     worker as gms_v1_worker,
 )
 
@@ -86,3 +89,17 @@ def test_v1_worker_uses_upstream_sleep_backend_accessor(monkeypatch):
         worker._maybe_get_memory_pool_context("kv_cache")
         is backend.capture_kv_cache.return_value
     )
+
+
+def test_v1_backend_accepts_level_1_suspend():
+    backend = gms_v1_backend.GMSV1SleepModeBackend.__new__(
+        gms_v1_backend.GMSV1SleepModeBackend
+    )
+    backend._client = Mock()
+
+    # vLLM 0.34 passes the storage a weight update rewrites: none at level 1.
+    backend.suspend(set())
+
+    backend._client.suspend.assert_called_once_with()
+    with pytest.raises(ValueError):
+        backend.suspend({0})

@@ -60,6 +60,7 @@ pub(crate) struct RequestClassifierRegistry {
 
 /// An error from classifier registration or startup resolution.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RequestClassifierRegistryError {
     #[error("request-classifier type must not be empty")]
     EmptyName,
@@ -67,10 +68,12 @@ pub enum RequestClassifierRegistryError {
     ReservedDefault,
     #[error("request-classifier type {name:?} is already registered")]
     Duplicate { name: String },
+    /// It carries the configuration error as its message and source only: that error's type
+    /// is the host's.
     #[error("could not load request_classifier from router_policy_config: {source}")]
     Config {
         #[source]
-        source: crate::scheduling::policy_config::RouterPolicyConfigError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("unknown request-classifier type {name:?}; linked classifier types: {available}")]
     UnknownType { name: String, available: String },
@@ -110,26 +113,39 @@ impl RequestClassifierRegistry {
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
-        let Some(classifier) = config
-            .request_classifier_config()
-            .map_err(|source| RequestClassifierRegistryError::Config { source })?
+        let Some(classifier) = config.request_classifier_config().map_err(|source| {
+            RequestClassifierRegistryError::Config {
+                source: Box::new(source),
+            }
+        })?
         else {
             return Ok(None);
         };
-        let classifier_type = classifier.classifier_type();
+        self.resolve_type_with(
+            classifier.classifier_type(),
+            classifier.parameters().clone(),
+        )
+        .map(Some)
+    }
+
+    /// Build the factory for one registered classifier type from `parameters`, the mapping a
+    /// policy file would give it.
+    pub(crate) fn resolve_type_with(
+        &self,
+        classifier_type: &str,
+        parameters: serde_yaml::Value,
+    ) -> Result<RequestClassifierFactory, RequestClassifierRegistryError> {
         let provider = self.providers.get(classifier_type).ok_or_else(|| {
             RequestClassifierRegistryError::UnknownType {
                 name: classifier_type.to_owned(),
                 available: self.available_classifier_types(),
             }
         })?;
-        provider(&RequestClassifierParameters(
-            classifier.parameters().clone(),
-        ))
-        .map(Some)
-        .map_err(|source| RequestClassifierRegistryError::Provider {
-            classifier_type: classifier_type.to_owned(),
-            source,
+        provider(&RequestClassifierParameters(parameters)).map_err(|source| {
+            RequestClassifierRegistryError::Provider {
+                classifier_type: classifier_type.to_owned(),
+                source,
+            }
         })
     }
 

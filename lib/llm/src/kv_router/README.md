@@ -196,7 +196,10 @@ releasing it.
    release. `finish()` waits for the scheduler to acknowledge it.
 5. **Expire.** The reaper scans once per active-request expiry interval with a second-chance
    clock: one scan marks an idle lease quiet and the next reclaims it. A lease is reclaimed one
-   to two intervals after its last progress.
+   to two intervals after its last progress. With replica sync on, a second timer runs every
+   half interval and re-sends the prefill-complete event for each booking this router made
+   that is past prefill. Peer routers count that event as progress on their mirrored lease, so
+   a long stream is not reclaimed there. A booking still in prefill gets no keepalive.
 
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.

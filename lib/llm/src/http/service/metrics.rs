@@ -533,11 +533,8 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated_to_sse_event(annotated)
 }
 
-/// Create a new router with optional DRT metrics integration.
-///
-/// When `drt_metrics` is provided, the `/metrics` handler will also include
-/// metrics from the DRT's registry tree (anything created via `metrics().create*()`).
-pub fn router(
+/// The `/metrics` router. With `drt_metrics`, `registry` must be attached to that tree.
+pub(crate) fn router(
     registry: Registry,
     path: Option<String>,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,

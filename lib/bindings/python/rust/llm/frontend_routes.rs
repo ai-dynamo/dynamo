@@ -37,7 +37,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(crate) struct PyFrontendRoute {
     method: Method,
     path: String,
-    handler: PyObject,
+    handler: Py<PyAny>,
     timeout: Duration,
     max_body_bytes: usize,
 }
@@ -50,7 +50,7 @@ impl PyFrontendRoute {
         py: Python<'_>,
         method: String,
         path: String,
-        handler: PyObject,
+        handler: Py<PyAny>,
         timeout_s: f64,
         max_body_bytes: usize,
     ) -> PyResult<Self> {
@@ -102,13 +102,13 @@ impl PyFrontendRoute {
 #[derive(Clone)]
 pub(crate) struct PyFrontendResponse {
     status_code: u16,
-    body: PyObject,
+    body: Py<PyAny>,
 }
 
 #[pymethods]
 impl PyFrontendResponse {
     #[new]
-    pub fn new(status_code: u16, body: PyObject) -> PyResult<Self> {
+    pub fn new(status_code: u16, body: Py<PyAny>) -> PyResult<Self> {
         StatusCode::from_u16(status_code).map_err(|e| {
             PyValueError::new_err(format!("invalid status code {status_code}: {e}"))
         })?;
@@ -129,7 +129,7 @@ pub(crate) struct PyFrontendExtensionContext {
     headers: Py<PyDict>,
     /// The frontend's own `DistributedRuntime`.
     #[pyo3(get)]
-    runtime: PyObject,
+    runtime: Py<PyAny>,
 }
 
 impl PyFrontendExtensionContext {
@@ -138,7 +138,7 @@ impl PyFrontendExtensionContext {
         inner: RsFrontendExtensionContext,
         headers: &HeaderMap,
         body: &[u8],
-        runtime: &PyObject,
+        runtime: &Py<PyAny>,
     ) -> PyResult<Self> {
         let dict = PyDict::new(py);
         for name in headers.keys() {
@@ -185,9 +185,9 @@ impl PyFrontendExtensionContext {
 struct PyRouteHandler {
     spec: PyFrontendRoute,
     /// The frontend's asyncio loop; awaitable handler results run here.
-    event_loop: PyObject,
+    event_loop: Py<PyAny>,
     /// The frontend's `DistributedRuntime`, handed to handlers as `ctx.runtime`.
-    runtime: PyObject,
+    runtime: Py<PyAny>,
     /// Calls in flight: queued or running on the pool, or running on the event
     /// loop. A slot is held until its handler is done, so slow async calls are
     /// shed rather than piled onto the loop. Sync routes also share the pool.
@@ -196,8 +196,8 @@ struct PyRouteHandler {
 
 pub(crate) fn frontend_route_extensions_from_py(
     py: Python<'_>,
-    routes: Option<PyObject>,
-    runtime: PyObject,
+    routes: Option<Py<PyAny>>,
+    runtime: Py<PyAny>,
 ) -> PyResult<Vec<FrontendRouteExtension>> {
     let Some(routes) = routes else {
         return Ok(Vec::new());
@@ -353,7 +353,7 @@ async fn call_python_frontend_route(
     let job: ExtensionJob = Box::new(move || {
         // Caller already gave up (timed out/disconnected): skip before the GIL.
         if !reply.is_closed() {
-            Python::with_gil(|py| run_handler(py, context, &headers, &body, reply));
+            Python::attach(|py| run_handler(py, context, &headers, &body, reply));
         }
     });
     if extension_executor().try_send(job).is_err() {
@@ -438,7 +438,7 @@ struct Reply {
     permit: Option<OwnedSemaphorePermit>,
     deadline: std::time::Instant,
     /// The event loop's deadline timer, until it fires or the handler is done.
-    timer: Option<PyObject>,
+    timer: Option<Py<PyAny>>,
 }
 
 impl Reply {

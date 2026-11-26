@@ -3,12 +3,8 @@
 
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-#[cfg(feature = "select-service")]
-use pyo3::sync::GILProtected;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
-#[cfg(feature = "select-service")]
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -35,7 +31,8 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::host::RouterPlugins;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyContext;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -80,9 +77,23 @@ mod demand_driven;
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
 pub(crate) struct WorkerSequenceEventPublisher {
-    // Publishing holds the GIL, so borrows never overlap.
-    inner: GILProtected<RefCell<Option<selection::WorkerSequenceEventPublisher>>>,
+    // Methods take this lock while attached to Python. Never call `py.detach` or
+    // run Python code while holding it: a thread that waits for the lock keeps
+    // the GIL, so the holder cannot attach again and both threads deadlock.
+    inner: std::sync::Mutex<Option<selection::WorkerSequenceEventPublisher>>,
     endpoint: String,
+}
+
+#[cfg(feature = "select-service")]
+impl WorkerSequenceEventPublisher {
+    fn publisher(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<selection::WorkerSequenceEventPublisher>> {
+        // Like the RefCell it replaces, a panic does not block later calls.
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[cfg(feature = "select-service")]
@@ -106,7 +117,7 @@ impl WorkerSequenceEventPublisher {
         .map_err(to_pyerr)?;
         Ok(Self {
             endpoint: publisher.endpoint().to_string(),
-            inner: GILProtected::new(RefCell::new(Some(publisher))),
+            inner: std::sync::Mutex::new(Some(publisher)),
         })
     }
 
@@ -115,8 +126,8 @@ impl WorkerSequenceEventPublisher {
         &self.endpoint
     }
 
-    fn mark_prefill_completed(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+    fn mark_prefill_completed(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
             publisher
                 .mark_prefill_completed(request_id)
                 .map_err(to_pyerr)?;
@@ -124,17 +135,17 @@ impl WorkerSequenceEventPublisher {
         Ok(())
     }
 
-    fn free(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+    fn free(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
             publisher.free(request_id).map_err(to_pyerr)?;
         }
         Ok(())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let publisher = self.inner.get(py).borrow_mut().take();
+        let publisher = self.publisher().take();
         // Dropping the publisher terminates its ZMQ context, which can block.
-        py.allow_threads(move || drop(publisher));
+        py.detach(move || drop(publisher));
         Ok(())
     }
 }
@@ -670,7 +681,7 @@ fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
     prompt: impl FnOnce(&mut T) -> &mut PromptRequest,
 ) -> PyResult<T> {
     let invalid = |e: pythonize::PythonizeError| PyValueError::new_err(e.to_string());
-    let Ok(dict) = request.downcast::<pyo3::types::PyDict>() else {
+    let Ok(dict) = request.cast::<pyo3::types::PyDict>() else {
         return depythonize(request).map_err(invalid);
     };
     let Some(tokens) = dict
@@ -714,7 +725,7 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     let message = err.to_string();
     let kind = err.kind();
     let status_code = err.status_code();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let pyerr = crate::errors::SelectionServiceError::new_err(message);
         let value = pyerr.value(py);
         let _ = value.setattr("kind", kind);
@@ -748,7 +759,7 @@ fn selection_cache_config_from_overrides(
 /// Bounds for the in-flight selection cache. Each field defaults to the
 /// service default when omitted.
 #[cfg(feature = "select-service")]
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub(crate) struct SelectionCacheConfig {
     inner: RsSelectionCacheConfig,
@@ -808,7 +819,7 @@ impl SessionBindingStream {
             let events = updates.recv_many().await.ok_or_else(|| {
                 pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
             })?;
-            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 }
@@ -865,7 +876,7 @@ impl SelectionService {
             builder = builder.session_binding_replication(writer_id);
         }
         let inner = py
-            .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
+            .detach(|| crate::bridge_runtime().block_on(builder.build()))
             .map_err(to_pyerr)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -879,7 +890,7 @@ impl SelectionService {
     /// dropped. Idempotent, and also run automatically on drop.
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
-        py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
+        py.detach(|| crate::bridge_runtime().block_on(service.shutdown()));
     }
 
     /// Session bindings this replica commits or refreshes, for the host to
@@ -894,7 +905,7 @@ impl SelectionService {
         })
     }
 
-    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+    fn apply_session_binding(&self, py: Python<'_>, update: Py<PyAny>) -> PyResult<()> {
         let event =
             depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.inner
@@ -912,13 +923,13 @@ impl SelectionService {
     }
 
     /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
-    fn upsert_worker<'p>(&self, py: Python<'p>, worker: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn upsert_worker<'p>(&self, py: Python<'p>, worker: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req: WorkerRequest =
             depythonize(worker.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let record = core.upsert_worker(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -927,7 +938,7 @@ impl SelectionService {
         &self,
         py: Python<'p>,
         worker_id: u64,
-        patch: PyObject,
+        patch: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let patch: WorkerPatchRequest =
             depythonize(patch.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -937,7 +948,7 @@ impl SelectionService {
                 .patch_worker(worker_id, patch)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -949,7 +960,7 @@ impl SelectionService {
                 .delete_worker(worker_id)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -960,7 +971,7 @@ impl SelectionService {
         py: Python<'_>,
         model_name: Option<String>,
         routing_group: Option<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let workers = self
             .inner
             .list_workers(model_name.as_deref(), routing_group.as_deref());
@@ -970,32 +981,32 @@ impl SelectionService {
     }
 
     /// Readiness: whether at least one worker is schedulable, plus catalog state.
-    fn ready(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn ready(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.inner.ready())
             .map(|o| o.unbind())
             .map_err(to_pyerr)
     }
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
-    fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn overlap_scores<'p>(&self, py: Python<'p>, request: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<OverlapScoresRequest>(request.bind(py), |req| {
             &mut req.prompt
         })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
-    fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn select<'p>(&self, py: Python<'p>, request: Py<PyAny>) -> PyResult<Bound<'p, PyAny>> {
         let req =
             depythonize_prompt_request::<SelectRequest>(request.bind(py), |req| &mut req.prompt)?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1003,7 +1014,7 @@ impl SelectionService {
     fn select_and_reserve<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<SelectAndReserveRequest>(request.bind(py), |req| {
             &mut req.prompt
@@ -1014,7 +1025,7 @@ impl SelectionService {
                 .select_and_reserve(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1023,7 +1034,7 @@ impl SelectionService {
     fn create_reservation<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<ReservationRequest>(request.bind(py), |req| {
             &mut req.prompt
@@ -1034,7 +1045,7 @@ impl SelectionService {
                 .create_reservation(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1083,7 +1094,7 @@ impl SelectionService {
         py: Python<'_>,
         model_name: Option<String>,
         routing_group: Option<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let loads = self
             .inner
             .loads(model_name.as_deref(), routing_group.as_deref());
@@ -1091,7 +1102,11 @@ impl SelectionService {
     }
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
-    fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+    fn potential_loads<'p>(
+        &self,
+        py: Python<'p>,
+        request: Py<PyAny>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let req = depythonize_prompt_request::<PotentialLoadsRequest>(request.bind(py), |req| {
             &mut req.prompt
         })?;
@@ -1101,7 +1116,7 @@ impl SelectionService {
                 .potential_loads(req)
                 .await
                 .map_err(selection_to_pyerr)?;
-            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::attach(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
@@ -1181,7 +1196,7 @@ impl SelectionService {
         let service = Arc::clone(&self.inner);
         crate::future_into_py(py, async move {
             let snapshot = service.indexer_snapshot().await;
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &snapshot)
                     .map(|o| o.unbind())
                     .map_err(to_pyerr)
@@ -1211,12 +1226,12 @@ mod selection_service_lifecycle_tests {
 
     #[test]
     fn idempotent_shutdown() {
-        pyo3::prepare_freethreaded_python();
-        let service = Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        let service = Python::attach(|py| {
             SelectionService::new(py, 1, None, None, None, None, None, "hard", None)
         })
         .unwrap();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             service.shutdown(py);
             service.shutdown(py);
         });
@@ -1589,7 +1604,7 @@ impl KvEventPublisher {
             .map(depythonize_block_mm_infos)
             .transpose()?;
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let event = self.stored_event(
                 inner.next_event_id(),
                 &token_ids,
@@ -1608,7 +1623,7 @@ impl KvEventPublisher {
     fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
         let inner = self.inner.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let event = self.removed_event(inner.next_event_id(), block_hashes);
             inner.publish(event).map_err(to_pyerr)
         })
@@ -1622,7 +1637,7 @@ impl KvEventPublisher {
     fn publish_batch(&self, py: Python, events: Bound<PyAny>) -> PyResult<()> {
         let inputs = depythonize_kv_event_inputs(&events)?;
         let inner = self.inner.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut converted = Vec::with_capacity(inputs.len());
             for input in inputs {
                 let event_id = inner.next_event_id();
@@ -1762,8 +1777,7 @@ impl RadixTree {
     ) -> PyResult<OverlapScores> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let local_block_hashes =
-            py.allow_threads(|| sequence.into_iter().map(LocalBlockHash).collect());
+        let local_block_hashes = py.detach(|| sequence.into_iter().map(LocalBlockHash).collect());
 
         let request = RadixTreeRequest::FindMatches {
             local_block_hashes,
@@ -1778,7 +1792,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        let result = py.allow_threads(move || {
+        let result = py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1808,7 +1822,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        let result = py.allow_threads(move || response_rx.recv());
+        let result = py.detach(move || response_rx.recv());
 
         result.map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
@@ -1830,7 +1844,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        py.allow_threads(move || {
+        py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1852,7 +1866,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response
-        py.allow_threads(move || {
+        py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
             })
@@ -1869,7 +1883,7 @@ impl RadixTree {
         })?;
 
         // Release GIL while waiting for response from dedicated thread
-        let events = py.allow_threads(move || {
+        let events = py.detach(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     "Failed to receive dump tree response",
@@ -1878,7 +1892,7 @@ impl RadixTree {
         })?;
 
         // Serialize RouterEvent structs to JSON strings with GIL released
-        py.allow_threads(move || {
+        py.detach(move || {
             events
                 .into_iter()
                 .map(|event| {
@@ -2278,15 +2292,15 @@ async fn create_kv_router_from_endpoint(
         let policy_worker_role = policy_worker_role
             .expect("a configured worker-selection policy waits for a typed model card above");
         let policy_model_name = policy_model_name.unwrap_or_default();
-        plugins.with_worker_selection(Arc::new(move |config, _worker_type, _partition| {
-            factory(
-                config,
+        plugins.with_worker_selection(Arc::new(move |context| {
+            factory(WorkerSelectionPolicyContext::new(
+                context.selection_config(),
                 policy_worker_role,
                 dynamo_router_protocol::identity::RoutingPartitionRef::new(
                     &policy_model_name,
                     dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP,
                 ),
-            )
+            ))
         }))
     } else {
         plugins
@@ -2363,7 +2377,7 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
             let (tx, rx) =
-                tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
+                tokio::sync::mpsc::channel::<RsAnnotated<Py<PyAny>>>(response_buffer_size);
 
             tokio::spawn(async move {
                 let mut stream = stream;
@@ -2386,7 +2400,7 @@ impl KvRouter {
                     }
 
                     let response = response.map_data(|data| {
-                        Python::with_gil(|py| {
+                        Python::attach(|py| {
                             pythonize(py, &data)
                                 .map(|obj| obj.unbind())
                                 .map_err(|error| error.to_string())
@@ -2465,7 +2479,7 @@ impl KvRouter {
         let plugins = crate::router_plugins(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = ais_perf_config
             .map(|config| {
-                Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
+                Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
             })
             .transpose()
             .map_err(to_pyerr)?;
@@ -2473,7 +2487,7 @@ impl KvRouter {
         // The initial-worker wait can be unbounded. Releasing the GIL makes it
         // supervisable from another thread, but not cancellable.
         let runtime = crate::bridge_runtime();
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
@@ -2523,16 +2537,16 @@ impl KvRouter {
         py: Python<'p>,
         token_ids: Vec<u32>,
         model: String,
-        stop_conditions: Option<PyObject>,
-        sampling_options: Option<PyObject>,
-        output_options: Option<PyObject>,
-        router_config_override: Option<PyObject>,
+        stop_conditions: Option<Py<PyAny>>,
+        sampling_options: Option<Py<PyAny>>,
+        output_options: Option<Py<PyAny>>,
+        router_config_override: Option<Py<PyAny>>,
         worker_id: Option<WorkerId>,
         dp_rank: Option<DpRank>,
-        extra_args: Option<PyObject>,
-        block_mm_infos: Option<PyObject>,
-        multi_modal_data: Option<PyObject>,
-        mm_routing_info: Option<PyObject>,
+        extra_args: Option<Py<PyAny>>,
+        block_mm_infos: Option<Py<PyAny>>,
+        multi_modal_data: Option<Py<PyAny>>,
+        mm_routing_info: Option<Py<PyAny>>,
         routing_constraints: Option<RoutingConstraints>,
         response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2641,7 +2655,7 @@ impl KvRouter {
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         response_buffer_size: isize,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2676,10 +2690,10 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
+        router_config_override: Option<Py<PyAny>>,
         request_id: Option<String>,
         update_indexer: bool,
-        block_mm_infos: Option<PyObject>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
@@ -2807,7 +2821,7 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        block_mm_infos: Option<PyObject>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2830,7 +2844,7 @@ impl KvRouter {
 
             // Return loads without aggregation - each (worker_id, dp_rank) pair is a separate entry
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &loads)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
@@ -2844,8 +2858,8 @@ impl KvRouter {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
-        block_mm_infos: Option<PyObject>,
+        router_config_override: Option<Py<PyAny>>,
+        block_mm_infos: Option<Py<PyAny>>,
         lora_name: Option<String>,
         include_shared: bool,
         cache_namespace: Option<String>,
@@ -2869,7 +2883,7 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)

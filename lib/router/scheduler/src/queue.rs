@@ -25,7 +25,7 @@ use super::overlap_refresh::{
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
     CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
-    WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    WorkerSelectionInput, WorkerSelector, request_info_of, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
@@ -37,6 +37,7 @@ use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::QueueLane;
+use dynamo_admission::host::{ClassifyRequestHostExt, dispatch_head};
 use dynamo_admission::{
     BlockReason, ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate,
     DispatchHead, DispatchRecheck, LaneCheck, LaneKey, RecheckScope,
@@ -47,6 +48,7 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::PrefillLoadHint;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
@@ -120,15 +122,25 @@ struct QueuedRequest {
 
 impl QueuedRequest {
     fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
-        DispatchHead::new(
-            self.request.mode.request_id(),
-            self.request.session_context.as_ref(),
-            self.request.isl_tokens,
-            self.request.pinned_worker,
-            policy_class,
-            self.enqueue_at,
-        )
+        dispatch_head_of(&self.request, policy_class, self.enqueue_at)
     }
+}
+
+/// The view a dispatch gate is shown of `request` at the head of the `policy_class` queue,
+/// queued at `queued_at`. The queue builds each head through it. `host` exports it for one
+/// caller outside this crate, the `plugins::testing` harness of `dynamo-kv-router`, so that
+/// a gate's test sees the head the queue builds; [`classify_inputs`] is exported for the
+/// same harness. A routing host builds no head.
+pub fn dispatch_head_of<'a>(
+    request: &'a SchedulingRequest,
+    policy_class: &'a str,
+    queued_at: Instant,
+) -> DispatchHead<'a> {
+    dispatch_head(
+        request_info_of(request, request.pinned_worker),
+        policy_class,
+        queued_at,
+    )
 }
 
 /// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, required
@@ -1231,8 +1243,8 @@ impl<
                 policy_class = class.name,
                 queue_policy = %class.queue_policy,
                 quantum = class.quantum,
-                prefill_busy_threshold = ?class.busy_thresholds.prefill_busy_threshold,
-                prefill_busy_threshold_frac = ?class.busy_thresholds.prefill_busy_threshold_frac,
+                prefill_busy_threshold = ?class.busy_thresholds.prefill_busy_threshold(),
+                prefill_busy_threshold_frac = ?class.busy_thresholds.prefill_busy_threshold_frac(),
                 "Router policy class configured"
             );
         }
@@ -1535,10 +1547,8 @@ impl<
         }
     }
 
-    /// Build the classifier's input and the rows for its declared worker inputs. Uses
-    /// `request.isl_tokens` — the routing-token basis the queue's bucketing, limits, and DRR
-    /// cost already use — so a pass-through classifier is behavior-identical to no
-    /// classifier.
+    /// Build the classifier's input and the rows for its declared worker inputs, through
+    /// [`classify_inputs`], over the workers this queue's eligibility admits.
     pub fn build_classify_request(
         &self,
         request: &SchedulingRequest,
@@ -1546,34 +1556,20 @@ impl<
         worker_inputs: WorkerInputs,
     ) -> (ClassifyRequest, WorkerInputRows) {
         self.with_queue_eligibility(request, |workers, eligibility, base| {
-            let cached_tokens = SchedulingContext::new(request, workers)
-                .with_eligibility(eligibility)
-                .best_cached_tokens();
             let reject_thresholds = self
                 .reject_thresholds
                 .as_ref()
                 .map(|provider| provider())
                 .unwrap_or_default();
-            let mut classification =
-                ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
-                    .with_pinned_worker(request.pinned_worker)
-                    .with_sequence_hashes(request.token_seq.as_deref())
-                    .with_busy_thresholds(reject_thresholds);
-            if let Some(request_id) = request.mode.request_id() {
-                classification = classification.with_request_id(request_id);
-            }
-            if let Some(policy_class) = request.policy_class.as_deref() {
-                classification = classification.with_initial_policy_class(policy_class);
-            }
-            if let Some(session_context) = request.session_context.clone() {
-                classification = classification.with_session_context(session_context);
-            }
-            let rows = if worker_inputs == WorkerInputs::NONE {
-                WorkerInputRows::empty()
-            } else {
-                worker_input_rows(workers, request, base, worker_inputs)
-            };
-            (classification, rows)
+            classify_inputs(
+                workers,
+                request,
+                eligibility,
+                base,
+                ingress_at,
+                reject_thresholds,
+                worker_inputs,
+            )
         })
     }
 
@@ -2283,8 +2279,8 @@ impl<
         let due_at = queued.due_at;
         // A head that expiry exposes may be able to run, so every refusal below still reports it.
         let mut exposed = self.expire_due_classes(now);
-        let priority_jump = queued.request.priority_jump;
-        let strict_priority = queued.request.strict_priority;
+        let priority_jump = queued.request.caller_hints.priority_jump;
+        let strict_priority = queued.request.caller_hints.strict_priority;
         let placement = self
             .eligibility
             .lane(&queued.request, queue_metadata.lane_key);
@@ -2583,9 +2579,8 @@ impl<
         if drained.gate_recheck {
             scope = Some(RecheckScope::All);
         }
-        // Consume hints even when there is no pending work. Blocked lanes count as ready here
-        // and still need their recheck.
-        if !self.pending.has_ready() {
+        // Consume hints even when there is no pending work.
+        if self.pending.pending_count() == 0 {
             return;
         }
         let mut capacity_all = drained.full_recheck;
@@ -2618,7 +2613,7 @@ impl<
         self.expire_due_classes(Instant::now());
         let cleanup_ready = drain_cleanup && self.drain_cleanup();
         self.recheck_capacity_updates(cleanup_ready.then_some(RecheckScope::All));
-        if !self.pending.has_ready() {
+        if self.pending.pending_count() == 0 {
             return;
         }
         self.drain_ready(None).await;
@@ -2650,7 +2645,7 @@ impl<
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
-            if !self.pending.has_ready() {
+            if self.pending.pending_count() == 0 {
                 break;
             }
             let decay_now = Instant::now();
@@ -3338,7 +3333,7 @@ impl<
             request_id,
             token_sequence: request.token_seq.take(),
             track_prefill_tokens: request.track_prefill_tokens,
-            expected_output_tokens: request.expected_output_tokens,
+            expected_output_tokens: request.caller_hints.expected_output_tokens,
             prefill_load_hint,
             worker: selected.selection.worker,
             lora_name: request
@@ -3538,6 +3533,50 @@ impl<
     }
 }
 
+/// Build the request a classifier reads and the rows for its declared worker inputs from one
+/// scheduling request, so the two agree: the request's pin is the pin that narrows the rows,
+/// and its cached tokens are the best that an eligible worker holds. Uses
+/// `request.isl_tokens`, the routing-token basis the queue's bucketing, limits, and DRR cost
+/// already use, so a pass-through classifier is behavior-identical to no classifier.
+///
+/// `eligibility` decides which workers count toward the cached tokens; `base` decides which
+/// ranks the rows hold. The queue passes its own two views; a caller with one view passes it
+/// twice.
+pub fn classify_inputs<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    base: RoutingEligibility<'_>,
+    ingress_at: Instant,
+    reject_thresholds: BusyThresholds,
+    worker_inputs: WorkerInputs,
+) -> (ClassifyRequest, WorkerInputRows) {
+    let cached_tokens = SchedulingContext::new(request, workers)
+        .with_eligibility(eligibility)
+        .best_cached_tokens();
+    let mut classification =
+        ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
+            .with_pinned_worker(request.pinned_worker)
+            .with_caller_hints(request.caller_hints)
+            .with_sequence_hashes(request.token_seq.as_deref())
+            .with_busy_thresholds(reject_thresholds);
+    if let Some(request_id) = request.mode.request_id() {
+        classification = classification.with_request_id(request_id);
+    }
+    if let Some(policy_class) = request.policy_class.as_deref() {
+        classification = classification.with_initial_policy_class(policy_class);
+    }
+    if let Some(session_context) = request.session_context.clone() {
+        classification = classification.with_session_context(session_context);
+    }
+    let rows = if worker_inputs == WorkerInputs::NONE {
+        WorkerInputRows::empty()
+    } else {
+        worker_input_rows(workers, request, base, worker_inputs)
+    };
+    (classification, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -3559,8 +3598,6 @@ mod tests {
 
     use crate::OverlapSignals;
 
-    use crate::classifier_rows::ClassifierRows;
-
     use crate::kv_hints::KvTransferCandidates;
 
     use crate::protocols::WorkerSelectionResult;
@@ -3577,9 +3614,9 @@ mod tests {
 
     use crate::RefreshedOverlap;
 
-    use dynamo_admission::WorkerView;
     use dynamo_admission::{PolicyClassConfig, RouterQueuePolicy};
     use dynamo_slot_tracker::BusyThresholds;
+    use dynamo_worker_selection::WorkerCandidates;
     use std::num::NonZeroU32;
 
     use dynamo_slot_tracker::WorkerDpRange;
@@ -4405,11 +4442,9 @@ mod tests {
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: Default::default(),
             policy_class: None,
             session_context: None,
-            expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -4468,7 +4503,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             let (candidates, loads) = (input.candidates(), input.load().unwrap());
@@ -4493,7 +4528,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             Ok(input
@@ -4515,7 +4550,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             let candidates = input.candidates();
@@ -4532,7 +4567,6 @@ mod tests {
         let mut decode_blocks = Vec::new();
         for inputs in [WorkerInputs::LOAD, WorkerInputs::ACTIVE_REQUESTS] {
             let policy = dynamo_worker_selection::WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
                 "test",
                 vec![],
                 Box::new(PickWorker { inputs, target }),
@@ -4573,13 +4607,8 @@ mod tests {
         picker: Box<dyn dynamo_worker_selection::WorkerPicker>,
     ) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
-            inner: dynamo_worker_selection::WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
-                "test",
-                vec![],
-                picker,
-            )
-            .with_exclusive_affinity(exclusive_affinity),
+            inner: dynamo_worker_selection::WorkerSelectionPolicy::new("test", vec![], picker)
+                .with_exclusive_affinity(exclusive_affinity),
             prepared_selections: Arc::clone(prepared_selections),
         }
     }
@@ -4869,7 +4898,7 @@ mod tests {
     async fn exclusive_affinity_queue_zero_limit_rejects_busy_target() {
         let mut capped = class("capped", 1);
         capped.queue_policy = RouterQueuePolicy::Fcfs;
-        capped.busy_thresholds.prefill_busy_threshold = Some(32);
+        capped.busy_thresholds = capped.busy_thresholds.with_prefill_busy_threshold(Some(32));
         capped.request_queue_limit_per_worker = Some(0);
         let profile = policy_profile(Some("capped"), vec![capped]);
         let (queue, slots) = make_queue_with_profile(2, 16, 64, profile);
@@ -4918,10 +4947,9 @@ mod tests {
         let b = WorkerWithDpRank::new(1, 0);
         for source in ["overloaded", "unavailable", "host-full"] {
             let changed = Arc::new(AtomicBool::new(false));
-            let limits = Arc::new(Mutex::new(BusyThresholds {
-                prefill_busy_threshold: Some(96),
-                ..Default::default()
-            }));
+            let limits = Arc::new(Mutex::new(
+                BusyThresholds::default().with_prefill_busy_threshold(Some(96)),
+            ));
             let provider = Arc::clone(&limits);
             let (queue, slots, _configs) = make_queue_with_profile_sender_and_reject(
                 2,
@@ -4988,7 +5016,7 @@ mod tests {
 
             // No enqueue or capacity notification accompanies this snapshot change.
             if source == "host-full" {
-                limits.lock().prefill_busy_threshold = Some(32);
+                *limits.lock() = BusyThresholds::default().with_prefill_busy_threshold(Some(32));
                 let (mut probe, _rx) = make_request("cost-probe", 48);
                 probe.affinity_target = Some(b.into());
                 probe.overlap.effective_cached_tokens.insert(a, 32);
@@ -5127,17 +5155,17 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::{ClassifierError, RequestClassifier};
+        use dynamo_admission::{RequestClassifier, RequestClassifierError};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                _workers: &dyn WorkerView,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+                _workers: WorkerCandidates<'_>,
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 assert_eq!(request.sequence_hashes(), self.0.as_deref());
-                assert_eq!(request.pinned_worker(), Some(self.1));
+                assert_eq!(request.info().pinned_worker(), Some(self.1));
                 Ok(request)
             }
         }
@@ -5156,8 +5184,8 @@ mod tests {
             // The classification input owns its copy of the hashes and the pin.
             request.token_seq = Some(vec![99]);
             request.pinned_worker = None;
-            classifier
-                .classify(classified, &ClassifierRows(workers))
+            workers
+                .read(|workers| classifier.classify(classified, workers))
                 .unwrap();
             drop(request);
         }
@@ -5193,7 +5221,7 @@ mod tests {
         let mut classified = queue
             .build_classify_request(&request, now, WorkerInputs::NONE)
             .0;
-        assert_eq!(classified.pinned_worker(), Some(pin));
+        assert_eq!(classified.info().pinned_worker(), Some(pin));
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)
@@ -5662,7 +5690,7 @@ mod tests {
     async fn prepared_rows_read_decode_progress_at_actor_selection() {
         use dynamo_slot_tracker::host::DecodeProgressUpdate;
         use dynamo_worker_selection::{
-            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+            WorkerInputView, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
         };
 
         struct ProgressPicker;
@@ -5673,7 +5701,7 @@ mod tests {
 
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, dynamo_worker_selection::host::WorkerSelectionPolicyError>
             {
@@ -5696,12 +5724,7 @@ mod tests {
         }
         let prepared_selections = Arc::new(AtomicUsize::new(0));
         let policy = || CountingPreparedPolicy {
-            inner: WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
-                "test",
-                vec![],
-                Box::new(ProgressPicker),
-            ),
+            inner: WorkerSelectionPolicy::new("test", vec![], Box::new(ProgressPicker)),
             prepared_selections: Arc::clone(&prepared_selections),
         };
         let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());
@@ -5842,10 +5865,7 @@ mod tests {
 
     /// Reject thresholds under which a rank past 32 tokens, half its prefill budget, is full.
     fn half_budget_reject() -> BusyThresholds {
-        BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        }
+        BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5))
     }
 
     /// Book `tokens` of prefill on `worker`, as a pinned request.
@@ -6629,11 +6649,11 @@ mod tests {
         first_rx.await.unwrap().unwrap();
 
         let (mut low, mut low_rx) = make_request("low", isl);
-        low.priority_jump = 10_000.0;
+        low.caller_hints.priority_jump = 10_000.0;
         queue.enqueue(low).await;
 
         let (mut high, high_rx) = make_request("high", isl);
-        high.strict_priority = 1;
+        high.caller_hints.strict_priority = 1;
         queue.enqueue(high).await;
         assert_eq!(queue.pending_count(), 2);
 
@@ -6815,9 +6835,9 @@ mod tests {
             16,
             1_000_000,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
-                decode_busy_threshold_frac: Some(0.5),
-                ..Default::default()
+            Some(Arc::new(|| {
+                dynamo_slot_tracker::BusyThresholds::default()
+                    .with_decode_busy_threshold_frac(Some(0.5))
             })),
         );
         let worker_config = SimpleWorkerConfig {
@@ -6889,9 +6909,9 @@ mod tests {
             16,
             100,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
-                prefill_busy_threshold_frac: Some(0.5),
-                ..Default::default()
+            Some(Arc::new(|| {
+                dynamo_slot_tracker::BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.5))
             })),
         );
         // Worker 0 grows to two ranks with a 100-token prefill budget each.
@@ -6935,10 +6955,10 @@ mod tests {
 
     #[tokio::test]
     async fn reject_thresholds_follow_the_live_provider_on_prefill_tokens() {
-        let live = Arc::new(Mutex::new(dynamo_slot_tracker::BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        }));
+        let live = Arc::new(Mutex::new(
+            dynamo_slot_tracker::BusyThresholds::default()
+                .with_prefill_busy_threshold_frac(Some(0.5)),
+        ));
         let provider = Arc::clone(&live);
         let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
         let (queue, slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
@@ -7106,24 +7126,15 @@ mod tests {
             Some("standard"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("standard", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("latency", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("custom_priority", 1)
                 },
             ],
@@ -7231,10 +7242,8 @@ mod tests {
             vec![PolicyClassConfig {
                 queue_policy: RouterQueuePolicy::Wspt,
                 slo_ttft_ms: NonZeroU32::new(1),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7372,10 +7381,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1000),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7397,8 +7404,8 @@ mod tests {
             ("explicit-early", 25, Some(900), 0),
         ] {
             let (mut request, response_rx) = make_request(request_id, 64);
-            request.strict_priority = strict_priority;
-            request.priority_jump = f64::from(strict_priority) * 100.0;
+            request.caller_hints.strict_priority = strict_priority;
+            request.caller_hints.priority_jump = f64::from(strict_priority) * 100.0;
             let ingress_at = start + Duration::from_millis(ingress_ms);
             let classified = explicit_due_ms.map(|due_ms| {
                 let mut classified = queue
@@ -7453,10 +7460,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7495,10 +7500,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7549,10 +7552,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1000),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -8661,17 +8662,13 @@ mod tests {
             Some("first"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("first", 100)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("second", 100)
                 },
             ],
@@ -8686,28 +8683,22 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("fast", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(200),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("medium", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(300),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("slow", 1)
                 },
             ],
@@ -8762,10 +8753,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -8906,19 +8895,15 @@ mod tests {
             Some("refreshing"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("refreshing", 100)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(11100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("budgeted", 100)
                 },
             ],
@@ -9521,10 +9506,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 request_queue_limit_per_worker: Some(1),
                 ..class("capped", 1)
             }],
@@ -9573,26 +9556,20 @@ mod tests {
             Some("requests"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(1),
                     ..class("requests", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(1),
                     ..class("raw_tokens", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     cached_token_queue_limit_per_worker: Some(1),
                     ..class("cached_tokens", 1)
                 },
@@ -9648,19 +9625,15 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(300),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("standard", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(50),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("latency", 1)
                 },
             ],
@@ -9719,27 +9692,21 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("enabled", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("omitted", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: false,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("disabled", 1)
                 },
             ],
@@ -9853,18 +9820,14 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("enforced", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("ordered", 1)
                 },
             ],
@@ -9932,18 +9895,14 @@ mod tests {
                     PolicyClassConfig {
                         slo_ttft_ms: head_budget.then(|| NonZeroU32::new(100).unwrap()),
                         controlled_delay: head_budget,
-                        busy_thresholds: BusyThresholds {
-                            prefill_busy_threshold_frac: Some(0.0),
-                            ..Default::default()
-                        },
+                        busy_thresholds: BusyThresholds::default()
+                            .with_prefill_busy_threshold_frac(Some(0.0)),
                         request_queue_limit_per_worker: Some(1),
                         ..class("limited", 1)
                     },
                     PolicyClassConfig {
-                        busy_thresholds: BusyThresholds {
-                            prefill_busy_threshold_frac: Some(0.0),
-                            ..Default::default()
-                        },
+                        busy_thresholds: BusyThresholds::default()
+                            .with_prefill_busy_threshold_frac(Some(0.0)),
                         ..class("other", 1)
                     },
                 ],
@@ -10072,18 +10031,14 @@ mod tests {
             Some("limited"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(100),
                     ..class("limited", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("other", 1)
                 },
             ],
@@ -10183,18 +10138,14 @@ mod tests {
             Some("a"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(32),
                     ..class("a", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("b", 1)
                 },
             ],
@@ -10301,10 +10252,8 @@ mod tests {
                 None,
                 vec![PolicyClassConfig {
                     queue_policy: RouterQueuePolicy::Fcfs,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(queue_limit),
                     ..class("a", 1)
                 }],
@@ -10410,18 +10359,14 @@ mod tests {
             Some("a"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(1),
                     ..class("a", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("b", 1)
                 },
             ],
@@ -10665,20 +10610,16 @@ mod tests {
             Some("direct"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(0),
                     ..class("direct", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("queued", 1)
                 },
             ],
@@ -10775,10 +10716,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 request_queue_limit_per_worker: Some(2),
                 ..class("capped", 1)
             }],

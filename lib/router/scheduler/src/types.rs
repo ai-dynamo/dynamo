@@ -20,6 +20,7 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::host::CallerHints;
 use dynamo_worker_selection::{SelectionTrace, SharedCacheHits};
 
 pub use dynamo_router_protocol::attempt::AttemptId;
@@ -74,14 +75,12 @@ impl AvailableWorkerIds {
     }
 }
 
-/// Builds a partition's worker-selection policy from the selection slice, the worker type
-/// this router serves, and the partition the policy is for. The composed router's plugin
-/// registry supplies it; the kernel calls it once per partition.
+/// Builds a partition's worker-selection policy from its context: the selection slice, the
+/// worker type this router serves, and the partition the policy is for. The composed router's
+/// plugin registry supplies it; the kernel calls it once per partition.
 pub type WorkerSelectionPolicyFactory = std::sync::Arc<
     dyn for<'a> Fn(
-            &dynamo_worker_selection::SelectionConfig,
-            dynamo_router_protocol::worker_type::WorkerType,
-            crate::identity::RoutingPartitionRef<'a>,
+            dynamo_worker_selection::WorkerSelectionPolicyContext<'a>,
         ) -> dynamo_worker_selection::WorkerSelectionPolicy
         + Send
         + Sync,
@@ -136,7 +135,7 @@ pub enum KvSchedulerError {
     RequestClassifierPanicked(String),
 
     #[error("request classifier failed: {0}")]
-    RequestClassifierFailed(Arc<dynamo_admission::ClassifierError>),
+    RequestClassifierFailed(Arc<dynamo_admission::RequestClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateClassificationRequestId(String),
@@ -373,7 +372,11 @@ pub struct SchedulingRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub accounting_attribution: AccountingAttribution,
-    pub expected_output_tokens: Option<u32>,
+    /// What the caller sent with the request: its expected output length and its two
+    /// priorities. One value, so the [`RequestInfo`](dynamo_worker_selection::RequestInfo)
+    /// of the selection request and of a dispatch head borrows it, and building either
+    /// reads none of the three. The classifier's request holds a copy.
+    pub caller_hints: CallerHints,
 
     // Routing constraints and request-level config.
     /// Affinity target with the same default-versus-custom policy semantics as
@@ -384,8 +387,6 @@ pub struct SchedulingRequest {
     pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
     pub track_prefill_tokens: bool,
-    pub priority_jump: f64,
-    pub strict_priority: u32,
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
 
@@ -642,15 +643,13 @@ mod tests {
             token_seq,
             isl_tokens,
             lora_name: None,
-            expected_output_tokens: None,
+            caller_hints: Default::default(),
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             router_config_override: None,
             track_prefill_tokens: false,
-            priority_jump: 0.0,
-            strict_priority: 0,
             policy_class: None,
             session_context: None,
             overlap: OverlapSignals {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::host::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -214,8 +214,10 @@ async fn run_with_router_plugins(
         .migration_limit(local_model.migration_limit())
         .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
-    // Inject the DRT's metrics registry so that component-scoped metrics
-    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    // Share the DRT's metrics registry: the HTTP service attaches its own
+    // registry to it, so the DRT's OTLP export includes the frontend's metrics,
+    // and /metrics (default port 8000) serves the merged tree, including
+    // component-scoped metrics such as KvIndexerMetrics.
     http_service_builder =
         http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
 

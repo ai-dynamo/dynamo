@@ -71,6 +71,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_max_logprobs,
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
@@ -1016,6 +1017,7 @@ async def register_vllm_model(
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
         )
+        publish_vllm_max_logprobs(runtime_config, vllm_config.model_config)
 
     # Get runtime configuration from vLLM engine
     logging.info(

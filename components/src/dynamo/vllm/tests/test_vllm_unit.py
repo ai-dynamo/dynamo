@@ -833,7 +833,7 @@ def test_should_register_model_fetch_weights_for_default_load_format():
 @pytest.mark.parametrize("shared_embedding", [False, True])
 @pytest.mark.parametrize(
     "qualification",
-    ["disabled", "qualified", "release", "architecture", "scheduler", "cache"],
+    ["disabled", "qualified", "architecture", "scheduler"],
 )
 def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
     monkeypatch, tmp_path, shared_embedding, qualification
@@ -906,16 +906,15 @@ def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
         order.append("shared_engine_factory")
         return engine_client, vllm_config, None
 
-    def installed_version(_package):
-        order.append("release")
-        return "0.32.0" if qualification == "release" else "0.33.0"
+    runtime_condition = decisions._unqualified_runtime_condition
 
-    def verify_cache_sources():
-        order.append("cache_sources")
-        return qualification != "cache"
+    def unqualified_runtime_condition(runtime):
+        order.append("qualify")
+        return runtime_condition(runtime)
 
-    monkeypatch.setattr(decisions, "version", installed_version)
-    monkeypatch.setattr(decisions, "verify_cache_sources", verify_cache_sources)
+    monkeypatch.setattr(
+        decisions, "_unqualified_runtime_condition", unqualified_runtime_condition
+    )
     if qualification == "architecture":
         vllm_config.model_config.architecture = "UnknownForCausalLM"
     elif qualification == "scheduler":
@@ -956,10 +955,8 @@ def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
     )
 
     errors = {
-        "release": "vLLM 0.33.0",
         "architecture": "unsupported model architecture",
         "scheduler": "standard scheduler_cls",
-        "cache": "cache sources",
     }
     if qualification in errors:
         with pytest.raises(ValueError, match=errors[qualification]):
@@ -975,7 +972,7 @@ def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
         assert order == (
             ["create_engine_config", factory_name]
             if qualification == "disabled"
-            else ["create_engine_config", "release", "cache_sources", factory_name]
+            else ["create_engine_config", "qualify", factory_name]
         )
 
 
@@ -1301,9 +1298,37 @@ class TestBenchmarkConfig:
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
+            "power_window_s": 0.0,
             "worker_extension_installed": True,
             "cudagraph_metrics_auto_enabled": True,
         }
+
+    def test_benchmark_power_window_reaches_scheduler_config(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-power-window-s",
+            "2.5",
+        )
+        config = parse_args()
+        assert config._benchmark_additional_config["power_window_s"] == 2.5
+
+    @pytest.mark.parametrize("value", ["0.5", "1.5", "-1", "inf"])
+    def test_benchmark_power_window_rejects_a_window_below_the_minimum(
+        self, mock_vllm_cli, value
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-power-window-s",
+            value,
+        )
+        with pytest.raises(ValueError, match="--benchmark-power-window-s"):
+            parse_args()
 
     def test_random_kda_config_selects_worker_and_reaches_scheduler(
         self, mock_vllm_cli
@@ -2032,6 +2057,7 @@ def _make_dynamo_config(**overrides):
         "benchmark_randomize_kda_state": False,
         "benchmark_hybrid_live_state": False,
         "benchmark_max_batch_size": None,
+        "benchmark_power_window_s": 0.0,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,
@@ -2854,6 +2880,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
         "apply_data_parallel_runtime_config",
         "publish_kv_hint_capabilities",
         "publish_vllm_token_budget",
+        "publish_vllm_max_logprobs",
         "apply_topology_config",
         "_register_model_source_path",
         "build_router_config",

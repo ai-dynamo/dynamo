@@ -303,6 +303,18 @@ Every `EngineConfig` field except `model` is optional. `None` means
 "don't advertise"; KV-aware routing falls back to round-robin when KV
 fields are unset.
 
+The frontend accepts log-probability counts (`top_logprobs`, and
+`logprobs` on completions) up to 20 unless the worker publishes its
+engine's limit. An engine that returns more, or fewer, publishes the
+limit through `runtime_data`:
+
+```python
+return EngineConfig(
+    model=self.model_name,
+    runtime_data={"max_logprobs": 32},
+)
+```
+
 #### Python: `generate()`
 
 An async generator that yields `GenerateChunk` dicts for a single
@@ -1123,6 +1135,9 @@ values from the live engine after it comes up, instead of hard-coding
 them. The `..Default::default()` is load-bearing: `EngineConfig`
 sometimes grows new fields (e.g. `bootstrap_host`/`bootstrap_port`
 for disaggregation) and the default keeps existing engines compiling.
+To publish the engine's log-probability limit (see the Python section
+above), insert `"max_logprobs"` with a non-negative integer into
+`runtime_data`.
 
 #### Rust: `generate()`
 
