@@ -881,8 +881,9 @@ the [sidecar support notes](https://github.com/ai-dynamo/dynamo/blob/main/lib/si
 
 <ParamField path="--direct" type="boolean" default="false">
   Serve the engines listed with `--engine-url` instead of discovering Dynamo workers. Requires at
-  least one `--engine-url`. Direct mode applies only to the HTTP frontend. The frontend uses
-  in-process discovery, so `--discovery-backend` is ignored.
+  least one `--engine-url`. Direct mode applies only to the HTTP frontend, so it can't be combined
+  with `--interactive` or `--kserve-grpc-server`. The frontend uses in-process discovery, so
+  `--discovery-backend` is ignored.
 
   Environment variable: `DYN_DIRECT`
 </ParamField>
@@ -897,7 +898,7 @@ the [sidecar support notes](https://github.com/ai-dynamo/dynamo/blob/main/lib/si
 <ParamField path="--engine-url" type="string" default="[]">
   gRPC endpoint of one engine, as `host:port` or `http://host:port`. Repeat the option to list
   several engines. Each engine reports its own role (aggregated, prefill, or decode), model, and
-  parsers, so aggregated and disaggregated deployments are listed the same way.
+  parsers, so aggregated and disaggregated deployments are listed the same way. Requires `--direct`.
 
   Environment variable: `DYN_ENGINE_URLS` accepts whitespace-separated values. `--engine-url` on the
   command line replaces them.
