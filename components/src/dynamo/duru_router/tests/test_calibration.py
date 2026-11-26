@@ -3,13 +3,16 @@
 
 """CPU regressions for graph-aware calibration; no accuracy-validation campaign."""
 
+import hashlib
 import json
 from functools import partial
+from pathlib import Path
 
 import pytest
 
-from dynamo.duru_router.calibration.measure import load, measure
-from dynamo.duru_router.calibration.plan import METRIC, design
+from dynamo.duru_router.calibration import measure as measurement
+from dynamo.duru_router.calibration.measure import decode_window, load, measure
+from dynamo.duru_router.calibration.plan import METRIC, Plan, atomic_json, design
 from dynamo.duru_router.calibration.predict import predict, predict_prefill_table
 from dynamo.duru_router.scoring import LiveU
 
@@ -25,12 +28,12 @@ def test_graph_neighbors_and_eager_transition():
         prefill_graphs=True,
     )
     for boundary in (64, 128, 256):
-        assert {boundary - 1, boundary, boundary + 1} <= set(plan["P"])
-    assert plan["P_discontinuities"] == [64, 128, 256]
-    assert all((p + d + 1 <= plan["cap"] for p in plan["P"] for d in plan["D"]))
-    assert all((d % 64 == 0 for d in plan["D"]))
-    assert all((case["split"] == "train" for case in plan["cases"]))
-    assert "validation" not in plan
+        assert {boundary - 1, boundary, boundary + 1} <= set(plan.P)
+    assert plan.P_discontinuities == [64, 128, 256]
+    assert all((p + d + 1 <= plan.cap for p in plan.P for d in plan.D))
+    assert all((d % 64 == 0 for d in plan.D))
+    assert all((case["split"] == "train" for case in plan.cases))
+    assert "validation" not in plan.to_dict()
 
 
 def test_decode_only_graphs_do_not_create_prefill_boundaries():
@@ -38,10 +41,36 @@ def test_decode_only_graphs_do_not_create_prefill_boundaries():
         32768, 64, max_prefill=1024, capture_sizes=[73, 149], prefill_graphs=True
     )
     decode_only = design(32768, 64, max_prefill=1024, capture_sizes=[73, 149])
-    assert decode_only["P_discontinuities"] == []
-    assert graph["K"] == decode_only["K"]
+    assert decode_only.P_discontinuities == []
+    assert graph.K == decode_only.K
     with pytest.raises(ValueError):
         design(32768, 64, prefill_graphs=True)
+
+
+def test_plan_json_round_trip_preserves_saved_fields(tmp_path):
+    plan = design(32768, 64, max_prefill=1024, capture_sizes=[64, 128])
+    path = tmp_path / "plan.json"
+    atomic_json(path, plan.to_dict())
+    saved = json.loads(path.read_text())
+    assert set(saved) == {
+        "schema_version",
+        "timing_metric",
+        "P",
+        "D",
+        "K",
+        "P_discontinuities",
+        "cases",
+        "cap",
+        "alignment",
+        "max_prefill",
+        "repeats",
+        "warmups",
+        "decode_tokens",
+        "decode_warmup_tokens",
+        "capture_sizes",
+        "prefill_graphs",
+    }
+    assert Plan.from_dict(saved) == plan
 
 
 def test_live_predictor_keeps_graph_jump():
@@ -78,11 +107,111 @@ def test_lookahead_uses_calibrated_chunk_budget():
     assert [row[1] for row in coordinates] == [4, 4, 2, 1, 1]
 
 
-def test_measure_resume_and_load_without_accuracy_gate(tmp_path):
+@pytest.mark.parametrize(
+    "k, expected, outside",
+    [
+        (2, 2 / 44.5, True),
+        (43.5, 43.5 / 44.5, True),
+        (44.5, 1, False),
+        (45, 1.5, False),
+        (46.5, 3, True),
+    ],
+)
+def test_decode_prediction_origin_fallback(k, expected, outside):
+    table = dict(grid=[dict(K=44.5, wall_ms=1), dict(K=45.5, wall_ms=2)])
+    value, actual_outside = predict(table, dict(phase="decode", k=k))
+    assert value == pytest.approx(expected)
+    assert actual_outside is outside
+
+
+@pytest.mark.parametrize(
+    "costs, k, expected",
+    [([2, 1], 48, 1), ([1e308, 1.1e308], 1, 1e308 / 45)],
+)
+def test_decode_fallback_provides_live_cost(costs, k, expected):
+    table = dict(grid=[dict(K=k, wall_ms=ms) for k, ms in zip((45, 46), costs)])
+    value, outside = predict(table, dict(phase="decode", k=k))
+    assert value == pytest.approx(expected)
+    assert outside
+    book = LiveU(1, dict(max_prefill=4, decode=table))
+    assert book.cost("decode", 1, k - 1, k) == pytest.approx(expected / 1000)
+    assert book.extrapolated_cost_evaluations == 1
+
+
+@pytest.mark.parametrize(
+    "axis, coordinate, expected, outside",
+    [
+        ("p", 2, 1, True),
+        ("d", 2, 1, True),
+        ("p", 44.5, 1.5, False),
+        ("d", 44.5, 1.5, False),
+        ("p", 46, 3, True),
+        ("d", 46, 3, True),
+    ],
+)
+def test_prefill_prediction_boundary_fallback(axis, coordinate, expected, outside):
+    if axis == "p":
+        table = dict(P=[44, 45], D=[0, 1], wall_ms=[[1, 1], [2, 2]])
+    else:
+        table = dict(P=[1, 2], D=[44, 45], wall_ms=[[1, 2], [1, 2]])
+    step = dict(phase="prefill", p=1, d=0)
+    step[axis] = coordinate
+    value, actual_outside = predict(table, step)
+    assert value == pytest.approx(expected)
+    assert actual_outside is outside
+
+
+@pytest.mark.parametrize("d, expected", [(0, 1), (500, 2), (1000, 3), (2000, 3)])
+def test_prefill_boundary_fallback_retains_cached_context(d, expected):
+    table = dict(P=[8, 9], D=[0, 1000], wall_ms=[[1, 3], [2, 4]])
+    value, outside = predict(table, dict(phase="prefill", p=2, d=d))
+    assert value == pytest.approx(expected)
+    assert outside
+    book = LiveU(1, dict(max_prefill=9, prefill=table))
+    assert book.cost("prefill", 2, d, d + 2) == pytest.approx(expected / 1000)
+
+
+@pytest.mark.parametrize(
+    "p, d, expected",
+    [(1, 0, 1), (32, 0, 3), (32, 20, 4.5)],
+)
+def test_prefill_boundary_fallback_keeps_execution_regimes(p, d, expected):
+    table = dict(
+        P=[4, 8, 16, 24],
+        D=[0, 10],
+        P_discontinuities=[8],
+        wall_ms=[[1, 2], [3, 4], [10, 11], [3, 4.5]],
+    )
+    value, outside = predict(table, dict(phase="prefill", p=p, d=d))
+    assert value == pytest.approx(expected)
+    assert outside
+
+
+def test_prefill_boundary_fallback_handles_nonfinite_extrapolation():
+    table = dict(P=[45, 46], D=[0, 1], wall_ms=[[1e308, 1e308], [1.1e308, 1.1e308]])
+    value, outside = predict(table, dict(phase="prefill", p=1, d=0))
+    assert value == pytest.approx(1e308)
+    assert outside
+
+
+@pytest.mark.parametrize("p, expected", [(8, 1), (8.5, 1.5)])
+def test_prefill_boundary_fallback_above_cached_context_grid(p, expected):
+    table = dict(P=[8, 9], D=[1000, 1100], wall_ms=[[2, 1], [3, 2]])
+    value, outside = predict(table, dict(phase="prefill", p=p, d=1300))
+    assert value == pytest.approx(expected)
+    assert outside
+
+
+@pytest.fixture
+def calibration_run(tmp_path):
     root = tmp_path
     ledger = root / "accepted.jsonl"
     ledger.touch()
     plan = dict(
+        schema_version=1,
+        alignment=16,
+        capture_sizes=[],
+        prefill_graphs=False,
         timing_metric=METRIC,
         cap=1024,
         max_prefill=4,
@@ -139,6 +268,12 @@ def test_measure_resume_and_load_without_accuracy_gate(tmp_path):
         ledger=ledger,
         reset=primed.clear,
     )
+    return run, plan, contract
+
+
+def test_measure_resume_and_load_without_accuracy_gate(tmp_path, calibration_run):
+    root = tmp_path
+    run, plan, contract = calibration_run
     result = run(plan)
     assert "quality_passed" not in result
     assert "validation" not in result
@@ -167,3 +302,292 @@ def test_measure_resume_and_load_without_accuracy_gate(tmp_path):
     (root / "bad.json").write_text(json.dumps(result))
     with pytest.raises(ValueError):
         load(root / "bad.json", contract)
+
+
+def test_decode_measurement_excludes_scheduler_gaps_and_window_edges(
+    tmp_path, calibration_run
+):
+    run, plan, _ = calibration_run
+    submit = run.keywords["submit"]
+    ledger = run.keywords["ledger"]
+
+    def submit_with_gap(prompt, count, rid, salt):
+        response = submit(prompt, count, rid, salt)
+        if count == plan["decode_tokens"]:
+            lines = ledger.read_text().splitlines()
+            record = json.loads(lines[-1])
+            now = record["steps"][0]["scheduled_at"]
+            for n, step in enumerate(record["steps"], 1):
+                if n == 12:
+                    now += 0.060
+                step["scheduled_at"] = now
+                # The first usable observation is the window's left boundary;
+                # its own work, startup work, and the final output stay excluded.
+                now += 0.100 if n <= 9 or n == count else 0.001
+                step["end"] = now
+            lines[-1] = json.dumps(record)
+            ledger.write_text("\n".join(lines) + "\n")
+        return response
+
+    result = run(plan, submit=submit_with_gap)
+    assert [row["wall_ms"] for row in result["decode"]["grid"]] == pytest.approx([1, 1])
+    assert [row["K"] for row in result["decode"]["grid"]] == [43.5, 139.5]
+    samples = [
+        json.loads(line)["sample"]
+        for line in (tmp_path / "cal/samples.jsonl").read_text().splitlines()
+        if json.loads(line)["case"]["phase"] == "decode"
+    ]
+    assert all(sample["steps"] == 6 for sample in samples)
+    assert [sample["elapsed_s"] for sample in samples] == pytest.approx([0.006] * 4)
+
+
+def test_decode_window_uses_token_advances_for_coalesced_intervals():
+    events = [
+        (1, 0.0, 0.1),
+        (3, 0.1, 0.2),
+        (5, 0.260, 0.262),
+        (7, 0.300, 0.302),
+        (9, 0.302, 0.304),
+        (10, 0.304, 0.404),
+    ]
+    sample = decode_window(events, 32, 2, 10)
+    assert sample["wall_ms"] == pytest.approx(1)
+    assert sample["elapsed_s"] == pytest.approx(0.006)
+    assert sample["K"] == 37.5
+    assert (sample["first_count"], sample["last_count"], sample["steps"]) == (3, 9, 6)
+    with pytest.raises(ValueError, match="required output length"):
+        decode_window(events[:-1], 32, 2, 10)
+
+
+@pytest.mark.parametrize("duration", [0, -0.001, float("nan"), float("inf")])
+def test_decode_window_rejects_invalid_service_intervals(duration):
+    events = [(n, n * 0.01, n * 0.01 + 0.001) for n in range(1, 17)]
+    events[11] = (12, 0.12, 0.12 + duration)
+    with pytest.raises(
+        ValueError, match="service intervals must be finite and positive"
+    ):
+        decode_window(events, 32, 8, 16)
+
+
+def test_resume_rejects_checkpoint_using_previous_decode_timing(
+    tmp_path, calibration_run
+):
+    run, plan, contract = calibration_run
+    run(plan)
+    checkpoint_path = tmp_path / "cal/checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    old_identity = dict(contract=contract, plan=plan, vocab_size=32000)
+    checkpoint["fingerprint"] = hashlib.sha256(
+        json.dumps(old_identity, sort_keys=True).encode()
+    ).hexdigest()
+    atomic_json(checkpoint_path, checkpoint)
+    with pytest.raises(ValueError, match="changed measurement method"):
+        run(plan, resume=True)
+    assert json.loads(checkpoint_path.read_text()) == checkpoint
+
+
+@pytest.mark.parametrize("filename", ["plan.json", "contract.json", "checkpoint.json"])
+def test_measure_initialization_failure_can_resume(
+    tmp_path, calibration_run, monkeypatch, filename
+):
+    run, plan, _ = calibration_run
+
+    def fail_initial_write(path, value):
+        if path.name == filename:
+            raise OSError("initial write interrupted")
+        atomic_json(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(measurement, "atomic_json", fail_initial_write)
+        with pytest.raises(OSError, match="initial write interrupted"):
+            run(plan)
+    assert not (tmp_path / "cal").exists()
+    assert not list(tmp_path.glob(".cal-*"))
+    result = run(plan, resume=True)
+    assert result["prefill"]["wall_ms"][0][0] > 0
+
+
+@pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf")])
+def test_measure_rejects_invalid_timing_before_saving(
+    tmp_path, calibration_run, duration
+):
+    run, plan, _ = calibration_run
+    submit = run.keywords["submit"]
+    ledger = run.keywords["ledger"]
+
+    def invalid_timing(prompt, count, rid, salt):
+        response = submit(prompt, count, rid, salt)
+        if len(prompt) == 4:
+            lines = ledger.read_text().splitlines()
+            record = json.loads(lines[-1])
+            step = record["steps"][0]
+            step["end"] = step["scheduled_at"] + duration
+            lines[-1] = json.dumps(record)
+            ledger.write_text("\n".join(lines) + "\n")
+        return response
+
+    with pytest.raises(ValueError, match="timing must be finite and positive"):
+        run(plan, submit=invalid_timing)
+    checkpoint = json.loads((tmp_path / "cal/checkpoint.json").read_text())
+    assert [row["P"] for row in checkpoint["points"]] == [1]
+    samples = [
+        json.loads(line)
+        for line in (tmp_path / "cal/samples.jsonl").read_text().splitlines()
+    ]
+    assert all(row["case"]["P"] == 1 for row in samples)
+    result = run(plan, resume=True)
+    assert result["prefill"]["wall_ms"][1][0] > 0
+
+
+@pytest.mark.parametrize("invalid", [0, -1, float("nan"), float("inf"), None, True])
+@pytest.mark.parametrize(
+    "phase, field", [("prefill", "wall_ms"), ("decode", "measured_K")]
+)
+def test_resume_remeasures_only_invalid_saved_points(
+    tmp_path, calibration_run, phase, field, invalid
+):
+    run, plan, contract = calibration_run
+    original = run(plan)
+    checkpoint_path = tmp_path / "cal/checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    point = next(row for row in checkpoint["points"] if row["phase"] == phase)
+    bad_case = {k: v for k, v in point.items() if k not in ("wall_ms", "measured_K")}
+    kept = [dict(row) for row in checkpoint["points"] if row is not point]
+    point[field] = invalid
+    checkpoint_path.write_text(json.dumps(checkpoint))
+    submit = run.keywords["submit"]
+    probes = []
+
+    def tracked_submit(prompt, count, rid, salt):
+        probes.append((len(prompt), count))
+        return submit(prompt, count, rid, salt)
+
+    repaired = run(plan, resume=True, submit=tracked_submit)
+    expected_probe = (
+        (bad_case["P"], 1)
+        if phase == "prefill"
+        else (bad_case["K"], plan["decode_tokens"])
+    )
+    assert probes == [expected_probe] * (plan["warmups"] + plan["repeats"])
+    saved = json.loads(checkpoint_path.read_text())["points"]
+    assert len(saved) == len(plan["cases"])
+    assert saved[:-1] == kept
+    for actual, expected in zip(
+        repaired["prefill"]["wall_ms"], original["prefill"]["wall_ms"]
+    ):
+        assert actual == pytest.approx(expected)
+    assert [row["wall_ms"] for row in repaired["decode"]["grid"]] == pytest.approx(
+        [row["wall_ms"] for row in original["decode"]["grid"]]
+    )
+    assert load(tmp_path / "cal/calibration.json", contract) == repaired
+
+
+def test_measure_checkpoint_failure_is_not_retried(
+    tmp_path, calibration_run, monkeypatch
+):
+    run, plan, _ = calibration_run
+    attempts = 0
+
+    def fail_completed_checkpoint(path, value):
+        nonlocal attempts
+        if path.name == "checkpoint.json" and value["points"]:
+            attempts += 1
+            raise OSError("checkpoint disk failure")
+        atomic_json(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(measurement, "atomic_json", fail_completed_checkpoint)
+        with pytest.raises(OSError, match="checkpoint disk failure"):
+            run(plan)
+    assert attempts == 1
+    checkpoint = json.loads((tmp_path / "cal/checkpoint.json").read_text())
+    assert checkpoint["points"] == []
+    assert run(plan, resume=True)["decode"]["grid"]
+
+
+def test_resume_skips_completed_point_after_partial_run(tmp_path, calibration_run):
+    run, plan, contract = calibration_run
+    original_submit = run.keywords["submit"]
+
+    def fail_second_point(prompt, count, rid, salt):
+        if len(prompt) == 4 and salt.endswith("-D0"):
+            raise RuntimeError("second point failed")
+        return original_submit(prompt, count, rid, salt)
+
+    with pytest.raises(RuntimeError, match="second point failed"):
+        run(plan, submit=fail_second_point)
+    checkpoint = tmp_path / "cal/checkpoint.json"
+    saved = json.loads(checkpoint.read_text())["points"]
+    assert len(saved) == 1
+    assert (saved[0]["phase"], saved[0]["P"], saved[0]["D"]) == ("prefill", 1, 0)
+    resumed = []
+
+    def record_submit(prompt, count, rid, salt):
+        resumed.append((len(prompt), count, salt.rsplit("-", 1)[-1]))
+        return original_submit(prompt, count, rid, salt)
+
+    artifact = run(Plan.from_dict(plan), submit=record_submit, resume=True)
+    assert (1, 1, "D0") not in resumed
+    assert (4, 1, "D0") in resumed
+    completed = json.loads(checkpoint.read_text())["points"]
+    assert completed[:1] == saved
+    assert len(completed) == len(plan["cases"])
+    assert load(tmp_path / "cal/calibration.json", contract) == artifact
+
+
+def test_measure_probe_error_does_not_trigger_checkpoint_write(
+    tmp_path, calibration_run, monkeypatch
+):
+    run, plan, _ = calibration_run
+    initial_written = False
+
+    def save_initial_only(path, value):
+        nonlocal initial_written
+        if initial_written:
+            raise OSError("secondary checkpoint failure")
+        atomic_json(path, value)
+        if path.name == "checkpoint.json":
+            initial_written = True
+
+    def fail_probe(*args):
+        raise RuntimeError("original probe failure")
+
+    monkeypatch.setattr(measurement, "atomic_json", save_initial_only)
+    with pytest.raises(RuntimeError, match="original probe failure"):
+        run(plan, submit=fail_probe)
+    assert json.loads((tmp_path / "cal/checkpoint.json").read_text())["points"] == []
+
+
+def test_atomic_json_interleaved_writes_use_distinct_temporaries(tmp_path, monkeypatch):
+    destination = tmp_path / "checkpoint.json"
+    unrelated = tmp_path / "checkpoint.json.tmp"
+    unrelated.write_text("unrelated")
+    replace = Path.replace
+    temporaries = []
+
+    def interleaved_replace(source, target):
+        temporaries.append(source)
+        if len(temporaries) == 1:
+            atomic_json(destination, {"writer": "second"})
+        return replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", interleaved_replace)
+    atomic_json(destination, {"writer": "first"})
+    assert len(set(temporaries)) == 2
+    assert json.loads(destination.read_text()) == {"writer": "first"}
+    assert unrelated.read_text() == "unrelated"
+    assert set(tmp_path.iterdir()) == {destination, unrelated}
+
+
+def test_atomic_json_replace_failure_preserves_previous_file(tmp_path, monkeypatch):
+    destination = tmp_path / "checkpoint.json"
+    atomic_json(destination, {"complete": 1})
+
+    def fail_replace(source, target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_json(destination, {"complete": 2})
+    assert json.loads(destination.read_text()) == {"complete": 1}
+    assert list(tmp_path.iterdir()) == [destination]

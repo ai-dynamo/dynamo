@@ -23,7 +23,13 @@ import uvloop
 from dynamo.common.utils.token_ids import token_ids_len
 from dynamo.duru_router.args import parse_args
 from dynamo.duru_router.router import DuruScheduler
-from dynamo.duru_router.scoring import Ingress, RouterAccounting, score_channel
+from dynamo.duru_router.scoring import (
+    AccountingError,
+    DispatchAckTimeout,
+    Ingress,
+    RouterAccounting,
+    score_channel,
+)
 from dynamo.llm import HttpError
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.thunderagent_router.__main__ import (
@@ -38,16 +44,17 @@ logger = logging.getLogger(__name__)
 
 
 class AccountingUnavailable(HttpError):
-    """Reject generation while the router cannot calculate valid scores."""
+    """Reject new generation while accounting or delivery health blocks admission."""
 
-    def __init__(self):
+    def __init__(self, reason=None):
         super().__init__(
-            503, "Duru accounting is unavailable; new admissions are stopped"
+            503, reason or "Duru accounting is unavailable; new admissions are stopped"
         )
 
 
 @dataclass(eq=False)
 class Request:
+    context: object | None = None
     stream: weakref.ReferenceType | None = None
     task: asyncio.Task | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -62,6 +69,7 @@ class Session:
     requests: set[Request] = field(default_factory=set)
     closing: bool = False
     ended: bool = False
+    termination: asyncio.Task | None = None
 
 
 class DuruRouterHandler(ThunderAgentRouterHandler):
@@ -76,11 +84,24 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         self.failure = None
         self.stopping = False
 
-    def fail(self, error):
-        if self.failure is not None:
+    def fail(self, error, *, context=None):
+        if self.failure is not None and not (
+            isinstance(self.failure, DispatchAckTimeout)
+            and not isinstance(error, DispatchAckTimeout)
+        ):
             return
         self.failure = error
-        logger.error("Duru accounting failed; rejecting new admissions", exc_info=error)
+        request_id = context.id() if context is not None else None
+        if isinstance(error, DispatchAckTimeout):
+            logger.error(
+                "Duru admission stopped (request_id=%s): %s", request_id, error
+            )
+        else:
+            logger.error(
+                "Duru accounting failed; rejecting new admissions (request_id=%s)",
+                request_id,
+                exc_info=error,
+            )
         if self._scheduler is not None:
             task = self._scheduler._scheduler_task
             if task is not None:
@@ -94,29 +115,46 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
             ):
                 request.task.cancel()
 
-    def check(self):
+    def check(self, *, context=None):
         if self.stopping:
             raise RuntimeError("Duru router is stopping")
         if self.failure is not None:
-            raise AccountingUnavailable() from self.failure
+            reason = (
+                str(self.failure)
+                if isinstance(self.failure, DispatchAckTimeout)
+                else None
+            )
+            raise AccountingUnavailable(reason) from self.failure
         try:
             self.accounting.check()
-        except Exception as error:
-            self.fail(error)
-            raise AccountingUnavailable() from error
+        except AccountingError as error:
+            self.fail(error, context=context)
+            reason = str(error) if isinstance(error, DispatchAckTimeout) else None
+            raise AccountingUnavailable(reason) from error
 
-    def emit(self, event, **fields):
+    def can_record(self):
+        """An admission timeout blocks new work while accounting keeps draining."""
+        return self.failure is None or isinstance(self.failure, DispatchAckTimeout)
+
+    def emit(self, event, *, context=None, **fields):
         try:
-            self.ingress.emit(event, time.time(), **fields)
+            self.ingress.emit(event, time.monotonic(), **fields)
         except Exception as error:
-            self.fail(error)
+            self.fail(error, context=context)
             raise AccountingUnavailable() from error
 
     async def monitor(self):
         try:
             while not self.stopping:
-                self.check()
-                if self._scheduler is not None:
+                try:
+                    self.check()
+                except AccountingUnavailable:
+                    if not isinstance(self.failure, DispatchAckTimeout):
+                        raise
+                    # Keep the ingress watermark moving after admissions stop,
+                    # so late work and terminal acknowledgements can be consumed.
+                    self.accounting.check(admissions=False)
+                if self.failure is None and self._scheduler is not None:
                     task = self._scheduler._scheduler_task
                     if task is not None and task.done():
                         raise RuntimeError("Duru admission scheduler stopped")
@@ -154,23 +192,34 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         self.roots.setdefault(root, set()).add(program_id)
         return current
 
-    async def end_session(self, program_id):
+    async def end_session(self, program_id, *, context=None):
         session = self.sessions.get(program_id)
         if session is None or session.ended:
             return
-        if session.closing:
-            raise ValueError("Session termination is already in progress")
-        session.closing = True
+        if session.termination is None:
+            session.closing = True
+            session.termination = asyncio.create_task(
+                self._end_session(program_id, session, context=context)
+            )
+        # A disconnected final caller must not cancel the session's cleanup.
+        await asyncio.shield(session.termination)
+
+    async def _end_session(self, program_id, session, *, context=None):
         await self.cancel_requests(list(session.requests))
         await self._scheduler.end_program(program_id)
         session.ended = True
         members = self.roots[session.root]
         group_ended = all(self.sessions[pid].ended for pid in members)
         try:
-            if self.failure is None:
-                self.emit("agent_end", program_id=program_id, root=session.root)
+            if self.can_record():
+                self.emit(
+                    "agent_end",
+                    context=context,
+                    program_id=program_id,
+                    root=session.root,
+                )
                 if group_ended:
-                    self.emit("agent_group_end", root=session.root)
+                    self.emit("agent_group_end", context=context, root=session.root)
         finally:
             if group_ended:
                 for pid in members:
@@ -178,11 +227,26 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
                 del self.roots[session.root]
 
     async def _before_dispatch(self, request):
-        self.check()
         identity = request["extra_args"]["sampling_options"]["vllm_xargs"]
         request_id = identity["duru_request_id"]
-        self.emit("request_dispatched", request_id=request_id)
-        self.requests[request_id].dispatched = True
+        state = self.requests[request_id]
+        self.check(context=state.context)
+        self.emit("request_dispatched", context=state.context, request_id=request_id)
+        state.dispatched = True
+
+    def _generate_from_request(self, request, *, context=None):
+        try:
+            return super()._generate_from_request(request, context=context)
+        except Exception:
+            # Only synchronous rejection proves no dispatch was started. Errors
+            # from awaiting or consuming the returned stream retain the barrier.
+            identity = request["extra_args"]["sampling_options"]["vllm_xargs"]
+            request_id = identity["duru_request_id"]
+            self.requests[request_id].dispatched = False
+            self.emit(
+                "request_dispatch_rejected", context=context, request_id=request_id
+            )
+            raise
 
     async def cancel_requests(self, requests):
         tasks = []
@@ -199,7 +263,7 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         await asyncio.gather(*(request.done.wait() for request in requests))
 
     def generate(self, request, context=None):
-        state = Request()
+        state = Request(context=context)
         stream = self._generate(request, context, state)
         # Do not keep abandoned iterators alive and prevent their finalizers.
         state.stream = weakref.ref(stream)
@@ -214,9 +278,9 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
                 raise ValueError("Session-final requires a session ID")
             self._stat_requests_total += 1
             self._stat_session_final_requests += 1
-            await self.end_session(program_id)
+            await self.end_session(program_id, context=context)
             return
-        self.check()
+        self.check(context=context)
         tokens = token_ids_len(request.get("token_ids"))
         if tokens <= 0:
             raise ValueError("Duru requires a nonempty token prompt")
@@ -248,6 +312,7 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         try:
             self.emit(
                 "request_arrived",
+                context=context,
                 request_id=request_id,
                 program_id=program_id,
                 root=session.root,
@@ -269,23 +334,28 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         except (asyncio.CancelledError, GeneratorExit):
             outcome = "request_cancelled"
             if self.failure is not None and not state.dispatched:
-                raise AccountingUnavailable() from self.failure
+                reason = (
+                    str(self.failure)
+                    if isinstance(self.failure, DispatchAckTimeout)
+                    else None
+                )
+                raise AccountingUnavailable(reason) from self.failure
             raise
         except Exception:
             outcome = "request_failed"
             if not state.dispatched:
-                self.check()
+                self.check(context=context)
             raise
         finally:
             session.requests.discard(state)
             self.requests.pop(request_id, None)
             try:
                 try:
-                    if self.failure is None:
-                        self.emit(outcome, request_id=request_id)
+                    if self.can_record():
+                        self.emit(outcome, context=context, request_id=request_id)
                 finally:
                     if anonymous:
-                        await self.end_session(program_id)
+                        await self.end_session(program_id, context=context)
             except AccountingUnavailable:
                 # A reporting failure must not replace a dispatched request's
                 # successful result, engine error, or client cancellation.
@@ -299,7 +369,7 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
         try:
             self.check()
             snapshot = self.accounting.reader.refresh()
-        except Exception as error:
+        except (AccountingUnavailable, AccountingError) as error:
             yield {
                 "status": "unhealthy",
                 "component": "duru_router",
@@ -315,6 +385,13 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
 
     async def shutdown(self):
         self.stopping = True
+        await asyncio.gather(
+            *(
+                asyncio.shield(session.termination)
+                for session in self.sessions.values()
+                if session.termination is not None
+            )
+        )
         await self.cancel_requests(
             [
                 request
@@ -363,8 +440,9 @@ async def worker(runtime: DistributedRuntime) -> None:
     os.environ["DURU_SCORES"] = settings["scores"]
     score_channel()
     ingress = Ingress(ingress_path.parent, in_process=True)
-    accounting = RouterAccounting(accounting_config, ingress=ingress)
+    accounting = None
     try:
+        accounting = RouterAccounting(accounting_config, ingress=ingress)
         accounting.start()
         handler = DuruRouterHandler(
             runtime, config, accounting=accounting, ingress=ingress
@@ -374,7 +452,8 @@ async def worker(runtime: DistributedRuntime) -> None:
         try:
             await asyncio.to_thread(ingress.close)
         finally:
-            await asyncio.to_thread(accounting.close)
+            if accounting is not None:
+                await asyncio.to_thread(accounting.close)
 
 
 def main():

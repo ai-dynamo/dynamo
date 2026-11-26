@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
+from dynamo.duru_router import events, scoring
+from dynamo.duru_router.transport import InProcessChannel
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
@@ -58,7 +61,21 @@ class NativeScheduler:
 
     def update_from_output(self, scheduler_output, runner_output):
         self.output_calls += 1
+        rejected = set()
+        connector = runner_output.kv_connector_output
+        if connector is not None:
+            if connector.failed_recving:
+                rejected.update(self._handle_failed_recving(connector.failed_recving))
+            if connector.invalid_block_ids:
+                rejected.update(
+                    self._handle_invalid_blocks(
+                        connector.invalid_block_ids,
+                        scheduler_output.num_scheduled_tokens,
+                    )
+                )
         for request_id, count in runner_output.generated.items():
+            if request_id in rejected:
+                continue
             request = self.requests.get(request_id)
             if request is None or request.is_finished():
                 continue
@@ -137,6 +154,7 @@ def worker(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setenv("DURU_SCORES", "unused")
+    monkeypatch.delenv("DURU_ENABLE_SCORING", raising=False)
     monkeypatch.setenv("DURU_WORK_DIR", "unused")
     monkeypatch.setattr(module, "CompactFeed", Feed)
     return module
@@ -182,19 +200,151 @@ def test_queue_order_and_allocated_identity(worker):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail):
-    ready, missing, holder = [Request(name) for name in ("ready", "missing", "holder")]
-    scheduler.waiting.extend([ready, missing])
+@pytest.mark.parametrize("holder_row", [None, {"score": None}, {"score": 1}])
+def test_native_queues_and_missing_scores_restored(
+    scheduler, monkeypatch, fail, holder_row
+):
+    ready, missing, another, holder = [
+        Request(name) for name in ("ready", "missing", "another", "holder")
+    ]
+    scheduler.waiting.extend([ready, missing, another])
     scheduler.kv_holding_waiting.append(holder)
-    snapshot = {"requests": {"ready": {"score": 3}, "holder": {"score": 1}}}
+    snapshot = {"requests": {"ready": {"score": 3}}}
+    if holder_row is not None:
+        snapshot["requests"]["holder"] = holder_row
     monkeypatch.setattr(scheduler.u_reader, "refresh", lambda **kw: snapshot)
     scheduler.failure = RuntimeError("native failure") if fail else None
     with pytest.raises(RuntimeError, match="native failure") if fail else nullcontext():
         scheduler.schedule()
     assert scheduler.selected_queues == ([ready], [holder])
-    assert list(scheduler.waiting) == [missing, ready]
+    assert list(scheduler.waiting) == [missing, another, ready]
     assert list(scheduler.kv_holding_waiting) == [holder]
     assert scheduler.u_reader.pinned is None
+
+
+def test_fresh_scores_rank_kv_holders_without_hiding_unscored_holders(
+    scheduler, monkeypatch
+):
+    missing, first, second, scored = [
+        Request(name) for name in ("missing", "first", "second", "scored")
+    ]
+    first.status.name = "PREEMPTED"
+    scheduler.waiting.append(missing)
+    scheduler.kv_holding_waiting.extend([first, second, scored])
+    now = 100.0
+    monkeypatch.setattr(scoring.time, "monotonic", lambda: now)
+    snapshot = dict(observation_time=now, requests={"scored": {"score": 2}})
+    scheduler.u_reader = scoring.Reader(snapshot_source=lambda: snapshot)
+
+    def native_schedule(self):
+        assert not self.waiting
+        assert len(self.kv_holding_waiting) == 3
+        assert self.u_reader.pinned is snapshot
+        return [self.kv_holding_waiting.pop_request() for _ in range(3)]
+
+    monkeypatch.setattr(NativeScheduler, "schedule", native_schedule)
+    assert scheduler.schedule() == [scored, first, second]
+    assert list(scheduler.waiting) == [missing]
+    assert not scheduler.kv_holding_waiting
+    assert scheduler.u_reader.pinned is None
+
+
+@pytest.mark.parametrize("availability", ["missing", "stale", "future"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_unavailable_scores_keep_preempted_requests_runnable(
+    scheduler, monkeypatch, availability, fail
+):
+    now = 100.0
+    monkeypatch.setattr(scoring.time, "monotonic", lambda: now)
+    first, second, holder = [Request(name) for name in ("first", "second", "holder")]
+    first.status.name = holder.status.name = "PREEMPTED"
+    scheduler.waiting.extend([first, second])
+    scheduler.kv_holding_waiting.append(holder)
+    fresh = dict(
+        observation_time=now,
+        requests={
+            "first": {"score": 1},
+            "second": {"score": 10},
+            "holder": {"score": 2},
+        },
+    )
+    snapshot = (
+        {}
+        if availability == "missing"
+        else dict(fresh, observation_time=now + (-3 if availability == "stale" else 1))
+    )
+    scheduler.u_reader = scoring.Reader(snapshot_source=lambda: snapshot)
+    failure = RuntimeError("native allocation failure")
+
+    def native_schedule(self):
+        nonlocal snapshot
+        # Publication mid-pass must not change the pinned fallback order.
+        snapshot = fresh
+        assert self.u_reader.refresh() == {}
+        assert self.waiting.peek_request() is first
+        assert self.kv_holding_waiting.peek_request() is holder
+        if fail:
+            raise failure
+        return self.waiting.pop_request(), self.kv_holding_waiting.pop_request()
+
+    with monkeypatch.context() as native:
+        native.setattr(NativeScheduler, "schedule", native_schedule)
+        if fail:
+            with pytest.raises(RuntimeError) as caught:
+                scheduler.schedule()
+            assert caught.value is failure
+        else:
+            assert scheduler.schedule() == (first, holder)
+    assert scheduler.u_reader.pinned is None
+    assert scheduler.waiting.peek_request() is second
+
+
+def test_calibration_without_scores_keeps_native_scheduling_and_work_records(
+    worker, monkeypatch
+):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "0")
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+
+    def unexpected_reader():
+        pytest.fail("Calibration must not create a score reader")
+
+    monkeypatch.setattr(worker, "Reader", unexpected_reader)
+    scheduler = worker.DuruScheduler()
+    probe = Request(extra={"duru_request_id": "duru-calibration-probe"})
+    holder = Request("holder")
+    try:
+        scheduler.add_request(probe)
+        scheduler.waiting.append(probe)
+        scheduler.kv_holding_waiting.append(holder)
+        assert type(scheduler.waiting) is NativeQueue
+        assert type(scheduler.kv_holding_waiting) is NativeQueue
+        assert scheduler.schedule() == ([probe], [holder])
+        batch = scheduled(count=8)
+        scheduler._update_after_schedule(batch)
+        scheduler.update_from_output(batch, output(count=1))
+        event, fields = scheduler.compact_feed.events[0]
+        assert event == "accepted_output"
+        assert fields["steps"][0]["client_request_id"] == "duru-calibration-probe"
+        assert fields["steps"][0]["generated_tokens"] == 1
+    finally:
+        scheduler.shutdown()
+    assert scheduler.stopped
+    assert scheduler.compact_feed.closed
+
+
+@pytest.mark.parametrize("setting", [None, "1"])
+def test_serving_still_requires_score_channel(worker, monkeypatch, setting):
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+    if setting is not None:
+        monkeypatch.setenv("DURU_ENABLE_SCORING", setting)
+    with pytest.raises(ValueError, match="DURU_SCORES"):
+        worker.DuruScheduler()
+
+
+def test_invalid_scoring_switch_is_rejected(worker, monkeypatch):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "invalid")
+    with pytest.raises(ValueError, match="DURU_ENABLE_SCORING"):
+        worker.DuruScheduler()
 
 
 def test_identity_and_priority_exclude_running_requests(scheduler, monkeypatch):
@@ -281,6 +431,45 @@ def test_output_acceptance(scheduler, batch, state):
     assert step["generated_tokens"] == (1 if state == "deliver_stale" else 0)
 
 
+@pytest.mark.parametrize("wall_jump", [-60, 60])
+def test_accounting_progress_survives_wall_clock_jump(worker, monkeypatch, wall_jump):
+    clock = SimpleNamespace(wall=1000.0, elapsed=100.0)
+    clock_api = SimpleNamespace(
+        time=lambda: clock.wall, monotonic=lambda: clock.elapsed
+    )
+    monkeypatch.setattr(worker, "time", clock_api)
+    monkeypatch.setattr(events, "time", clock_api)
+    channel = InProcessChannel()
+    monkeypatch.setattr(events, "open_feed", lambda *args, **kwargs: channel)
+    monkeypatch.setattr(worker, "CompactFeed", events.CompactFeed)
+    scheduler = worker.DuruScheduler()
+    reader = scoring.EventStreamReader("unused", receiver=channel)
+    try:
+        scheduler.add_request(Request(computed=8))
+        batch = scheduled()
+        scheduler._update_after_schedule(batch)
+        with scheduler.compact_feed.lock:
+            scheduler.compact_feed.emit("u_clock")
+            reader.read()
+            cutoff = reader.received_through
+            clock.wall += wall_jump
+            clock.elapsed += 0.25
+        scheduler.update_from_output(batch, output())
+        rows = reader.read()
+        step = next(row for row in rows if row["event"] == "accepted_output")["steps"][
+            0
+        ]
+
+        assert step["scheduled_at"] == 100.0
+        assert cutoff == 100.0
+        assert step["end"] == 100.25
+        assert cutoff < step["end"] <= reader.received_through
+        assert all(row["time"] == 100.25 for row in rows)
+    finally:
+        scheduler.shutdown()
+        reader.close()
+
+
 def test_inflight_batches_retain_coordinates(scheduler, batch):
     second = scheduled()
     scheduler._update_after_schedule(second)
@@ -316,19 +505,78 @@ def test_unsupported_requests_fail_before_admission(scheduler, pooling):
     assert not scheduler.requests
 
 
-@pytest.mark.parametrize("failure", ["invalid_kv", "failed_transfer", "speculative"])
-def test_invalid_outputs_fail_before_native_acceptance(scheduler, batch, failure):
+def test_speculative_outputs_fail_before_native_acceptance(scheduler, batch):
     result = output()
-    result.kv_connector_output = SimpleNamespace(
-        invalid_block_ids={1} if failure == "invalid_kv" else set(),
-        failed_recving={"r"} if failure == "failed_transfer" else set(),
-    )
-    if failure == "speculative":
-        batch.scheduled_spec_decode_tokens = {"r": [2]}
+    batch.scheduled_spec_decode_tokens = {"r": [2]}
     with pytest.raises(ValueError):
         scheduler.update_from_output(batch, result)
     assert id(batch) in scheduler._pending_work
     assert scheduler.output_calls == 0
+
+
+@pytest.mark.parametrize("kind", ["invalid_blocks", "failed_recving", "both"])
+@pytest.mark.parametrize("reject_output", [False, True])
+def test_kv_recovery_preserves_native_skip_decision(
+    scheduler, monkeypatch, kind, reject_output
+):
+    affected, healthy = Request("r", computed=8), Request("healthy", computed=8)
+    scheduler.add_request(affected)
+    scheduler.add_request(healthy)
+    batch = scheduled()
+    batch.num_scheduled_tokens["healthy"] = 1
+    scheduler._update_after_schedule(batch)
+    calls = []
+
+    def recover(self, *args):
+        calls.append(args)
+        affected.num_computed_tokens = 0
+        return {"r"} if reject_output else set()
+
+    monkeypatch.setattr(
+        NativeScheduler, "_handle_failed_recving", recover, raising=False
+    )
+    monkeypatch.setattr(
+        NativeScheduler, "_handle_invalid_blocks", recover, raising=False
+    )
+    result = output()
+    result.generated["healthy"] = 1
+    result.kv_connector_output = SimpleNamespace(
+        invalid_block_ids={1} if kind != "failed_recving" else set(),
+        failed_recving={"r"} if kind != "invalid_blocks" else set(),
+    )
+    assert scheduler.update_from_output(batch, result) == "native-output"
+    assert len(calls) == (2 if kind == "both" else 1)
+    assert affected.num_computed_tokens == 0
+    assert affected.num_output_tokens == (0 if reject_output else 1)
+    assert healthy.num_output_tokens == 1
+    steps = scheduler.compact_feed.events[-1][1]["steps"]
+    assert [(step["accepted"], step["generated_tokens"]) for step in steps] == [
+        (not reject_output, 0 if reject_output else 1),
+        (True, 1),
+    ]
+    # A successfully recomputed next batch must not inherit the skip set.
+    retry = scheduled(count=8)
+    scheduler._update_after_schedule(retry)
+    scheduler.update_from_output(retry, output())
+    step = scheduler.compact_feed.events[-1][1]["steps"][0]
+    assert step["accepted"] and step["generated_tokens"] == 1
+
+
+def test_native_kv_recovery_error_is_preserved(scheduler, batch, monkeypatch):
+    failure = RuntimeError("unsupported native KV layout")
+
+    def fail(self, *args):
+        raise failure
+
+    monkeypatch.setattr(NativeScheduler, "_handle_invalid_blocks", fail, raising=False)
+    result = output()
+    result.kv_connector_output = SimpleNamespace(
+        invalid_block_ids={1}, failed_recving=set()
+    )
+    with pytest.raises(RuntimeError) as caught:
+        scheduler.update_from_output(batch, result)
+    assert caught.value is failure
+    assert scheduler.compact_feed.events == []
 
 
 def test_native_failure_emits_no_work_and_closes_feed(scheduler, batch):

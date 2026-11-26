@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,11 +17,17 @@ from dynamo.duru_router import router as router_module
 from dynamo.duru_router.admission import Candidate, DuruPolicy
 from dynamo.duru_router.router import DuruScheduler, ThunderAgentConfig
 from dynamo.duru_router.scoring import Reader
+from dynamo.thunderagent_router import router as native_router
 from dynamo.thunderagent_router.policy import ResumeChoice
 from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
 from dynamo.thunderagent_router.tests.test_router import FakeCapacity
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(10),
+]
 
 
 class RouterCase:
@@ -45,7 +52,7 @@ class RouterCase:
 
     def save(self, age=0):
         self.snapshot = dict(
-            observation_time=time.time() - age, programs=deepcopy(self.scores)
+            observation_time=time.monotonic() - age, programs=deepcopy(self.scores)
         )
 
     def put(self, program, demand, score):
@@ -162,7 +169,17 @@ async def test_optional_diagnostics_preserve_admission(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True], ids=["recover", "cancel"])
-async def test_missing_initial_score_defers_without_leaking_program(case, cancel):
+async def test_missing_initial_score_defers_without_leaking_program(
+    case, monkeypatch, cancel
+):
+    retry = asyncio.Event()
+
+    async def wait_for_score(delay):
+        await retry.wait()
+
+    clock = SimpleNamespace(**vars(asyncio))
+    clock.sleep = wait_for_score
+    monkeypatch.setattr(native_router, "asyncio", clock)
     task = await case.start("new", 100)
     assert not task.done()
     assert "new" not in case.router._table.programs
@@ -174,6 +191,7 @@ async def test_missing_initial_score_defers_without_leaking_program(case, cancel
     else:
         case.score("new", 0)
         case.save()
+        retry.set()
         assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
     assert not case.router._admission_gates
 
@@ -302,6 +320,58 @@ async def test_idle_reservation_competes_by_measured_u(
     assert case.used((1, 0)) == 600
 
 
+@pytest.mark.parametrize(
+    "first_admissions, expected",
+    [
+        ((True, True), ["first", "second"]),
+        ((True, False), ["first"]),
+        ((False, True), ["first"]),
+        ((False, False), ["first"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admission_pass_shares_ceiling(case, first_admissions, expected):
+    case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
+    first = case.put("first", 600, 2)
+    second = case.put("second", 300, 1)
+    first._u_new_admission, second._u_new_admission = first_admissions
+
+    await case.resume()
+
+    assert case.admitted == expected
+    assert case.used((1, 0)) == (900 if len(expected) == 2 else 600)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostics", [False, True])
+async def test_failed_first_admission_retains_full_capacity_eligibility(
+    case, monkeypatch, diagnostics
+):
+    monkeypatch.setenv("DURU_DIAGNOSTICS", "1" if diagnostics else "0")
+    case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
+    case.put("occupant", 200, 1)
+    await case.resume()
+    case.score("new", 2)
+    waiting = await case.start("new", 900)
+    newcomer = case.router._table.programs["new"]
+    assert not waiting.done()
+    assert newcomer.lifecycle == ProgramLifecycle.PAUSED
+    assert newcomer._u_new_admission
+    assert case.used((1, 0)) == 200
+
+    await case.resume()
+    assert newcomer._u_new_admission
+    assert not waiting.done()
+
+    await case.router.end_program("occupant")
+    await case.resume()
+    await asyncio.wait_for(waiting, 1)
+    assert case.admitted == ["occupant", "new"]
+    assert newcomer.lifecycle == ProgramLifecycle.ACTIVE
+    assert not newcomer._u_new_admission
+    assert case.used((1, 0)) == 900
+
+
 @pytest.mark.asyncio
 async def test_newcomer_preserves_resume_headroom_for_established_waiters(case):
     case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
@@ -320,22 +390,6 @@ async def test_newcomer_preserves_resume_headroom_for_established_waiters(case):
 
 
 @pytest.mark.asyncio
-async def test_lookahead_crossing_alpha_unblocks_pending_request(case, monkeypatch):
-    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
-    case.router._cfg.resume_timeout_seconds = 0
-    case.score("child", 0.69)
-    case.scores["child"].update(U=None, kind="zero_work_root_next_five")
-    task = await case.start("child", 1100)
-    assert not task.done()
-    assert case.router._stat_forced_resumes == 0
-    case.scores["child"]["score"] = 0.7
-    await case.resume()
-    assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
-    assert case.router._stat_forced_resumes == 1
-    assert case.events[-1]["forced"]
-
-
-@pytest.mark.asyncio
 async def test_missing_scores_and_nonpending_requests_cannot_force_admission(
     case, monkeypatch
 ):
@@ -348,19 +402,6 @@ async def test_missing_scores_and_nonpending_requests_cannot_force_admission(
     case.put("valid", 100, 0.01)
     await case.resume()
     assert case.admitted == ["valid"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("capacities", [{}, {(1, 0): 0}])
-async def test_alpha_requires_a_live_positive_capacity_worker(
-    case, monkeypatch, capacities
-):
-    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
-    case.capacity.workers = capacities
-    high = case.put("high", 1100, 4)
-    await case.resume()
-    assert high.lifecycle == ProgramLifecycle.PAUSED
-    assert not case.events
 
 
 @pytest.mark.asyncio
@@ -441,25 +482,6 @@ async def test_policy_placement_uses_replica_ties_and_decayed_usage(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("high_score", [0.9, 1.0])
-async def test_highest_score_exception_precedes_lower_score_backfill(
-    case, monkeypatch, high_score
-):
-    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
-    resident = case.router._table.begin_request("resident", 600)
-    resident.assigned_replica = (1, 0)
-    case.put("high", 700, high_score)
-    case.put("backfill", 200, 0.1)
-
-    await case.resume()
-
-    # There is no capacity-only pass over the queue. A high-score override
-    # happens before a lower-ranked candidate can consume the remaining 400.
-    assert case.admitted == (["high"] if high_score == 1.0 else ["backfill"])
-    assert case.events[0]["forced"] is (high_score == 1.0)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("demand,forced", [(100, False), (101, True)])
 async def test_host_checks_fit_before_alpha_and_preserves_replica_ties(
     case, monkeypatch, demand, forced
@@ -507,7 +529,7 @@ def test_policies_and_prepared_plans_keep_their_own_scores(monkeypatch, caplog):
     snapshots = [
         dict(
             run_id=str(index),
-            observation_time=time.time() - index * 0.1,
+            observation_time=time.monotonic() - index * 0.1,
             programs={
                 pid: dict(score=score, U=score, request_id=f"{index}-{pid}")
                 for pid, score in zip(("a", "b"), scores)
@@ -557,6 +579,54 @@ def test_idle_measurement_and_stable_ties():
     ]
 
 
+@pytest.mark.asyncio
+async def test_lookahead_crossing_alpha_unblocks_pending_request(case, monkeypatch):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
+    case.router._cfg.resume_timeout_seconds = 0
+    case.score("child", 0.69)
+    case.scores["child"].update(U=None, kind="zero_work_root_next_five")
+    task = await case.start("child", 1100)
+    assert not task.done()
+    assert case.router._stat_forced_resumes == 0
+    case.scores["child"]["score"] = 0.7
+    await case.resume()
+    assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
+    assert case.router._stat_forced_resumes == 1
+    assert case.events[-1]["forced"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacities", [{}, {(1, 0): 0}])
+async def test_alpha_requires_a_live_positive_capacity_worker(
+    case, monkeypatch, capacities
+):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
+    case.capacity.workers = capacities
+    high = case.put("high", 1100, 4)
+    await case.resume()
+    assert high.lifecycle == ProgramLifecycle.PAUSED
+    assert not case.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("high_score", [0.9, 1.0])
+async def test_highest_score_exception_precedes_lower_score_backfill(
+    case, monkeypatch, high_score
+):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
+    resident = case.router._table.begin_request("resident", 600)
+    resident.assigned_replica = (1, 0)
+    case.put("high", 700, high_score)
+    case.put("backfill", 200, 0.1)
+
+    await case.resume()
+
+    # There is no capacity-only pass over the queue. A high-score override
+    # happens before a lower-ranked candidate can consume the remaining 400.
+    assert case.admitted == (["high"] if high_score == 1.0 else ["backfill"])
+    assert case.events[0]["forced"] is (high_score == 1.0)
+
+
 @pytest.mark.parametrize(
     "score,pending,allowed",
     [
@@ -571,3 +641,78 @@ def test_idle_measurement_and_stable_ties():
 def test_alpha_requires_pending_request_and_valid_score(score, pending, allowed):
     candidate = Candidate("request", 200, score=score, pending_request=pending)
     assert DuruPolicy(alpha=0.7).may_force_admit(candidate) is allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["queued", "resumed"])
+async def test_cancelled_turn_restores_first_admission_eligibility(
+    case, monkeypatch, phase
+):
+    if phase == "resumed":
+        program = case.put("request", 100, 1)
+        program._u_new_admission = True
+    else:
+        case.score("request", 1)
+        program = case.router._table.begin_request("request", 100)
+    original_flag = program._u_new_admission
+    original_lifecycle = program.lifecycle
+    original_wait = case.router._wait_for_resume
+
+    async def cancel_admission(*args):
+        if phase == "resumed":
+            await original_wait(*args)
+            assert not program._u_new_admission
+        else:
+            assert program._u_new_admission
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(case.router, "_wait_for_resume", cancel_admission)
+    task = await case.start("request", 100)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert case.router._table.programs["request"] is program
+    assert program._u_new_admission is original_flag
+    assert program.lifecycle is original_lifecycle
+    assert program.assigned_replica is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("periodic", [False, True])
+@pytest.mark.parametrize("live", [{1}, set()])
+async def test_ranked_resume_ignores_stale_capacity_cards(case, periodic, live):
+    case.capacity.workers = {(1, 0): 1000, (2, 0): 4000}
+    case.capacity.live_workers = live
+    if periodic:
+        program = case.put("request", 900, 1)
+        program._u_new_admission = True
+        case.save()
+        await case.router._scheduler_tick()
+    else:
+        case.score("request", 1)
+        task = await case.start("request", 900)
+        program = case.router._table.programs["request"]
+        if live:
+            await asyncio.wait_for(task, 1)
+        else:
+            assert not task.done()
+    assert program.assigned_replica == ((1, 0) if live else None)
+    assert program.lifecycle is (
+        ProgramLifecycle.ACTIVE if live else ProgramLifecycle.PAUSED
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [{1}, set()])
+async def test_ranked_reassignment_requires_live_worker(case, live):
+    case.capacity.workers = {(1, 0): 1000, (2, 0): 4000}
+    case.capacity.live_workers = live
+    program = case.router._table.begin_request("request", 100)
+    program.assigned_replica = (2, 0)
+    case.score("request", 1)
+    task = await case.start("request", 100)
+    if live:
+        assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
+    else:
+        assert not task.done()
+        assert program.assigned_replica is None
+        assert program.lifecycle is ProgramLifecycle.PAUSED
