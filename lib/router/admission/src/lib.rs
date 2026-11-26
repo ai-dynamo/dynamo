@@ -21,17 +21,17 @@
 
 mod classifier;
 pub mod host;
-mod placement;
+mod lane_key;
 mod profile;
 mod queue;
 
 pub use classifier::{
-    AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
-    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    AbortCause, ClassificationError, ClassificationOverrides, ClassifyEvent, ClassifyRequest,
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, RequestClassifier,
+    RequestClassifierContext, RequestClassifierError, RequestClassifierRuntime, RequestLifecycle,
     RequestProgress, RequestProgressUpdater,
 };
-pub use placement::LaneKey;
+pub use lane_key::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,

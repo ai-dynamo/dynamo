@@ -1,33 +1,31 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! What an in-tree host names from the admission stage: the classifier runtime it drives, the
-//! queue rejection it renders, the queue policy and profiles it configures, the queue
-//! snapshot replay reads, and the host half of the classifier contract types: how the kernel
-//! builds the request a classifier reads and takes back what the classifier set. That half is
-//! an extension trait here, not methods on the contract type, so a plugin, which does not
-//! name this module, cannot call them. This list is the host contract.
+//! What an in-tree host names from the admission stage: the abort cause it reports and the
+//! request progress it reads and updates, the queue rejection it renders, the queue policy and
+//! profiles it configures, the policy queue offline replay drives, and the host half of the
+//! classifier contract types: how the kernel builds the request a classifier reads and takes
+//! back what the classifier set. That half is an extension trait here, not methods on the
+//! contract type, so a plugin, which does not name this module, cannot call them. This list is
+//! the host contract.
 
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_slot_tracker::BusyThresholds;
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::RequestInfo;
+use dynamo_worker_selection::host::CallerHints;
 use tokio::time::Instant;
 
-use crate::classifier::{ClassificationOverrides, ClassifyRequest};
+use crate::classifier::{ClassificationOverrides, ClassifyRequest, DispatchHead};
 
-pub use crate::classifier::{
-    AbortCause, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-};
-pub use crate::placement::LaneKey;
+pub use crate::classifier::{AbortCause, RequestProgress, RequestProgressUpdater};
+pub use crate::lane_key::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
-    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot,
-    RecheckScope,
+    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueLimitKind, QueueMetadata, QueueRejection,
+    QueueSnapshot, RecheckScope,
 };
-
-// What the frontend host (lib/llm) names beyond the lists above.
-pub use crate::queue::QueueLimitKind;
 
 mod sealed {
     /// Keeps the host traits implementable only here, so a method can be added to one.
@@ -47,6 +45,16 @@ pub fn request_progress(
     RequestProgress::new(initial_context_tokens)
 }
 
+/// The view of one queue head a dispatch gate reads, over the facts of the queued request.
+/// The queue builds one per head it asks the gate about.
+pub fn dispatch_head<'a>(
+    info: RequestInfo<'a>,
+    policy_class: &'a str,
+    queued_at: Instant,
+) -> DispatchHead<'a> {
+    DispatchHead::from_info(info, policy_class, queued_at)
+}
+
 /// How the kernel builds the request a classifier reads, and what it reads back. A plugin
 /// reads a [`ClassifyRequest`] and calls its `set_*` methods; its tests get one through
 /// `dynamo_kv_router::plugins::testing`.
@@ -62,6 +70,10 @@ pub trait ClassifyRequestHostExt: sealed::Sealed + Sized {
     fn with_session_context(self, session_context: SessionContext) -> Self;
 
     fn with_pinned_worker(self, pinned_worker: Option<WorkerWithDpRank>) -> Self;
+
+    /// What the caller sent with the request: its expected output length and its two
+    /// priorities, the priority within its strict tier and the strict tier.
+    fn with_caller_hints(self, caller_hints: CallerHints) -> Self;
 
     /// Copy tracking hashes into storage owned by this classification attempt.
     fn with_sequence_hashes(self, hashes: Option<&[SequenceHash]>) -> Self;

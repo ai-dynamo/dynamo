@@ -8,7 +8,7 @@ use crate::types::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::WorkerInputView;
-use dynamo_worker_selection::host::SelectionConfigHostExt;
+use dynamo_worker_selection::host::{CallerHints, SelectionConfigHostExt};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -1008,9 +1008,9 @@ fn custom_picker_receives_session_metadata() {
                 session.input_trigger(),
                 Some(WorkerSelectionInputTrigger::ToolResult)
             );
-            assert_eq!(request.expected_output_tokens(), Some(128));
-            assert_eq!(request.priority_jump(), 3.0);
-            assert_eq!(request.strict_priority(), 2);
+            assert_eq!(request.info().expected_output_tokens(), Some(128));
+            assert_eq!(request.info().priority_jump(), 3.0);
+            assert_eq!(request.info().strict_priority(), 2);
             Ok(0)
         }
     }
@@ -1047,9 +1047,11 @@ fn custom_picker_receives_session_metadata() {
     ));
     let cloned = request.session_context.clone().unwrap();
     assert!(std::ptr::eq(cloned.agent_headers(), headers.as_ref()));
-    request.expected_output_tokens = Some(128);
-    request.priority_jump = 3.0;
-    request.strict_priority = 2;
+    request.caller_hints = CallerHints {
+        expected_output_tokens: Some(128),
+        priority_jump: 3.0,
+        strict_priority: 2,
+    };
     let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(ContextPicker));
 
     policy

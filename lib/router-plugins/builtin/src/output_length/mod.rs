@@ -177,7 +177,7 @@ impl RequestClassifier for OutputLengthClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.predict(&mut request, Instant::now());
         Ok(request)
     }

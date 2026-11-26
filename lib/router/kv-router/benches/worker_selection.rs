@@ -29,7 +29,7 @@ use dynamo_scheduler::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelect
 use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
-use dynamo_worker_selection::host::SelectionConfigHostExt;
+use dynamo_worker_selection::host::{CallerHints, SelectionConfigHostExt};
 use dynamo_worker_selection::{
     SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
     WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -259,7 +259,10 @@ fn fixture_with_preferred_taints(
         token_seq: None,
         isl_tokens: 2_048,
         lora_name: None,
-        expected_output_tokens: Some(256),
+        caller_hints: CallerHints {
+            expected_output_tokens: Some(256),
+            ..Default::default()
+        },
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
@@ -273,8 +276,6 @@ fn fixture_with_preferred_taints(
         },
         router_config_override: None,
         track_prefill_tokens: true,
-        priority_jump: 0.0,
-        strict_priority: 0,
         policy_class: None,
         session_context: None,
         overlap: OverlapSignals {

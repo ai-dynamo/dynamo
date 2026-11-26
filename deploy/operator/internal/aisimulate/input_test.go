@@ -19,12 +19,14 @@ package aisimulate
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // defaultedSpec is a model-only Request after structural and admission defaults:
@@ -462,6 +464,103 @@ func TestInputOverridesPreserveLargeIntegers(t *testing.T) {
 	}
 	if got := encode(t, input); !strings.Contains(got, `"seed":`+seed) {
 		t.Fatalf("encoded input lost integer precision: %s", got)
+	}
+}
+
+func TestLowerNullSentinelsMatchNativeNulls(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides string
+	}{
+		{name: "inactive workers", overrides: `{"engine":{"mode":"aggregated","workers":{"prefill":null,"decode":null}}}`},
+		{name: "typed field", overrides: `{"traffic":{"source":{"input_tokens":null}}}`},
+		{name: "derived default", overrides: `{"traffic":{"stop":{"requests":null,"requests_per_load_unit":10}}}`},
+		{name: "complete section", overrides: `{"optimizer":null}`},
+		{name: "complete array field", overrides: `{"engine":{"backend":{"choices":null}}}`},
+		{name: "absent field", overrides: `{"optimizer":{"missing":null,"seed":9007199254740993}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Compare the transported sentinel with the existing native-null merge behavior")
+			sentinel := strings.ReplaceAll(tc.overrides, "null", `{"$null":true}`)
+			spec := withInputOverrides(defaultedSpec(), sentinel)
+			got := encode(t, lower(t, spec))
+			want := encode(t, lower(t, withInputOverrides(defaultedSpec(), tc.overrides)))
+			if got != want {
+				t.Fatalf("sentinel input = %s, want native-null input %s", got, want)
+			}
+			if string(spec.AISim.InputOverrides.Raw) != sentinel {
+				t.Fatal("lowering changed the stored override document")
+			}
+		})
+	}
+}
+
+func TestInputOverridesNullSentinelValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "native null document", raw: `null`, want: `null`},
+		{name: "native array values", raw: `{"values":[null,{"nested":null},[1]]}`, want: `{"values":[null,{"nested":null},[1]]}`},
+		{name: "whole array field", raw: `{"values":{"$null":true}}`, want: `{"values":null}`},
+		{name: "ordinary object", raw: `{"value":{"other":true}}`, want: `{"value":{"other":true}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Expand object-field markers and retain native nulls and ordinary data")
+			spec := withInputOverrides(defaultedSpec(), tc.raw)
+			got, errs := InputOverrides(&spec.NativeSearchInput, field.NewPath("spec", "aisim", "inputOverrides"))
+			if len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			if encoded := encode(t, got); encoded != tc.want {
+				t.Fatalf("input overrides = %s, want %s", encoded, tc.want)
+			}
+		})
+	}
+}
+
+func TestInputOverridesRejectsInvalidNullSentinels(t *testing.T) {
+	const malformed = "$null must be the boolean true and the only object field"
+	path := field.NewPath("spec", "aisim", "inputOverrides")
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want field.ErrorList
+	}{
+		{name: "false", raw: `{"value":{"$null":false}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "number", raw: `{"value":{"$null":1}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "string", raw: `{"value":{"$null":"true"}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "null", raw: `{"value":{"$null":null}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "object", raw: `{"value":{"$null":{}}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "list", raw: `{"value":{"$null":[]}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "extra keys", raw: `{"value":{"$null":true,"other":1}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "root", raw: `{"$null":true}`, want: field.ErrorList{field.Forbidden(path, "$null is not allowed at the document root")}},
+		{name: "array element", raw: `{"values":[{"$null":true}]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0), "$null is not allowed inside arrays")}},
+		{name: "object inside array", raw: `{"values":[{"nested":{"$null":true}}]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0).Key("nested"), "$null is not allowed inside arrays")}},
+		{name: "nested array", raw: `{"values":[[{"$null":true}]]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0).Index(0), "$null is not allowed inside arrays")}},
+		{name: "path preserves map keys", raw: `{"a.b":{"c/d":{"$null":false}}}`, want: field.ErrorList{field.Invalid(path.Key("a.b").Key("c/d"), "<redacted>", malformed)}},
+		{name: "all errors are deterministic", raw: `{"z":{"$null":false},"a":{"$null":"true"}}`, want: field.ErrorList{
+			field.Invalid(path.Key("a"), "<redacted>", malformed),
+			field.Invalid(path.Key("z"), "<redacted>", malformed),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Report typed grammar errors without changing the source document")
+			spec := withInputOverrides(defaultedSpec(), tc.raw)
+			_, errs := InputOverrides(&spec.NativeSearchInput, path)
+			if !reflect.DeepEqual(errs, tc.want) {
+				t.Fatalf("InputOverrides errors = %#v, want %#v", errs, tc.want)
+			}
+			if string(spec.AISim.InputOverrides.Raw) != tc.raw {
+				t.Fatal("normalization changed the source document")
+			}
+
+			t.Log("Lowering must not return a consumable input when normalization fails")
+			if input, err := Lower(&spec.NativeSearchInput); input != nil || err == nil {
+				t.Fatalf("Lower = (%v, %v), want nil input and an error", input, err)
+			}
+		})
 	}
 }
 

@@ -25,7 +25,7 @@ use super::overlap_refresh::{
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
     CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
-    WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    WorkerSelectionInput, WorkerSelector, request_info_of, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
@@ -37,7 +37,7 @@ use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::QueueLane;
-use dynamo_admission::host::ClassifyRequestHostExt;
+use dynamo_admission::host::{ClassifyRequestHostExt, dispatch_head};
 use dynamo_admission::{
     BlockReason, ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate,
     DispatchHead, DispatchRecheck, LaneCheck, LaneKey, RecheckScope,
@@ -122,15 +122,25 @@ struct QueuedRequest {
 
 impl QueuedRequest {
     fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
-        DispatchHead::new(
-            self.request.mode.request_id(),
-            self.request.session_context.as_ref(),
-            self.request.isl_tokens,
-            self.request.pinned_worker,
-            policy_class,
-            self.enqueue_at,
-        )
+        dispatch_head_of(&self.request, policy_class, self.enqueue_at)
     }
+}
+
+/// The view a dispatch gate is shown of `request` at the head of the `policy_class` queue,
+/// queued at `queued_at`. The queue builds each head through it. `host` exports it for one
+/// caller outside this crate, the `plugins::testing` harness of `dynamo-kv-router`, so that
+/// a gate's test sees the head the queue builds; [`classify_inputs`] is exported for the
+/// same harness. A routing host builds no head.
+pub fn dispatch_head_of<'a>(
+    request: &'a SchedulingRequest,
+    policy_class: &'a str,
+    queued_at: Instant,
+) -> DispatchHead<'a> {
+    dispatch_head(
+        request_info_of(request, request.pinned_worker),
+        policy_class,
+        queued_at,
+    )
 }
 
 /// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, required
@@ -2269,8 +2279,8 @@ impl<
         let due_at = queued.due_at;
         // A head that expiry exposes may be able to run, so every refusal below still reports it.
         let mut exposed = self.expire_due_classes(now);
-        let priority_jump = queued.request.priority_jump;
-        let strict_priority = queued.request.strict_priority;
+        let priority_jump = queued.request.caller_hints.priority_jump;
+        let strict_priority = queued.request.caller_hints.strict_priority;
         let placement = self
             .eligibility
             .lane(&queued.request, queue_metadata.lane_key);
@@ -2569,9 +2579,8 @@ impl<
         if drained.gate_recheck {
             scope = Some(RecheckScope::All);
         }
-        // Consume hints even when there is no pending work. Blocked lanes count as ready here
-        // and still need their recheck.
-        if !self.pending.has_ready() {
+        // Consume hints even when there is no pending work.
+        if self.pending.pending_count() == 0 {
             return;
         }
         let mut capacity_all = drained.full_recheck;
@@ -2604,7 +2613,7 @@ impl<
         self.expire_due_classes(Instant::now());
         let cleanup_ready = drain_cleanup && self.drain_cleanup();
         self.recheck_capacity_updates(cleanup_ready.then_some(RecheckScope::All));
-        if !self.pending.has_ready() {
+        if self.pending.pending_count() == 0 {
             return;
         }
         self.drain_ready(None).await;
@@ -2636,7 +2645,7 @@ impl<
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
-            if !self.pending.has_ready() {
+            if self.pending.pending_count() == 0 {
                 break;
             }
             let decay_now = Instant::now();
@@ -3324,7 +3333,7 @@ impl<
             request_id,
             token_sequence: request.token_seq.take(),
             track_prefill_tokens: request.track_prefill_tokens,
-            expected_output_tokens: request.expected_output_tokens,
+            expected_output_tokens: request.caller_hints.expected_output_tokens,
             prefill_load_hint,
             worker: selected.selection.worker,
             lora_name: request
@@ -3548,6 +3557,7 @@ pub fn classify_inputs<C: WorkerConfigLike>(
     let mut classification =
         ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
             .with_pinned_worker(request.pinned_worker)
+            .with_caller_hints(request.caller_hints)
             .with_sequence_hashes(request.token_seq.as_deref())
             .with_busy_thresholds(reject_thresholds);
     if let Some(request_id) = request.mode.request_id() {
@@ -4432,11 +4442,9 @@ mod tests {
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: Default::default(),
             policy_class: None,
             session_context: None,
-            expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -5147,7 +5155,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::{ClassifierError, RequestClassifier};
+        use dynamo_admission::{RequestClassifier, RequestClassifierError};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -5155,7 +5163,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 assert_eq!(request.sequence_hashes(), self.0.as_deref());
                 assert_eq!(request.info().pinned_worker(), Some(self.1));
                 Ok(request)
@@ -6641,11 +6649,11 @@ mod tests {
         first_rx.await.unwrap().unwrap();
 
         let (mut low, mut low_rx) = make_request("low", isl);
-        low.priority_jump = 10_000.0;
+        low.caller_hints.priority_jump = 10_000.0;
         queue.enqueue(low).await;
 
         let (mut high, high_rx) = make_request("high", isl);
-        high.strict_priority = 1;
+        high.caller_hints.strict_priority = 1;
         queue.enqueue(high).await;
         assert_eq!(queue.pending_count(), 2);
 
@@ -7396,8 +7404,8 @@ mod tests {
             ("explicit-early", 25, Some(900), 0),
         ] {
             let (mut request, response_rx) = make_request(request_id, 64);
-            request.strict_priority = strict_priority;
-            request.priority_jump = f64::from(strict_priority) * 100.0;
+            request.caller_hints.strict_priority = strict_priority;
+            request.caller_hints.priority_jump = f64::from(strict_priority) * 100.0;
             let ingress_at = start + Duration::from_millis(ingress_ms);
             let classified = explicit_due_ms.map(|due_ms| {
                 let mut classified = queue

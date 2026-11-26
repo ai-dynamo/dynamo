@@ -5,17 +5,16 @@
 
 mod inputs;
 mod progress;
-pub mod runtime;
+mod runtime;
+
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
 
-use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
 use dynamo_router_protocol::columns::WorkerInputs;
@@ -23,9 +22,11 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
-use dynamo_worker_selection::host::request_info;
+use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::host::{CallerHints, request_info};
 use dynamo_worker_selection::{RequestInfo, WorkerCandidates};
 
+use crate::lane_key::LaneKey;
 use crate::queue::QueueSnapshot;
 
 #[derive(Debug)]
@@ -41,7 +42,8 @@ pub struct ClassifyRequest {
     progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    reject_thresholds: Option<BusyThresholds>,
+    caller_hints: CallerHints,
+    reject_thresholds: BusyThresholds,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -56,29 +58,23 @@ pub struct ClassificationOverrides {
 }
 
 impl ClassifyRequest {
-    #[cfg(test)]
-    pub fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
-        <Self as crate::host::ClassifyRequestHostExt>::with_timing(
-            input_tokens,
-            initial_cached_tokens,
-            Instant::now(),
-        )
-    }
-
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
     pub fn reject_thresholds(&self) -> BusyThresholds {
-        self.reject_thresholds.unwrap_or_default()
+        self.reject_thresholds
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
-    /// and the pinned worker. A view over this request's own fields; nothing is copied.
+    /// the pinned worker, and the caller's expected output length and priorities. A view over
+    /// this request's own fields; nothing is copied.
+    #[inline]
     pub fn info(&self) -> RequestInfo<'_> {
         request_info(
             self.request_id.as_deref(),
             self.input_tokens,
             self.session_context.as_ref(),
             self.pinned_worker,
+            &self.caller_hints,
         )
     }
 
@@ -194,7 +190,8 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
-            reject_thresholds: None,
+            caller_hints: CallerHints::default(),
+            reject_thresholds: BusyThresholds::default(),
         }
     }
 
@@ -218,13 +215,18 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
         self
     }
 
+    fn with_caller_hints(mut self, caller_hints: CallerHints) -> Self {
+        self.caller_hints = caller_hints;
+        self
+    }
+
     fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
         self
     }
 
     fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
-        self.reject_thresholds = Some(reject);
+        self.reject_thresholds = reject;
         self
     }
 
@@ -238,7 +240,7 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
 }
 
 /// Error returned by [`RequestClassifier::classify`].
-pub type ClassifierError = dyn Error + Send + Sync + 'static;
+pub type RequestClassifierError = dyn Error + Send + Sync + 'static;
 
 /// Cause delivered to the classifier when a request aborts. Produced by the
 /// router or the worker path, not by the classifier.
@@ -318,7 +320,7 @@ pub trait RequestClassifier: Send + 'static {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         Ok(request)
     }
 
@@ -346,7 +348,10 @@ pub struct DispatchHead<'a> {
 }
 
 impl<'a> DispatchHead<'a> {
-    /// Builds a head view. Hosts build one per queue head; plugin tests build them directly.
+    /// Builds a head view for a plugin's tests, with no expected output length and no
+    /// priority from the caller. To set them, build the head from a described request with
+    /// `SelectionCase::dispatch_head` in `dynamo_kv_router::plugins::testing`. The router
+    /// builds each head from the queued request through `host::dispatch_head`.
     pub fn new(
         request_id: Option<&'a str>,
         session_context: Option<&'a SessionContext>,
@@ -356,14 +361,34 @@ impl<'a> DispatchHead<'a> {
         queued_at: Instant,
     ) -> Self {
         Self {
-            info: request_info(request_id, isl_tokens, session_context, pinned_worker),
+            info: request_info(
+                request_id,
+                isl_tokens,
+                session_context,
+                pinned_worker,
+                &CallerHints::NONE,
+            ),
+            policy_class,
+            queued_at,
+        }
+    }
+
+    pub(crate) fn from_info(
+        info: RequestInfo<'a>,
+        policy_class: &'a str,
+        queued_at: Instant,
+    ) -> Self {
+        Self {
+            info,
             policy_class,
             queued_at,
         }
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
-    /// and the pinned worker, which a `Go` target cannot override.
+    /// the pinned worker, which a `Go` target cannot override, and the caller's expected
+    /// output length and priorities.
+    #[inline]
     pub fn info(&self) -> RequestInfo<'a> {
         self.info
     }

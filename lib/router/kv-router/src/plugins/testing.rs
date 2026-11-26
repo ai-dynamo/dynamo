@@ -54,15 +54,19 @@
 //! For a request classifier, [`SelectionCase::classify`] runs it on the case: it builds the
 //! request and the worker rows from the case, as the router builds both from one request.
 //! Without a case, [`classify_request`] builds a request and [`classify`] runs the classifier
-//! on it with no worker rows. [`request_progress`] builds a progress reading.
+//! on it with no worker rows. [`request_progress`] builds a progress reading. For the
+//! experimental dispatch gate, [`SelectionCase::dispatch_head`] builds the queue head a gate
+//! is shown.
 //!
-//! This module follows the stability of the plugin API ([`super`]).
+//! This module follows the stability of the plugin API ([`super`]), except
+//! [`SelectionCase::dispatch_head`], which follows the experimental dispatch gate.
 
 use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{
-    ClassifierError, ClassifyRequest, RequestClassifier, RequestClassifierContext, RequestProgress,
+    ClassifyRequest, DispatchHead, RequestClassifier, RequestClassifierContext,
+    RequestClassifierError, RequestProgress,
 };
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::TieredMatchDetails;
@@ -73,7 +77,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
     AccountingAttribution, CacheHitWeights, KvSchedulerError, OverlapAnalysis, OverlapSignals,
     RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerConfigLike, WorkerSelectionInput,
-    WorkerSelector, classify_inputs,
+    WorkerSelector, classify_inputs, dispatch_head_of,
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::{BusyThresholds, WorkerLoadProjection};
@@ -224,15 +228,13 @@ impl SelectionCase {
                 isl_tokens,
                 lora_name: None,
                 accounting_attribution: AccountingAttribution::default(),
-                expected_output_tokens: None,
+                caller_hints: Default::default(),
                 affinity_target: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: RoutingConstraints::default(),
                 router_config_override: None,
                 track_prefill_tokens: true,
-                priority_jump: 0.0,
-                strict_priority: 0,
                 policy_class: None,
                 session_context: None,
                 overlap: OverlapSignals::default(),
@@ -275,9 +277,18 @@ impl SelectionCase {
         self
     }
 
-    /// The output length `WorkerSelectionRequest::expected_output_tokens` returns.
+    /// The output length `RequestInfo::expected_output_tokens` returns, to a policy and to a
+    /// classifier.
     pub fn expected_output_tokens(mut self, tokens: u32) -> Self {
-        self.request.expected_output_tokens = Some(tokens);
+        self.request.caller_hints.expected_output_tokens = Some(tokens);
+        self
+    }
+
+    /// The caller's priorities, as `RequestInfo::priority_jump` and
+    /// `RequestInfo::strict_priority` return them.
+    pub fn priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.request.caller_hints.priority_jump = priority_jump;
+        self.request.caller_hints.strict_priority = strict_priority;
         self
     }
 
@@ -348,7 +359,7 @@ impl SelectionCase {
     pub fn classify<C: RequestClassifier + ?Sized>(
         &self,
         classifier: &mut C,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let eligibility = self.request.eligibility();
         let (request, rows) = classify_inputs(
             &self.workers,
@@ -360,6 +371,17 @@ impl SelectionCase {
             classifier.required_worker_inputs(),
         );
         rows.read(|workers| classifier.classify(request, workers))
+    }
+
+    /// The view an experimental dispatch gate is shown of this case's request at the head of
+    /// the `policy_class` queue, queued now. It carries the facts the case sets: the request
+    /// ID, session, pinned worker, and the caller's expected output length and priorities.
+    ///
+    /// It returns [`DispatchHead`], a `plugins::experimental` type, so this method has the
+    /// stability of the dispatch gate, which has no compatibility promise, and not of this
+    /// module.
+    pub fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
+        dispatch_head_of(&self.request, policy_class, tokio::time::Instant::now())
     }
 
     /// Run `policy` over this case and return the worker it picked.
@@ -449,7 +471,9 @@ fn policy_file_parameters(parameters: &str) -> Result<serde_yaml::Value, serde_y
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
 /// cached prefix, arriving now, with the request ID, session, and pinned worker a test gives
-/// it. Together with `isl_tokens` those are the facts `ClassifyRequest::info` returns.
+/// it. The caller's expected output length and priorities, the other facts
+/// `ClassifyRequest::info` returns, are unset; [`SelectionCase::classify`] classifies a
+/// request that carries them.
 pub fn classify_request(
     isl_tokens: usize,
     request_id: Option<&str>,
@@ -478,7 +502,7 @@ pub fn request_progress(context_tokens: usize) -> RequestProgress {
 pub fn classify<C: RequestClassifier + ?Sized>(
     classifier: &mut C,
     request: ClassifyRequest,
-) -> Result<ClassifyRequest, Box<ClassifierError>> {
+) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
     WorkerInputRows::empty().read(|workers| classifier.classify(request, workers))
 }
 
@@ -565,7 +589,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 let info = request.info();
                 assert_eq!(info.request_id(), Some("r1"));
                 assert_eq!(info.isl_tokens(), 160);
@@ -655,7 +679,7 @@ mod tests {
             &mut self,
             mut request: ClassifyRequest,
             workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             self.rows_seen = workers.len();
             let mut loads = workers
                 .iter()
@@ -679,12 +703,25 @@ mod tests {
         };
         let busy = SelectionCase::new(160, 16)
             .request_id("r1")
+            .expected_output_tokens(64)
+            .priority(2.5, 3)
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(9));
         let classified = busy.classify(&mut classifier).unwrap();
         assert_eq!(classifier.rows_seen, 2);
         assert_eq!(classified.policy_class(), Some("batch"));
-        assert_eq!(classified.info().request_id(), Some("r1"));
+        let info = classified.info();
+        assert_eq!(info.request_id(), Some("r1"));
+        assert_eq!(info.expected_output_tokens(), Some(64));
+        assert_eq!(info.priority_jump(), 2.5);
+        assert_eq!(info.strict_priority(), 3);
+
+        let head = busy.dispatch_head("batch");
+        assert_eq!(head.policy_class(), "batch");
+        assert_eq!(head.info().request_id(), Some("r1"));
+        assert_eq!(head.info().expected_output_tokens(), Some(64));
+        assert_eq!(head.info().priority_jump(), 2.5);
+        assert_eq!(head.info().strict_priority(), 3);
 
         let idle = SelectionCase::new(160, 16)
             .request_id("r2")
@@ -755,7 +792,9 @@ mod tests {
                 assert_eq!(session.session_id(), "s1");
                 assert_eq!(info.pinned_worker(), Some(PINNED));
                 assert_eq!(request.affinity_target(), Some(PINNED.into()));
-                assert_eq!(request.expected_output_tokens(), Some(64));
+                assert_eq!(info.expected_output_tokens(), Some(64));
+                assert_eq!(info.priority_jump(), 2.5);
+                assert_eq!(info.strict_priority(), 3);
 
                 // A pinned request is offered its pin alone.
                 assert_eq!(input.len(), 1);
@@ -774,6 +813,7 @@ mod tests {
             .pinned_worker(PINNED)
             .affinity_target(PINNED)
             .expected_output_tokens(64)
+            .priority(2.5, 3)
             .worker(29, CaseWorker::new())
             .worker(
                 41,
@@ -867,7 +907,7 @@ mod tests {
                 &mut self,
                 mut request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 request.set_policy_class(&self.0);
                 Ok(request)
             }

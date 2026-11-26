@@ -55,7 +55,7 @@ A plugin crate depends on `dynamo-kv-router` alone and imports the module for th
 | `plugins::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in the root `plugins` module | Same |
 | `plugins` | Only what both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `RequestInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
 | `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints`. An API's names move into a kind's module when it is ready | None: an item can change or be removed in any release |
-| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as the plugin API |
+| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as the plugin API, except `SelectionCase::dispatch_head`, which returns an experimental type and follows the dispatch gate |
 
 A policy and a classifier read workers through the same rows, so a value added to an input group reaches both.
 
@@ -429,6 +429,9 @@ Filters, scorers, and pickers receive each request as a `WorkerSelectionRequest`
 | `isl_tokens()` | Input sequence length in tokens; zero when the request has no token IDs, such as embeddings-only input |
 | `session_context()` | Optional session metadata described below |
 | `pinned_worker()` | Exact worker and rank the request must run on, if any, such as an explicit request target, a hard session binding to one rank, or the worker Dynamo chose when it previewed the route. Read-only: Dynamo offers the policy only this worker. A session binding that Dynamo passes only as `affinity_target()` is not a pin |
+| `expected_output_tokens()` | Output length expected for the request, in tokens, if the frontend that received it supplies one. The OpenAI-compatible endpoints pass the caller's estimate (`nvext.agent_hints.osl`); vLLM's `/inference/v1/generate` passes the request's `max_tokens`, which is a cap and not an estimate; the Decision APIs pass the zero or one token their scoring request generates |
+| `priority_jump()` | The caller's priority within its strict tier of the router queue; zero when the caller sent none. A larger value is served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is a head start in seconds); `edf` does not use it. The queue treats a negative value as zero |
+| `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. A queue with the `fcfs`, `lcfs`, or `wspt` policy serves a larger value first; `edf`, the default for a policy class in the policy file, does not use it |
 
 What exists only at worker selection is on the `WorkerSelectionRequest` itself:
 
@@ -438,9 +441,6 @@ What exists only at worker selection is on the `WorkerSelectionRequest` itself:
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
-| `expected_output_tokens()` | Optional expected output length |
-| `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
-| `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
 
 ### Session Context
@@ -669,7 +669,7 @@ For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    ClassifyRequest, RequestClassifier, RequestClassifierError, WorkerCandidates,
 };
 
 struct InspectPrefixes;
@@ -679,7 +679,7 @@ impl RequestClassifier for InspectPrefixes {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
         Ok(request)
     }
