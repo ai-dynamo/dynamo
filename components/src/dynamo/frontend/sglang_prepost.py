@@ -754,23 +754,6 @@ def build_response_format_guided_decoding(
     return {"json": schema}
 
 
-def normalize_empty_tools(request: dict[str, Any]) -> dict[str, Any]:
-    """Treat an explicit ``tools: []`` as an omitted ``tools`` field.
-
-    Matches vLLM ``ChatCompletionRequest.check_tool_usage`` and the Rust
-    preprocessor: ``"auto"`` and ``"required"`` have nothing to call and fall
-    back to ``"none"``. A named ``tool_choice`` keeps the empty list so
-    validation reports the missing tool. Returns a copy when it changes.
-    """
-    if request.get("tools") != [] or _is_named_tool_choice(request.get("tool_choice")):
-        return request
-    request = dict(request)
-    del request["tools"]
-    if request.get("tool_choice") in ("auto", "required"):
-        request["tool_choice"] = "none"
-    return request
-
-
 def preprocess_chat_request(
     request: dict[str, Any],
     *,

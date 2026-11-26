@@ -68,6 +68,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    normalize_empty_tools,
     nvext_extra_field_requested,
     request_id_from_context,
     resolve_chat_template,
@@ -1002,6 +1003,10 @@ class VllmProcessor:
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
+        # This path bypasses the Rust preprocessor, and the default
+        # DYN_VLLM_SKIP_REQUEST_VALIDATION fast path also skips vLLM's own
+        # empty-tools validator, so apply that rule here.
+        request = normalize_empty_tools(request)
         try:
             with _nvtx.annotate("mm_frontend:generator", color="blue"):
                 async for item in self._generator_inner(request, context=context):

@@ -49,7 +49,6 @@ from .sglang_prepost import (
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
-    normalize_empty_tools,
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
@@ -64,6 +63,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    normalize_empty_tools,
     nvext_extra_field_requested,
     read_jinja_chat_template,
     request_id_from_context,

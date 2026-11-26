@@ -400,3 +400,22 @@ def handle_engine_error(
         "No outputs from engine for request %s: %s", request_id, engine_response
     )
     return make_internal_error(request_id)
+
+
+def normalize_empty_tools(request: dict[str, Any]) -> dict[str, Any]:
+    """Treat an explicit ``tools: []`` as an omitted ``tools`` field.
+
+    The Python chat processors bypass the Rust preprocessor, which applies the
+    same rule, so they call this on entry. It matches vLLM
+    ``ChatCompletionRequest.check_tool_usage``: ``"auto"`` and ``"required"``
+    have nothing to call and fall back to ``"none"``, while a named
+    ``tool_choice`` keeps the empty list so validation reports the missing
+    tool. Returns a copy when it changes the request.
+    """
+    if request.get("tools") != [] or isinstance(request.get("tool_choice"), dict):
+        return request
+    request = dict(request)
+    del request["tools"]
+    if request.get("tool_choice") in ("auto", "required"):
+        request["tool_choice"] = "none"
+    return request
