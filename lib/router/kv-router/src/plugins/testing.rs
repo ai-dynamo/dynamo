@@ -710,14 +710,12 @@ mod tests {
         let classified = busy.classify(&mut classifier).unwrap();
         assert_eq!(classifier.rows_seen, 2);
         assert_eq!(classified.policy_class(), Some("batch"));
-        // A classifier reads the request facts a policy reads, the caller's hints included.
         let info = classified.info();
         assert_eq!(info.request_id(), Some("r1"));
         assert_eq!(info.expected_output_tokens(), Some(64));
         assert_eq!(info.priority_jump(), 2.5);
         assert_eq!(info.strict_priority(), 3);
 
-        // A dispatch gate reads the same facts from the head of the queue.
         let head = busy.dispatch_head("batch");
         assert_eq!(head.policy_class(), "batch");
         assert_eq!(head.info().request_id(), Some("r1"));
