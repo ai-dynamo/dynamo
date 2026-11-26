@@ -133,6 +133,10 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** A `DYN_LOG` filter scoped to `dynamo_llm`, `dynamo_llm::http`, `dynamo_llm::http::service`, or one of the modules in the table must also name `dynamo_http_server` or the new target, for example `dynamo_http_server=<level>`. There is no runtime alias, so the old directive no longer selects these lines.
 
+<span className="dynref-badge dynref-badge--red">Removed</span> **`LocalKvIndexer` no longer indexes prefixes** ([#19429](https://github.com/ai-dynamo/dynamo/pull/19429)). `dynamo_kv_indexer::LocalKvIndexer`, also reachable through the deprecated `dynamo_kv_router` path, is a worker's recovery source only: it records KV events and answers a router's recovery query. It no longer implements `KvIndexerInterface`, and `event_sender`, `get_workers_sender`, `block_size`, `flush_and_wait` are gone. `LocalKvIndexer::new` takes only the replay buffer size, and `apply_event_with_buffer` is no longer `async` and returns nothing.
+
+  > **Migrate:** To match prefixes against KV events (`find_matches`, `find_matches_for_request`, `dump_events`, `remove_worker`), use `dynamo_kv_indexer::KvIndexer`. Keep `LocalKvIndexer` for `apply_event_with_buffer` and `get_events_in_id_range`: construct it with `LocalKvIndexer::new(max_buffer_size)`, and drop the `.await` and the `Result` handling on `apply_event_with_buffer`. Drop calls to `flush_and_wait`: an event is applied before `apply_event_with_buffer` returns.
+
 <a id="v170"></a>
 
 ## v1.7.0 - Nov 23, 2026

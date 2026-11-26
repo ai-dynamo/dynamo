@@ -1466,7 +1466,7 @@ mod tests {
     };
     use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_indexer::cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId};
-    use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse};
+    use dynamo_kv_indexer::host::{LocalKvIndexer, WorkerKvQueryResponse};
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
@@ -1835,18 +1835,8 @@ mod tests {
     #[tokio::test]
     async fn recovery_accepts_local_indexer_snapshot_with_removed_tail() {
         let worker = WorkerWithDpRank::new(1, 0);
-        let token = CancellationToken::new();
-        let _cancel = token.clone().drop_guard();
-        let indexer = LocalKvIndexer::new(
-            token,
-            16,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        );
-        indexer
-            .apply_event_with_buffer(stored(worker, 1, &[11, 12]))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(32);
+        indexer.apply_event_with_buffer(stored(worker, 1, &[11, 12]));
         assert!(matches!(
             indexer.get_events_in_id_range(None, None).await,
             WorkerKvQueryResponse::TreeDump { .. }
@@ -1862,11 +1852,8 @@ mod tests {
                 dp_rank: worker.dp_rank,
             },
         );
-        indexer.apply_event_with_buffer(remove).await.unwrap();
-        indexer
-            .apply_event_with_buffer(stored(worker, 3, &[21]))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(remove);
+        indexer.apply_event_with_buffer(stored(worker, 3, &[21]));
         let WorkerKvQueryResponse::TreeDump {
             events,
             last_event_id,

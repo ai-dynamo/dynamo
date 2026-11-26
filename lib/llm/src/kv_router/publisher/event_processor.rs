@@ -54,18 +54,15 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                     super::PublisherInput::Barrier(done) => {
                         let mut output = Vec::new();
                         batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                        // Recovery applies events like live ingestion, then waits for the index to finish them.
-                        let result = tokio::select! {
-                            biased;
-                            _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during recovery")),
-                            result = flush_local_indexer(&local_indexer) => result,
+                        // Recovery applies events like live ingestion. The local index applies each
+                        // event as it is admitted, so the flush above is all there is to wait for.
+                        let result = if local_indexer.is_some() {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!("KV recovery requires a local indexer"))
                         };
                         if let Err(error) = &result {
-                            if cancellation_token.is_cancelled() {
-                                tracing::debug!(%error, "KV recovery barrier cancelled");
-                            } else {
-                                tracing::error!(%error, "KV recovery barrier failed; stopping KV event publisher");
-                            }
+                            tracing::error!(%error, "KV recovery barrier failed; stopping KV event publisher");
                         }
                         let has_failed = result.is_err();
                         let _ = done.send(result);
@@ -81,7 +78,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
 
                 // Process the complete source list before returning to `select!` so
                 // another channel item, the timeout, or cancellation cannot split it.
-                'event_batch: for placement_event in event_batch {
+                for placement_event in event_batch {
                     let raw_event_id = placement_event.event.event_id;
                     if let Some(last_id) = last_raw_input_id
                         && raw_event_id > last_id + 1
@@ -134,7 +131,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 residency_domain,
                                 batching_state.dedup_policy(residency_domain),
                             );
-                            let applied = emit(
+                            emit(
                                 &local_indexer,
                                 worker_id,
                                 storage_tier,
@@ -146,23 +143,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 },
                                 None,
                                 &mut output,
-                            )
-                            .await;
-                            if !applied {
-                                output.pop();
-                                tracing::error!(
-                                    worker_id,
-                                    dp_rank = event.dp_rank,
-                                    ?residency_domain,
-                                    "Fencing KV event publisher after local reset failure"
-                                );
-                                // NOTE: This token owns the publisher's discovery and recovery
-                                // advertisement too. Once the local reset barrier fails, withdrawing
-                                // the complete source is the only safe way to avoid advertising a
-                                // cursor whose local snapshot has diverged.
-                                cancellation_token.cancel();
-                                break 'event_batch;
-                            }
+                            );
                             batching_state.next_publish_id = batching_state
                                 .next_publish_id
                                 .checked_add(1)
@@ -194,13 +175,6 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
             }
         }
     }
-}
-
-async fn flush_local_indexer(local_indexer: &Option<Arc<LocalKvIndexer>>) -> anyhow::Result<()> {
-    let indexer = local_indexer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
-    Ok(indexer.flush_and_wait().await?)
 }
 
 async fn publish_output<P: RouterEventBatchSink>(

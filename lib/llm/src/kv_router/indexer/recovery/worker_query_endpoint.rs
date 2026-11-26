@@ -592,12 +592,7 @@ mod tests {
         let engine = WorkerKvQueryEngine {
             worker_id: 7,
             dp_rank: 0,
-            local_indexer: Arc::new(LocalKvIndexer::new(
-                tokio_util::sync::CancellationToken::new(),
-                4,
-                Arc::new(dynamo_kv_indexer::host::KvIndexerMetrics::new_unregistered()),
-                16,
-            )),
+            local_indexer: Arc::new(LocalKvIndexer::new(16)),
             status: None,
             processing_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TREE_DUMP_RESPONSES)),
         };

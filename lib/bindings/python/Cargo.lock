@@ -2330,6 +2330,7 @@ dependencies = [
  "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-ledger",
  "dynamo-router-protocol",
  "dynamo-tokens",
  "fastrand",
@@ -2345,6 +2346,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-kv-ledger"
+version = "1.8.0"
+dependencies = [
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]

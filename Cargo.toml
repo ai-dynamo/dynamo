@@ -17,6 +17,7 @@ members = [
     "lib/router/admission",
     "lib/router/kv-hints",
     "lib/router/kv-indexer",
+    "lib/router/kv-ledger",
     "lib/router/kv-router",
     "lib/router/protocol",
     "lib/router/scheduler",
@@ -99,6 +100,7 @@ dynamo-kv-events = { path = "lib/kv-events", version = "1.8.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.8.0" }
 dynamo-kv-hints = { path = "lib/router/kv-hints", version = "1.8.0" }
 dynamo-kv-indexer = { path = "lib/router/kv-indexer", version = "1.8.0" }
+dynamo-kv-ledger = { path = "lib/router/kv-ledger", version = "1.8.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.8.0" }
 dynamo-global-router = { path = "lib/global-router", version = "1.8.0" }
 dynamo-global-router-store-dynamodb = { path = "lib/global-router-store-dynamodb", version = "1.8.0" }

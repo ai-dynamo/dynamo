@@ -176,11 +176,11 @@ Each event carries a unique router ID to prevent self-event processing. Publicat
 
 ## Event Transport Modes
 
-KV cache events use fire-and-forget pub/sub through the configured event plane. Workers maintain local radix trees, and routers rebuild state by querying workers on startup. The event plane supports both NATS Core and ZMQ.
+KV cache events use fire-and-forget pub/sub through the configured event plane. Workers keep a local record of their recent events and the blocks they hold, and routers rebuild state by querying workers on startup. The event plane supports both NATS Core and ZMQ.
 
 ### Event Plane with Local Indexers
 
-By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
+By default, workers have local indexer enabled. Each worker keeps its recent events and a ledger of the blocks it holds (the local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
 - **Best for**: Low-latency event delivery, multi-router deployments, and deployments without NATS (using the ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
