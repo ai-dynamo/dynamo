@@ -43,10 +43,10 @@ fn test_config(use_kv_events: bool) -> KvRouterConfig {
 }
 
 fn reference_factory() -> dynamo_scheduler::WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _| {
+    Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }

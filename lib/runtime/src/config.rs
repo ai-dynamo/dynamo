@@ -622,6 +622,18 @@ pub fn span_events_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
 }
 
+/// How long the HTTP service lets the requests it has admitted finish once
+/// shutdown starts: `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, default 5 s.
+/// Whatever those requests' responses come through must stay up as long, so
+/// the HTTP service and everything that waits for its drain read it here.
+pub fn http_graceful_shutdown_timeout() -> std::time::Duration {
+    let seconds = std::env::var(environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or(5);
+    std::time::Duration::from_secs(seconds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
