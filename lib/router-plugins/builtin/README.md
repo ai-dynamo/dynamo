@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # dynamo-router-policies
 
-`dynamo-router-policies` holds the router plugins Dynamo ships. Each one is written against the same public plugin API a custom policy uses (`dynamo_kv_router::plugins::prelude`), so the crate also serves as a set of worked examples.
+`dynamo-router-policies` holds the router plugins Dynamo ships. Each one is written against the same public plugin API a custom policy uses (`dynamo_kv_router::plugins::worker_selection` and `dynamo_kv_router::plugins::request_classifier`), so the crate also serves as a set of worked examples.
 
 | Kind | Type name | Source |
 |---|---|---|

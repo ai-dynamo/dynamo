@@ -74,14 +74,12 @@ impl AvailableWorkerIds {
     }
 }
 
-/// Builds a partition's worker-selection policy from the selection slice, the worker type
-/// this router serves, and the partition the policy is for. The composed router's plugin
-/// registry supplies it; the kernel calls it once per partition.
+/// Builds a partition's worker-selection policy from its context: the selection slice, the
+/// worker type this router serves, and the partition the policy is for. The composed router's
+/// plugin registry supplies it; the kernel calls it once per partition.
 pub type WorkerSelectionPolicyFactory = std::sync::Arc<
     dyn for<'a> Fn(
-            &dynamo_worker_selection::SelectionConfig,
-            dynamo_router_protocol::worker_type::WorkerType,
-            crate::identity::RoutingPartitionRef<'a>,
+            dynamo_worker_selection::WorkerSelectionPolicyContext<'a>,
         ) -> dynamo_worker_selection::WorkerSelectionPolicy
         + Send
         + Sync,

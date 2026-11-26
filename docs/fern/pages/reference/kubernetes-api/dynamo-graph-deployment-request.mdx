@@ -107,6 +107,40 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 KV-transfer bandwidth
+
+In a disaggregated candidate, the prefill worker sends each request's KV cache to a
+decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
+is the sustained bandwidth, in decimal GB/s, that one GPU has for that transfer. It is a
+per-GPU value, not the aggregate of a node or of a parallel group. Prefer a measured value,
+for example from a NIXL benchmark, to the nominal NIC rate.
+
+The field lowers to AISimulate's `engine.kv_transfer.bandwidth_gb_per_second`. When it is
+omitted, AISimulate's default models the transfer as instantaneous, so disaggregated
+candidates report optimistic TTFT and goodput. See AISimulate's
+[P/D KV transfer](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+documentation for how candidates use the bandwidth, including
+[link sharing](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md#link-sharing).
+
+```yaml
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  hardware:
+    interconnect:
+      kvTransferBandwidthGBps: 27.7 # Measured NIXL GPU-to-GPU bandwidth across nodes.
+```
+
+Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` is applied
+after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
+set other transfer fields, or delete the transfer model with `null`.
+
+<Note>
+  Client-side `kubectl apply` incorrectly removes native `null` values. Use
+  `{$null: true}` for deletions, or submit native nulls with `kubectl create`
+  or `kubectl apply --server-side`.
+</Note>
+
 ### v1beta2 DGD Overrides
 
 DGDR v1beta2 is available without a feature gate and is not feature complete.
@@ -1495,21 +1529,20 @@ with `traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traff
 These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
-override deletes the named field or parent object, and the operator does not restore it. For
-example, this override deletes the lowered source:
+or `{$null: true}` override deletes the named field or parent object, and the operator does not
+restore it. For example, this override deletes the lowered traffic configuration:
 
 ```yaml
 spec:
   aisim:
     inputOverrides:
-      traffic:
-        source: null
+      traffic: null  # or equivalent {$null: true} for kubectl apply
 ```
 
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
-claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. AISimulate validates
-the resulting input when the Run's Job starts, and an input it rejects fails the Run; admission does
-not validate it against the AISimulate schema yet.
+claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. Admission validates
+the merged input against the bundled AISimulate schema; the Run's Job also applies AISimulate's
+runtime validation.
 
 ### Trace claim lifecycle
 

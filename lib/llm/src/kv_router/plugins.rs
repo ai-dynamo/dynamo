@@ -5,8 +5,10 @@
 
 use std::sync::{Arc, OnceLock};
 
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::host::RouterPlugins;
 use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyFactory};
-use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
 use dynamo_runtime::pipeline::{InstanceSelector, ModeSelectors, PushRouterOptions};
 use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 

@@ -71,6 +71,8 @@ fn policy_error(error_value: RuntimePolicyError) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY
         }
         RuntimePolicyError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // An error this endpoint has no status for is the server's, not the caller's.
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, error_value)
 }

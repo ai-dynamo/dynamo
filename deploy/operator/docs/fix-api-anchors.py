@@ -202,5 +202,12 @@ for t in external_types_without_sections:
     anchor = t.lower()
     content = content.replace(f"[{t}](#{anchor})", t)
 
+# crd-ref-docs escapes object braces even inside code spans, where Markdown preserves the slashes.
+content = re.sub(
+    r"`\\\{[^`\n]*\\\}`",
+    lambda match: match.group(0).replace(r"\{", "{").replace(r"\}", "}"),
+    content,
+)
+
 path.write_text(content)
 print(f"✅ Post-processed API reference in {path}")

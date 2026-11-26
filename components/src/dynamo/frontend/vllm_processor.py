@@ -1757,6 +1757,10 @@ class EngineFactory:
             "tokenizer_mode": tokenizer_mode,
             "config_format": config_format,
             "trust_remote_code": trust_remote_code,
+            # No cap here (vLLM's -1). The Rust frontend has already checked
+            # the count against the serving model's limit, which follows
+            # worker membership; a cap fixed at build time would go stale.
+            "max_logprobs": -1,
         }
         context_length = _runtime_config_context_length(mdc)
         if context_length:
