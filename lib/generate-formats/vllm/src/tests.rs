@@ -17,10 +17,9 @@ fn routing_metadata(
 }
 
 fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
-    preprocessed_from_generate_with_priority(
+    preprocessed_from_generate(
         serde_json::from_value(raw.clone()).unwrap(),
         worker.model,
-        None,
         None,
         "resolved-request",
         worker,
@@ -228,10 +227,9 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         }
     }))
     .expect("deserialize request");
-    let preprocessed = preprocessed_from_generate_with_priority(
+    let preprocessed = preprocessed_from_generate(
         request,
         "test-model",
-        None,
         None,
         "resolved-request",
         &routing_metadata(4, false, None),
@@ -462,10 +460,9 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         }
         let expected_token_ids = request.token_ids.clone();
 
-        let preprocessed = preprocessed_from_generate_with_priority(
+        let preprocessed = preprocessed_from_generate(
             request,
             "test-model",
-            None,
             None,
             "resolved-request",
             &routing_metadata(4, false, None),
@@ -473,7 +470,6 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         .expect("invalid routing metadata must not reject execution");
 
         assert!(preprocessed.mm_routing_info.is_none(), "{name}");
-        assert!(preprocessed.has_opaque_multimodal_input, "{name}");
         assert_eq!(
             preprocessed.token_ids.as_slice(),
             expected_token_ids,
@@ -508,10 +504,9 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     });
     let base_request: GenerateRequest =
         serde_json::from_value(raw.clone()).expect("deserialize base request");
-    let base = preprocessed_from_generate_with_priority(
+    let base = preprocessed_from_generate(
         base_request,
         "test-model",
-        None,
         None,
         "resolved-request",
         &routing_metadata(4, true, None),
@@ -525,17 +520,15 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     for tower_connector_lora_enabled in [false, true] {
         let adapter_request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate_with_priority(
+        let adapter = preprocessed_from_generate(
             adapter_request,
             "adapter-a",
-            None,
             None,
             "resolved-request",
             &routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
         )
         .expect("build adapter request");
         assert!(adapter.mm_routing_info.is_none());
-        assert!(adapter.has_opaque_multimodal_input);
         assert_eq!(
             adapter.routing.as_ref().unwrap().lora_name.as_deref(),
             Some("adapter-a")
@@ -570,11 +563,10 @@ fn routing_preserves_bounds_rank_and_priority() {
                 "token_ids": [1, 2], "sampling_params": sampling, "priority": priority,
             }))
             .unwrap();
-            let request = preprocessed_from_generate_with_priority(
+            let request = preprocessed_from_generate(
                 request,
                 "test-model",
                 Some(3),
-                None,
                 "req",
                 &routing_metadata(16, false, None),
             )
@@ -619,10 +611,9 @@ fn generate_projects_training_text_controls() {
     }))
     .expect("deserialize request");
 
-    let preprocessed = preprocessed_from_generate_with_priority(
+    let preprocessed = preprocessed_from_generate(
         request,
         "test-model",
-        None,
         None,
         "resolved-request",
         &routing_metadata(16, false, None),

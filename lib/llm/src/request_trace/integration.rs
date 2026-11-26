@@ -48,10 +48,7 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
     if common_request.prompt_embeds.is_some() {
         return Some("prompt embeddings are not supported");
     }
-    if common_request.multi_modal_data.is_some()
-        || common_request.mm_routing_info.is_some()
-        || common_request.has_opaque_multimodal_input
-    {
+    if common_request.multi_modal_data.is_some() || common_request.mm_routing_info.is_some() {
         return Some("multimodal inputs are not supported");
     }
     if common_request.sampling_options.n.unwrap_or(1) > 1 {
@@ -517,12 +514,6 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_request_shapes() {
-        let mut opaque = preprocessed_request(SamplingOptions::default());
-        opaque.has_opaque_multimodal_input = true;
-        assert_eq!(
-            request_trace_rejection(&opaque),
-            Some("multimodal inputs are not supported")
-        );
         let mut multi_choice = preprocessed_request(SamplingOptions {
             n: Some(2),
             ..Default::default()
