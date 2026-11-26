@@ -697,6 +697,31 @@ impl RoutingHost {
         }
     }
 
+    /// Verify an aggregated completion's explicit route up to the dispatch boundary.
+    pub(crate) async fn check_completion_route(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        worker_id: u64,
+    ) -> Result<(), Error> {
+        let phase = RequestPhase::Aggregated;
+        anyhow::ensure!(
+            explicit_target(request.content(), phase)?.map(|target| target.worker_id)
+                == Some(worker_id),
+            "completion probe requires the exact pinned worker"
+        );
+        if matches!(&self.policy, RoutingPolicy::Kv(_)) {
+            let budget = CleanupBudget::default();
+            let (selection, _) = self
+                .select_with_affinity(request, phase, true, &budget)
+                .await?;
+            anyhow::ensure!(
+                selection.worker.worker_id == worker_id,
+                "completion probe selected a different worker"
+            );
+        }
+        self.inner.ensure_dispatchable(worker_id)
+    }
+
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,

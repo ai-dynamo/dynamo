@@ -9251,6 +9251,52 @@ impl
     }
 }
 
+impl OpenAIPreprocessor {
+    /// Prepare a completion using the same tokenizer and validation for inference and route probes.
+    pub(crate) async fn preprocess_completion_request(
+        &self,
+        request: &NvCreateCompletionRequest,
+        tracker: Option<&RequestTracker>,
+        lora_name: Option<String>,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
+        let mut builder = self.builder_with_lora(request, lora_name)?;
+
+        // Check if embeddings are provided - skip tokenization path
+        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+            // Skip tokenization for embeddings
+            builder.token_ids(vec![]); // Empty token IDs
+            builder.prompt_embeds(Some(prompt_embeds.clone()));
+            // No token annotations
+            HashMap::new()
+        } else {
+            // Normal path: tokenize the prompt; embeddings don't need MM routing,
+            // so install tokens on the builder right away.
+            let (token_ids, ann) = self.gather_tokens(request, None, tracker).await?;
+            builder.token_ids(token_ids);
+            ann
+        };
+
+        // Gather multimodal data (works with both embeddings and text prompts)
+        // Returned MM entries are unused on the embeddings path; routing info is
+        // not built here.
+        let _ = self
+            .gather_multi_modal_data(request, &mut builder, None, &[])
+            .await?;
+
+        let mut common_request = builder.build()?;
+        // Backends can distinguish legacy completion defaults from chat defaults.
+        let extra_args = common_request
+            .extra_args
+            .get_or_insert_with(|| serde_json::json!({}));
+        let extra_args = extra_args
+            .as_object_mut()
+            .context("preprocessed extra_args must be an object")?;
+        extra_args.insert("request_type".to_string(), "completions".into());
+        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        Ok((common_request, annotations))
+    }
+}
+
 #[async_trait]
 impl
     Operator<
@@ -9288,50 +9334,17 @@ impl
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
         apply_upstream_elapsed(&context, tracker.as_deref());
-        // convert the chat completion request to a common completion request
-        let mut builder = self.builder_with_lora(
-            &request,
-            context
-                .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
-                .ok()
-                .flatten()
-                .map(|name| name.as_ref().clone()),
-        )?;
-
-        // Check if embeddings are provided - skip tokenization path
-        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
-            // Skip tokenization for embeddings
-            builder.token_ids(vec![]); // Empty token IDs
-            builder.prompt_embeds(Some(prompt_embeds.clone()));
-            // No token annotations
-            HashMap::new()
-        } else {
-            // Normal path: tokenize the prompt; embeddings don't need MM routing,
-            // so install tokens on the builder right away.
-            let (token_ids, ann) = self
-                .gather_tokens(&request, None, tracker.as_deref())
-                .await?;
-            builder.token_ids(token_ids);
-            ann
-        };
-
-        // Gather multimodal data (works with both embeddings and text prompts)
-        // Returned MM entries are unused on the embeddings path; routing info is
-        // not built here.
-        let _ = self
-            .gather_multi_modal_data(&request, &mut builder, None, &[])
+        let (mut common_request, annotations) = self
+            .preprocess_completion_request(
+                &request,
+                tracker.as_deref(),
+                context
+                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|name| name.as_ref().clone()),
+            )
             .await?;
-
-        let mut common_request = builder.build()?;
-        // Backends can distinguish legacy completion defaults from chat defaults.
-        let extra_args = common_request
-            .extra_args
-            .get_or_insert_with(|| serde_json::json!({}));
-        let extra_args = extra_args
-            .as_object_mut()
-            .context("preprocessed extra_args must be an object")?;
-        extra_args.insert("request_type".to_string(), "completions".into());
-        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }

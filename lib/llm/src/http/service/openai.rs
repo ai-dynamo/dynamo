@@ -1357,13 +1357,14 @@ async fn handler_completions(
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
-    // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready_for(
-        &state,
-        &request.inner.model,
-        NamedWorkers::from_request(request.nvext.as_ref(), &headers, state.nvext_enabled()),
-    )?;
+    if request.inner.max_tokens != Some(0) {
+        check_model_serving_ready_for(
+            &state,
+            &request.inner.model,
+            NamedWorkers::from_request(request.nvext.as_ref(), &headers, state.nvext_enabled()),
+        )?;
+    }
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1377,6 +1378,10 @@ async fn handler_completions(
     }
     request.nvext =
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
+
+    if request.inner.max_tokens == Some(0) {
+        return probe_completion_route(&state, request, &headers).await;
+    }
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1422,6 +1427,57 @@ async fn handler_completions(
     connection_handle.disarm();
 
     response
+}
+
+/// Check a pinned aggregate route without invoking a serving engine.
+async fn probe_completion_route(
+    state: &Arc<service_v2::State>,
+    mut request: NvCreateCompletionRequest,
+    headers: &HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    use crate::protocols::openai::completions::get_prompt_batch_size;
+
+    let named = NamedWorkers::from_nvext(request.nvext.as_ref());
+    let worker_id = named
+        .worker
+        .ok_or_else(|| ErrorMessage::bad_request("max_tokens: 0 requires an explicit worker ID"))?;
+    if named.prefill.is_some()
+        || request.inner.stream.unwrap_or(false)
+        || get_prompt_batch_size(&request.inner.prompt) != 1
+        || request.inner.n.unwrap_or(1) != 1
+        || request.inner.best_of.unwrap_or(1) != 1
+    {
+        return Err(ErrorMessage::bad_request(
+            "max_tokens: 0 requires one non-streaming, aggregated completion",
+        ));
+    }
+    validate_completion_stream_options(&request)?;
+    request.inner.model = state.manager().resolve_canonical_name(&request.inner.model);
+    let max_logprobs = request_max_logprobs(state, &request.inner.model, request.inner.logprobs);
+    request
+        .validate_route_probe(max_logprobs)
+        .map_err(|e| validation_error_response(e, "completion"))?;
+
+    let model = state.manager().get_committed_model(&request.inner.model);
+    let unavailable = ErrorMessage::service_unavailable_with_body;
+    let Some(probe) = model.and_then(|model| model.completion_route_probe(worker_id)) else {
+        return Err(unavailable(model_not_ready_message(&request.inner.model)));
+    };
+    let model_name = request.inner.model.clone();
+    let context = context_from_headers_with_input_trigger(
+        request,
+        get_or_create_request_id(headers),
+        headers,
+        |request| Some(classify_completion_request(request)),
+    )?;
+    if !probe
+        .check(context, worker_id)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to preprocess completion probe"))?
+    {
+        return Err(unavailable(model_not_ready_message(&model_name)));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[tracing::instrument(skip_all)]
@@ -7954,6 +8010,115 @@ mod tests {
         state.start_draining();
         let response = check_ready(&state).unwrap_err();
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn completion_route_probe_checks_held_target_without_dispatch() {
+        use crate::{
+            discovery::{LoadThresholdHandle, WorkerSet},
+            entrypoint::input::CompletionRouteProbe,
+            kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext},
+            model_card::ModelDeploymentCard,
+            model_type::ModelType,
+            preprocessor::OpenAIPreprocessor,
+            worker_type::WorkerType,
+        };
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime, distributed::DistributedConfig, pipeline::RouterMode,
+        };
+        use tower::ServiceExt;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("completion-probe")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let load = RoutingLoadContext::start(
+            client.clone(),
+            RouterLoadSource::Aggregated,
+            LoadThresholdHandle::new(Default::default()),
+            &drt.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+            .load_context(load)
+            .build()
+            .await
+            .unwrap();
+
+        const READY: u64 = 7;
+        const HELD: u64 = 8;
+        client.override_discovered_instances_with_held(vec![READY, HELD], vec![HELD]);
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        card.set_name("probe-model");
+        card.model_type = ModelType::Completions;
+        card.worker_type = Some(WorkerType::Aggregated);
+        let preprocessor =
+            OpenAIPreprocessor::new_for_completions(card.clone(), card.tokenizer().unwrap())
+                .unwrap();
+        let mut set = WorkerSet::new(
+            "completion-probe".to_string(),
+            card.mdcsum().to_string(),
+            card,
+        );
+        set.set_instance_watcher(client.instance_avail_watcher());
+        set.set_dispatch_watcher(client.instance_dispatch_watcher());
+        set.completions_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        set.completion_route_probe = Some(CompletionRouteProbe::new(preprocessor, Arc::new(host)));
+
+        let service = service_v2::HttpService::builder()
+            .enable_nvext(true)
+            .build()
+            .unwrap();
+        assert!(
+            service
+                .model_manager()
+                .add_worker_set("probe-model", "completion-probe", set)
+        );
+        let (_, router) = completions_router(service.state_clone(), None);
+
+        // Neither instance has a serving endpoint. A worker dispatch cannot pass this probe.
+        for (worker_id, expected) in [
+            (Some(HELD), StatusCode::NO_CONTENT),
+            (Some(99), StatusCode::SERVICE_UNAVAILABLE),
+            (None, StatusCode::BAD_REQUEST),
+        ] {
+            let mut body = serde_json::json!({
+                "model": "probe-model",
+                "prompt": "hello",
+                "max_tokens": 0,
+            });
+            if let Some(worker_id) = worker_id {
+                body["nvext"] = serde_json::json!({"backend_instance_id": worker_id});
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::post("/v1/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "worker {worker_id:?}");
+        }
+
+        runtime.shutdown();
     }
 
     fn media_rejection_state(enabled: bool, status_code: u16) -> Arc<service_v2::State> {

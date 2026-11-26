@@ -605,6 +605,18 @@ impl NvCreateCompletionRequest {
     /// [`ValidateRequest::validate`], with `logprobs` checked against
     /// `max_logprobs` (the serving model's limit) instead of the default.
     pub fn validate_with_max_logprobs(&self, max_logprobs: u8) -> Result<(), anyhow::Error> {
+        self.validate_fields(max_logprobs, self.inner.max_tokens)
+    }
+
+    pub(crate) fn validate_route_probe(&self, max_logprobs: u8) -> Result<(), anyhow::Error> {
+        self.validate_fields(max_logprobs, None)
+    }
+
+    fn validate_fields(
+        &self,
+        max_logprobs: u8,
+        generation_limit: Option<u32>,
+    ) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
@@ -616,7 +628,7 @@ impl NvCreateCompletionRequest {
         )?;
 
         validate::validate_suffix(self.inner.suffix.as_deref())?;
-        validate::validate_max_tokens(self.inner.max_tokens)?;
+        validate::validate_max_tokens(generation_limit)?;
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_n(self.inner.n)?;

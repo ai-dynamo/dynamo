@@ -2499,6 +2499,18 @@ async fn kv_reaches_a_held_worker_only_through_a_caller_pin() {
         .override_discovered_instances_with_held(vec![READY, HELD], vec![HELD]);
     let budget = CleanupBudget::default();
 
+    // A zero-token HTTP probe takes the same query-only path for this exact worker.
+    let mut probe = request();
+    probe.routing = Some(
+        serde_json::from_value(serde_json::json!({
+            "backend_instance_id": HELD,
+        }))
+        .unwrap(),
+    );
+    let probe = Context::new(probe);
+    router.check_completion_route(&probe, HELD).await.unwrap();
+    assert!(router.check_completion_route(&probe, READY).await.is_err());
+
     for (field, phase) in [
         ("backend_instance_id", RequestPhase::Aggregated),
         ("decode_worker_id", RequestPhase::Decode),

@@ -882,7 +882,7 @@ impl ModelWatcher {
                     let completions_engine = routing
                         .build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(
                             card,
-                            preprocessor,
+                            preprocessor.clone(),
                             tk,
                             self.migration_limit,
                             self.migration_max_seq_len,
@@ -890,6 +890,13 @@ impl ModelWatcher {
                         )
                         .context("PreprocessedRouting::build_pipeline")?;
                     worker_set.completions_engine = Some(completions_engine);
+                    if effective_worker_type(card.worker_type, card.model_type)
+                        == WorkerType::Aggregated
+                        && card.lora.is_none()
+                    {
+                        worker_set.completion_route_probe =
+                            Some(routing.completion_route_probe(preprocessor));
+                    }
                     tracing::info!("Completions is ready");
                 } else {
                     tracing::warn!(

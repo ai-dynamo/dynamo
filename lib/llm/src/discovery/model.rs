@@ -16,6 +16,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::entrypoint::input::CompletionRouteProbe;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
@@ -1042,6 +1043,23 @@ impl Model {
         })
         .map(Some)
         .ok_or_else(|| self.engine_error(true))
+    }
+
+    /// Look up the prepared probe in the exact candidate's WorkerSet, including held workers.
+    pub(crate) fn completion_route_probe(&self, worker_id: u64) -> Option<CompletionRouteProbe> {
+        let worker_sets = self.worker_sets.load();
+        let named = NamedWorkers {
+            worker: Some(worker_id),
+            prefill: None,
+        };
+        let namespaces = self.named_namespaces(&worker_sets, named);
+        worker_sets.values().find_map(|set| {
+            if namespaces.contains(&set.namespace()) && set.has_dispatchable_worker(worker_id) {
+                set.completion_route_probe.clone()
+            } else {
+                None
+            }
+        })
     }
 
     pub fn get_completions_engine_with_parsing(

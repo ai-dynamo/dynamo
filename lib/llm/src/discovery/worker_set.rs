@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     chat_input::ChatInputPolicy,
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    entrypoint::input::CompletionRouteProbe,
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
@@ -234,6 +235,7 @@ pub struct WorkerSet {
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
+    pub(crate) completion_route_probe: Option<CompletionRouteProbe>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
     pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
@@ -298,6 +300,7 @@ impl WorkerSet {
             card,
             chat_engine: None,
             completions_engine: None,
+            completion_route_probe: None,
             embeddings_engine: None,
             classify_engine: None,
             pooling_engine: None,
@@ -674,6 +677,7 @@ impl WorkerSet {
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
+            completion_route_probe: None,
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
             classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
             pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
