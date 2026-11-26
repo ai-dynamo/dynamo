@@ -6,9 +6,46 @@
 import json
 import math
 import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 METRIC = "engine_service_time_v1"
+
+
+@dataclass
+class Plan:
+    """Calibration inputs; JSON field names are kept stable for saved plans."""
+
+    schema_version: int
+    timing_metric: str
+    P: list[int]
+    D: list[int]
+    K: list[int]
+    P_discontinuities: list[int]
+    cases: list[dict[str, str | int]]
+    cap: int
+    alignment: int
+    max_prefill: int
+    repeats: int
+    warmups: int
+    decode_tokens: int
+    decode_warmup_tokens: int
+    capture_sizes: list[int]
+    prefill_graphs: bool
+    measurement_only: bool | None = None
+    point_selection: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "Plan":
+        return cls(**value)
+
+    def to_dict(self) -> dict:
+        value = asdict(self)
+        # Preserve legacy metadata when supplied, without adding it to new plans.
+        for key in ("measurement_only", "point_selection"):
+            if value[key] is None:
+                value.pop(key)
+        return value
 
 
 def atomic_json(path, value):
@@ -54,7 +91,7 @@ def design(
     repeats=10,
     warmups=3,
     decode_tokens=80,
-):
+) -> Plan:
     """Capture sizes must be resolved sizes usable by single-request prefill.
 
     vLLM rounds scheduled tokens up to the next captured size. Thus c and c+1
@@ -104,7 +141,7 @@ def design(
     p = sorted(p)
     cases = [dict(phase="prefill", P=a, D=b, split="train") for b in d for a in p]
     cases += [dict(phase="decode", K=a, split="train") for a in k]
-    return dict(
+    return Plan(
         schema_version=1,
         timing_metric=METRIC,
         P=p,

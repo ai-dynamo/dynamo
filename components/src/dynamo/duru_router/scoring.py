@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +37,10 @@ from dynamo.duru_router.transport import (
 
 logger = logging.getLogger(__name__)
 MAX_PENDING_EVENTS = 262144
+
+
+class AccountingError(RuntimeError):
+    """The router-owned accounting service has failed or stopped unexpectedly."""
 
 
 class LiveU:
@@ -256,8 +261,6 @@ class EventStreamReader:
         self.receiver = receiver
 
     def read(self):
-        if self.closed:
-            return []
         if self.receiver is None:
             try:
                 self.receiver = Receiver(channel_path(self.path))
@@ -304,6 +307,7 @@ class Ingress:
         if event not in (
             "request_arrived",
             "request_dispatched",
+            "request_dispatch_rejected",
             "request_completed",
             "request_cancelled",
             "request_failed",
@@ -422,6 +426,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                         if row["event"] in (
                             "request_arrived",
                             "request_dispatched",
+                            "request_dispatch_rejected",
                             "request_completed",
                             "request_cancelled",
                             "request_failed",
@@ -503,6 +508,10 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                                     "Request dispatched without an arrival event"
                                 )
                             worker_requests.add(event_data["request_id"])
+                        elif event_data["event"] == "request_dispatch_rejected":
+                            # The router confirmed rejection before async dispatch.
+                            # Request failure still closes the active accounting entry.
+                            worker_requests.remove(event_data["request_id"])
                         elif event_data["event"] == "agent_group_end":
                             root = event_data["root"]
                             if book.root_active[root]:
@@ -551,10 +560,18 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     rid: dict(book.score(rid), program_id=request_programs[rid], **r)
                     for rid, r in book.active.items()
                 }
-                programs = {
-                    r["program_id"]: dict(r, request_id=rid)
-                    for rid, r in requests.items()
-                }
+                programs = {}
+                for rid, request in requests.items():
+                    program_id = request["program_id"]
+                    previous = programs.get(program_id)
+                    # One reservation serves every active request in a program.
+                    # Use its highest request score, with stable arrival/ID ties.
+                    if previous is None or priority_key(
+                        request["score"], request["arrival"], rid
+                    ) < priority_key(
+                        previous["score"], previous["arrival"], previous["request_id"]
+                    ):
+                        programs[program_id] = dict(request, request_id=rid)
                 for program_id, (root, agent) in program_identities.items():
                     programs.setdefault(
                         program_id,
@@ -666,7 +683,7 @@ class RouterAccounting:
             raise ValueError("Router-owned ingress must use in_process=True")
         self._snapshot = {}
         self._stop = threading.Event()
-        self._error = None
+        self._result = Future()
         self._thread = threading.Thread(
             target=self._run, name="duru-accounting", daemon=True
         )
@@ -687,23 +704,31 @@ class RouterAccounting:
                 router_publish=self._router_publish,
                 ingress_source=self._ingress_source,
             )
-        except BaseException as exc:
+        except Exception as exc:
+            # Hand ordinary task failures to the owner without losing their
+            # original traceback. Process-control exceptions still escape.
+            self._result.set_exception(exc)
+        else:
+            self._result.set_result(None)
+        finally:
             self._snapshot = {}
-            self._error = exc
 
     def start(self):
         self._thread.start()
         return self
 
     def check(self):
-        if self._error is not None:
-            raise RuntimeError("Router U accounting failed") from self._error
+        if self._result.done():
+            try:
+                self._result.result()
+            except Exception as exc:
+                raise AccountingError("Router U accounting failed") from exc
         if (
             self._thread.ident is not None
             and not self._thread.is_alive()
             and not self._stop.is_set()
         ):
-            raise RuntimeError("Router U accounting stopped unexpectedly")
+            raise AccountingError("Router U accounting stopped unexpectedly")
 
     def close(self):
         self._stop.set()

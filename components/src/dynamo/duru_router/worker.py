@@ -59,6 +59,7 @@ class DuruScheduler(AsyncScheduler):
             self.waiting = Queue(self.waiting, self)
             self.kv_holding_waiting = Queue(self.kv_holding_waiting, self)
         self._pending_work = {}
+        self._kv_rejected_work = set()
         self.compact_feed = CompactFeed(os.environ["DURU_WORK_DIR"])
 
     def identity(self, request):
@@ -92,6 +93,9 @@ class DuruScheduler(AsyncScheduler):
         if self.u_reader is None:
             return super().schedule(*args, **kwargs)
         snapshot = self.u_reader.refresh()
+        # Requests here have already passed router admission. An unavailable
+        # snapshot must let native scheduling drain them, including preemptions.
+        # Pin the empty snapshot so both queues keep native order for this pass.
         held = []
         try:
             for queue in (self.waiting, self.kv_holding_waiting):
@@ -99,7 +103,8 @@ class DuruScheduler(AsyncScheduler):
                 deferred = [
                     request
                     for request in queue
-                    if snapshot.get("requests", {}).get(
+                    if snapshot
+                    and snapshot.get("requests", {}).get(
                         self.identity(request)["client_request_id"]
                     )
                     is None
@@ -144,14 +149,8 @@ class DuruScheduler(AsyncScheduler):
     def update_from_output(self, scheduler_output, runner_output):
         if scheduler_output.scheduled_spec_decode_tokens:
             raise ValueError("Speculative work is outside Duru's accounting model")
-        connector = runner_output.kv_connector_output
-        if connector is not None and (
-            connector.invalid_block_ids or connector.failed_recving
-        ):
-            raise ValueError(
-                "Invalid KV blocks or failed KV transfers are outside Duru's accounting model"
-            )
         with self.compact_feed.lock:
+            self._kv_rejected_work.clear()
             pending = self._pending_work.pop(id(scheduler_output))
             acceptance = {}
             for request_id, (request, _) in pending.items():
@@ -169,6 +168,7 @@ class DuruScheduler(AsyncScheduler):
             steps = []
             for request_id, (request, step) in pending.items():
                 accepted, previous_tokens = acceptance[request_id]
+                accepted = accepted and request_id not in self._kv_rejected_work
                 steps.append(
                     dict(
                         step,
@@ -190,6 +190,20 @@ class DuruScheduler(AsyncScheduler):
             if finished:
                 self.compact_feed.emit("worker_request_finished", requests=finished)
             return result
+
+    def _handle_failed_recving(self, failed_req_ids):
+        rejected = super()._handle_failed_recving(failed_req_ids)
+        self._kv_rejected_work.update(rejected)
+        return rejected
+
+    def _handle_invalid_blocks(self, invalid_block_ids, num_scheduled_tokens):
+        rejected = super()._handle_invalid_blocks(
+            invalid_block_ids, num_scheduled_tokens
+        )
+        # Use the native skip set: a transfer failure can trigger recovery
+        # without rejecting any scheduled output in this batch.
+        self._kv_rejected_work.update(rejected)
+        return rejected
 
     def finish_requests(self, *args, **kwargs):
         # Abort acknowledgement follows native removal. Later stale output cannot

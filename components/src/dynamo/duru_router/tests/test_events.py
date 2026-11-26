@@ -6,11 +6,12 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from dynamo.duru_router.events import CompactFeed, open_journal
+from dynamo.duru_router.events import AsyncJournal, CompactFeed, open_journal
 from dynamo.duru_router.tests.helpers import Tail, work_step
 
 pytestmark = [
@@ -19,6 +20,30 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.timeout(30),
 ]
+
+
+@pytest.mark.parametrize("target", ["journal", "clock"])
+def test_background_failure_is_logged_saved_and_reraised(target, caplog):
+    failure = OSError("injected background failure")
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    if target == "journal":
+        owner = SimpleNamespace(
+            closed=False, error=None, queue=SimpleNamespace(get=fail)
+        )
+        callback = AsyncJournal._send
+    else:
+        owner = SimpleNamespace(error=None, stop=SimpleNamespace(wait=fail))
+        callback = CompactFeed._clock
+    with pytest.raises(OSError) as caught:
+        callback(owner)
+    assert caught.value is failure
+    assert owner.error is failure
+    assert any(
+        record.exc_info and record.exc_info[1] is failure for record in caplog.records
+    )
 
 
 def test_compact_coordinates_and_clock_ordering(tmp_path):

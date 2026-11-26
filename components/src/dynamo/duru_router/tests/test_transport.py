@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -348,6 +348,26 @@ def event_frame(row, *, extended=False):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.unit
+def test_sender_failure_is_logged_saved_and_reraised(caplog):
+    failure = OSError("listener failed")
+
+    def fail():
+        raise failure
+
+    sender = Sender.__new__(Sender)
+    sender.closed = False
+    sender.peer = None
+    sender.listener = SimpleNamespace(accept=fail)
+    with pytest.raises(OSError) as caught:
+        sender._send()
+    assert caught.value is failure
+    assert sender.error is failure
+    record = next(r for r in caplog.records if r.message == "Duru event sender failed")
+    assert record.exc_info[1] is failure
+
+
+@pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.timeout(10)
 @pytest.mark.parametrize(
@@ -392,6 +412,31 @@ def test_receiver_budget_preserves_fifo_and_footer(event_connection):
     assert receiver.read(budget=0) == []
     assert receiver.read(budget=1) == rows[:1]
     assert receiver.read() == rows[1:]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.integration
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("after_footer", ["record", "clean_eof", "partial_eof"])
+def test_receiver_checks_frames_after_footer_across_reads(
+    event_connection, after_footer
+):
+    receiver, peer = event_connection
+    footer = dict(sequence=1, event="footer")
+    peer.sendall(event_frame(footer))
+    assert read_until(receiver, 1) == [footer]
+    assert receiver.read() == []
+    if after_footer == "record":
+        peer.sendall(event_frame(dict(sequence=2, event="u_clock")))
+        expected = pytest.raises(ValueError, match="event after footer")
+    elif after_footer == "partial_eof":
+        peer.sendall(b"\x00\x00")
+        expected = pytest.raises(EOFError, match="during a frame")
+    else:
+        expected = nullcontext()
+    peer.shutdown(socket.SHUT_WR)
+    with expected:
+        assert receiver.read() == []
 
 
 @pytest.mark.pre_merge
@@ -1058,23 +1103,22 @@ finally: r.close()
 )
 def test_bad_frame_fails_closed(endpoint, frame):
     _, address = endpoint
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(address))
-    listener.listen(1)
-    listener.settimeout(2)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(address))
+        listener.listen(1)
+        listener.settimeout(2)
 
-    def serve():
-        with listener:
+        def serve():
             peer, _ = listener.accept()
             with peer:
                 peer.sendall(frame)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        serving = executor.submit(serve)
-        reader = Reader()
-        try:
-            wait(reader, lambda s: reader._subscriber.failures > 0)
-            assert reader.refresh() == {}
-        finally:
-            reader.close()
-            serving.result(timeout=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            serving = executor.submit(serve)
+            reader = Reader()
+            try:
+                wait(reader, lambda s: reader._subscriber.failures > 0)
+                assert reader.refresh() == {}
+            finally:
+                reader.close()
+                serving.result(timeout=3)

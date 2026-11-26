@@ -26,6 +26,7 @@ from dynamo.duru_router.tests.helpers import (
 )
 from dynamo.duru_router.tests.helpers import memory_mode as memory_mode
 from dynamo.duru_router.tests.helpers import replay_accounting, work_step
+from dynamo.duru_router.transport import InProcessChannel
 
 pytestmark = [pytest.mark.gpu_0]
 
@@ -334,6 +335,28 @@ def test_tail_rejects_sequence_gap_before_updating_progress(tmp_path):
     assert not tail.closed
 
 
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("same_batch", [False, True])
+def test_event_reader_rejects_records_after_footer(tmp_path, same_batch):
+    channel = InProcessChannel()
+    reader = scoring.EventStreamReader(tmp_path / "events", receiver=channel)
+    footer = dict(sequence=1, time=10, event="footer")
+    channel.submit("record", footer)
+    try:
+        if not same_batch:
+            assert reader.read() == [footer]
+            assert reader.read() == []
+        channel.submit("record", dict(sequence=2, time=11, event="u_clock"))
+        with pytest.raises(ValueError, match="event after footer"):
+            reader.read()
+        assert reader.sequence == 1
+        assert reader.received_through == 10
+        assert reader.closed
+    finally:
+        reader.close()
+
+
 @pytest.fixture
 def config(tmp_path):
     return configuration(tmp_path)
@@ -451,6 +474,64 @@ def cleanup_participants(config, monkeypatch):
         publisher_factory=publisher_factory,
         router_publish=Mock(),
     )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("measured", [False, True])
+def test_overlapping_program_uses_highest_active_request_score(
+    cleanup_participants, monkeypatch, reverse, measured
+):
+    participants = cleanup_participants
+    book = make_book(1)
+    book.prefill_budget = 8
+    monkeypatch.setattr(scoring, "LiveU", lambda *args: book)
+    short = arrival_record(100, "short", "shared")
+    long = dict(arrival_record(100, "long", "shared"), prompt_tokens=40)
+    arrivals = [short, long]
+    if reverse:
+        arrivals.reverse()
+    for source in participants.sources:
+        source.received_through = 110
+        source.sequence = 1
+    participants.sources[0].read = Mock(side_effect=[arrivals, []])
+    if measured:
+        participants.sources[1].read = Mock(
+            side_effect=[
+                [
+                    dict(
+                        event="accepted_output",
+                        steps=[work_step(client_request_id="short", end=105)],
+                    )
+                ],
+                [],
+            ]
+        )
+    run(
+        participants.path, participants.stop, router_publish=participants.router_publish
+    )
+    snapshot = next(
+        call.args[0]
+        for call in participants.router_publish.call_args_list
+        if call.args[0]
+    )
+    assert book.entitlement["root"] == 10
+    assert book.root_active["root"] == 1
+    assert set(snapshot["requests"]) == {"short", "long"}
+    program = snapshot["programs"]["shared"]
+    if measured:
+        assert program["score"] == program["U"] == 5
+        # Equal scores/arrival times use request identity, not insertion order.
+        assert program["request_id"] == "long"
+        assert book.work["root"] == 2
+    else:
+        assert snapshot["requests"]["short"]["score"] == pytest.approx(10 / 6)
+        assert snapshot["requests"]["long"]["score"] == 1
+        assert program["score"] == pytest.approx(10 / 6)
+        assert program["request_id"] == "short"
+        assert program["U"] is None
+        assert book.work["root"] == 0
 
 
 @pytest.mark.pre_merge
@@ -672,18 +753,54 @@ def journal_validation_mode(monkeypatch, memory_mode):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.timeout(3)
 def test_accounting_failure_invalidates_local_scores(monkeypatch):
+    published, fail_now = threading.Event(), threading.Event()
+    snapshot = dict(observation_time=time.monotonic(), requests={"q": {"score": 1}})
+    failure = ValueError("bad event")
+
     def fail(*args, **kwargs):
-        raise ValueError("bad event")
+        kwargs["router_publish"](snapshot)
+        published.set()
+        assert fail_now.wait(1)
+        raise failure
 
     monkeypatch.setattr(scoring, "run", fail)
     owner = scoring.RouterAccounting("unused").start()
-    owner._thread.join(2)
-    with pytest.raises(RuntimeError, match="accounting failed"):
-        owner.reader.refresh()
+    try:
+        assert published.wait(1)
+        assert owner.reader.refresh() is snapshot
+        fail_now.set()
+        with pytest.raises(ValueError) as result:
+            owner._result.result(timeout=1)
+        assert result.value is failure
+        owner._thread.join(1)
+        assert not owner._thread.is_alive()
+        with pytest.raises(scoring.AccountingError, match="accounting failed") as error:
+            owner.reader.refresh()
+        assert error.value.__cause__ is failure
+        assert owner._snapshot == {}
+    finally:
+        fail_now.set()
+        with pytest.raises(scoring.AccountingError, match="accounting failed"):
+            owner.close()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit()])
+def test_accounting_does_not_consume_process_control_exceptions(monkeypatch, failure):
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(scoring, "run", fail)
+    owner = scoring.RouterAccounting("unused")
+    owner._router_publish({"requests": {"q": {"score": 1}}})
+    with pytest.raises(type(failure)) as error:
+        owner._run()
+    assert error.value is failure
     assert owner._snapshot == {}
-    with pytest.raises(RuntimeError, match="accounting failed"):
-        owner.close()
+    assert not owner._result.done()
 
 
 @pytest.mark.pre_merge

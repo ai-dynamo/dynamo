@@ -17,7 +17,7 @@ from functools import partial
 from dynamo.duru_router.admission import Candidate, DuruPolicy
 from dynamo.duru_router.diagnostics import emit as diagnostic
 from dynamo.duru_router.diagnostics import enabled as diagnostics_enabled
-from dynamo.duru_router.scoring import score_channel
+from dynamo.duru_router.scoring import AccountingError, score_channel
 from dynamo.thunderagent_router.policy import (
     ResumeChoice,
     ResumePlan,
@@ -49,15 +49,13 @@ class DuruResumePlan(ResumePlan):
     diagnostics: bool = False
     native_rank: dict[str, int] | None = None
 
-    def before_attempt(self, program: Program) -> None:
-        program._u_new_admission = False
-
     def may_force_admit(self, program: Program) -> bool:
         return self.policy.may_force_admit(self.candidates[program.program_id])
 
     def record_admission(
         self, program: Program, choice: ResumeChoice, admission_rank: int
     ) -> None:
+        program._u_new_admission = False
         if not self.diagnostics:
             return
         candidate = self.candidates[program.program_id]
@@ -201,3 +199,11 @@ class DuruScheduler(BaseScheduler):
     def __init__(self, capacity, config, *, reader):
         self.policy_cls = partial(DuruSchedulingPolicy, reader=reader)
         super().__init__(capacity, config)
+
+    async def _greedy_resume(self, capacities):
+        try:
+            await super()._greedy_resume(capacities)
+        except AccountingError:
+            # Score refresh precedes admissions. Abandon this optional retry;
+            # the handler's health checks still expose the accounting failure.
+            return

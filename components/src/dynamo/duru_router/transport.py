@@ -9,6 +9,7 @@ threads refresh in the background without blocking scheduling on socket I/O.
 """
 
 import hashlib
+import logging
 import math
 import os
 import pickle
@@ -24,6 +25,7 @@ CAPACITY = 16 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
 _LENGTH = struct.Struct("!I")
 _PEERCRED = struct.Struct("iII")
+logger = logging.getLogger(__name__)
 
 
 def transport():
@@ -186,6 +188,8 @@ class Sender:
                     self.pending_bytes -= len(frame)
         except Exception as exc:
             self.error = exc
+            logger.exception("Duru event sender failed")
+            raise
         finally:
             if connection is not None:
                 connection.close()
@@ -237,6 +241,7 @@ class Receiver:
         self._header_size = 4
         self._frame_size = None
         self._error = None
+        self._footer_seen = False
 
     def _read_frame(self):
         while True:
@@ -255,6 +260,8 @@ class Receiver:
                         raise EOFError(
                             "Duru event producer disconnected during a frame"
                         )
+                    if self._footer_seen:
+                        return None
                     raise EOFError("Duru event producer disconnected")
                 self._buffer.extend(chunk)
                 continue
@@ -291,8 +298,11 @@ class Receiver:
                 row = pickle.loads(frame)
                 if not isinstance(row, dict):
                     raise ValueError("Duru event frame must contain a record")
+                if self._footer_seen:
+                    raise ValueError("Duru event after footer")
                 rows.append(row)
                 if row.get("event") == "footer":
+                    self._footer_seen = True
                     break
         except (
             EOFError,

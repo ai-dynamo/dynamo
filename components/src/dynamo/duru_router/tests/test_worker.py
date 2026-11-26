@@ -61,7 +61,21 @@ class NativeScheduler:
 
     def update_from_output(self, scheduler_output, runner_output):
         self.output_calls += 1
+        rejected = set()
+        connector = runner_output.kv_connector_output
+        if connector is not None:
+            if connector.failed_recving:
+                rejected.update(self._handle_failed_recving(connector.failed_recving))
+            if connector.invalid_block_ids:
+                rejected.update(
+                    self._handle_invalid_blocks(
+                        connector.invalid_block_ids,
+                        scheduler_output.num_scheduled_tokens,
+                    )
+                )
         for request_id, count in runner_output.generated.items():
+            if request_id in rejected:
+                continue
             request = self.requests.get(request_id)
             if request is None or request.is_finished():
                 continue
@@ -199,6 +213,56 @@ def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail)
     assert list(scheduler.waiting) == [missing, ready]
     assert list(scheduler.kv_holding_waiting) == [holder]
     assert scheduler.u_reader.pinned is None
+
+
+@pytest.mark.parametrize("availability", ["missing", "stale", "future"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_unavailable_scores_keep_preempted_requests_runnable(
+    scheduler, monkeypatch, availability, fail
+):
+    now = 100.0
+    monkeypatch.setattr(scoring.time, "monotonic", lambda: now)
+    first, second, holder = [Request(name) for name in ("first", "second", "holder")]
+    first.status.name = holder.status.name = "PREEMPTED"
+    scheduler.waiting.extend([first, second])
+    scheduler.kv_holding_waiting.append(holder)
+    fresh = dict(
+        observation_time=now,
+        requests={
+            "first": {"score": 1},
+            "second": {"score": 10},
+            "holder": {"score": 2},
+        },
+    )
+    snapshot = (
+        {}
+        if availability == "missing"
+        else dict(fresh, observation_time=now + (-3 if availability == "stale" else 1))
+    )
+    scheduler.u_reader = scoring.Reader(snapshot_source=lambda: snapshot)
+    failure = RuntimeError("native allocation failure")
+
+    def native_schedule(self):
+        nonlocal snapshot
+        # Publication mid-pass must not change the pinned fallback order.
+        snapshot = fresh
+        assert self.u_reader.refresh() == {}
+        assert self.waiting.peek_request() is first
+        assert self.kv_holding_waiting.peek_request() is holder
+        if fail:
+            raise failure
+        return self.waiting.pop_request(), self.kv_holding_waiting.pop_request()
+
+    with monkeypatch.context() as native:
+        native.setattr(NativeScheduler, "schedule", native_schedule)
+        if fail:
+            with pytest.raises(RuntimeError) as caught:
+                scheduler.schedule()
+            assert caught.value is failure
+        else:
+            assert scheduler.schedule() == (first, holder)
+    assert scheduler.u_reader.pinned is None
+    assert scheduler.waiting.peek_request() is second
 
 
 def test_calibration_without_scores_keeps_native_scheduling_and_work_records(
@@ -407,19 +471,78 @@ def test_unsupported_requests_fail_before_admission(scheduler, pooling):
     assert not scheduler.requests
 
 
-@pytest.mark.parametrize("failure", ["invalid_kv", "failed_transfer", "speculative"])
-def test_invalid_outputs_fail_before_native_acceptance(scheduler, batch, failure):
+def test_speculative_outputs_fail_before_native_acceptance(scheduler, batch):
     result = output()
-    result.kv_connector_output = SimpleNamespace(
-        invalid_block_ids={1} if failure == "invalid_kv" else set(),
-        failed_recving={"r"} if failure == "failed_transfer" else set(),
-    )
-    if failure == "speculative":
-        batch.scheduled_spec_decode_tokens = {"r": [2]}
+    batch.scheduled_spec_decode_tokens = {"r": [2]}
     with pytest.raises(ValueError):
         scheduler.update_from_output(batch, result)
     assert id(batch) in scheduler._pending_work
     assert scheduler.output_calls == 0
+
+
+@pytest.mark.parametrize("kind", ["invalid_blocks", "failed_recving", "both"])
+@pytest.mark.parametrize("reject_output", [False, True])
+def test_kv_recovery_preserves_native_skip_decision(
+    scheduler, monkeypatch, kind, reject_output
+):
+    affected, healthy = Request("r", computed=8), Request("healthy", computed=8)
+    scheduler.add_request(affected)
+    scheduler.add_request(healthy)
+    batch = scheduled()
+    batch.num_scheduled_tokens["healthy"] = 1
+    scheduler._update_after_schedule(batch)
+    calls = []
+
+    def recover(self, *args):
+        calls.append(args)
+        affected.num_computed_tokens = 0
+        return {"r"} if reject_output else set()
+
+    monkeypatch.setattr(
+        NativeScheduler, "_handle_failed_recving", recover, raising=False
+    )
+    monkeypatch.setattr(
+        NativeScheduler, "_handle_invalid_blocks", recover, raising=False
+    )
+    result = output()
+    result.generated["healthy"] = 1
+    result.kv_connector_output = SimpleNamespace(
+        invalid_block_ids={1} if kind != "failed_recving" else set(),
+        failed_recving={"r"} if kind != "invalid_blocks" else set(),
+    )
+    assert scheduler.update_from_output(batch, result) == "native-output"
+    assert len(calls) == (2 if kind == "both" else 1)
+    assert affected.num_computed_tokens == 0
+    assert affected.num_output_tokens == (0 if reject_output else 1)
+    assert healthy.num_output_tokens == 1
+    steps = scheduler.compact_feed.events[-1][1]["steps"]
+    assert [(step["accepted"], step["generated_tokens"]) for step in steps] == [
+        (not reject_output, 0 if reject_output else 1),
+        (True, 1),
+    ]
+    # A successfully recomputed next batch must not inherit the skip set.
+    retry = scheduled(count=8)
+    scheduler._update_after_schedule(retry)
+    scheduler.update_from_output(retry, output())
+    step = scheduler.compact_feed.events[-1][1]["steps"][0]
+    assert step["accepted"] and step["generated_tokens"] == 1
+
+
+def test_native_kv_recovery_error_is_preserved(scheduler, batch, monkeypatch):
+    failure = RuntimeError("unsupported native KV layout")
+
+    def fail(self, *args):
+        raise failure
+
+    monkeypatch.setattr(NativeScheduler, "_handle_invalid_blocks", fail, raising=False)
+    result = output()
+    result.kv_connector_output = SimpleNamespace(
+        invalid_block_ids={1}, failed_recving=set()
+    )
+    with pytest.raises(RuntimeError) as caught:
+        scheduler.update_from_output(batch, result)
+    assert caught.value is failure
+    assert scheduler.compact_feed.events == []
 
 
 def test_native_failure_emits_no_work_and_closes_feed(scheduler, batch):

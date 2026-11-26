@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,11 +17,17 @@ from dynamo.duru_router import router as router_module
 from dynamo.duru_router.admission import Candidate, DuruPolicy
 from dynamo.duru_router.router import DuruScheduler, ThunderAgentConfig
 from dynamo.duru_router.scoring import Reader
+from dynamo.thunderagent_router import router as native_router
 from dynamo.thunderagent_router.policy import ResumeChoice
 from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
 from dynamo.thunderagent_router.tests.test_router import FakeCapacity
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(10),
+]
 
 
 class RouterCase:
@@ -132,28 +139,27 @@ async def case(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("diagnostics", [False, True])
-@pytest.mark.parametrize("demand,forced", [(100, False)])
 async def test_optional_diagnostics_preserve_admission(
-    case, monkeypatch, caplog, diagnostics, demand, forced
+    case, monkeypatch, caplog, diagnostics
 ):
     monkeypatch.setenv("DURU_DIAGNOSTICS", "1" if diagnostics else "0")
     monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
     caplog.set_level("INFO", logger="dynamo.duru_router.diagnostics")
-    case.put("ready", demand, 2)
+    case.put("ready", 100, 2)
     with patch(
         "dynamo.duru_router.events.open_journal",
         side_effect=AssertionError("Admission must not open an audit journal"),
     ):
         await case.resume()
     assert case.admitted == ["ready"]
-    assert case.events[0]["forced"] is forced
+    assert case.events[0]["forced"] is False
     records = [r for r in caplog.records if r.name.endswith(".diagnostics")]
     assert len(records) == int(diagnostics)
     if diagnostics:
         row = json.loads(records[0].getMessage().split(" ", 1)[1])
-        assert row["forced"] is forced
+        assert row["forced"] is False
         assert row["U"] == 2
-        assert row["required"] == demand
+        assert row["required"] == 100
         assert row["remaining_before"] == 1000
         assert row["worker"] == [1, 0]
         assert row["request_id"] == "ready"
@@ -162,7 +168,17 @@ async def test_optional_diagnostics_preserve_admission(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True], ids=["recover", "cancel"])
-async def test_missing_initial_score_defers_without_leaking_program(case, cancel):
+async def test_missing_initial_score_defers_without_leaking_program(
+    case, monkeypatch, cancel
+):
+    retry = asyncio.Event()
+
+    async def wait_for_score(delay):
+        await retry.wait()
+
+    clock = SimpleNamespace(**vars(asyncio))
+    clock.sleep = wait_for_score
+    monkeypatch.setattr(native_router, "asyncio", clock)
     task = await case.start("new", 100)
     assert not task.done()
     assert "new" not in case.router._table.programs
@@ -174,23 +190,19 @@ async def test_missing_initial_score_defers_without_leaking_program(case, cancel
     else:
         case.score("new", 0)
         case.save()
+        retry.set()
         assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
     assert not case.router._admission_gates
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [False], ids=["capacity-fit"])
-async def test_stale_scores_block_admission_then_fresh_scores_restore_rank(
-    case, monkeypatch, override
-):
+async def test_stale_scores_block_admission_then_fresh_scores_restore_rank(case):
     resident = case.router._table.begin_request("resident", 900)
     resident.assigned_replica = (1, 0)
     case.score("low", 0.2)
     low = await case.start("low", 300)
     case.score("high", 1.4)
-    high = await case.start("high", 1100 if override else 200)
-    if override:
-        monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
+    high = await case.start("high", 200)
     resident.token_total = 650
     case.save(age=3)
     await case.router._scheduler_tick()
@@ -201,21 +213,18 @@ async def test_stale_scores_block_admission_then_fresh_scores_restore_rank(
     await asyncio.wait_for(high, 1)
     assert case.admitted == ["high"]
     assert case.events[0]["score"] == 1.4
-    assert case.events[0]["forced"] is override
+    assert case.events[0]["forced"] is False
     assert not low.done()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("demand,scores,forced", [(300, [0.1, 0.01, 0.2], 0)])
-async def test_fit_and_override_admissions_follow_score_order(
-    case, monkeypatch, demand, scores, forced
-):
+async def test_capacity_fit_admissions_follow_score_order(case, monkeypatch):
     monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
-    for program, score in zip(["middle", "low", "high"], scores):
-        case.put(program, demand, score)
+    for program, score in zip(["middle", "low", "high"], [0.1, 0.01, 0.2]):
+        case.put(program, 300, score)
     await case.resume()
     assert case.admitted == ["high", "middle", "low"]
-    assert case.router._stat_forced_resumes == forced
+    assert case.router._stat_forced_resumes == 0
 
 
 @pytest.mark.asyncio
@@ -321,6 +330,36 @@ async def test_admission_pass_shares_ceiling(case, first_admissions, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostics", [False, True])
+async def test_failed_first_admission_retains_full_capacity_eligibility(
+    case, monkeypatch, diagnostics
+):
+    monkeypatch.setenv("DURU_DIAGNOSTICS", "1" if diagnostics else "0")
+    case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
+    case.put("occupant", 200, 1)
+    await case.resume()
+    case.score("new", 2)
+    waiting = await case.start("new", 900)
+    newcomer = case.router._table.programs["new"]
+    assert not waiting.done()
+    assert newcomer.lifecycle == ProgramLifecycle.PAUSED
+    assert newcomer._u_new_admission
+    assert case.used((1, 0)) == 200
+
+    await case.resume()
+    assert newcomer._u_new_admission
+    assert not waiting.done()
+
+    await case.router.end_program("occupant")
+    await case.resume()
+    await asyncio.wait_for(waiting, 1)
+    assert case.admitted == ["occupant", "new"]
+    assert newcomer.lifecycle == ProgramLifecycle.ACTIVE
+    assert not newcomer._u_new_admission
+    assert case.used((1, 0)) == 900
+
+
+@pytest.mark.asyncio
 async def test_newcomer_preserves_resume_headroom_for_established_waiters(case):
     case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
     new = case.put("new", 900, 0.1)
@@ -404,53 +443,36 @@ async def test_resume_updates_weighted_reservations_between_policy_choices(case)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [False], ids=["fit"])
-async def test_policy_placement_uses_replica_ties_and_decayed_usage(
-    case, monkeypatch, override
-):
-    # Same worker, reverse DP-rank insertion order: normal fits prefer the
-    # smaller replica key, while the override uses current decayed occupancy.
+async def test_capacity_fit_placement_breaks_replica_ties_by_key(case):
+    # Same worker, reverse DP-rank insertion order: fits prefer the smaller key.
     case.capacity.workers = {(7, 1): 1000, (7, 0): 1000}
-    if override:
-        monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
-        monkeypatch.setattr(time, "monotonic", lambda: 100.0)
-        idle = case.router._table.begin_request("idle", 900)
-        idle.status = ProgramStatus.ACTING
-        idle.acting_since = 90.0
-        idle.assigned_replica = (7, 1)
-        busy = case.router._table.begin_request("busy", 100)
-        busy.assigned_replica = (7, 0)
-    candidate = case.put("candidate", 1100 if override else 100, 2)
+    candidate = case.put("candidate", 100, 2)
 
     await case.resume()
 
-    assert candidate.assigned_replica == ((7, 1) if override else (7, 0))
-    assert case.events[0]["forced"] is override
-    assert case.events[0]["remaining"] == (100 if override else 1000)
+    assert candidate.assigned_replica == (7, 0)
+    assert case.events[0]["forced"] is False
+    assert case.events[0]["remaining"] == 1000
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("demand,forced", [(100, False)])
 async def test_host_checks_fit_before_alpha_and_preserves_replica_ties(
-    case, monkeypatch, demand, forced
+    case, monkeypatch
 ):
     monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
     case.capacity.workers = {(7, 1): 100, (7, 0): 100}
-    program = case.put("high", demand, 0.7)
+    program = case.put("high", 100, 0.7)
 
-    if forced:
+    # A fit must never consult the exception, even when score >= alpha.
+    with patch.object(
+        router_module.DuruResumePlan,
+        "may_force_admit",
+        side_effect=AssertionError("Capacity fit must precede alpha exception"),
+    ):
         await case.resume()
-    else:
-        # A fit must never consult the exception, even when score >= alpha.
-        with patch.object(
-            router_module.DuruResumePlan,
-            "may_force_admit",
-            side_effect=AssertionError("Capacity fit must precede alpha exception"),
-        ):
-            await case.resume()
 
-    assert program.assigned_replica == ((7, 1) if forced else (7, 0))
-    assert case.events[0]["forced"] is forced
+    assert program.assigned_replica == (7, 0)
+    assert case.events[0]["forced"] is False
 
 
 @pytest.mark.parametrize("channel", [None, "", "   "])

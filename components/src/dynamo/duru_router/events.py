@@ -10,6 +10,7 @@ All accounting timestamps use the same host's system-wide monotonic clock.
 
 import atexit
 import json
+import logging
 import os
 import pickle
 import queue
@@ -21,6 +22,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 FIELDS = (
     "client_request_id",
@@ -119,6 +122,8 @@ class AsyncJournal:
                     ack.set()
         except Exception as exc:
             self.error = exc
+            logger.exception("Duru journal sender failed")
+            raise
 
     def flush(self, timeout=30):
         with self._lifecycle_lock:
@@ -279,8 +284,10 @@ class CompactFeed:
         try:
             while not self.stop.wait(0.1):
                 self.emit("u_clock")
-        except BaseException as exc:
+        except Exception as exc:
             self.error = exc
+            logger.exception("Duru clock failed")
+            raise
 
     def close(self):
         self.stop.set()

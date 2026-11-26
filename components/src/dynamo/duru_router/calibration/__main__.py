@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from .measure import measure
-from .plan import atomic_json, design
+from .plan import Plan, atomic_json, design
 
 
 def read(path):
@@ -57,9 +57,9 @@ def main():
         options.pop("command")
         output = options.pop("out")
         result = design(**options)
-        atomic_json(output, result)
+        atomic_json(output, result.to_dict())
         print(
-            f"{len(result['P'])} prefill lengths x {len(result['D'])} prefix depths + {len(result['K'])} decode contexts = {len(result['cases'])} points"
+            f"{len(result.P)} prefill lengths x {len(result.D)} prefix depths + {len(result.K)} decode contexts = {len(result.cases)} points"
         )
     else:
         module, name = args.adapter.split(":", 1)
@@ -69,7 +69,7 @@ def main():
             measure(
                 args.out,
                 contract,
-                read(args.plan),
+                Plan.from_dict(read(args.plan)),
                 adapter.submit,
                 adapter.drain,
                 adapter.ledger,
