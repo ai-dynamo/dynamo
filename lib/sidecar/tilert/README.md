@@ -18,7 +18,7 @@ The two engines sit behind one worker because TileRT's prefill has to be told wh
 
 ## Engines
 
-Tested with TileRT 0.1.8 (`tilert.pd_vllm`).
+Works with TileRT 0.1.8 only (`tilert.pd_vllm`). TileRT 0.2 changed the decode server's API, and the sidecar fails at startup against it.
 
 | Engine | Requirements |
 |--------|--------------|

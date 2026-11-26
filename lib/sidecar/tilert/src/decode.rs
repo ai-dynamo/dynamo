@@ -139,6 +139,22 @@ pub(crate) fn parse_line(line: &str) -> Result<Option<DecodeEvent>, DynamoError>
     Ok(None)
 }
 
+/// TileRT 0.2 replaced 0.1.8's decode API, and its `/capabilities` is the
+/// first reply where the two differ, so a 0.2 server fails startup here.
+fn parse_capabilities(body: &[u8]) -> Result<DecodeCapabilities, DynamoError> {
+    serde_json::from_slice::<CapabilitiesReply>(body)
+        .map(|reply| reply.capabilities)
+        .map_err(|error| {
+            backend_error(
+                BackendError::Unknown,
+                format!(
+                    "TileRT decode /capabilities reply is not TileRT 0.1.8's ({error}); \
+                     this sidecar works with TileRT 0.1.8 only"
+                ),
+            )
+        })
+}
+
 fn node_error(error_type: Option<&str>, error: &serde_json::Value) -> DynamoError {
     let message = match error {
         serde_json::Value::String(message) => message.clone(),
@@ -248,11 +264,11 @@ impl DecodeClient {
             let body = error_text(response).await;
             return Err(status_error(status, &body));
         }
-        let reply: CapabilitiesReply = response
-            .json()
+        let body = response
+            .bytes()
             .await
             .map_err(|error| transport_error(path, error))?;
-        Ok(reply.capabilities)
+        parse_capabilities(&body)
     }
 
     /// Stops a decode the server has already started. A request it has not
@@ -484,5 +500,20 @@ mod tests {
             let error = status_error(status, "{}");
             assert!(is_kind(&error, kind), "{status}: {error}");
         }
+    }
+
+    #[test]
+    fn capabilities_from_any_tilert_but_0_1_8_are_refused() {
+        let v018 = br#"{"profile":"dsv41","engine":"E","capabilities":{"penalties":true,"ignore_eos":true,"logprobs":false}}"#;
+        assert_eq!(
+            parse_capabilities(v018).unwrap(),
+            DecodeCapabilities {
+                penalties: true,
+                ignore_eos: true
+            }
+        );
+        let v02 = br#"{"penalties":false,"ignore_eos":true,"max_concurrency":8,"logprobs":false}"#;
+        let error = parse_capabilities(v02).unwrap_err();
+        assert!(error.to_string().contains("TileRT 0.1.8 only"), "{error}");
     }
 }
