@@ -14,6 +14,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_slot_tracker::BusyThresholds;
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::RequestInfo;
+use dynamo_worker_selection::host::CallerHints;
 use tokio::time::Instant;
 
 use crate::classifier::{ClassificationOverrides, ClassifyRequest, DispatchHead};
@@ -71,13 +72,8 @@ pub trait ClassifyRequestHostExt: sealed::Sealed + Sized {
     fn with_pinned_worker(self, pinned_worker: Option<WorkerWithDpRank>) -> Self;
 
     /// What the caller sent with the request: its expected output length and its two
-    /// priorities, the queue head start in seconds and the strict tier.
-    fn with_caller_hints(
-        self,
-        expected_output_tokens: Option<u32>,
-        priority_jump: f64,
-        strict_priority: u32,
-    ) -> Self;
+    /// priorities, the priority within its strict tier and the strict tier.
+    fn with_caller_hints(self, caller_hints: CallerHints) -> Self;
 
     /// Copy tracking hashes into storage owned by this classification attempt.
     fn with_sequence_hashes(self, hashes: Option<&[SequenceHash]>) -> Self;

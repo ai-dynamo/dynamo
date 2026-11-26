@@ -20,6 +20,8 @@ use crate::policy::{
 };
 use crate::request::{RequestInfo, WorkerSelectionRequest};
 
+pub use crate::request::CallerHints;
+
 pub use crate::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,
 };
@@ -155,25 +157,21 @@ pub trait SelectionConfigHostExt: sealed::Sealed + Sized {
 /// builds a [`RequestInfo`] fails to compile until it supplies a fact added later.
 /// `pinned_worker` is the exact worker and rank the request's host requires, the same value
 /// at every stage. An affinity target is not a pin, even when the selector treats it as
-/// exclusive.
+/// exclusive. `caller_hints` is [`CallerHints::default`] where no caller sent the request.
 #[inline]
 pub fn request_info<'a>(
     request_id: Option<&'a str>,
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    expected_output_tokens: Option<u32>,
-    priority_jump: f64,
-    strict_priority: u32,
+    caller_hints: CallerHints,
 ) -> RequestInfo<'a> {
     RequestInfo::new(
         request_id,
         isl_tokens,
         session_context,
         pinned_worker,
-        expected_output_tokens,
-        priority_jump,
-        strict_priority,
+        caller_hints,
     )
 }
 

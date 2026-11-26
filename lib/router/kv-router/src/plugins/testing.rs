@@ -54,7 +54,9 @@
 //! For a request classifier, [`SelectionCase::classify`] runs it on the case: it builds the
 //! request and the worker rows from the case, as the router builds both from one request.
 //! Without a case, [`classify_request`] builds a request and [`classify`] runs the classifier
-//! on it with no worker rows. [`request_progress`] builds a progress reading.
+//! on it with no worker rows. [`request_progress`] builds a progress reading. For the
+//! experimental dispatch gate, [`SelectionCase::dispatch_head`] builds the queue head a gate
+//! is shown.
 //!
 //! This module follows the stability of the plugin API ([`super`]).
 
@@ -62,8 +64,8 @@ use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{
-    ClassifyRequest, RequestClassifier, RequestClassifierContext, RequestClassifierError,
-    RequestProgress,
+    ClassifyRequest, DispatchHead, RequestClassifier, RequestClassifierContext,
+    RequestClassifierError, RequestProgress,
 };
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::TieredMatchDetails;
@@ -74,7 +76,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
     AccountingAttribution, CacheHitWeights, KvSchedulerError, OverlapAnalysis, OverlapSignals,
     RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerConfigLike, WorkerSelectionInput,
-    WorkerSelector, classify_inputs,
+    WorkerSelector, classify_inputs, dispatch_head_of,
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::{BusyThresholds, WorkerLoadProjection};
@@ -372,6 +374,13 @@ impl SelectionCase {
         rows.read(|workers| classifier.classify(request, workers))
     }
 
+    /// The view an experimental dispatch gate is shown of this case's request at the head of
+    /// the `policy_class` queue, queued now. It carries the facts the case sets: the request
+    /// ID, session, pinned worker, and the caller's expected output length and priorities.
+    pub fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
+        dispatch_head_of(&self.request, policy_class, tokio::time::Instant::now())
+    }
+
     /// Run `policy` over this case and return the worker it picked.
     pub fn select(
         &self,
@@ -459,7 +468,9 @@ fn policy_file_parameters(parameters: &str) -> Result<serde_yaml::Value, serde_y
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
 /// cached prefix, arriving now, with the request ID, session, and pinned worker a test gives
-/// it. Together with `isl_tokens` those are the facts `ClassifyRequest::info` returns.
+/// it. The caller's expected output length and priorities, the other facts
+/// `ClassifyRequest::info` returns, are unset; [`SelectionCase::classify`] classifies a
+/// request that carries them.
 pub fn classify_request(
     isl_tokens: usize,
     request_id: Option<&str>,
@@ -702,6 +713,14 @@ mod tests {
         assert_eq!(info.expected_output_tokens(), Some(64));
         assert_eq!(info.priority_jump(), 2.5);
         assert_eq!(info.strict_priority(), 3);
+
+        // A dispatch gate reads the same facts from the head of the queue.
+        let head = busy.dispatch_head("batch");
+        assert_eq!(head.policy_class(), "batch");
+        assert_eq!(head.info().request_id(), Some("r1"));
+        assert_eq!(head.info().expected_output_tokens(), Some(64));
+        assert_eq!(head.info().priority_jump(), 2.5);
+        assert_eq!(head.info().strict_priority(), 3);
 
         let idle = SelectionCase::new(160, 16)
             .request_id("r2")

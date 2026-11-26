@@ -23,7 +23,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
 use dynamo_tokens::SequenceHash;
-use dynamo_worker_selection::host::request_info;
+use dynamo_worker_selection::host::{CallerHints, request_info};
 use dynamo_worker_selection::{RequestInfo, WorkerCandidates};
 
 use crate::lane_key::LaneKey;
@@ -42,9 +42,7 @@ pub struct ClassifyRequest {
     progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    expected_output_tokens: Option<u32>,
-    priority_jump: f64,
-    strict_priority: u32,
+    caller_hints: CallerHints,
     reject_thresholds: BusyThresholds,
 }
 
@@ -75,9 +73,7 @@ impl ClassifyRequest {
             self.input_tokens,
             self.session_context.as_ref(),
             self.pinned_worker,
-            self.expected_output_tokens,
-            self.priority_jump,
-            self.strict_priority,
+            self.caller_hints,
         )
     }
 
@@ -193,9 +189,7 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
-            expected_output_tokens: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
+            caller_hints: CallerHints::default(),
             reject_thresholds: BusyThresholds::default(),
         }
     }
@@ -220,15 +214,8 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
         self
     }
 
-    fn with_caller_hints(
-        mut self,
-        expected_output_tokens: Option<u32>,
-        priority_jump: f64,
-        strict_priority: u32,
-    ) -> Self {
-        self.expected_output_tokens = expected_output_tokens;
-        self.priority_jump = priority_jump;
-        self.strict_priority = strict_priority;
+    fn with_caller_hints(mut self, caller_hints: CallerHints) -> Self {
+        self.caller_hints = caller_hints;
         self
     }
 
@@ -361,8 +348,9 @@ pub struct DispatchHead<'a> {
 
 impl<'a> DispatchHead<'a> {
     /// Builds a head view for a plugin's tests, with no expected output length and no
-    /// priority from the caller. The router builds each head from the queued request through
-    /// `host::dispatch_head`.
+    /// priority from the caller. To set them, build the head from a described request with
+    /// `SelectionCase::dispatch_head` in `dynamo_kv_router::plugins::testing`. The router
+    /// builds each head from the queued request through `host::dispatch_head`.
     pub fn new(
         request_id: Option<&'a str>,
         session_context: Option<&'a SessionContext>,
@@ -377,9 +365,7 @@ impl<'a> DispatchHead<'a> {
                 isl_tokens,
                 session_context,
                 pinned_worker,
-                None,
-                0.0,
-                0,
+                CallerHints::default(),
             ),
             policy_class,
             queued_at,

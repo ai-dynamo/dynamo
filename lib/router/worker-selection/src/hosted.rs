@@ -11,7 +11,7 @@ use dynamo_router_protocol::worker::WorkerId;
 use crate::{
     ScoredWorkerCandidate, SelectionFailure, WorkerInputView, WorkerInputs, WorkerPicker,
     WorkerSelectionPolicyError, WorkerSelectionRequest,
-    host::{WorkerSelectionRequestHostExt, request_info},
+    host::{CallerHints, WorkerSelectionRequestHostExt, request_info},
 };
 
 /// Request metadata a routing host without the KV path supplies for one selection.
@@ -47,7 +47,7 @@ impl HostedSelectionRequest {
     fn selection_request(&self) -> WorkerSelectionRequest<'_> {
         // The host applies pins and session affinity before selecting.
         WorkerSelectionRequest::new(
-            request_info(None, self.isl_tokens, None, None, None, 0.0, 0),
+            request_info(None, self.isl_tokens, None, None, CallerHints::default()),
             0,
         )
         .with_preview(self.preview)

@@ -20,9 +20,17 @@ pub struct RequestInfo<'a> {
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    expected_output_tokens: Option<u32>,
-    priority_jump: f64,
-    strict_priority: u32,
+    caller_hints: CallerHints,
+}
+
+/// What a caller sends with a request: the output length it expects and its two priorities.
+/// A host passes one to `host::request_info`; a plugin reads the values through
+/// [`RequestInfo`]. The default is a request whose caller sent none.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CallerHints {
+    pub expected_output_tokens: Option<u32>,
+    pub priority_jump: f64,
+    pub strict_priority: u32,
 }
 
 impl<'a> RequestInfo<'a> {
@@ -32,18 +40,14 @@ impl<'a> RequestInfo<'a> {
         isl_tokens: usize,
         session_context: Option<&'a SessionContext>,
         pinned_worker: Option<WorkerWithDpRank>,
-        expected_output_tokens: Option<u32>,
-        priority_jump: f64,
-        strict_priority: u32,
+        caller_hints: CallerHints,
     ) -> Self {
         Self {
             request_id,
             isl_tokens,
             session_context,
             pinned_worker,
-            expected_output_tokens,
-            priority_jump,
-            strict_priority,
+            caller_hints,
         }
     }
 
@@ -83,7 +87,7 @@ impl<'a> RequestInfo<'a> {
     /// The output length the caller expects, if the request supplies one.
     #[inline]
     pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.expected_output_tokens
+        self.caller_hints.expected_output_tokens
     }
 
     /// The caller's priority within its strict tier of the router queue. A larger value is
@@ -92,15 +96,15 @@ impl<'a> RequestInfo<'a> {
     /// the queue treats a negative value as zero.
     #[inline]
     pub fn priority_jump(&self) -> f64 {
-        self.priority_jump
+        self.caller_hints.priority_jump
     }
 
     /// The caller's strict priority tier. A queue with the `fcfs`, `lcfs`, or `wspt` policy
-    /// serves a higher tier before a lower one; `edf`, the default, does not use it. Zero
-    /// when the caller sent none.
+    /// serves a higher tier before a lower one; `edf`, the default for a policy class in
+    /// the policy file, does not use it. Zero when the caller sent none.
     #[inline]
     pub fn strict_priority(&self) -> u32 {
-        self.strict_priority
+        self.caller_hints.strict_priority
     }
 }
 
