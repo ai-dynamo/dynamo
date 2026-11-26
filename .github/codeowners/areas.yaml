@@ -204,6 +204,7 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
+  - designs/
   - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
@@ -367,6 +368,7 @@ areas:
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:
+  - designs/operator/
   - deploy/CONTRIBUTING.md
   - deploy/__init__.py
   - deploy/helm/
@@ -531,6 +533,8 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: designs/COMPONENT_BOUNDARIES.md
+  owners: [runtime, operator]
 - glob: Cargo.lock
   owners:
   - ops

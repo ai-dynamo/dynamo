@@ -184,6 +184,7 @@
 
 # === runtime  (@ai-dynamo/dynamo-runtime-codeowners) ===
 /tests/                                                                                                 @ai-dynamo/dynamo-runtime-codeowners
+/designs/                                                                                               @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/                                                                                               @ai-dynamo/dynamo-runtime-codeowners
 /lib/error/                                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/truthy/                                                                                            @ai-dynamo/dynamo-runtime-codeowners
@@ -462,6 +463,7 @@ requirements.txt                                                                
 /lib/lora/tests/                                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /tests/frontend/                                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /tests/mm_router/                                                                                       @ai-dynamo/dynamo-multimodal-codeowners
+/designs/operator/                                                                                      @ai-dynamo/dynamo-operator-codeowners
 /lib/llm/src/grpc/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora/                                                                                      @ai-dynamo/dynamo-frontend-codeowners
@@ -639,6 +641,7 @@ requirements.txt                                                                
 /lib/kv-hashing/src/multimodal/                                                                         @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/test_kustomize_matrix.py                                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /.github/workflows/fern-docs.yml                                                                        @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
+/designs/COMPONENT_BOUNDARIES.md                                                                        @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-operator-codeowners
 /examples/deployments/**/vllm/**                                                                        @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/llm/src/kv_router/README.md                                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /lib/llm/src/protocols/agents.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners

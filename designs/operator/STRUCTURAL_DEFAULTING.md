@@ -1,4 +1,15 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Structural defaulting
+
+## Scope
+
+These rules apply to operator mutating admission and its tests across
+resources and API versions. Implementation filenames below are relative to
+`deploy/operator/internal/webhook/defaulting/`.
 
 Mutating admission mirrors the Go API type tree, keeps one semantic owner for
 each default, and leaves the webhook handler as a narrow request boundary.
@@ -143,3 +154,8 @@ func defaultDynamoGraphDeploymentSpecV1alpha1(
   application and cover their composition through the production admission path.
 - Assert the complete mutated object or a focused typed subtree. Do not test only a
   rendered patch or log message.
+
+## Decision source
+
+Existing operator convention, introduced in
+[PR #16540](https://github.com/ai-dynamo/dynamo/pull/16540).

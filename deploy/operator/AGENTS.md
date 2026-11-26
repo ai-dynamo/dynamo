@@ -9,6 +9,22 @@ SPDX-License-Identifier: Apache-2.0
 - Keep chart-only grants in the manual section of the platform chart's
   `../helm/charts/platform/components/operator/templates/manager-rbac.yaml`.
 
+## Design invariants
+
+- Before changing DGDR v1beta2 API types, Request defaulting or validation,
+  AISimulate lowering, input overrides, or Run snapshots, read
+  [`DGDR_V1BETA2_API_DESIGN.md`](../../designs/operator/DGDR_V1BETA2_API_DESIGN.md)
+  completely. Its requirements are mandatory.
+- Before changing operator defaulting code or tests, read
+  [`STRUCTURAL_DEFAULTING.md`](../../designs/operator/STRUCTURAL_DEFAULTING.md)
+  completely. Before changing validation code or tests, read
+  [`STRUCTURAL_VALIDATION.md`](../../designs/operator/STRUCTURAL_VALIDATION.md)
+  completely. These requirements apply even when starting from API types,
+  controllers, or lowering code outside the webhook packages.
+- Assign new defaulting and validation rules to their owning API types before
+  implementing them. Follow the existing structural traversals rather than
+  adding feature-specific passes.
+
 ## Kubernetes API Documentation
 
 - `make generate-api-docs` generates
