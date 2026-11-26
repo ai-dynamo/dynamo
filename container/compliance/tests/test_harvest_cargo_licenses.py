@@ -88,6 +88,7 @@ def test_missing_root_is_skipped(tmp_path: Path, shell: str, policy: str) -> Non
     result = _harvest(shell, policy, out, tmp_path / "missing/registry/src")
 
     assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
     assert _tree(out) == []
 
 
