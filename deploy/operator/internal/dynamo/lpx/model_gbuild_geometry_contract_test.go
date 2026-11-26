@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,41 +26,39 @@ func TestGBuildGeometryContract(t *testing.T) {
 			Name       string `json:"name"`
 			SHA256     string `json:"sha256"`
 			Partitions []struct {
-				ID             int      `json:"id"`
-				Topology       string   `json:"topology"`
-				NumChips       int      `json:"num_chips"`
-				DevicesPerNode int      `json:"devices_per_node"`
-				SourceExtent   []uint32 `json:"source_extent"`
+				ID             int    `json:"id"`
+				Topology       string `json:"topology"`
+				NumChips       int    `json:"num_chips"`
+				DevicesPerNode int    `json:"devices_per_node"`
 			} `json:"partitions"`
-			SelectedChain []int `json:"selected_chain"`
+			UnitPartitionIDs []int `json:"unit_partition_ids"`
 		} `json:"fixtures"`
 	}
 	require.NoError(t, json.Unmarshal(data, &index))
 
 	t.Log("Keep the scheduling and runtime expectations independent of the projector")
 	want := map[string]struct {
-		ids            []int
-		chips          []int
-		extents        [][]int64
-		nodes, offsets string
-		agents         int
-		contentID      string
+		ids       []int
+		chips     []int
+		extents   [][]int64
+		agents    int
+		contentID string
 	}{
 		"subnode8": {
-			[]int{7}, []int{8}, [][]int64{{16, 1, 1, 1}}, "1", "0", 1,
-			"sha256:89dbe9188c9040e09208c5285892f0b16a6814b6b3dbe1c337d27cf1bdec2585",
+			[]int{7}, []int{8}, [][]int64{{16, 1, 1, 1}}, 1,
+			"sha256:3443297eeadaf0b631a1a899c0a777522d417e102d5e17343d16f5c0a5e71cc1",
 		},
 		"cross_hemi32": {
-			[]int{7}, []int{32}, [][]int64{{16, 1, 2, 1}}, "2", "0", 2,
-			"sha256:b066521fbbf5fa728a5d436990a97e2c33ac3e2d16b176b91038ad5acf7fd7ec",
+			[]int{7}, []int{32}, [][]int64{{16, 1, 2, 1}}, 2,
+			"sha256:7d9d482ef788f4467e44fb463b0da6a2bd99bba54d9447da1948a5e532b440ac",
 		},
 		"rack256": {
-			[]int{7}, []int{256}, [][]int64{{16, 8, 2, 1}}, "16", "0", 16,
-			"sha256:f1f9b6d2d0ed0957f261dad2660150d6fd753abff79ff9f35bd5cd7608ca2d10",
+			[]int{7}, []int{256}, [][]int64{{16, 8, 2, 1}}, 16,
+			"sha256:69c7c1b1b20bc151c468b4c8bb29fcb67f7e8fede6714dc8d8cbc1eaf5333381",
 		},
 		"connected_chain": {
-			[]int{7, 8}, []int{32, 16}, [][]int64{{16, 1, 2, 1}, {16, 1, 1, 1}}, "2\n1", "0\n2", 3,
-			"sha256:e26ec31a28f2189eedde280da4aeac6d50063a740aab65e1d13432ac893e1441",
+			[]int{7, 8}, []int{32, 16}, [][]int64{{16, 1, 2, 1}, {16, 1, 1, 1}}, 3,
+			"sha256:2842615e8da9b735515686033c934d0de6a09e0cbfcc16bb28a8536268ece954",
 		},
 	}
 	require.Len(t, index.Fixtures, len(want))
@@ -82,6 +78,7 @@ func TestGBuildGeometryContract(t *testing.T) {
 			require.Equal(t, fixture.SHA256, fmt.Sprintf("%x", sha256.Sum256(payload)))
 			deployment, err := decodeGbuildDeploymentV1(payload)
 			require.NoError(t, err)
+			require.EqualValues(t, 1, deployment.ContractRevision())
 			raw, err := deployment.Partitions()
 			require.NoError(t, err)
 			require.Equal(t, len(expected.ids), raw.Len())
@@ -99,25 +96,15 @@ func TestGBuildGeometryContract(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, v3OpaqueTopology, topology)
 				require.Equal(t, v3OpaqueTopology, source.Topology)
-				metadata, err := detail.TopologyMetadata()
-				require.NoError(t, err)
-				family, err := metadata.TopologyFamily()
-				require.NoError(t, err)
-				require.Equal(t, "HX16x8x2", family)
-				shape, err := metadata.PartitionShape()
-				require.NoError(t, err)
-				require.Equal(t, 4, shape.Len())
-				require.Len(t, source.SourceExtent, 4)
-				for axis, value := range source.SourceExtent {
-					require.Equal(t, value, shape.At(axis))
-				}
+				require.EqualValues(t, expected.chips[i], detail.NumChips())
+				require.EqualValues(t, 16, detail.DevicesPerNode())
 			}
 
 			t.Log("Acquire the fixture's exact source identity and project the LPU-only workload")
 			build := acquireTestSnapshot(t, fixtureRoot)
 			require.Equal(t, expected.contentID, build.contentID)
 			require.Equal(t, build.contentID, acquireTestSnapshot(t, fixtureRoot).contentID)
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
+			projections, err := projectModels(ModelProjectionInput{
 				Pipeline: PipelineSingle, Models: []string{"default"}, Build: build,
 			})
 			require.NoError(t, err)
@@ -128,38 +115,46 @@ func TestGBuildGeometryContract(t *testing.T) {
 			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 			require.Len(t, spec.Partitions, len(expected.ids))
 			require.Len(t, spec.NodeLocal.PartitionMappings, len(expected.ids))
-			var ids, paths []string
 			for i, partition := range spec.Partitions {
-				require.EqualValues(t, expected.ids[i], partition.CompilerPartitionID)
 				require.EqualValues(t, i, partition.Ordinal)
 				require.Equal(t, fmt.Sprintf("partition-%03d", i), partition.ID)
 				require.NotNil(t, partition.Extent)
 				require.Equal(t, expected.extents[i], *partition.Extent)
 				require.EqualValues(t, i, spec.NodeLocal.PartitionMappings[i].ModelPartitionID)
 				require.Equal(t, partition.ID, spec.NodeLocal.PartitionMappings[i].PartitionID)
-				require.Equal(t, expected.chips[i], build.partitions[i].numChips)
-				require.Equal(t, expected.chips[i], projection.configuredBuild.partitions[i].numChips)
-				require.Equal(t, fixture.Partitions[i].Topology, build.partitions[i].topology)
-				require.Equal(t, fixture.Partitions[i].Topology, projection.configuredBuild.partitions[i].topology)
-				ids = append(ids, strconv.Itoa(expected.ids[i]))
-				paths = append(paths, fmt.Sprintf("part-%d", expected.ids[i]))
 			}
+			require.Equal(t, 16, build.devicesPerNode)
 
-			t.Log("Preserve aligned runtime rows and global Agent rank offsets")
-			require.Equal(t, map[string]string{
-				"nodes_per_partition":    expected.nodes,
-				"partition_ids":          strings.Join(ids, "\n"),
-				"partition_node_offsets": expected.offsets,
-				"partition_paths":        strings.Join(paths, "\n"),
-			}, resolvedPartitionData(projections))
+			t.Log("Retain the producer's ordered unit members")
+			config, err := deployment.Config()
+			require.NoError(t, err)
+			runtimeIO, err := config.RuntimeIo()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, runtimeIO.IoFpgaCount())
+			require.EqualValues(t, 1, runtimeIO.FanoutFactor())
+			units, err := config.LpuUnits()
+			require.NoError(t, err)
+			require.Equal(t, 1, units.Len())
+			reservations, err := units.At(0).Reservations()
+			require.NoError(t, err)
+			require.Equal(t, len(expected.ids), reservations.Len())
+			for i := range reservations.Len() {
+				ids, err := reservations.At(i).PartitionIds()
+				require.NoError(t, err)
+				require.Equal(t, 1, ids.Len())
+				require.EqualValues(t, expected.ids[i], ids.At(0))
+				hx, err := reservations.At(i).Size().Hx()
+				require.NoError(t, err)
+				require.Equal(t, expected.extents[i][1:], []int64{int64(hx.TraysPerHemisphere()), int64(hx.Hemispheres()), int64(hx.Racks())})
+			}
+			require.Equal(t, expected.ids, fixture.UnitPartitionIDs)
 
 			t.Log("Honor the compiler-selected chain at the final logical-node boundary")
 			if fixture.Name != "connected_chain" {
-				require.Empty(t, fixture.SelectedChain)
 				require.Empty(t, spec.PropSyncConnectors)
 				return
 			}
-			require.Equal(t, []int{7, 8}, fixture.SelectedChain)
+			require.Equal(t, []int{7, 8}, fixture.UnitPartitionIDs)
 			require.Len(t, spec.PropSyncConnectors, 1)
 			connector := spec.PropSyncConnectors[0]
 			require.Equal(t, "partition-000", connector.FromPartitionID)

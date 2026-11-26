@@ -6,15 +6,14 @@
 package lpx
 
 import (
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -53,7 +52,9 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	if workload.Pipeline() == PipelineHybrid {
-		input.Cyborg = pcs.Spec.Template.Cliques[0]
+		if input.Cyborg == nil {
+			input.Cyborg = &CliqueTemplate{Template: pcs.Spec.Template.Cliques[0]}
+		}
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
 	if err != nil {
@@ -64,12 +65,101 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	return pcs, nil
 }
 
+func TestRenderFinalizesModelPathBindings(t *testing.T) {
+	for _, pipeline := range []Pipeline{PipelineSingle, PipelineHybrid} {
+		t.Run(string(pipeline), func(t *testing.T) {
+			t.Log("Retain graph dependencies until model paths are bound to every final LPX role")
+			projection := projectRenderFixture(t, pipeline, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			pcs := renderTestPCS(pipeline == PipelineHybrid)
+			template := corev1.PodTemplateSpec{Spec: renderTestPodSpec()}
+			template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}
+			conductor := template.DeepCopy()
+			pods := []*corev1.PodSpec{&template.Spec, &conductor.Spec}
+			if pipeline == PipelineHybrid {
+				pod := &pcs.Spec.Template.Cliques[0].Spec.PodSpec
+				pod.Containers[0].Env = append(pod.Containers[0].Env, template.Spec.Containers[0].Env...)
+				pods = append(pods, pod)
+			}
+			collectors := make([]*semanticenv.ContainerLayers, len(pods))
+			for i, pod := range pods {
+				pod.Containers = append(pod.Containers, corev1.Container{Name: "observer", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
+				pod.InitContainers = append(pod.InitContainers, corev1.Container{Name: "prepare", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
+				layers := &semanticenv.ContainerLayers{}
+				for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+					for j := range containers {
+						container := &containers[j]
+						layers.Register(container,
+							semanticenv.Layer{Source: "spec.env", Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}},
+							semanticenv.Layer{Source: "container[name=" + container.Name + "].env", Env: container.Env},
+						)
+					}
+				}
+				collectors[i] = layers
+			}
+			input := RenderInput{
+				Stages:    map[string]PodTemplate{testRenderComponentName: {Template: template, Environment: collectors[0]}},
+				Conductor: &PodTemplate{Template: *conductor, Environment: collectors[1]},
+			}
+			if pipeline == PipelineHybrid {
+				input.Cyborg = &CliqueTemplate{Template: pcs.Spec.Template.Cliques[0], Environment: collectors[2]}
+			}
+			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+			require.NoError(t, err)
+			for _, clique := range rendered.Spec.Template.Cliques {
+				for _, containers := range [][]corev1.Container{clique.Spec.PodSpec.Containers, clique.Spec.PodSpec.InitContainers} {
+					for _, container := range containers {
+						var relevant []string
+						for _, env := range container.Env {
+							if env.Name == "LPX_MODEL_PATH" || env.Name == "MODEL" {
+								relevant = append(relevant, env.Name)
+							}
+						}
+						require.Equal(t, []string{"LPX_MODEL_PATH", "MODEL"}, relevant, "%s/%s", clique.Name, container.Name)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRenderRequiresPairedRoleTemplates(t *testing.T) {
+	for _, missing := range []string{"stage", "conductor", "Cyborg"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Log("Require each selected role's template instead of silently losing its environment sources")
+			pipeline := PipelineSingle
+			if missing == "Cyborg" {
+				pipeline = PipelineHybrid
+			}
+			projection := projectRenderFixture(t, pipeline, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			projection.stage = testRenderComponentName
+			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
+			serving := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}}}
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
+			require.NoError(t, err)
+			template := corev1.PodTemplateSpec{Spec: renderTestPodSpec()}
+			input := RenderInput{Stages: map[string]PodTemplate{testRenderComponentName: {Template: template}}, Conductor: &PodTemplate{Template: *template.DeepCopy()}}
+			if missing == "stage" {
+				delete(input.Stages, testRenderComponentName)
+			} else if missing == "conductor" {
+				input.Conductor = nil
+			}
+			before := template.DeepCopy()
+
+			t.Log("Report the omitted role before changing any Pod template")
+			_, err = RenderNodeLocal(workload, plan, input)
+			require.ErrorContains(t, err, "requires")
+			require.ErrorContains(t, err, missing)
+			require.Equal(t, *before, template)
+		})
+	}
+}
+
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Cover shared configuration overrides and HX hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
-	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
+
 	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
@@ -80,7 +170,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	}{
 		{
 			name: "XT config mount", pipeline: PipelineSingle,
-			snapshot: xtSnapshot, configPath: "/custom",
+			snapshot: xtSnapshot, configPath: "/etc/runtime",
 		},
 		{
 			name: "XT omitted config mount", pipeline: PipelineSingle,
@@ -92,11 +182,11 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 		},
 		{
 			name: "HX custom config mount", pipeline: PipelineSingle,
-			snapshot: hxSnapshot, configPath: "/custom",
+			snapshot: hxSnapshot, configPath: "/etc/custom-runtime",
 		},
 		{
 			name: "HX hybrid storage", pipeline: PipelineHybrid,
-			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
+			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "",
 		},
 	}
 	for _, test := range tests {
@@ -124,27 +214,25 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			}
 			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
-					Name: lpuConfigVolumeName,
+					Name: "runtime-config",
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						Name: "authored-config", DefaultMode: ptr.To[int32](0440),
 					},
 				})
 			}
-			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
-				func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName })
 			if test.configPath != "" {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
+					corev1.VolumeMount{Name: "runtime-config", MountPath: test.configPath})
 			}
 			if test.pipeline == PipelineHybrid {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
-				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
+				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 			}
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				Conductor: template.DeepCopy(),
+				Stages:    map[string]PodTemplate{testRenderComponentName: {Template: template}},
+				Conductor: &PodTemplate{Template: *template.DeepCopy()},
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -178,7 +266,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
 				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})
 				require.Contains(t, cyborg.Env, corev1.EnvVar{
-					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/manifest.v2.capnp.bin",
+					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/deployment.v1.capnp.bin",
 				})
 			}
 		})
@@ -211,8 +299,8 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
+		Stages:    map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: conductorPodSpec}}},
+		Conductor: &PodTemplate{Template: corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()}},
 	})
 	require.NoError(t, err)
 
@@ -245,10 +333,10 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 
 	t.Log("Create distinct draft and target compiler fixtures")
 	draftFixture := newV3CompilerFixture()
-	draftFixture.pipelineName = runtimeModelDraft
+
 	draftSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, draftFixture))
 	targetFixture := newV3CompilerFixture()
-	targetFixture.pipelineName = runtimeModelTarget
+
 	targetSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, targetFixture))
 
 	t.Log("Keep independent draft, target and conductor templates")
@@ -284,7 +372,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 
 	t.Log("Assign distinct runtime settings to each component and conductor")
-	stages := make(map[string]corev1.PodTemplateSpec)
+	stages := make(map[string]PodTemplate)
 	for _, component := range source.Spec.Components {
 		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 		template.Labels = map[string]string{"owner": component.ComponentName}
@@ -295,7 +383,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 			{Name: "CONTAINER_NAME", Value: "main"},
 		}
 		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
-		stages[component.ComponentName] = *template.DeepCopy()
+		stages[component.ComponentName] = PodTemplate{Template: *template.DeepCopy()}
 	}
 	conductorTemplate := source.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
@@ -328,7 +416,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	templates, err := RenderNodeLocal(selected, plan, RenderInput{
-		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
+		Stages: stages, Conductor: &PodTemplate{Template: *conductorTemplate.DeepCopy()},
 	})
 	require.NoError(t, err)
 
@@ -381,19 +469,14 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 
 	t.Log("Preserve runtime settings in the conductor template and share only partition data")
 	require.Equal(t, conductorTemplate.Spec.Containers[0].Resources, conductor.Spec.PodSpec.Containers[0].Resources)
-	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
-	require.True(t, ok)
-	require.NotContains(t, configMap.Data, "model_config.toml")
 	for _, env := range conductorTemplate.Spec.Containers[0].Env {
 		require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, env)
 	}
-	require.Equal(t, "draft0\ndraft1\ntarget", configMap.Data["partition_models"])
 	require.Equal(t, before, source)
 
 	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
 	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
-	require.NotContains(t, configMap.Data, "datacenter.toml")
 	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
 	for _, agent := range plan.ForReplica(0).Agents {
 		hostname := strings.NewReplacer(
@@ -413,7 +496,7 @@ func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *Mod
 		Pipeline: pipeline,
 		Models:   []string{"default"}, RuntimeBuildRef: "model-build", Build: snapshot,
 	}
-	projectionBatch, err := appendModelProjections(nil, intent)
+	projectionBatch, err := projectModels(intent)
 	require.NoError(t, err)
 	return projectionBatch[0]
 }
@@ -439,7 +522,6 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
 				}, VolumeMounts: []corev1.VolumeMount{
-					{Name: lpuConfigVolumeName, MountPath: "/configs"},
 					{Name: "model-storage", MountPath: "/models"},
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
@@ -469,7 +551,6 @@ func renderTestPodSpec() corev1.PodSpec {
 			Name: "main", Image: "runtime",
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "model-storage", MountPath: "/models"},
-				{Name: lpuConfigVolumeName, MountPath: "/configs"},
 				{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
 				{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
 			},
@@ -489,96 +570,4 @@ func namedClique(t *testing.T, pcs *grovev1alpha1.PodCliqueSet, name string) *gr
 	}
 	t.Fatalf("clique %q not found", name)
 	return nil
-}
-
-func TestRenderUnitsHaveNoLegacyConfig(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name                        string
-		hybrid, mount, volume, init bool
-		allLocal                    bool
-		mountName, mountPath        string
-		ioFPGACount                 uint32
-	}{
-		{name: "Quasar"}, {name: "Cyborg and Hydra", hybrid: true},
-		{name: "all-local units render only Cyborg", hybrid: true, allLocal: true},
-		{name: "two compiler I/O endpoints", hybrid: true, ioFPGACount: 2},
-		{name: "config name at another path", mount: true, mountName: "config", mountPath: "/other"},
-		{name: "other name at configs path", mount: true, mountName: "other", mountPath: "/configs"}, {name: "authored volume and mount", mount: true, volume: true},
-		{name: "other name at equivalent configs path", mount: true, mountName: "other", mountPath: "/configs/"},
-		{name: "native init mount", mount: true, volume: true, init: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Resolve a units artifact and prepare fresh runtime templates")
-			bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: tc.hybrid, ioFPGACount: tc.ioFPGACount,
-				partitions: testUnitPartitions(8, nil, 0), units: testSingleUnits(testNodesReservation(1, 0))}
-			build, err := acquireTestUnitBundle(t, bundle)
-			require.NoError(t, err)
-			var local *v1beta1.LPXLocalPartitions
-			if tc.allLocal {
-				local = &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}
-			}
-			projections, err := projectTestUnits(build, local)
-			require.NoError(t, err)
-			projections[0].stage = testRenderComponentName
-			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
-			serving := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}}}
-			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
-			require.NoError(t, err)
-			spec := renderTestPodSpec()
-			spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
-			if tc.mount {
-				if tc.mountName == "" {
-					tc.mountName = lpuConfigVolumeName
-				}
-				if tc.mountPath == "" {
-					tc.mountPath = "/configs"
-				}
-				spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: tc.mountName, MountPath: tc.mountPath})
-			}
-			if tc.volume {
-				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: lpuConfigVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}})
-			}
-			if tc.init {
-				spec.InitContainers = []corev1.Container{*spec.Containers[0].DeepCopy()}
-				spec.InitContainers[0].Name = "setup"
-				spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
-			}
-			input := RenderInput{Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: spec}}}
-			if tc.hybrid {
-				input.Cyborg = renderTestPCS(true).Spec.Template.Cliques[0]
-				input.Cyborg.Spec.Replicas, err = workload.MinimumCyborgReplicas()
-				require.NoError(t, err)
-				input.Cyborg.Spec.PodSpec.Containers[0].VolumeMounts = slices.DeleteFunc(input.Cyborg.Spec.PodSpec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
-			} else {
-				input.Conductor = &corev1.PodTemplateSpec{Spec: *spec.DeepCopy()}
-			}
-			got, err := RenderNodeLocal(workload, plan, input)
-			if tc.mount {
-				require.ErrorContains(t, err, "mounts legacy config")
-				return
-			}
-			require.NoError(t, err)
-			require.Empty(t, got.Resources)
-			if tc.allLocal {
-				t.Log("Render no Agent and give the local Cyborg an empty allocation")
-				require.Len(t, got.Cliques, 1)
-				require.Equal(t, plan.CyborgTemplate, got.Cliques[0].Name)
-				require.Empty(t, got.Cliques[0].Spec.StartsAfter)
-				require.Contains(t, got.Cliques[0].Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: allocationEnvVar, Value: ""})
-			}
-			for _, clique := range got.Cliques {
-				if tc.hybrid && clique.Name == plan.CyborgTemplate {
-					require.EqualValues(t, max(1, tc.ioFPGACount), clique.Spec.Replicas)
-				}
-				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
-				for _, volume := range clique.Spec.PodSpec.Volumes {
-					require.NotEqual(t, lpuConfigVolumeName, volume.Name)
-				}
-				if !tc.allLocal && clique.Name == plan.Agents[0].TemplateName {
-					require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: ""})
-				}
-			}
-		})
-	}
 }

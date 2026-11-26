@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
+//! Multi-worker extension of `ActiveSequences` with per-worker `parking_lot::RwLock` for
 //! fine-grained concurrent access, with pluggable event publishing and metric observation via
 //! traits.
 //!
@@ -23,8 +23,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadReader, WorkerLoadSnapshot};
+use super::replica_sync::PendingWorkerEvents;
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
@@ -35,11 +35,10 @@ use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTo
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::booking::SchedulerBookingDescriptor;
 use crate::busy::FullRankCounts;
-use crate::prelude::{
-    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
-};
+use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate};
+use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
 use dynamo_router_protocol::attempt::AttemptId;
-use dynamo_router_protocol::worker::WorkerCapacity;
+use dynamo_router_protocol::worker::{WorkerCapacity, WorkerId, WorkerWithDpRank};
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -299,8 +298,8 @@ pub enum ReplicaWorkerPolicy {
     RequireRegistered,
 }
 
+/// Construction options for [`ActiveSequencesMultiWorker`].
 #[derive(Debug, Clone, Copy)]
-/// Stage operation the router drives; documented with the kernel contract in step 6.
 pub struct SequenceTrackerOptions {
     /// How this tracker treats replicated bookings.
     pub replica_worker_policy: ReplicaWorkerPolicy,
@@ -322,9 +321,6 @@ pub enum SequenceError {
 
     #[error("Request {request_id} not found")]
     RequestNotFound { request_id: String },
-
-    #[error("Failed to publish replica-sync event: {0}")]
-    ReplicaSyncPublishFailed(String),
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -365,7 +361,7 @@ impl LifecycleMutationOutcome {
     }
 }
 
-/// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
+/// Multi-worker extension of `ActiveSequences` with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
 /// The outer reader-sharded `WorkerTable` lock is held only during sync blocks (never across
@@ -388,6 +384,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) replica_sync: bool,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     replica_request_lease_observer: OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
+    pub(super) pending_worker_events: Mutex<PendingWorkerEvents>,
     worker_type: &'static str,
 }
 
@@ -498,12 +495,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             replica_sync,
             replica_worker_policy: options.replica_worker_policy,
             replica_request_lease_observer: OnceLock::new(),
+            pending_worker_events: Mutex::default(),
             worker_type,
         }
     }
 
     /// Test hook: panics unless every tracked request and block has been released.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn assert_completely_drained(&self, decay_now: Instant) {
         let active_blocks = self.active_blocks();
         assert!(
@@ -802,7 +800,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Book an admitted request on its worker and return the attempt id minted for it.
     pub fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -848,6 +846,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: req.lora_name.clone(),
         });
         let attempt_id = self.add_request_local(req, decay_now, lazily_register_worker)?;
@@ -857,7 +856,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// The worker rank `request_id` is booked on, if any.
     pub fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
@@ -873,7 +872,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Whether `booking` still names the live attempt for its request on its worker.
     pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.request_index.booking_for(&booking.request_id)
             == Some(RequestBooking {
@@ -897,14 +896,45 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if !self.has_booking(booking) {
             return false;
         }
+        self.enqueue_prefill_completed(booking);
+        true
+    }
+
+    /// Re-send the idempotent completion event for `booking` so peer routers keep
+    /// its mirrored lease alive. Skips a booking that is gone, that mirrors a peer's,
+    /// or that is still in prefill (the mark would move it to decode on peers).
+    pub fn publish_prefill_keepalive_if_booking(&self, booking: &SchedulerBookingDescriptor) {
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&booking.worker) else {
+            return;
+        };
+        let seq = table.slots[idx].sequences.read();
+        let own_booking = RequestBooking {
+            worker: booking.worker,
+            attempt_id: booking.attempt_id,
+        };
+        if self
+            .request_index
+            .booking_and_replica_router(&booking.request_id)
+            != Some((own_booking, None))
+            || !seq.is_prefill_completed(&booking.request_id)
+        {
+            return;
+        }
+        // Enqueued under the sequence lock: the mark carries no attempt id, so it must
+        // not follow this booking's `Free` onto a later attempt of the same request.
+        self.enqueue_prefill_completed(booking);
+    }
+
+    fn enqueue_prefill_completed(&self, booking: &SchedulerBookingDescriptor) {
         self.enqueue_publish_event(|| ActiveSequenceEvent {
             request_id: booking.request_id.clone(),
             worker: booking.worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: self.request_index.lora_for(&booking.request_id),
         });
-        true
     }
 
     /// Free all blocks associated with a request.
@@ -955,6 +985,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::Free,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: removed.lora_name,
         });
         Ok(LifecycleMutationOutcome::Applied)
@@ -1065,6 +1096,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 worker,
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
+                origin: Default::default(),
                 lora_name: removed.lora_name,
             });
         }
@@ -1172,6 +1204,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name,
         });
         Ok(completion)
@@ -1191,6 +1224,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: self.request_index.lora_for(request_id),
         });
     }
@@ -1236,7 +1270,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Add `num_blocks` output blocks to the request only if `attempt_id` is still its live
+    /// booking on `worker`.
     pub fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
@@ -1245,7 +1280,27 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if num_blocks == 0 {
+        self.update_output_if_booking(
+            request_id,
+            worker,
+            attempt_id,
+            num_blocks,
+            decay_fraction,
+            None,
+        )
+    }
+
+    /// Apply native block accounting and optional raw progress under the same booking fence.
+    pub fn update_output_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        num_blocks: usize,
+        decay_fraction: Option<f64>,
+        progress: Option<DecodeProgressUpdate>,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if num_blocks == 0 && progress.is_none() {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
         let expected = RequestBooking { worker, attempt_id };
@@ -1261,8 +1316,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            if !seq.add_output_blocks(request_id, num_blocks, decay_fraction) {
+            let blocks_changed = seq.add_output_blocks(request_id, num_blocks, decay_fraction);
+            let progress_changed =
+                progress.is_some_and(|update| seq.observe_decode_progress(request_id, update));
+            if !blocks_changed && !progress_changed {
                 return Ok(LifecycleMutationOutcome::NoChange);
+            }
+            if !blocks_changed {
+                return Ok(LifecycleMutationOutcome::Applied);
             }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
@@ -1273,18 +1334,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(LifecycleMutationOutcome::Applied)
     }
 
+    /// Read this rank's complete decoding-owner summary on demand.
+    pub fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<DecodeProgress> {
+        let table = self.workers.read();
+        let &index = table.index.get(&worker)?;
+        table
+            .slots
+            .get(index)?
+            .sequences
+            .read()
+            .decode_progress_summary()
+    }
+
     /// Get the number of workers.
     #[cfg(test)]
     pub fn num_workers(&self) -> usize {
         self.workers.read().slots.len()
     }
 
-    /// Get the worker type for this router ("prefill" or "decode").
-    pub fn worker_type(&self) -> &'static str {
-        self.worker_type
-    }
-
-    /// Query all workers for the potential blocks and tokens.
+    /// Test hook: [`Self::potential_blocks_and_tokens_at`] at `Instant::now()`.
+    #[cfg(any(test, feature = "testing"))]
     pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
@@ -1323,19 +1392,61 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the pass also counts the ranks past its busy thresholds per worker.
+    /// Returns the load table's version, which changes whenever a rank is added or removed,
+    /// or reports another capacity.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         self.prompt_registry.project_worker_loads_into(
             token_sequence,
             decay_now,
             projections,
             full_ranks,
-        );
+        )
+    }
+
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`], and judge it again in the `full_ranks` that pass
+    /// counted. `version` is what that pass returned: false, with nothing overwritten, when
+    /// a rank was added or removed since, or reported another capacity.
+    pub fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
+    ) -> bool {
+        self.prompt_registry.reproject_worker_loads(
+            token_sequence,
+            decay_now,
+            workers,
+            version,
+            projections,
+            full_ranks,
+        )
+    }
+
+    /// Count full ranks from derived snapshots without materializing request load rows.
+    pub fn record_full_worker_ranks_at(&self, decay_now: Instant, full_ranks: &mut FullRankCounts) {
+        self.prompt_registry
+            .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
+    /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
+    /// for that rank alone.
+    pub fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        self.prompt_registry
+            .additional_active_blocks(token_sequence, worker)
     }
 
     /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
@@ -1359,18 +1470,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    /// Bench hook: project every worker's load into `projections` the way the scheduler
-    /// does when it builds candidate rows, with no prefill-load hint.
-    #[cfg(feature = "bench")]
-    pub fn bench_project_worker_loads_into(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
-    ) {
-        self.project_worker_loads_into(token_sequence, decay_now, projections, None);
-    }
-
     /// Query all workers for their current number of active blocks.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_blocks()
@@ -1381,38 +1480,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_tokens(decay_now)
     }
 
-    /// Return modeled remaining prefill time by worker from the derived read model.
-    ///
-    /// Values are non-negative milliseconds. For workers whose active prefills
-    /// all have modeled durations, the formula is:
-    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
-    ///
-    /// Elapsed time from the oldest active prefill can reduce later modeled
-    /// backlog, then the final worker backlog is clipped at zero. This accounts
-    /// for engines that batch or overlap multiple prefills.
-    ///
-    /// `Err(MissingExpectedDuration)` is expected for workers with any active
-    /// prefill that lacks an AIS prediction, including the default no-AIS path or
-    /// failed predictions. Replica-synced remote values are receive-time anchored
-    /// advisory reads, not producer-time truth.
-    #[allow(dead_code)]
-    pub(crate) fn modeled_remaining_prefill_time_loads_at(
-        &self,
-        now: Instant,
-    ) -> Vec<PrefillTimeLoad> {
-        self.prompt_registry
-            .modeled_remaining_prefill_times_ms(now)
-            .into_iter()
-            .map(
-                |(worker, modeled_remaining_prefill_time_ms)| PrefillTimeLoad {
-                    worker,
-                    modeled_remaining_prefill_time_ms,
-                },
-            )
-            .collect()
-    }
-
-    /// Return true if any worker satisfies the provided predicate on active token count.
+    /// Test hook: true if any worker satisfies `predicate` on its active token count.
+    #[cfg(any(test, feature = "testing"))]
     pub fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,
@@ -1551,7 +1620,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             let attempt_id = self
                 .request_index
-                .try_insert_request(request_id.clone(), worker, lora_name)
+                .try_insert_request(request_id.clone(), worker, lora_name, None)
                 .map_err(|existing_worker| SequenceError::DuplicateRequest {
                     request_id: request_id.clone(),
                     worker: existing_worker,
@@ -1657,8 +1726,7 @@ mod tests {
 
     use super::*;
     use crate::NoopSequencePublisher;
-    use crate::prefill_tracker::PrefillTimeLoadError;
-    use crate::prelude::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
+    use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
@@ -1790,17 +1858,6 @@ mod tests {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
         })
-    }
-
-    fn modeled_time_loads_by_worker(
-        sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
-        now: Instant,
-    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
-        sequences
-            .modeled_remaining_prefill_time_loads_at(now)
-            .into_iter()
-            .map(|load| (load.worker, load.modeled_remaining_prefill_time_ms))
-            .collect()
     }
 
     fn active_request_count(
@@ -2114,6 +2171,7 @@ mod tests {
                 prefill_load_hint: tracking_hint(12),
             },
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -2127,6 +2185,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::Free,
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -2140,6 +2199,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -2414,8 +2474,9 @@ mod tests {
         assert_eq!(sequences.active_tokens(Instant::now())[&worker], 12);
         assert_eq!(sequences.remote_state_update_count(), 0);
 
+        // A shipped worker's mark: no origin field, and its own id as `router_id`.
         let mut remote_mark = replica_mark(&request_id, worker);
-        remote_mark.router_id = 99;
+        remote_mark.router_id = worker.worker_id;
         sequences.apply_replica_batch(vec![remote_mark]);
         assert_eq!(sequences.active_tokens(Instant::now())[&worker], 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
@@ -2607,76 +2668,6 @@ mod tests {
     }
 
     #[test]
-    fn modeled_remaining_prefill_time_loads_follow_multi_worker_projection() {
-        let sequences = make_multi_sequences();
-        let worker_a = WorkerWithDpRank::new(1, 0);
-        let worker_b = WorkerWithDpRank::new(2, 0);
-        let start = Instant::now();
-        let a_oldest = "a-oldest".to_string();
-
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: a_oldest.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
-                    track_prefill_tokens: true,
-                    expected_output_tokens: None,
-                    prefill_load_hint: modeled_hint(100, 10),
-                    worker: worker_a,
-                    lora_name: None,
-                },
-                start,
-            )
-            .unwrap();
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: "a-later".to_string(),
-                    token_sequence: Some(vec![4, 5, 6]),
-                    track_prefill_tokens: true,
-                    expected_output_tokens: None,
-                    prefill_load_hint: modeled_hint(60, 4),
-                    worker: worker_a,
-                    lora_name: None,
-                },
-                start + Duration::from_secs(1),
-            )
-            .unwrap();
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: "b-unmodeled".to_string(),
-                    token_sequence: Some(vec![7, 8, 9]),
-                    track_prefill_tokens: true,
-                    expected_output_tokens: None,
-                    prefill_load_hint: tracking_hint(12),
-                    worker: worker_b,
-                    lora_name: None,
-                },
-                start,
-            )
-            .unwrap();
-
-        let query = start + Duration::from_secs(3);
-        let loads = modeled_time_loads_by_worker(&sequences, query);
-        assert_eq!(loads.get(&worker_a).copied(), Some(Ok(11_000)));
-        assert_eq!(
-            loads.get(&worker_b).copied(),
-            Some(Err(PrefillTimeLoadError::MissingExpectedDuration))
-        );
-
-        sequences.mark_prefill_completed(&a_oldest, query).unwrap();
-        assert_eq!(active_request_count(&sequences, worker_a), 2);
-
-        let loads = modeled_time_loads_by_worker(&sequences, query + Duration::from_secs(2));
-        assert_eq!(loads.get(&worker_a).copied(), Some(Ok(2_000)));
-        assert_eq!(
-            loads.get(&worker_b).copied(),
-            Some(Err(PrefillTimeLoadError::MissingExpectedDuration))
-        );
-    }
-
-    #[test]
     fn free_nonanchor_modeled_prefill_applies_anchor_credit() {
         let sequences = make_sequences();
         let worker = WorkerWithDpRank::new(1, 0);
@@ -2720,12 +2711,6 @@ mod tests {
                 .copied(),
             Some(90)
         );
-        assert_eq!(
-            modeled_time_loads_by_worker(&sequences, completion_time)
-                .get(&worker)
-                .copied(),
-            Some(Ok(9_000))
-        );
 
         sequences.free(&later, completion_time).unwrap();
         assert_eq!(active_request_count(&sequences, worker), 1);
@@ -2737,12 +2722,44 @@ mod tests {
                 .copied(),
             Some(90)
         );
-        assert_eq!(
-            modeled_time_loads_by_worker(&sequences, completion_time)
-                .get(&worker)
-                .copied(),
-            Some(Ok(9_000))
-        );
+    }
+
+    #[test]
+    fn reprojection_refuses_once_a_rank_is_added_or_removed() {
+        let sequences = make_multi_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        let mut projections = FxHashMap::default();
+        let version = sequences.project_worker_loads_into(None, now, &mut projections, None);
+        let reproject = |projections: &mut FxHashMap<_, _>| {
+            sequences.reproject_worker_loads(None, now, &[worker], version, projections, None)
+        };
+
+        // A booking changes the rank's load, not the set of ranks.
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req".to_string(),
+                    token_sequence: Some(vec![1, 2]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert!(reproject(&mut projections));
+        assert_eq!(projections[&worker].active_requests, 1);
+
+        sequences
+            .register_worker(WorkerDpRange::new(3, 0, 1))
+            .unwrap();
+        assert!(!reproject(&mut projections));
+        // Removing it again does not bring the projected set of ranks back.
+        sequences.unregister_worker(3).unwrap();
+        assert!(!reproject(&mut projections));
     }
 
     #[test]
@@ -3429,6 +3446,8 @@ mod tests {
     fn replica_phase_only_mark_observes_without_waking_scheduler() {
         let worker = WorkerWithDpRank::new(1, 0);
         let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let observer = Arc::new(RecordingReplicaLeaseObserver::default());
+        assert!(sequences.set_replica_request_lease_observer(observer.clone()));
         let mut add = replica_add("req-1", worker, vec![1, 2, 3]);
         add.data = ActiveSequenceEventData::AddRequest {
             token_sequence: Some(vec![1, 2, 3]),
@@ -3440,34 +3459,238 @@ mod tests {
         state.clear();
         let wake_count_before = sequences.remote_state_update_count();
 
+        // The first mark changes the phase; the repeat is the owner's keepalive.
+        sequences.apply_replica_batch(vec![replica_mark("req-1", worker)]);
         sequences.apply_replica_batch(vec![replica_mark("req-1", worker)]);
 
         assert!(state.load_batches().is_empty());
         assert_eq!(sequences.remote_state_update_count(), wake_count_before);
         let load = last_observed_load(&state, worker).unwrap();
         assert_eq!((load.active_requests, load.prefill_requests), (1, 0));
+        let booking = sequences.request_booking("req-1").unwrap();
+        assert_eq!(
+            observer.events.lock().unwrap()[1..],
+            [
+                ObservedReplicaLeaseEvent::Progressed(booking.clone()),
+                ObservedReplicaLeaseEvent::Progressed(booking),
+            ]
+        );
+
+        // A peer's repeated mark for a booking this router made is not progress.
+        let now = Instant::now();
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request("local", worker), now)
+            .unwrap();
+        sequences
+            .mark_prefill_completed_if_booking(&"local".to_string(), worker, attempt_id, now)
+            .unwrap();
+        sequences.apply_replica_batch(vec![replica_mark("local", worker)]);
+        assert_eq!(observer.events.lock().unwrap().len(), 3);
+    }
+
+    fn is_prefill_completed(
+        sequences: &ActiveSequencesMultiWorker<RecordingPublisher>,
+        request_id: &str,
+    ) -> bool {
+        let worker = sequences.request_worker(request_id).unwrap();
+        let table = sequences.workers.read();
+        table.slots[table.index[&worker]]
+            .sequences
+            .read()
+            .is_prefill_completed(&request_id.to_string())
     }
 
     #[test]
-    fn replica_duplicate_add_preserves_first_owner_without_side_effects() {
+    fn replica_mark_applies_only_to_a_mirror_of_its_router() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        sequences
+            .add_request(local_sequence_request("local", worker), Instant::now())
+            .unwrap();
+        sequences.apply_replica_batch(vec![replica_add("mirrored", worker, vec![4, 5, 6])]);
+
+        // Router 98 booked the same ids for its own requests; its marks are about those.
+        let mut other_router_marks = vec![
+            replica_mark("local", worker),
+            replica_mark("mirrored", worker),
+        ];
+        for mark in &mut other_router_marks {
+            mark.router_id = 98;
+        }
+        sequences.apply_replica_batch(other_router_marks);
+        assert!(!is_prefill_completed(&sequences, "local"));
+        assert!(!is_prefill_completed(&sequences, "mirrored"));
+
+        // A worker's mark, and the mark of the router a mirror came from, still apply.
+        sequences.apply_replica_batch(vec![
+            from_worker(replica_mark("local", worker)),
+            replica_mark("mirrored", worker),
+        ]);
+        assert!(is_prefill_completed(&sequences, "local"));
+        assert!(is_prefill_completed(&sequences, "mirrored"));
+    }
+
+    #[test]
+    fn keepalive_publishes_mark_only_for_own_live_booking_past_prefill() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "req-1".to_string();
+        let now = Instant::now();
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        let booking = sequences.request_booking(&request_id).unwrap();
+        sequences.apply_replica_batch(vec![
+            replica_add("mirrored", worker, vec![4, 5, 6]),
+            replica_mark("mirrored", worker),
+        ]);
+        let mirrored = sequences.request_booking("mirrored").unwrap();
+        state.clear();
+
+        // Still in prefill: the mark would move the request to decode on peers.
+        sequences.publish_prefill_keepalive_if_booking(&booking);
+        // Mirrored and past prefill: only the router that made a booking sends for it.
+        sequences.publish_prefill_keepalive_if_booking(&mirrored);
+        assert!(state.events.lock().unwrap().is_empty());
+
+        sequences
+            .mark_prefill_completed_if_booking(&request_id, worker, attempt_id, now)
+            .unwrap();
+        state.clear();
+        sequences.publish_prefill_keepalive_if_booking(&booking);
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::MarkPrefillCompleted]
+        ));
+
+        sequences
+            .free_if_booking(&request_id, worker, attempt_id, now)
+            .unwrap();
+        state.clear();
+        sequences.publish_prefill_keepalive_if_booking(&booking);
+        assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replica_events_for_a_superseded_attempt_leave_the_new_booking() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "req-1".to_string();
+        let now = Instant::now();
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker, vec![1, 2, 3])]);
+        let mirror = sequences.request_index.booking_for("req-1").unwrap();
+        let mirror_booking = sequences.request_booking("req-1").unwrap();
+
+        // After the replica task read `mirror`, the reaper expires it and a local
+        // admission books the same id on the same worker.
+        sequences
+            .expire_if_booking(&request_id, worker, mirror.attempt_id, now)
+            .unwrap();
+        sequences
+            .add_request(local_sequence_request("req-1", worker), now)
+            .unwrap();
+        let rebooked = sequences.request_index.booking_for("req-1");
+
+        sequences.apply_prefill_completed(&mirror_booking, now, true, &mut Default::default());
+        assert!(!is_prefill_completed(&sequences, "req-1"));
+        sequences.free_replica_booking(&request_id, mirror, now, &mut Default::default());
+
+        assert_eq!(sequences.request_index.booking_for("req-1"), rebooked);
+        assert_eq!(sequences.active_request_counts()[&worker], 1);
+        assert_eq!(sequences.active_blocks()[&worker], 3);
+    }
+
+    #[test]
+    fn worker_free_before_a_retry_add_drops_the_stale_mirror() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
+        // The owner expired this booking without a `Free`, then retried on worker B.
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_a, vec![1, 2, 3])]);
+
+        // The retry finishes on B before its Add arrives here.
+        sequences.apply_replica_batch(vec![from_worker(replica_free("req-1", worker_b))]);
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+
+        assert_eq!(sequences.request_worker("req-1"), None);
+        assert_eq!(sequences.active_request_counts()[&worker_a], 0);
+        assert_eq!(sequences.active_request_counts()[&worker_b], 0);
+    }
+
+    #[test]
+    fn worker_free_held_against_an_earlier_booking_does_not_skip_a_later_add() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
+        // The request moved from A to B; the first attempt's worker `Free` arrives late.
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![1, 2, 3])]);
+        sequences.apply_replica_batch(vec![from_worker(replica_free("req-1", worker_a))]);
+
+        // B ends, and the request moves back to A.
+        sequences.apply_replica_batch(vec![
+            replica_free("req-1", worker_b),
+            replica_add("req-1", worker_a, vec![4, 5, 6]),
+        ]);
+
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
+        assert_eq!(sequences.active_request_counts()[&worker_a], 1);
+    }
+
+    #[test]
+    fn replica_add_replaces_only_a_mirror_from_the_same_router() {
         let worker_a = WorkerWithDpRank::new(1, 0);
         let worker_b = WorkerWithDpRank::new(2, 0);
         let (sequences, publisher) =
             make_recording_sequences(HashMap::from([(worker_a.worker_id, (0, 1))]));
+        let observer = Arc::new(RecordingReplicaLeaseObserver::default());
+        assert!(sequences.set_replica_request_lease_observer(observer.clone()));
         sequences.apply_replica_batch(vec![replica_add("req-1", worker_a, vec![1, 2, 3])]);
+        let first = sequences.request_booking("req-1").unwrap();
         publisher.clear();
         let wake_count = sequences.remote_state_update_count();
         let cleanup_count = sequences.prompt_registry.cleanup_attempts();
 
-        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+        // Another router's Add for the same id is ignored without side effects.
+        let mut other_router_add = replica_add("req-1", worker_b, vec![4, 5, 6]);
+        other_router_add.router_id = 98;
+        sequences.apply_replica_batch(vec![other_router_add]);
 
-        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker_a));
+        assert_eq!(sequences.request_booking("req-1"), Some(first.clone()));
         assert_eq!(sequences.active_blocks()[&worker_a], 3);
         assert!(!sequences.active_blocks().contains_key(&worker_b));
         assert_eq!(sequences.num_workers(), 1);
         assert!(publisher.load_batches().is_empty());
         assert_eq!(sequences.remote_state_update_count(), wake_count);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), cleanup_count);
+
+        // The same router's Add frees the stale mirror, then books the new attempt.
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+
+        let second = sequences.request_booking("req-1").unwrap();
+        assert_eq!(second.worker, worker_b);
+        assert_eq!(sequences.active_blocks()[&worker_a], 0);
+        assert_eq!(sequences.active_blocks()[&worker_b], 3);
+        assert_eq!(
+            *observer.events.lock().unwrap(),
+            [
+                ObservedReplicaLeaseEvent::Admitted(first.clone()),
+                ObservedReplicaLeaseEvent::Completed(first),
+                ObservedReplicaLeaseEvent::Admitted(second),
+            ]
+        );
+
+        sequences.apply_replica_batch(vec![replica_free("req-1", worker_b)]);
+        assert_eq!(sequences.request_booking("req-1"), None);
+        assert_eq!(sequences.active_blocks()[&worker_b], 0);
+
+        // A replica Add never displaces a local booking.
+        sequences
+            .add_request(local_sequence_request("local", worker_a), Instant::now())
+            .unwrap();
+        sequences.apply_replica_batch(vec![replica_add("local", worker_b, vec![7, 8, 9])]);
+        assert_eq!(sequences.request_worker("local"), Some(worker_a));
+        assert_eq!(sequences.active_blocks()[&worker_b], 0);
     }
 
     #[test]
@@ -3513,6 +3736,68 @@ mod tests {
             cleanup_count + 1
         );
         assert_eq!(sequences.request_index.worker_for("req-1"), None);
+    }
+
+    fn from_worker(mut event: ActiveSequenceEvent) -> ActiveSequenceEvent {
+        event.origin = crate::wire::ActiveSequenceEventOrigin::Worker;
+        event
+    }
+
+    fn load_of(
+        sequences: &ActiveSequencesMultiWorker<RecordingPublisher>,
+        worker: WorkerWithDpRank,
+    ) -> (usize, usize, usize) {
+        let now = Instant::now();
+        (
+            sequences.active_request_counts()[&worker],
+            sequences.active_blocks()[&worker],
+            sequences.active_tokens(now)[&worker],
+        )
+    }
+
+    #[test]
+    fn worker_events_before_admission_are_applied() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let other_worker = WorkerWithDpRank::new(2, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
+
+        sequences.apply_replica_batch(vec![
+            from_worker(replica_free("freed", worker)),
+            from_worker(replica_mark("prefilled-then-freed", worker)),
+            from_worker(replica_free("prefilled-then-freed", worker)),
+            from_worker(replica_mark("prefilled", worker)),
+            // Only a worker's own events, for its own requests, are held.
+            replica_free("router-freed", worker),
+            from_worker(replica_free("other-worker", other_worker)),
+        ]);
+        sequences.apply_replica_batch(vec![
+            replica_add("freed", worker, vec![1, 2, 3]),
+            replica_add("prefilled-then-freed", worker, vec![13, 14, 15]),
+            replica_add("prefilled", worker, vec![4, 5, 6]),
+            replica_add("router-freed", worker, vec![7, 8, 9]),
+            replica_add("other-worker", worker, vec![10, 11, 12]),
+        ]);
+
+        assert_eq!(sequences.request_index.worker_for("freed"), None);
+        assert_eq!(
+            sequences.request_index.worker_for("prefilled-then-freed"),
+            None
+        );
+        // "prefilled" books decoding; the other two book prefill load.
+        assert_eq!(load_of(&sequences, worker), (3, 9, 24));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_worker_events_expire() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        for event in [replica_free("stale", worker), replica_mark("stale", worker)] {
+            let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+            sequences.apply_replica_batch(vec![from_worker(event)]);
+            tokio::time::advance(Duration::from_secs(31)).await;
+            sequences.apply_replica_batch(vec![replica_add("stale", worker, vec![1, 2, 3])]);
+
+            assert_eq!(load_of(&sequences, worker), (1, 3, 12));
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -3675,6 +3960,7 @@ mod tests {
                         prefill_load_hint: tracking_hint(12),
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 }),
                 Ok(ActiveSequenceEvent {
@@ -3682,6 +3968,7 @@ mod tests {
                     worker,
                     data: ActiveSequenceEventData::Free,
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 }),
             ]),
@@ -3696,105 +3983,6 @@ mod tests {
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert_eq!(active_request_count(&sequences, worker), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn replica_sync_modeled_remaining_prefill_time_uses_receive_time_and_clears() {
-        let sequences = ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1_u64, (0_u32, 1_u32))]),
-            true,
-            0,
-            "test",
-        );
-        let worker = WorkerWithDpRank::new(1, 0);
-
-        sequences
-            .run_replica_sync(
-                VecSubscriber {
-                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
-                        request_id: "req-1".to_string(),
-                        worker,
-                        data: ActiveSequenceEventData::AddRequest {
-                            token_sequence: Some(vec![1, 2, 3]),
-                            track_prefill_tokens: true,
-                            expected_output_tokens: None,
-                            prefill_load_hint: modeled_hint(12, 10),
-                        },
-                        router_id: 99,
-                        lora_name: None,
-                    })]),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
-        assert_eq!(loads.get(&worker).copied(), Some(Ok(10_000)));
-
-        sequences
-            .run_replica_sync(
-                VecSubscriber {
-                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
-                        request_id: "req-1".to_string(),
-                        worker,
-                        data: ActiveSequenceEventData::MarkPrefillCompleted,
-                        router_id: 99,
-                        lora_name: None,
-                    })]),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
-        assert_eq!(loads.get(&worker).copied(), Some(Ok(0)));
-
-        sequences
-            .run_replica_sync(
-                VecSubscriber {
-                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
-                        request_id: "req-2".to_string(),
-                        worker,
-                        data: ActiveSequenceEventData::AddRequest {
-                            token_sequence: Some(vec![4, 5, 6]),
-                            track_prefill_tokens: true,
-                            expected_output_tokens: None,
-                            prefill_load_hint: modeled_hint(12, 6),
-                        },
-                        router_id: 99,
-                        lora_name: None,
-                    })]),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
-        assert_eq!(loads.get(&worker).copied(), Some(Ok(6_000)));
-
-        sequences
-            .run_replica_sync(
-                VecSubscriber {
-                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
-                        request_id: "req-2".to_string(),
-                        worker,
-                        data: ActiveSequenceEventData::Free,
-                        router_id: 99,
-                        lora_name: None,
-                    })]),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
-        assert_eq!(loads.get(&worker).copied(), Some(Ok(0)));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3824,6 +4012,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(100, 10),
                             },
                             router_id: 99,
+                            origin: Default::default(),
                             lora_name: None,
                         }),
                         Ok(ActiveSequenceEvent {
@@ -3836,6 +4025,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(40, 4),
                             },
                             router_id: 99,
+                            origin: Default::default(),
                             lora_name: None,
                         }),
                     ]),
@@ -3848,10 +4038,11 @@ mod tests {
         tokio::time::advance(Duration::from_secs(5)).await;
         let completion_time = Instant::now();
         assert_eq!(
-            modeled_time_loads_by_worker(&sequences, completion_time)
+            sequences
+                .active_tokens(completion_time)
                 .get(&worker)
                 .copied(),
-            Some(Ok(9_000))
+            Some(90)
         );
 
         sequences
@@ -3862,6 +4053,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::Free,
                         router_id: 99,
+                        origin: Default::default(),
                         lora_name: None,
                     })]),
                 },
@@ -3871,10 +4063,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            modeled_time_loads_by_worker(&sequences, completion_time)
+            sequences
+                .active_tokens(completion_time)
                 .get(&worker)
                 .copied(),
-            Some(Ok(9_000))
+            Some(90)
         );
     }
 
@@ -3900,6 +4093,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                 },
                 router_id: 99,
+                origin: Default::default(),
                 lora_name: None,
             })]),
         };
@@ -4136,5 +4330,119 @@ mod tests {
                 candidate == worker && tokens == 50
             })
         );
+    }
+
+    fn decoding_request(
+        sequences: &ActiveSequencesMultiWorker<RecordingPublisher>,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        now: Instant,
+    ) -> AttemptId {
+        let attempt = sequences
+            .add_request_admitted(local_sequence_request(request_id, worker), now)
+            .unwrap();
+        sequences
+            .mark_prefill_completed_if_booking(request_id, worker, attempt, now)
+            .unwrap();
+        sequences
+            .update_output_if_booking(
+                request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 8)),
+            )
+            .unwrap();
+        attempt
+    }
+
+    #[test]
+    fn decode_progress_uses_existing_booking_without_load_publication() {
+        let (sequences, publisher) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "raw-progress".to_string();
+        let now = Instant::now();
+        let attempt = decoding_request(&sequences, &request_id, worker, now);
+        // Progress-only updates must leave the independently published load snapshot alone.
+        sequences.prompt_registry.replace_worker_load_state(
+            worker,
+            WorkerLoadSnapshot {
+                active_blocks: 17,
+                active_requests: 23,
+                ..Default::default()
+            },
+        );
+        let load_before = sequences.worker_load_reader(now).get(worker).unwrap();
+        publisher.clear();
+        assert_eq!(
+            sequences
+                .decode_progress_for(worker)
+                .unwrap()
+                .remaining_token_budget(),
+            120
+        );
+        assert_eq!(
+            sequences
+                .update_output_if_booking(
+                    &request_id,
+                    worker,
+                    attempt,
+                    0,
+                    None,
+                    Some(DecodeProgressUpdate::observed(128, 9)),
+                )
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        let progress = sequences.decode_progress_for(worker).unwrap();
+        assert_eq!(progress.remaining_token_budget(), 119);
+        assert_eq!(progress.observed_requests(), 1);
+        assert_eq!(
+            sequences.worker_load_reader(now).get(worker),
+            Some(load_before)
+        );
+        assert!(publisher.events.lock().unwrap().is_empty());
+        assert!(publisher.single_loads.lock().unwrap().is_empty());
+        assert!(publisher.observations.lock().unwrap().is_empty());
+        assert!(publisher.load_batches.lock().unwrap().is_empty());
+        sequences
+            .free_if_booking(&request_id, worker, attempt, now)
+            .unwrap();
+        assert!(sequences.decode_progress_for(worker).is_none());
+    }
+
+    #[test]
+    fn decode_progress_is_incomplete_for_unobserved_or_prefilling_owners() {
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        decoding_request(&sequences, &"a".to_string(), worker, now);
+        assert!(sequences.decode_progress_for(worker).is_some());
+        let pending = "b".to_string();
+        sequences
+            .add_request_admitted(local_sequence_request(&pending, worker), now)
+            .unwrap();
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.mark_prefill_completed(&pending, now).unwrap();
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.free(&pending, now).unwrap();
+        assert!(sequences.decode_progress_for(worker).is_some());
+    }
+
+    #[test]
+    fn decode_progress_follows_mirrored_lifecycle_changes() {
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "local-owner".to_string();
+        let now = Instant::now();
+        decoding_request(&sequences, &request_id, worker, now);
+        assert!(sequences.decode_progress_for(worker).is_some());
+        sequences.apply_replica_batch(vec![replica_add("mirrored", worker, vec![10])]);
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.apply_replica_batch(vec![replica_mark("mirrored", worker)]);
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.apply_replica_batch(vec![replica_free("mirrored", worker)]);
+        assert!(sequences.decode_progress_for(worker).is_some());
     }
 }

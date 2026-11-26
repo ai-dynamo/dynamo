@@ -423,7 +423,7 @@ mod tests {
             let mut exchange = bind(&crate::testkit::worker()).unwrap().exchange;
             for chunk in fixture["stream"].as_array().unwrap() {
                 let output = LLMEngineOutput {
-                    engine_data: Some(json!({ RESPONSE_KEY: chunk })),
+                    engine_data: Some(Box::new(json!({ RESPONSE_KEY: chunk }))),
                     ..Default::default()
                 };
                 exchange.chunk(output, false, &mut |_| {}).unwrap();

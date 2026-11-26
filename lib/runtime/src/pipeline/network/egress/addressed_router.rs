@@ -79,12 +79,15 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 }
 
 /// Build the error returned when the worker fails before any response bytes.
+/// Public for a [`StreamingDispatch`] that reaches its workers another way and
+/// must report such a failure as the request plane does.
 ///
-/// A typed [`ErrorClass::InvalidRequest`] refusal from the worker's prologue is
-/// returned as the worker's own error. The worker is reachable and refused the
-/// request itself, so a [`ErrorType::CannotConnect`] ancestor would make fault
-/// detection quarantine a healthy worker and make migration resend the request
-/// to every other worker, which would refuse it too.
+/// A typed [`ErrorClass::InvalidRequest`] or [`ErrorClass::NotImplemented`]
+/// refusal from the worker's prologue is returned as the worker's own error.
+/// The worker is reachable and refused the request itself, so a
+/// [`ErrorType::CannotConnect`] ancestor would make fault detection quarantine
+/// a healthy worker and make migration resend a request every worker would
+/// refuse.
 ///
 /// Every other failure keeps the outer [`ErrorType::CannotConnect`], so retry
 /// classification of the outer error is unchanged. A typed error from the
@@ -95,7 +98,7 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 /// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
 /// are withheld rather than attached. The worker's text stays in the message
 /// either way; only the machine-readable type is withheld.
-pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)
         .message(format!(
@@ -104,7 +107,7 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
 
     match error.typed_error {
         Some(typed)
-            if !is_migration_sensitive(&typed) && typed.class() == ErrorClass::InvalidRequest =>
+            if !is_migration_sensitive(&typed) && is_worker_request_rejection(typed.class()) =>
         {
             typed
         }
@@ -113,20 +116,23 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
     }
 }
 
+/// Worker prologue statuses that reject only this request rather than indicate
+/// a worker or transport fault.
+fn is_worker_request_rejection(class: ErrorClass) -> bool {
+    matches!(
+        class,
+        ErrorClass::InvalidRequest | ErrorClass::NotImplemented
+    )
+}
+
 /// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
 /// normal build of this crate exposes no public API for them.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing {
-    use super::{DynamoError, StreamPrologueError};
-
     /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
     pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
         super::MIGRATION_SENSITIVE_ERROR_REASONS
-    }
-
-    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
-        super::pre_stream_failure_error(error)
     }
 }
 
@@ -655,6 +661,11 @@ impl<T> AddressedRequest<T> {
     pub fn for_instance(request: T, instance: Instance) -> Self {
         let address = instance.transport.address().to_string();
         Self::with_instance(request, address, instance)
+    }
+
+    /// The worker this request was routed to, when the router knows it.
+    pub fn instance(&self) -> Option<&Instance> {
+        self.instance.as_ref()
     }
 
     /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
@@ -1227,8 +1238,10 @@ where
 /// Transport seam beneath `PushRouter`: given an already-selected worker (typed
 /// request + resolved address), dispatch the final hop and return a typed stream.
 /// Selection, occupancy, fault detection, and migration stay in `PushRouter`
-/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
-/// (the request plane) is the default impl.
+/// above the seam; only the transport below it changes. By default a router
+/// reaches `TransportType::Direct` instances through the runtime's registered
+/// direct dispatch and all others through [`AddressedPushRouter`] (the request
+/// plane).
 ///
 /// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
 /// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
@@ -1239,7 +1252,8 @@ where
 /// The removal watcher behind `on_instance_removed` / `on_instance_added` is
 /// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
 /// holding per-instance state must share it per endpoint (the default cleans up
-/// shared per-runtime state, so it is unaffected).
+/// shared per-runtime state and notifies every registered direct dispatch, so
+/// it is unaffected).
 #[async_trait::async_trait]
 pub trait StreamingDispatch<T, U>: Send + Sync
 where
@@ -1265,6 +1279,11 @@ where
     async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
 }
 
+// A router built without a dispatch does not call `generate` or
+// `generate_bidirectional` here: to save a boxed future per request, its
+// default dispatch (`TransportDispatch` in push_router.rs) calls what they
+// forward to. Keep them forwarding only: logic added to them would not run
+// for those routers. The lifecycle hooks are the ones it calls.
 #[async_trait::async_trait]
 impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
 where
@@ -1442,6 +1461,35 @@ mod tests {
                 callbacks,
                 responses,
             );
+            let removed = Instance {
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                namespace: "default".to_string(),
+                instance_id: 42,
+                transport: TransportType::Nats("worker.generate".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            };
+            router
+                .cancel_instance_streams(&removed.endpoint_instance_id())
+                .await;
+            let rejected = SingleIn::new(AddressedRequest::with_instance(
+                42_u64,
+                "test".to_string(),
+                removed,
+            ));
+            let result: anyhow::Result<ManyOut<Annotated<u64>>> = router.generate(rejected).await;
+            let error = result.expect_err("tombstoned worker must reject before sending");
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::Disconnected],
+                &[]
+            ));
+            assert!(matches!(
+                request_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
             let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
             let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
             let (response, (mut sender, payload_codec)) =

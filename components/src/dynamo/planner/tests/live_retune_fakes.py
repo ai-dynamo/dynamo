@@ -257,6 +257,7 @@ def lower_request_input(
         _nested_set(underlay, ("optimization", "strict_sla"), True)
     overrides = nested_get(spec, "aisim", "inputOverrides", default={}) or {}
     effective = merge_patch(underlay, overrides)
+    is_pareto = objective.get("mode") == "Pareto"
     reserved = {
         "name": run_name,
         "max_candidates": max_candidates,
@@ -266,6 +267,7 @@ def lower_request_input(
         "runtime_version_override": dynamo_version,
         "derive_runtime_images": True,
         "num_gpus_per_node": gpus_per_node,
+        "is_pareto": is_pareto,
     }
     for key, value in reserved.items():
         _nested_set(effective, ("dgdr_run", key), value)

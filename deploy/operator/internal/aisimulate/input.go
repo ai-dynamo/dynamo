@@ -117,14 +117,7 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 		b.setStrings(backends, engineBackendChoices)
 	}
-	if spec.Hardware != nil && spec.Hardware.GPU != nil {
-		if sku := spec.Hardware.GPU.SKU; sku != nil && *sku != "" {
-			b.set(*sku, engineHardware)
-		}
-		if budget := spec.Hardware.GPU.Budget; budget != nil {
-			b.set(int64(*budget), optimizationHardwareBudget)
-		}
-	}
+	b.setHardware(spec.Hardware)
 
 	if spec.Workload != nil && spec.Workload.Static != nil {
 		static := spec.Workload.Static
@@ -164,8 +157,13 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	b.setTraceWorkload(spec.Workload)
 
 	if objective := spec.Objective; objective != nil {
-		// CRD enum and CEL rules admit only scalar Optimize; Pareto lowering is intentionally absent.
-		if objective.Metric != nil {
+		if objective.Mode == v1beta2.ObjectiveModePareto {
+			if err := validateParetoMetrics(objective.Metrics); err != nil {
+				b.err = err
+			} else {
+				b.set(TargetPareto, optimizationTarget)
+			}
+		} else if objective.Metric != nil {
 			target, err := publicMetric(*objective.Metric)
 			if err != nil {
 				b.err = err
@@ -186,6 +184,26 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 	}
 	return b.root, b.err
+}
+
+// setHardware lowers the accelerator identity, the candidate GPU budget, and the prefill-to-decode
+// KV-transfer bandwidth. hardware may be nil; unset fields lower nothing. numGpusPerNode is not
+// lowered here: the Run controller writes it as an operator-owned execution value.
+func (b *builder) setHardware(hardware *v1beta2.HardwareSpec) {
+	if hardware == nil {
+		return
+	}
+	if gpu := hardware.GPU; gpu != nil {
+		if gpu.SKU != nil && *gpu.SKU != "" {
+			b.set(*gpu.SKU, engineHardware)
+		}
+		if gpu.Budget != nil {
+			b.set(int64(*gpu.Budget), optimizationHardwareBudget)
+		}
+	}
+	if interconnect := hardware.Interconnect; interconnect != nil && interconnect.KVTransferBandwidthGBps != nil {
+		b.set(*interconnect.KVTransferBandwidthGBps, engineKVTransferBW)
+	}
 }
 
 // setTraceWorkload lowers workload.trace: it replays the recorded arrival times, scaled by the
@@ -235,6 +253,29 @@ func (b *builder) setStrings(values []string, path []string) {
 	if err := unstructured.SetNestedStringSlice(b.root, values, path...); err != nil {
 		b.err = fmt.Errorf("set %s: %w", strings.Join(path, "."), err)
 	}
+}
+
+// defaultParetoMetrics is the only pair that maps to the AISimulate "pareto" target.
+// Any other non-empty Metrics slice names objectives the public input does not expose.
+var defaultParetoMetrics = map[v1beta2.ObjectiveMetric]struct{}{
+	v1beta2.ObjectiveMetric("ThroughputPerGPU"):  {},
+	v1beta2.ObjectiveMetric("ThroughputPerUser"): {},
+}
+
+// validateParetoMetrics returns an error when metrics names a pair that cannot be
+// lowered to the AISimulate "pareto" target. An empty slice uses the default pair.
+func validateParetoMetrics(metrics []v1beta2.ObjectiveMetric) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+	if len(metrics) == 2 {
+		_, ok0 := defaultParetoMetrics[metrics[0]]
+		_, ok1 := defaultParetoMetrics[metrics[1]]
+		if ok0 && ok1 && metrics[0] != metrics[1] {
+			return nil
+		}
+	}
+	return fmt.Errorf("spec.objective.metrics: unsupported Pareto metrics pair; omit to use the default [ThroughputPerGPU, ThroughputPerUser]")
 }
 
 // publicMetric maps each public API metric to its explicit AISimulate optimization target.

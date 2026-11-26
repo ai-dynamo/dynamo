@@ -4,14 +4,25 @@
 use super::*;
 #[cfg(feature = "bench")]
 use crate::WorkerObservationState;
-use crate::{AnchorCapableSyncIndexer, ApproximateLruLane, ApproximateLruTask};
+use crate::approximate_lru::ApproximateLruLane;
+use crate::{AnchorCapableSyncIndexer, ApproximateLruTask, ResidentBlockTracker};
+
+/// Publishes `worker`'s block count once a policy reads resident blocks.
+fn track(
+    resident_blocks: &mut Option<ResidentBlockTracker>,
+    lookup: &LaneLookup,
+    worker: WorkerWithDpRank,
+) {
+    if let Some(tracker) = resident_blocks {
+        tracker.update(worker, lookup.block_count(worker));
+    }
+}
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
-    #[cfg_attr(feature = "profile", inline(never))]
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
@@ -20,6 +31,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         let mut lookup = LaneLookup::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
         let mut approximate_lru = ApproximateLruLane::default();
+        let mut resident_blocks = None;
         #[cfg(feature = "bench")]
         let mut observation = WorkerObservationState::default();
 
@@ -27,7 +39,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
+                    let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    track(&mut resident_blocks, &lookup, worker);
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
@@ -37,7 +51,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
+                    let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    track(&mut resident_blocks, &lookup, worker);
                     let applied = result.is_ok();
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
@@ -56,14 +72,17 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         ..
                     } = task;
                     let result = approximate_lru.apply(command).and_then(|output| {
-                        let crate::ApproximateLruApplyOutput {
+                        let crate::approximate_lru::ApproximateLruApplyOutput {
                             events,
                             reply,
                             ttl_update,
                         } = output;
                         for event in events {
                             let kind = EventKind::of(&event.event.data);
+                            let worker =
+                                WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
                             let applied = self.apply_event(&mut lookup, event, counters.as_ref());
+                            track(&mut resident_blocks, &lookup, worker);
                             if let Some(ref counters) = counters {
                                 counters.inc(kind, applied);
                             }
@@ -96,7 +115,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
+                    let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    track(&mut resident_blocks, &lookup, worker);
                     observation.record(correlation_id, result.is_ok());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
@@ -125,6 +146,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
                     );
+                    if let Some(tracker) = &mut resident_blocks {
+                        tracker.remove(|worker| worker.worker_id == worker_id);
+                    }
                     let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
@@ -132,12 +156,16 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     dp_rank,
                     sweep_tree,
                 } => {
-                    approximate_lru.forget_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+                    let rank = WorkerWithDpRank::new(worker_id, dp_rank);
+                    approximate_lru.forget_rank(rank);
                     self.erase_worker_coverage(
                         &mut lookup,
-                        WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),
+                        WorkerRemovalTarget::DpRank(rank),
                         sweep_tree,
                     );
+                    if let Some(tracker) = &mut resident_blocks {
+                        tracker.remove(|worker| worker == rank);
+                    }
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
@@ -158,6 +186,10 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     // A flush offers every dead leaf this lane queued for unlinking first.
                     self.drain_pending_unlinks(&mut lookup, None);
                     let _ = sender.send(());
+                }
+                WorkerTask::TrackResidentBlocks(counts) => {
+                    resident_blocks =
+                        Some(ResidentBlockTracker::new(counts, lookup.block_counts()));
                 }
                 WorkerTask::Terminate => {
                     break;

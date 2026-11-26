@@ -83,6 +83,26 @@ type HardwareSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+
+	// Interconnect describes the links between candidate workers. Like gpu, it makes the
+	// hardware object nonempty, so admission still discovers omitted GPU fields.
+	// +optional
+	Interconnect *InterconnectSpec `json:"interconnect,omitempty"`
+}
+
+// InterconnectSpec describes the links that move data between candidate workers.
+type InterconnectSpec struct {
+	// KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that
+	// one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU
+	// value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's
+	// engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation
+	// (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+	// describes how candidates use it, including link sharing. When omitted, no bandwidth is
+	// lowered and AISimulate's default applies, which models the transfer as instantaneous.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	KVTransferBandwidthGBps *float64 `json:"kvTransferBandwidthGBps,omitempty"`
 }
 
 // KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.
@@ -252,14 +272,13 @@ type WorkloadSpec struct {
 	Trace *TraceWorkloadSpec `json:"trace,omitempty"`
 }
 
-// ObjectiveMode selects the optimization mode. Pareto is reserved for a future
-// release and is not admitted until Candidate publication supports Pareto fronts.
-// +kubebuilder:validation:Enum=Optimize
+// ObjectiveMode selects the optimization mode.
+// +kubebuilder:validation:Enum=Optimize;Pareto
 type ObjectiveMode string
 
 const (
 	ObjectiveModeOptimize ObjectiveMode = "Optimize"
-	// ObjectiveModePareto is reserved for the future Pareto API implementation.
+	// ObjectiveModePareto searches for a Pareto front across multiple objectives.
 	ObjectiveModePareto ObjectiveMode = "Pareto"
 )
 
@@ -290,11 +309,14 @@ type ObjectiveSLASpec struct {
 	E2EMs *float64 `json:"e2eMs,omitempty"`
 }
 
-// ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
-// +kubebuilder:validation:XValidation:rule="!has(self.metrics)",message="metrics is reserved for the future Pareto implementation"
+// ObjectiveSpec defines the optimization objective. Use mode Optimize with a single metric
+// for scalar optimization, or mode Pareto with two metrics for multi-objective search.
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Pareto' || !has(self.metric)",message="Pareto mode uses metrics, not metric"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Optimize' || !has(self.metrics)",message="Optimize mode uses metric, not metrics"
 type ObjectiveSpec struct {
-	// Mode selects scalar optimization. Only Optimize is currently supported.
+	// Mode selects the optimization mode: Optimize for a single scalar target,
+	// Pareto for a multi-objective search across two metrics.
 	// +optional
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
@@ -303,7 +325,10 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics is reserved for the future Pareto implementation.
+	// Metrics selects the two objectives for a Pareto search. Ignored when mode is not Pareto.
+	// When omitted in Pareto mode, AISimulate uses its default objectives
+	// [ThroughputPerGPU, ThroughputPerUser]. When set, the pair must be exactly
+	// [ThroughputPerGPU, ThroughputPerUser]; other pairs are unsupported.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=2
@@ -356,6 +381,15 @@ type RecommendationSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
+}
+
+// RerunSpec records explicit intent to create another Run without changing search inputs.
+type RerunSpec struct {
+	// Reason records why the user requested another Run. Changing this value creates a new
+	// Request generation and the value is frozen into that generation's immutable Run.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Reason string `json:"reason"`
 }
 
 // OverridesSpec patches the generated deployment independently for every selected Candidate.
@@ -431,6 +465,12 @@ type NativeSearchInput struct {
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 
+	// Rerun intentionally creates a new Request generation when the search inputs otherwise
+	// remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry
+	// the same immutable Run.
+	// +optional
+	Rerun *RerunSpec `json:"rerun,omitempty"`
+
 	// Overrides customizes the generated DGD without changing AISimulate execution.
 	// +optional
 	Overrides *OverridesSpec `json:"overrides,omitempty"`
@@ -444,7 +484,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.rerun) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
@@ -504,6 +544,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)",message="nonempty status must use the representation selected by spec"
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+// Available without a feature gate. This API is not feature complete.
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

@@ -23,8 +23,8 @@ use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_router_protocol::worker_type::WorkerType;
 use dynamo_scheduler::host::{
-    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
     OverloadedWorkerProvider, PrefillLoadEstimator, RejectThresholdsProvider, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     WorkerAvailabilityProvider, WorkerCatalogSource, WorkerConfigLike, WorkerRequest,
@@ -69,6 +69,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Builds the partition's worker-selection policy (see
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
+    /// The partition's hint policies, resolved from router configuration.
+    pub hint_policies: dynamo_kv_router::plugins::host::HintPolicyFactory,
 }
 
 fn record_queue_rejection(
@@ -292,6 +294,9 @@ impl EmbeddedSelection {
                 request_leases,
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             },
+            hints: HostHints {
+                policies: Some(args.hint_policies),
+            },
         })
         .build()
         .await
@@ -408,9 +413,18 @@ impl EmbeddedSelection {
     }
 
     /// Run one selection through the shared core.
-    pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+    pub(crate) async fn run_selection(
+        &self,
+        operation: SelectionOperation<'_>,
+        allow_cache_credit: bool,
+    ) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.
-        let run = Box::pin(self.service.core().run_selection(operation)).await;
+        let run = Box::pin(
+            self.service
+                .core()
+                .run_selection_with_cache_credit(operation, allow_cache_credit),
+        )
+        .await;
         self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
             _ => None,
@@ -484,11 +498,32 @@ pub(crate) fn worker_request_from_runtime_config(
             }
         }
     }
+    // An engine the frontend dials directly names its own KV-event publishers,
+    // which the ZMQ ingress subscribes to per rank.
+    let kv_events_endpoints: HashMap<u32, String> = config
+        .runtime_data
+        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY)
+        .and_then(serde_json::Value::as_object)
+        .map(|endpoints| {
+            endpoints
+                .iter()
+                .filter_map(|(rank, endpoint)| {
+                    Some((rank.parse().ok()?, endpoint.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let idempotent_stores = config
+        .runtime_data
+        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY)
+        .and_then(serde_json::Value::as_bool);
     WorkerRequest {
         worker_id,
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),
         endpoint: Some(format!("dyn://{worker_id}")),
+        kv_events_endpoints,
+        idempotent_stores,
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
@@ -500,6 +535,7 @@ pub(crate) fn worker_request_from_runtime_config(
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         ),
         total_kv_blocks: config.total_kv_blocks,
+        cache_owner_capacity_blocks: config.cache_owner_capacity_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
         taints: config.taints().clone(),
@@ -573,6 +609,7 @@ mod tests {
             data_parallel_size: 2,
             max_num_batched_tokens: Some(8192),
             total_kv_blocks: Some(4096),
+            cache_owner_capacity_blocks: Some(1024),
             stable_routing_id: Some("worker-0".to_string()),
             ..ModelRuntimeConfig::default()
         };
@@ -599,6 +636,7 @@ mod tests {
         assert_eq!(request.data_parallel_size, Some(2));
         assert_eq!(request.max_num_batched_tokens, Some(8192));
         assert_eq!(request.total_kv_blocks, Some(4096));
+        assert_eq!(request.cache_owner_capacity_blocks, Some(1024));
         assert_eq!(request.stable_routing_id.as_deref(), Some("worker-0"));
         assert!(request.taints.contains("gpu=h100"));
         assert_eq!(request.router_hint_worker_type.as_deref(), Some("decode"));
@@ -620,6 +658,37 @@ mod tests {
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
+    }
+
+    #[test]
+    fn direct_kv_publishers_reach_the_catalog_record() {
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let mut config = ModelRuntimeConfig {
+            data_parallel_size: 2,
+            ..ModelRuntimeConfig::default()
+        };
+        config.runtime_data.insert(
+            crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY.to_string(),
+            serde_json::json!({"0": "tcp://engine:5557", "1": "tcp://engine:5558"}),
+        );
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(
+            request.kv_events_endpoints,
+            HashMap::from([
+                (0, "tcp://engine:5557".to_string()),
+                (1, "tcp://engine:5558".to_string())
+            ])
+        );
+        // Unsaid, the listener counts a remove per store.
+        assert_eq!(request.idempotent_stores, None);
+
+        config.runtime_data.insert(
+            crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY
+                .to_string(),
+            true.into(),
+        );
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.idempotent_stores, Some(true));
     }
 
     #[test]

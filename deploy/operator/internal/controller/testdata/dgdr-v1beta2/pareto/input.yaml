@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: aisimulate-pareto
+spec:
+  model:
+    # CPU-only simulation reads model metadata; it does not load weights or allocate GPUs.
+    name: Qwen/Qwen3-32B
+  backends:
+    - vllm
+  workload:
+    static:
+      inputTokens: 1024
+      outputTokens: 128
+      load:
+        concurrency: 1
+  objective:
+    mode: Pareto
+    sla: {}
+  aisim:
+    inputOverrides:
+      engine:
+        mode: aggregated
+        context_length: 32768
+        workers:
+          aggregated:
+            parallelism:
+              preset:
+                - replicas: 1
+                  tensor: 1
+                  pipeline: 1
+                  attention_data: 1
+                  moe_tensor: 1
+                  moe_expert: 1
+                - replicas: 2
+                  tensor: 1
+                  pipeline: 1
+                  attention_data: 1
+                  moe_tensor: 1
+                  moe_expert: 1
+            scheduler:
+              # Redundant replicas at concurrency 1 create dominated points; batching supplies tradeoffs.
+              max_sequences:
+                choices: [1, 64]
+              max_batched_tokens: 2048
+            kv_cache:
+              # TODO(#17581): Remove after AISimulate preserves an unset runtime block size.
+              block_size: 64
+          prefill: null
+          decode: null
+      traffic:
+        load:
+          type: concurrency
+          concurrency:
+            choices: [1, 4, 16, 64]
+        stop:
+          requests: 128
+      optimizer:
+        algorithm: random
+        seed: 21
+        max_trials: 16
+        parallelism: 1
+        candidate_timeout_seconds: 120
+      dgdr_run:
+        snapshot_interval_seconds: 0
+  recommendation:
+    maxCandidates: 1

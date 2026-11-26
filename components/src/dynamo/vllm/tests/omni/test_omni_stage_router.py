@@ -21,6 +21,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -285,7 +286,11 @@ async def test_generate_stage_error_stops_pipeline():
 
 
 @pytest.mark.asyncio
-async def test_generate_delegates_formatting_to_output_formatter():
+@pytest.mark.parametrize(
+    "nvext, expected_steps",
+    [(None, {}), ({"num_inference_steps": 4}, {"num_inference_steps": 4})],
+)
+async def test_generate_delegates_formatting_to_output_formatter(nvext, expected_steps):
     """Final stage output should be deserialized and passed to OutputFormatter."""
     fake_result = SimpleNamespace(final_output_type="image")
     mock_formatter = AsyncMock()
@@ -304,14 +309,13 @@ async def test_generate_delegates_formatting_to_output_formatter():
         "prompt": "x",
         "response_format": "b64_json",
         "output_format": "JPEG",
+        "nvext": nvext,
     }
     with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
         with patch(
             "dynamo.vllm.omni.stage_router.parse_request_type",
             return_value=(
-                NvCreateImageRequest(
-                    prompt="x", response_format="b64_json", output_format="JPEG"
-                ),
+                NvCreateImageRequest(**request),
                 RequestType.IMAGE_GENERATION,
             ),
         ):
@@ -327,6 +331,7 @@ async def test_generate_delegates_formatting_to_output_formatter():
         request_type=RequestType.IMAGE_GENERATION,
         response_format="b64_json",
         output_format="jpeg",
+        **expected_steps,
     )
 
 

@@ -47,18 +47,17 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | Unsupported | Unsupported | Unsupported | — | | | | | | |
-| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | Unsupported | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | Unsupported | 🚧 | — | | | | |
-| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | Unsupported | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
-| **LoRA** | | | | Unsupported | | | | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | Unsupported | ✅ | ✅ | ✅ | | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | Unsupported | — | ✅ | ✅ | | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
+| **LoRA** | | | | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | ✅ | | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](multimodal.md))
@@ -69,7 +68,7 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 The Dynamo TensorRT-LLM container uses the NIXL library and Python bindings provided by its upstream TensorRT-LLM release image. Multimodal embedding transfers still use those bindings. Do not install a second NIXL distribution or preload `libnixl` globally.
 
-The AWS EFA variant adds the missing LIBFABRIC plugin without replacing upstream's NIXL libraries or Python bindings. Its `trtllm.nixl_ref` build setting selects the plugin source. NIXL 1.5.2's plugin is qualified with the upstream 1.5.0 runtime using plugin API 1, including CUDA context-independent allocations. Updating either version requires compatibility validation; the build rejects unqualified version pairs.
+Starting with TensorRT-LLM 1.4.0rc3, the upstream image includes the AWS EFA installer and a NIXL LIBFABRIC plugin. The AWS EFA variant replaces that plugin with one built from its `trtllm.nixl_ref` build setting, and keeps upstream's NIXL libraries and Python bindings. The plugin and the upstream runtime are both NIXL 1.5.2 and use plugin API 1. Updating either version requires compatibility validation; the build rejects unqualified version pairs.
 
 The deprecated KVBM connector and event consolidator have been removed. Remove `--connector kvbm` and KVBM-specific settings from existing deployments. Native KV-event publishing through `--publish-kv-events` and KV-aware routing remain supported.
 
@@ -79,9 +78,9 @@ The deprecated KVBM connector and event consolidator have been removed. Remove `
 
 | Container tag | Backend version | CUDA | Min NVIDIA driver |
 |---|---|---|---|
-| `tensorrtllm-runtime:1.6.0` | TRT-LLM `v1.3.0rc29` | `v13.1` | `580+` |
-| `vllm-runtime:1.6.0` | vLLM `v0.31.0` | `v13.0` | `580+` |
-| `sglang-runtime:1.6.0` | SGLang `v0.5.21` | `v13.0` | `580+` |
+| `tensorrtllm-runtime:1.7.0` | TRT-LLM `v1.4.0rc2` | `v13.1` | `580+` |
+| `vllm-runtime:1.7.0` | vLLM `v0.33.0` | `v13.0` | `580+` |
+| `sglang-runtime:1.7.0` | SGLang `v0.5.23` | `v13.0` | `580+` |
 
 Source of truth: [`docs/fern/pages/reference/general/compatibility.mdx`](../../../../../reference/general/compatibility.mdx#release-support-matrix) and [`docs/fern/pages/reference/general/release-artifacts.mdx`](../../../../../reference/general/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
 
@@ -96,7 +95,7 @@ docker compose -f dev/docker-compose.yml up -d
 **Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
-DYNAMO_VERSION=1.6.0
+DYNAMO_VERSION=1.7.0
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
 docker run --gpus all -it --network host --ipc host \
   nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION

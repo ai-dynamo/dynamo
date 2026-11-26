@@ -43,21 +43,8 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
-/// How long the Velo response service stays open after the main token is
-/// cancelled: the HTTP service's drain, `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
-/// (default 5, read by dynamo-llm). Requests it admits may still be queued or
-/// tokenizing, and register their responses later.
-fn velo_response_drain_window() -> Duration {
-    let timeout_secs =
-        std::env::var(config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(5);
-
-    Duration::from_secs(timeout_secs)
-}
-
-/// How long Velo responses still open after that window get to finish.
+/// How long Velo responses still open after the HTTP drain window
+/// (`config::http_graceful_shutdown_timeout`) get to finish.
 const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
@@ -429,12 +416,17 @@ impl Runtime {
             main_token.cancel();
 
             // The main token also starts the HTTP drain, so close the response
-            // service only after that drain and its streams finish. Other
-            // Runtime owners in this process keep their shared service alive.
+            // service only after that drain and its streams finish: requests it
+            // admits may still be queued or tokenizing, and register their
+            // responses later. Other Runtime owners in this process keep their
+            // shared service alive.
             // The main token is already cancelled and nothing awaits this task,
             // so a slow close cannot hold up shutdown.
             velo_response_service
-                .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                .drain(
+                    config::http_graceful_shutdown_timeout(),
+                    VELO_RESPONSE_DRAIN_HEADROOM,
+                )
                 .await;
             velo_response_service.shutdown().await;
         });

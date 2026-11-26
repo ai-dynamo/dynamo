@@ -875,6 +875,8 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 	}
 }
 
+// reconcileInput reuses a Run's frozen input or creates it before the Job starts.
+// run must not be nil; job is nil before the Run has a Job.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
@@ -914,6 +916,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		)}
 	}
 
+	// Require publisher configuration only when freezing a new execution, not when observing an existing Run.
+	if r.OperatorImage == "" {
+		return dgdrRunExecution{}, errors.New("operator image is required for the DGDR Run publisher; set --operator-image")
+	}
+
 	// Resolve every execution value before creating the immutable artifact.
 	execution := dgdrRunExecution{
 		SnapshotPath:        dgdrRunSnapshotPath,
@@ -942,7 +949,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
-	contents, err := yaml.Marshal(input)
+	contents, err := aisimulate.MarshalInput(input)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("encode AISimulate input: %w", err)}
 	}
@@ -1046,6 +1053,20 @@ func dgdrRunInput(
 		"runtime_image":            runtimeImageSource,
 		"runtime_version_override": dynamoVersion,
 		"derive_runtime_images":    true,
+	}
+	// Derive is_pareto from the effective optimization.target after inputOverrides have been
+	// applied, not from the typed spec.objective.mode, so that override-driven Pareto searches
+	// and override-driven scalar downgrades both propagate correctly to the output adapter.
+	effectiveTarget, _, err := unstructured.NestedString(input, "optimization", "target")
+	if err != nil {
+		return nil, fmt.Errorf("read effective optimization.target: %w", err)
+	}
+	reserved["is_pareto"] = effectiveTarget == aisimulate.TargetPareto
+	if effectiveTarget == aisimulate.TargetPareto {
+		// Supply the objectives so the adapter can apply Pareto dominance filtering in
+		// on_candidate and on_round without having to parse the full workload config.
+		// Pareto mode always uses the default pair; override-driven Pareto inherits it too.
+		reserved["pareto_objectives"] = []any{"throughput_per_gpu", "throughput_per_user"}
 	}
 	if run.Spec.Hardware != nil && run.Spec.Hardware.NumGPUsPerNode != nil {
 		reserved["num_gpus_per_node"] = int64(*run.Spec.Hardware.NumGPUsPerNode)
@@ -1824,9 +1845,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) SetupWithManager(mgr ctrl.Ma
 	}
 	if r.PlannerImage == "" {
 		return errors.New("planner image is required for the DGDR Run sweeper")
-	}
-	if r.OperatorImage == "" {
-		return errors.New("operator image is required for the DGDR Run publisher")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(), &batchv1.Job{}, dgdrRunJobControllerUIDIndex, dgdrRunJobControllerUIDs,

@@ -31,7 +31,7 @@ use crate::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::{RequestPhase, RequestTracker},
+        timing::RequestPhase,
     },
     protocols::response_merge::{
         PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
@@ -507,9 +507,7 @@ impl
                     );
 
                     let mut conditional_request = conditional_request;
-                    if conditional_request.tracker.is_none() {
-                        conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
-                    }
+                    conditional_request.ensure_tracker();
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
@@ -552,9 +550,7 @@ impl
 
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.
-        if req.tracker.is_none() {
-            req.tracker = Some(Arc::new(RequestTracker::new()));
-        }
+        req.ensure_tracker();
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
@@ -937,7 +933,7 @@ mod tests {
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
-        timing::RoutingData,
+        timing::{RequestTracker, RoutingData},
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
@@ -958,10 +954,10 @@ mod tests {
             assert!(request.get_annotation_value("query_instance_id").is_some());
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
-                routing_data: Some(RoutingData {
+                routing_data: Some(Box::new(RoutingData {
                     token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             });
             Ok(ResponseStream::new(
@@ -1274,9 +1270,9 @@ mod tests {
             let mut outputs = Vec::new();
             if after_handoff {
                 outputs.push(Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 }));
             }
@@ -1642,10 +1638,10 @@ mod tests {
         let output = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![2],
             finish_reason: Some(FinishReason::EoS),
-            disaggregated_params: Some(serde_json::json!({
+            disaggregated_params: Some(Box::new(serde_json::json!({
                 "ctx_request_id": null,
                 "request_type": "context_only",
-            })),
+            }))),
             ..Default::default()
         });
 

@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -51,3 +51,10 @@ def test_every_policy_parameter_is_public_an_extension_or_not_retunable() -> Non
             ValidationError, match=re.escape(f"{name} is not retunable: {reason}")
         ):
             RouterRetuneConfig.model_validate({name: 1.0})
+
+
+def test_retune_router_section_rejects_key() -> None:
+    with pytest.raises(
+        ValidationError, match=r"retune\.router\.ais_perf_model is not supported"
+    ):
+        RouterRetuneConfig.model_validate({"ais_perf_model": {"use": "engine"}})

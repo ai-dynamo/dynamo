@@ -44,13 +44,16 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 )
 
 // dgdCheckpointsResult is the cohesive output consumed by later workload
@@ -238,6 +241,7 @@ func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
 		string(backendFramework),
 		gmsMode,
 		gmsDeviceClassName,
+		compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations),
 	)
 }
 
@@ -314,6 +318,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		string(backendFramework),
 		gmsMode,
 		gmsDeviceClassName,
+		compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations),
 	)
 	if err != nil {
 		return nil, err
@@ -964,9 +969,25 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	componentForJob.Experimental = nil
 	componentForJob.FrontendSidecar = nil
 
+	// Retain job overrides as a fourth user layer before final composition.
+	var jobEnvironment map[string]semanticenv.Layer
+	if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil && config.Job.PodTemplate != nil {
+		jobEnvironment = make(map[string]semanticenv.Layer)
+		for _, container := range config.Job.PodTemplate.Spec.Containers {
+			// Other regular containers are discarded, then job-only sidecars are added fresh.
+			if container.Name != targetContainerName {
+				continue
+			}
+			jobEnvironment[container.Name] = semanticenv.Layer{
+				Source: "experimental.checkpoint.job.podTemplate.spec.containers[name=" + container.Name + "].env",
+				Env:    container.Env,
+			}
+		}
+	}
+
 	// Use the normal DGD path so graph-level defaults such as spec.env,
 	// annotations, labels, and pod-template metadata are applied consistently.
-	podSpec, err := dynamo.GeneratePodSpecForComponent(
+	podSpec, environment, err := dynamo.GeneratePodSpecForComponentStaged(
 		componentForJob,
 		backendFramework,
 		r.dockerSecretRetriever,
@@ -978,6 +999,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		componentName,
 		nil,                                     // Use default deployer
 		func() (int64, error) { return 0, nil }, // Checkpoint jobs are single-node
+		jobEnvironment,
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
@@ -1066,10 +1088,16 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 
 				baseEnv := existing.Env
 				user := override.DeepCopy()
+				if environment != nil {
+					// The target's job environment is already retained as its fourth source.
+					user.Env = nil
+				}
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
-				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
+				if environment == nil {
+					existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, override.Env)
+				}
 				if user.LivenessProbe != nil {
 					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
 				}
@@ -1078,6 +1106,28 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				}
 				if user.StartupProbe != nil {
 					existing.StartupProbe = user.StartupProbe.DeepCopy()
+				}
+			}
+
+			// Replacement containers own only their job sources, never discarded serving inputs.
+			if environment != nil {
+				for _, group := range []struct {
+					field      string
+					overrides  []corev1.Container
+					containers []corev1.Container
+				}{{"initContainers", initContainers, podTemplate.Spec.InitContainers}, {"containers", containers, podTemplate.Spec.Containers}} {
+					for _, override := range group.overrides {
+						if group.field == "containers" && override.Name == targetContainerName {
+							continue
+						}
+						container := common.FindContainerByName(group.containers, override.Name)
+						if container == nil {
+							return corev1.PodTemplateSpec{}, fmt.Errorf("SnapshotJob override %q is missing from %s", override.Name, group.field)
+						}
+						environment.Register(container, semanticenv.Layer{
+							Source: "experimental.checkpoint.job.podTemplate.spec." + group.field + "[name=" + override.Name + "].env", Env: override.Env,
+						})
+					}
 				}
 			}
 		}
@@ -1105,7 +1155,32 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		dynamo.PrepareSnapshotFailoverCapture(targetContainer)
+		dynamo.PrepareSnapshotFailoverCapture(targetContainer, environment)
+	}
+
+	// All surviving sources are now known; record logical GMS bindings before
+	// hashing, while physical sidecar and claim setup remains checkpoint-ID dependent.
+	environment.Capture(&podTemplate.Spec)
+	if service := dynamo.GetGPUMemoryService(component); environment != nil && service != nil && (service.Mode == "" || service.Mode == nvidiacomv1beta1.GMSModeIntraPod) {
+		clients := []string{targetContainerName}
+		if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil {
+			clients = append(clients, config.Job.GMSClientContainers...)
+		}
+		for _, name := range clients {
+			container, err := findPodTemplateContainer(&podTemplate, name)
+			if err != nil {
+				return corev1.PodTemplateSpec{}, err
+			}
+			environment.Bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(true))
+		}
+	}
+	// Selecting a helper capture does not transfer the main engine's port policy.
+	var engineContainers []string
+	if targetContainerName == consts.MainContainerName && dynamo.GetComponentDynamoSidecar(componentForJob) == nil {
+		engineContainers = []string{consts.MainContainerName}
+	}
+	if err := dynamo.FinalizePodEnvironment(&podTemplate.Spec, environment, backendFramework, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
+		return corev1.PodTemplateSpec{}, err
 	}
 	return podTemplate, nil
 }

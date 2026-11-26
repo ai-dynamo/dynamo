@@ -17,12 +17,12 @@ const SERDE_JSON_RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
 /// An exact `list` of exact `int`s as `Vec<u32>`; `None` for anything else, including a
 /// negative id or one past `u32::MAX`.
 pub(crate) fn read_exact_u32_list(obj: &Bound<'_, PyAny>) -> Option<Vec<u32>> {
-    let list = obj.downcast_exact::<PyList>().ok()?;
+    let list = obj.cast_exact::<PyList>().ok()?;
     // SAFETY: `PyLong_AsUnsignedLong` on an exact `int` calls no `__index__`, so the read
     // runs no Python code.
     unsafe {
         read_list(list, |item| {
-            let int = item.downcast_exact::<PyInt>().ok()?;
+            let int = item.cast_exact::<PyInt>().ok()?;
             // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
             // values past `u32::MAX` fail `try_from`.
             let id = u32::try_from(ffi::PyLong_AsUnsignedLong(int.as_ptr()));
@@ -37,13 +37,13 @@ pub(crate) fn read_exact_u32_list(obj: &Bound<'_, PyAny>) -> Option<Vec<u32>> {
 /// Exact `dict` (with `str` keys), `list`, `tuple`, `str`, `int` (in `i64` or `u64` range),
 /// `float`, `bool` or `None` as a `serde_json::Value`; `None` for anything else.
 pub(crate) fn exact_json_value(obj: &Bound<'_, PyAny>) -> Option<Value> {
-    if let Ok(int) = obj.downcast_exact::<PyInt>() {
+    if let Ok(int) = obj.cast_exact::<PyInt>() {
         return exact_int(int);
     }
-    if let Ok(list) = obj.downcast_exact::<PyList>() {
+    if let Ok(list) = obj.cast_exact::<PyList>() {
         // SAFETY: this function reads only exact builtin types, which runs no Python code.
         let items = unsafe {
-            read_list(list, |item| match item.downcast_exact::<PyInt>() {
+            read_list(list, |item| match item.cast_exact::<PyInt>() {
                 // Ints, by far the commonest item, skip the recursive call.
                 Ok(int) => exact_int(int),
                 Err(_) => exact_json_value(item),
@@ -54,27 +54,27 @@ pub(crate) fn exact_json_value(obj: &Bound<'_, PyAny>) -> Option<Value> {
     if obj.is_none() {
         return Some(Value::Null);
     }
-    if let Ok(flag) = obj.downcast_exact::<PyBool>() {
+    if let Ok(flag) = obj.cast_exact::<PyBool>() {
         return Some(Value::Bool(flag.is_true()));
     }
-    if let Ok(text) = obj.downcast_exact::<PyString>() {
+    if let Ok(text) = obj.cast_exact::<PyString>() {
         return text.to_str().ok().map(|s| Value::String(s.to_owned()));
     }
-    if let Ok(number) = obj.downcast_exact::<PyFloat>() {
+    if let Ok(number) = obj.cast_exact::<PyFloat>() {
         // NaN and the infinities become `Null`, as serde_json's own `Value` visitor does.
         return Some(Number::from_f64(number.value()).map_or(Value::Null, Value::Number));
     }
-    if let Ok(tuple) = obj.downcast_exact::<PyTuple>() {
+    if let Ok(tuple) = obj.cast_exact::<PyTuple>() {
         return tuple
             .iter_borrowed()
             .map(|item| exact_json_value(&item))
             .collect::<Option<_>>()
             .map(Value::Array);
     }
-    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let dict = obj.cast_exact::<PyDict>().ok()?;
     let mut map = Map::with_capacity(dict.len());
     for (key, value) in dict.iter() {
-        let key = key.downcast_exact::<PyString>().ok()?.to_str().ok()?;
+        let key = key.cast_exact::<PyString>().ok()?.to_str().ok()?;
         if key == SERDE_JSON_RAW_VALUE_TOKEN {
             return None;
         }
