@@ -226,6 +226,11 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
                     del self.sessions[pid]
                 del self.roots[session.root]
 
+    def _admission_request_id(self, request, *, context=None):
+        return request["extra_args"]["sampling_options"]["vllm_xargs"][
+            "duru_request_id"
+        ]
+
     async def _before_dispatch(self, request):
         identity = request["extra_args"]["sampling_options"]["vllm_xargs"]
         request_id = identity["duru_request_id"]

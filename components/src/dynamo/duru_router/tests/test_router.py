@@ -33,6 +33,7 @@ pytestmark = [
 class RouterCase:
     def __init__(self):
         self.snapshot = {}
+        self.requests = {}
         self.scores, self.events, self.tasks = {}, [], []
         self.capacity = FakeCapacity(workers={(1, 0): 1000})
         self.router = DuruScheduler(
@@ -52,7 +53,9 @@ class RouterCase:
 
     def save(self, age=0):
         self.snapshot = dict(
-            observation_time=time.monotonic() - age, programs=deepcopy(self.scores)
+            observation_time=time.monotonic() - age,
+            programs=deepcopy(self.scores),
+            requests=deepcopy(self.requests),
         )
 
     def put(self, program, demand, score):
@@ -67,7 +70,7 @@ class RouterCase:
         self.save(age)
         await self.router._greedy_resume(self.capacity.workers)
 
-    async def start(self, program, demand):
+    async def start(self, program, demand, *, request_id=None):
         self.save()
         checked = asyncio.Event()
         original = self.router._admission_ready
@@ -77,7 +80,9 @@ class RouterCase:
             return original(program_id)
 
         with patch.object(self.router, "_admission_ready", ready):
-            task = asyncio.create_task(self.router.before_request(program, demand))
+            task = asyncio.create_task(
+                self.router.before_request(program, demand, request_id=request_id)
+            )
             self.tasks.append(task)
             await asyncio.wait_for(checked.wait(), 1)
         return task
@@ -135,6 +140,90 @@ async def case(tmp_path, monkeypatch):
         for task in case.tasks:
             task.cancel()
         await asyncio.wait_for(asyncio.gather(*case.tasks, return_exceptions=True), 1)
+
+
+@pytest.mark.asyncio
+async def test_same_session_waiter_uses_own_score_for_alpha(case, monkeypatch, caplog):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
+    monkeypatch.setenv("DURU_DIAGNOSTICS", "1")
+    caplog.set_level("INFO", logger="dynamo.duru_router.diagnostics")
+    case.score("session", 2)  # The later, shorter request wins the program row.
+    case.requests = {
+        "long": dict(program_id="session", score=0.5, U=None, arrival=1),
+        "short": dict(program_id="session", score=2, U=None, arrival=2),
+    }
+    first = await case.start("session", 1100, request_id="long")
+    entered = asyncio.Event()
+
+    async def second_request():
+        entered.set()
+        return await case.router.before_request("session", 100, request_id="short")
+
+    second = asyncio.create_task(second_request())
+    case.tasks.append(second)
+    await asyncio.wait_for(entered.wait(), 1)
+    await case.resume()
+    assert not first.done() and not second.done()
+    assert not case.admitted
+
+    # Only the request owning the gate can authorize its own exception.
+    case.requests["long"]["score"] = 1.5
+    await case.resume()
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert case.admitted == ["session"]
+    assert case.events[0]["score"] == 1.5
+    assert case.events[0]["forced"]
+    rows = [
+        json.loads(r.getMessage().split(" ", 1)[1])
+        for r in caplog.records
+        if r.name.endswith(".diagnostics")
+        and r.getMessage().startswith("duru.admission ")
+    ]
+    assert rows[-1]["request_id"] == "long"
+    assert not case.router._policy.admitting_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_program", [None, "another-session"])
+async def test_admission_waits_for_its_own_request_row(case, request_program):
+    case.score("session", 2)
+    if request_program is not None:
+        case.requests["owner"] = dict(program_id=request_program, score=2)
+    task = await case.start("session", 100, request_id="owner")
+    assert not task.done()
+    assert "session" not in case.router._table.programs
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
+    assert not case.router._policy.admitting_requests
+    assert not case.router._admission_gates
+
+
+@pytest.mark.asyncio
+async def test_request_score_controls_queue_rank_and_cancellation_releases_binding(
+    case,
+):
+    case.put("occupant", 1000, 1)
+    await case.resume()
+    case.score("session", 10)
+    case.requests["owner"] = dict(program_id="session", score=0.5, U=None)
+    task = await case.start("session", 1000, request_id="owner")
+    case.put("competitor", 1000, 1)
+    await case.router.end_program("occupant")
+    await case.resume()
+    assert case.admitted == ["occupant", "competitor"]
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
+    assert not case.router._policy.admitting_requests
+    # Idle reservations still use the program's measured score.
+    idle = case.put("idle", 100, None)
+    idle.status = ProgramStatus.ACTING
+    case.scores["idle"] = dict(U=3, score=None)
+    case.save()
+    plan = case.router._policy.prepare_resume([idle], case.router._cfg)
+    assert plan.candidates["idle"].effective_score == 3
 
 
 @pytest.mark.asyncio

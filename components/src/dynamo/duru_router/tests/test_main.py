@@ -188,6 +188,29 @@ async def generate(handler, pid, tokens=8, **kwargs):
 
 
 @pytest.mark.asyncio
+async def test_admission_uses_accounting_identity_not_transport_context(
+    handler, monkeypatch
+):
+    seen = []
+    original = handler._scheduler.before_request
+
+    async def admit(program_id, estimated_prompt_tokens=0, *, request_id=None):
+        assert request_id in handler.requests
+        assert request_id != "external-id"
+        seen.append(request_id)
+        return await original(
+            program_id, estimated_prompt_tokens, request_id=request_id
+        )
+
+    monkeypatch.setattr(handler._scheduler, "before_request", admit)
+    await generate(
+        handler, "session", context=SimpleNamespace(id=lambda: "external-id")
+    )
+    assert len(seen) == 1
+    assert not handler._scheduler._policy.admitting_requests
+
+
+@pytest.mark.asyncio
 async def test_status_propagates_unexpected_snapshot_errors(handler, monkeypatch):
     failure = ValueError("malformed snapshot")
 

@@ -251,7 +251,7 @@ class ThunderAgentRouterHandler:
         decision = await self._scheduler.before_request(
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
-            request_id=context.id() if context is not None else None,
+            request_id=self._admission_request_id(request, context=context),
         )
         replica_pin = decision.assigned_replica_hint
         logger.debug(
@@ -383,6 +383,10 @@ class ThunderAgentRouterHandler:
                 replica_pin,
                 selected_worker_id,
             )
+
+    def _admission_request_id(self, request: dict[str, Any], *, context=None):
+        """Identify the request whose admission is being considered."""
+        return context.id() if context is not None else None
 
     def _generate_from_request(self, request: dict[str, Any], *, context=None):
         """Return the dispatch awaitable after synchronous request conversion."""

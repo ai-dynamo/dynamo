@@ -54,6 +54,7 @@ class DuruResumePlan(ResumePlan):
     policy: DuruPolicy
     established_waiters: bool
     snapshot: dict
+    score_rows: dict[str, dict]
     native_packing: bool = False
     diagnostics: bool = False
     native_rank: dict[str, int] | None = None
@@ -68,7 +69,7 @@ class DuruResumePlan(ResumePlan):
         if not self.diagnostics:
             return
         candidate = self.candidates[program.program_id]
-        row = self.snapshot.get("programs", {}).get(program.program_id, {})
+        row = self.score_rows[program.program_id]
         diagnostic(
             "admission",
             time=time.monotonic(),
@@ -105,12 +106,13 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
         self.reader = reader
         self.decision_snapshot = {}
         self.last_defer = {}
+        self.admitting_requests: dict[str, str] = {}
 
     def begin_decision(self, program_id=None):
         self.decision_snapshot = self.reader.refresh()
         reason = self.reader.reason
         if self.decision_snapshot and program_id is not None:
-            entry = self.decision_snapshot.get("programs", {}).get(program_id, {})
+            entry = self.score_row(program_id)
             if not entry or "request_id" not in entry:
                 reason = "missing_program_score"
         ready = bool(self.decision_snapshot) and reason == "fresh"
@@ -130,6 +132,12 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
         return ready
 
     def score_row(self, program_id):
+        request_id = self.admitting_requests.get(program_id)
+        if request_id is not None:
+            row = self.decision_snapshot.get("requests", {}).get(request_id, {})
+            if row.get("program_id") != program_id:
+                return {}
+            return dict(row, request_id=request_id)
         return self.decision_snapshot.get("programs", {}).get(program_id, {})
 
     def admission_ready(self, program_id: str) -> bool:
@@ -162,8 +170,10 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
             return ResumePlan(programs=[], resume_ceiling=0.0)
         by_id = {p.program_id: p for p in programs}
         candidates = []
+        score_rows = {}
         for program in programs:
             row = self.score_row(program.program_id)
+            score_rows[program.program_id] = row
             candidates.append(
                 Candidate(
                     identity=program.program_id,
@@ -198,6 +208,7 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
             established_waiters=established_waiters,
             diagnostics=diagnostics,
             snapshot=self.decision_snapshot,
+            score_rows=score_rows,
             native_rank=(
                 {p.program_id: i for i, p in enumerate(programs)}
                 if diagnostics
@@ -223,3 +234,15 @@ class DuruScheduler(BaseScheduler):
             # Score refresh precedes admissions. Abandon this optional retry;
             # the handler's health checks still expose the accounting failure.
             return
+
+    async def _admit_request(self, program_id, estimated_prompt_tokens, request_id):
+        # The base scheduler holds this program's admission gate for this call.
+        # A later arrival must not replace the score while this request waits.
+        if request_id is not None:
+            self._policy.admitting_requests[program_id] = request_id
+        try:
+            return await super()._admit_request(
+                program_id, estimated_prompt_tokens, request_id
+            )
+        finally:
+            self._policy.admitting_requests.pop(program_id, None)

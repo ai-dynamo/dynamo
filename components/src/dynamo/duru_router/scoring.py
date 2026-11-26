@@ -496,6 +496,9 @@ class EventStreamReader:
 
     received_through is the latest received event/clock timestamp. Ordered
     delivery lets accounting use it as this source's safe observation cutoff.
+    Startup connection refusals are retried by the caller's polling for five
+    seconds from the first refusal. Missing paths remain waitable; errors after
+    connection establishment are never retried.
     """
 
     def __init__(self, path, *, receiver=None):
@@ -504,6 +507,7 @@ class EventStreamReader:
         self.received_through = 0.0
         self.closed = False
         self.receiver = receiver
+        self._connect_deadline = None
 
     def read(self):
         if self.receiver is None:
@@ -511,6 +515,14 @@ class EventStreamReader:
                 self.receiver = Receiver(channel_path(self.path))
             except FileNotFoundError:
                 return []
+            except ConnectionRefusedError:
+                now = time.monotonic()
+                if self._connect_deadline is None:
+                    self._connect_deadline = now + 5.0
+                if now >= self._connect_deadline:
+                    raise
+                return []
+            self._connect_deadline = None
         rows = self.receiver.read()
         for row in rows:
             if self.closed or row["sequence"] != self.sequence + 1:

@@ -5,6 +5,9 @@
 
 import gc
 import json
+import pickle
+import socket
+import struct
 import tempfile
 import threading
 import time
@@ -26,7 +29,7 @@ from dynamo.duru_router.tests.helpers import (
 )
 from dynamo.duru_router.tests.helpers import memory_mode as memory_mode
 from dynamo.duru_router.tests.helpers import replay_accounting, work_step
-from dynamo.duru_router.transport import InProcessChannel
+from dynamo.duru_router.transport import InProcessChannel, channel_path
 
 pytestmark = [pytest.mark.gpu_0]
 
@@ -439,6 +442,100 @@ def test_event_reader_rejects_records_after_footer(tmp_path, same_batch):
         assert reader.closed
     finally:
         reader.close()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.integration
+@pytest.mark.timeout(1)
+@pytest.mark.parametrize("listen", [False, True])
+def test_event_reader_retries_bound_socket_until_listener_ready(
+    tmp_path, monkeypatch, listen
+):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(scoring, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    logical = tmp_path / "events"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(channel_path(logical)))
+        listener.settimeout(1)
+        reader = scoring.EventStreamReader(logical)
+        try:
+            assert reader.read() == []
+            assert reader.receiver is None
+            clock.now = 104.999
+            assert reader.read() == []
+            assert reader.sequence == 0 and reader.received_through == 0
+            if not listen:
+                clock.now = 105
+                with pytest.raises(ConnectionRefusedError):
+                    reader.read()
+                return
+            listener.listen(1)
+            assert reader.read() == []
+            peer, _ = listener.accept()
+            with peer:
+                row = dict(sequence=1, time=104.999, event="u_clock")
+                payload = pickle.dumps(row, protocol=5)
+                peer.sendall(struct.pack("!i", len(payload)) + payload)
+                assert reader.read() == [row]
+            # A later disconnect without a footer remains fatal.
+            with pytest.raises(EOFError, match="disconnected"):
+                reader.read()
+        finally:
+            reader.close()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_missing_socket_does_not_consume_refused_connection_window(
+    tmp_path, monkeypatch
+):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(scoring, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    refused = ConnectionRefusedError("bound but not listening")
+    receiver = Mock(
+        side_effect=[
+            FileNotFoundError(),
+            FileNotFoundError(),
+            refused,
+            refused,
+            refused,
+        ]
+    )
+    monkeypatch.setattr(scoring, "Receiver", receiver)
+    reader = scoring.EventStreamReader(tmp_path / "events")
+    for now in (0, 1000, 2000, 2004.999):
+        clock.now = now
+        assert reader.read() == []
+    clock.now = 2005
+    with pytest.raises(ConnectionRefusedError) as caught:
+        reader.read()
+    assert caught.value is refused
+    assert receiver.call_count == 5
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_event_reader_does_not_retry_other_startup_errors(tmp_path, monkeypatch):
+    failure = PermissionError("socket permission denied")
+    receiver = Mock(side_effect=failure)
+    monkeypatch.setattr(scoring, "Receiver", receiver)
+    with pytest.raises(PermissionError) as caught:
+        scoring.EventStreamReader(tmp_path / "events").read()
+    assert caught.value is failure
+    receiver.assert_called_once()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_event_reader_does_not_retry_refusal_after_connection(tmp_path, monkeypatch):
+    failure = ConnectionRefusedError("connected reader failed")
+    receiver = SimpleNamespace(read=Mock(side_effect=failure))
+    reconnect = Mock()
+    monkeypatch.setattr(scoring, "Receiver", reconnect)
+    with pytest.raises(ConnectionRefusedError) as caught:
+        scoring.EventStreamReader(tmp_path / "events", receiver=receiver).read()
+    assert caught.value is failure
+    reconnect.assert_not_called()
 
 
 @pytest.fixture
