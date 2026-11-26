@@ -48,6 +48,7 @@ use super::replay::{
 };
 use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
+use dynamo_runtime::namespace::NamespaceFilter;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::local_model::ModelRuntimeConfig;
@@ -870,11 +871,11 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
 async fn serve_direct_engines(
     drt: &dynamo_runtime::DistributedRuntime,
     direct: DirectEngines,
-    namespace: Option<String>,
+    namespace: String,
     model_path: Option<String>,
 ) -> anyhow::Result<()> {
     let options = DirectEngineOptions {
-        namespace: namespace.unwrap_or_else(|| "dynamo".to_string()),
+        namespace,
         model_path,
     };
     let factory = match direct.backend.as_str() {
@@ -884,6 +885,16 @@ async fn serve_direct_engines(
     let specs = direct_engine_specs(&direct.urls)?;
     dynamo_backend_common::direct::serve_direct_engines(drt, specs, factory).await?;
     Ok(())
+}
+
+/// The namespace direct engines register in: the one this frontend's model
+/// filter admits. A namespace prefix takes precedence over the namespace
+/// there, so it does here.
+fn direct_namespace(namespace: Option<&str>, namespace_prefix: Option<&str>) -> String {
+    match NamespaceFilter::from_namespace_and_prefix(namespace, namespace_prefix) {
+        NamespaceFilter::Exact(admitted) | NamespaceFilter::Prefix(admitted) => admitted,
+        NamespaceFilter::Global => "dynamo".to_string(),
+    }
 }
 
 /// One engine per `--engine-url`, named by its endpoint's normal form, so
@@ -929,7 +940,7 @@ async fn select_engine(
                 serve_direct_engines(
                     &distributed_runtime.inner,
                     direct,
-                    args.namespace.clone(),
+                    direct_namespace(args.namespace.as_deref(), args.namespace_prefix.as_deref()),
                     args.model_path
                         .as_ref()
                         .map(|path| path.display().to_string()),
@@ -1086,6 +1097,20 @@ mod direct_engine_tests {
 
         let rejected = direct_engine_specs(&["https://engine:30001".to_string()]).unwrap_err();
         assert!(rejected.to_string().contains("--engine-url"), "{rejected}");
+    }
+
+    #[test]
+    fn direct_engines_register_in_a_namespace_the_frontend_filter_admits() {
+        for (namespace, prefix) in [
+            (None, None),
+            (Some("serving"), None),
+            (None, Some("production")),
+            (Some("serving"), Some("production")),
+        ] {
+            let filter = NamespaceFilter::from_namespace_and_prefix(namespace, prefix);
+            let registered = direct_namespace(namespace, prefix);
+            assert!(filter.matches(&registered), "{filter:?} drops {registered}");
+        }
     }
 }
 
