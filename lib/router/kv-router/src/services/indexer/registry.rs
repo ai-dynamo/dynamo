@@ -409,9 +409,17 @@ enum Removal {
     DpRank(u32),
 }
 
-type WorkerLocks = Arc<DashMap<WorkerId, Arc<tokio::sync::Mutex<()>>>>;
+#[derive(Default)]
+struct WorkerLock {
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Operations holding or waiting for `mutex`; the entry goes when none is left.
+    users: usize,
+}
+
+type WorkerLocks = Arc<DashMap<WorkerId, WorkerLock>>;
 
 /// Held by every registration and removal of one worker, until a removal is queued.
+/// Counted as a user from before it waits, so a waiter dropped mid-wait is counted out.
 struct WorkerLifecycleGuard {
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     locks: WorkerLocks,
@@ -421,9 +429,10 @@ struct WorkerLifecycleGuard {
 impl Drop for WorkerLifecycleGuard {
     fn drop(&mut self) {
         drop(self.guard.take());
-        // Cloning a lock out of the map takes the same shard lock, so a waiter keeps it.
-        self.locks
-            .remove_if(&self.worker_id, |_, lock| Arc::strong_count(lock) == 1);
+        self.locks.remove_if_mut(&self.worker_id, |_, lock| {
+            lock.users -= 1;
+            lock.users == 0
+        });
     }
 }
 
@@ -526,12 +535,18 @@ impl WorkerRegistry {
     /// Serializes registrations and removals of one worker; other workers are not blocked.
     /// Take it before the index lifecycle lock.
     async fn lock_worker(&self, worker_id: WorkerId) -> WorkerLifecycleGuard {
-        let lock = self.worker_locks.entry(worker_id).or_default().clone();
-        WorkerLifecycleGuard {
-            guard: Some(lock.lock_owned().await),
+        let mutex = {
+            let mut lock = self.worker_locks.entry(worker_id).or_default();
+            lock.users += 1;
+            lock.mutex.clone()
+        };
+        let mut lifecycle = WorkerLifecycleGuard {
+            guard: None,
             locks: self.worker_locks.clone(),
             worker_id,
-        }
+        };
+        lifecycle.guard = Some(mutex.lock_owned().await);
+        lifecycle
     }
 
     pub fn index(&self) -> &Arc<IndexRegistry> {
@@ -2013,6 +2028,25 @@ mod tests {
             .unwrap();
         assert!(!registry.has_worker(1));
         registry.root_cancel_token.cancel();
+    }
+
+    /// A waiter dropped after the holder released the lock, before it ran, leaves no entry.
+    #[tokio::test]
+    async fn dropped_lock_waiter_leaves_no_entry() {
+        let registry = test_registry();
+        let holder = registry.lock_worker(1).await;
+        {
+            let waiter = registry.lock_worker(1);
+            tokio::pin!(waiter);
+            assert!(poll_once(waiter.as_mut()).is_pending());
+            drop(holder);
+        }
+        assert!(
+            registry.worker_locks.is_empty(),
+            "a dropped lock waiter left its worker's entry behind"
+        );
+        drop(registry.lock_worker(1).await);
+        assert!(registry.worker_locks.is_empty());
     }
 
     #[tokio::test]
