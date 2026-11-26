@@ -872,6 +872,37 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 
+### Direct engine mode
+
+In direct mode the frontend dials inference engines over their native gRPC API. The engines run with
+no Dynamo sidecar beside them, and the frontend needs no discovery service. Routing, disaggregated
+prefill and decode serving, and request migration work as they do with sidecars. For the limits, see
+the [sidecar support notes](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md).
+
+<ParamField path="--direct" type="boolean" default="false">
+  Serve the engines listed with `--engine-url` instead of discovering Dynamo workers. Requires at
+  least one `--engine-url`. Direct mode applies only to the HTTP frontend. The frontend uses
+  in-process discovery, so `--discovery-backend` is ignored.
+
+  Environment variable: `DYN_DIRECT`
+</ParamField>
+
+<ParamField path="--direct-backend" type="string" default="sglang">
+  Engine family behind `--engine-url`. The only value is `sglang`: SGLang's Rust server
+  (`SGLANG_RUST_SERVER=1`, v0.5.23 or later) started with `--grpc-port`.
+
+  Environment variable: `DYN_DIRECT_BACKEND`
+</ParamField>
+
+<ParamField path="--engine-url" type="string" default="[]">
+  gRPC endpoint of one engine, as `host:port` or `http://host:port`. Repeat the option to list
+  several engines. Each engine reports its own role (aggregated, prefill, or decode), model, and
+  parsers, so aggregated and disaggregated deployments are listed the same way.
+
+  Environment variable: `DYN_ENGINE_URLS` accepts whitespace-separated values. `--engine-url` on the
+  command line replaces them.
+</ParamField>
+
 ### Other experimental options
 
 <ParamField path="--enable-anthropic-api" type="boolean" default="false">
