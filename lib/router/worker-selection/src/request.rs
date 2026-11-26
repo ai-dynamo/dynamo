@@ -100,7 +100,11 @@ impl<'a> RequestInfo<'a> {
         self.pinned_worker
     }
 
-    /// The output length the caller expects, if the request supplies one.
+    /// The output length expected for the request, in tokens, if the frontend that received
+    /// it supplies one. The source depends on the endpoint: the OpenAI-compatible endpoints
+    /// pass the caller's estimate (`nvext.agent_hints.osl`); vLLM's `/inference/v1/generate`
+    /// passes the request's `max_tokens`, which is a cap and not an estimate; the Decision
+    /// APIs pass the zero or one token their scoring request generates.
     #[inline]
     pub fn expected_output_tokens(&self) -> Option<u32> {
         self.caller_hints.expected_output_tokens

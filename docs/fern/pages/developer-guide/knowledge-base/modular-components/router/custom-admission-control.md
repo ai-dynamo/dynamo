@@ -204,7 +204,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
-| `expected_output_tokens()` | Output length the caller expects, if the request supplies one (`nvext.agent_hints.osl`) |
+| `expected_output_tokens()` | Output length expected for the request, in tokens, if the frontend that received it supplies one. The OpenAI-compatible endpoints pass the caller's estimate (`nvext.agent_hints.osl`); vLLM's `/inference/v1/generate` passes the request's `max_tokens`, which is a cap and not an estimate; the Decision APIs pass the zero or one token their scoring request generates |
 | `priority_jump()` | The caller's priority within its strict tier of the router queue; zero when the caller sent none. A larger value is served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is a head start in seconds); `edf` does not use it. The queue treats a negative value as zero |
 | `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. A queue with the `fcfs`, `lcfs`, or `wspt` policy serves a larger value first; `edf`, the default for a policy class in the policy file, does not use it |
 
