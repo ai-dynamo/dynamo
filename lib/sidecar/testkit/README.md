@@ -14,8 +14,9 @@ and Mockers do not depend on testkit. Backend fixtures live in `tests/support/`
 and are local to the integration suite, rather than a public fixture API.
 
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
-The two CPU files separate direct engine calls from child-process startup,
-discovery and shutdown, making each setup easier to follow and run independently.
+The CPU files separate in-process calls to the sidecar engine library from
+child-process startup, discovery and shutdown, and from a frontend that hosts
+the engines itself, making each setup easier to follow and run independently.
 
 ## Integration tests
 
@@ -36,6 +37,10 @@ Each suite exercises a different request path:
   HTTP error scenarios additionally run the real frontend: native invalid-argument
   errors become HTTP 400, and failures after a token reaches the client become SSE
   errors without a successful finish. Both paths verify subsequent recovery.
+- `direct_sglang_mocker_integration.rs` runs a frontend in direct mode: it hosts
+  the SGLang sidecar's engine in-process, with no sidecar child process, and
+  sends HTTP requests through the real frontend and router to CPU Mockers over
+  native gRPC.
 
 The SGLang fixture is one Rust-server listener. `Fixture::start_node` starts the
 listeners of one node, which share a controller and report one
