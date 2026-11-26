@@ -40,7 +40,7 @@ The two surfaces are fed independently — the scrape collects when Prometheus s
 
 ### Triton and Planner metrics
 
-- **Triton engine metrics are typed from their exposition text.** Triton renders its metrics only as text, so for the OTLP export the Triton backend parses that text, and each family's type comes from its `# TYPE` line. They are exported when the backend runs with `--allow-metrics`, the same condition as for `/metrics`.
+- **Triton engine metrics are typed from their exposition text.** Triton renders its metrics only as text, so for the OTLP export the Triton backend parses that text, and each family's type comes from its `# TYPE` line. They are exported unless metrics are turned off with `--allow-metrics false` (`DYN_TRITON_METRICS=false`), the same condition as for `/metrics`.
 - **Planner metrics are exported only from a live planner with collection on.** The `dynamo_planner_*` families are exported when the planner runs with a Dynamo runtime and a non-zero `metric_reporting_prometheus_port`, and stop at planner shutdown. They are not added to the runtime's `/metrics`: scrapers keep reading them from the planner's own port, so a scraper that reads both ports does not count them twice.
 
 ## Conversion principles

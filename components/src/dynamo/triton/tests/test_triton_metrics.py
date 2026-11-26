@@ -102,7 +102,6 @@ def test_bridge_returns_metrics_then_stops_after_close():
         ("nv_inference_first_response_histogram_ms_bucket", "+Inf"): 2.0,
     }
 
-    # Closed state: no more calls to Triton; both paths return empty.
     bridge.close()
     assert bridge.collect() == ""
     assert bridge.collect_typed() == []
@@ -204,7 +203,6 @@ def test_register_creates_metrics_only_endpoint():
     )
     endpoint.serve_endpoint.assert_not_called()
 
-    # Confirm exactly one callback of each kind is registered.
     endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once_with(
         bridge.collect
     )
