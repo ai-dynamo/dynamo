@@ -1624,7 +1624,6 @@ mod tests {
     }
 
     impl GateHandle {
-        /// Whether the listener loop is already gone, without waiting for it.
         fn listener_exited(&mut self) -> bool {
             self.exit_seen = self.exit_seen
                 || matches!(
@@ -1765,7 +1764,6 @@ mod tests {
         (registry, indexer, gate, others)
     }
 
-    /// After the listener is gone, the rank has no block and its neighbours are intact.
     async fn assert_rank_gone(indexer: &Indexer, sibling_rank: bool) {
         assert_eq!(
             indexed_events(indexer, 1, 0).await,
@@ -1825,7 +1823,6 @@ mod tests {
             registry.resume_listener(1, 0).await.unwrap();
         }
 
-        // The listener is parked mid-batch. A fix that cannot stop it makes this time out.
         let deregistration = tokio::time::timeout(WATCHDOG, async {
             match removal {
                 Deregistration::Worker => registry.deregister(1, "test-model", "default").await,
@@ -2087,7 +2084,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A resume that cloned the record before the deregistration must not restart it.
         let resumed = registry.resume_record_for_test(&stale, 1, 0);
         assert!(
             matches!(resumed, Err(ListenerControlError::ListenerNotFound { .. })),
