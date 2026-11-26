@@ -379,6 +379,7 @@ func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
 		field.NewPath("spec", "components").Index(0).Child("roles"),
 		false,
 		"",
+		false,
 	)
 
 	t.Log("Report both the duplicate entry and the missing mandatory worker role")

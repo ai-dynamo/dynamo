@@ -190,6 +190,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
 	groveStrategyChanged              bool
+	// lpxSharedPair reports that the graph's two LPX components form a shared draft and target pair.
+	lpxSharedPair bool
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -302,6 +304,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			fldPath.Child("roles"),
 			options.providerOverridesSupported,
 			options.workloadProvider,
+			options.lpxSharedPair,
 		)...)
 	}
 	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
@@ -625,6 +628,7 @@ func (v *sharedValidation) validateComponentRoles(
 	fldPath *field.Path,
 	providerOverridesSupported bool,
 	workloadProvider string,
+	lpxSharedPair bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if !component.IsLPX() && component.Multinode == nil {
@@ -693,6 +697,7 @@ func (v *sharedValidation) validateComponentRoles(
 					scope:                      scope,
 					component:                  component,
 					podTemplateAllowed:         true,
+					lpxSharedPair:              lpxSharedPair,
 				},
 			)...)
 		}
@@ -715,6 +720,7 @@ type componentRoleSpecValidationOptions struct {
 	scope                      provideroverride.Scope
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	podTemplateAllowed         bool
+	lpxSharedPair              bool
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
@@ -726,7 +732,8 @@ func (v *sharedValidation) validateComponentRoleSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	lpx := options.component != nil && options.component.IsLPX()
-	hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
+	// A shared pair has no conductor, which the graph reports on the role itself, so its agent hosts the engine.
+	hostsEngine := lpx && (options.lpxSharedPair || role.Name == dynamolpx.RuntimeSidecarRole(options.component))
 
 	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar; reconciliation checks the build.
 	if lpx && role.PodTemplate != nil && !hostsEngine {

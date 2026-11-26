@@ -608,8 +608,8 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				conductor := dgd.Spec.Components[0].Roles[1]
 				setBetaLPXSpecDec(dgd, nil)
+				// The target keeps its agent sidecar, so the conductor is the only error.
 				target := &dgd.Spec.Components[1]
-				target.Roles[0].PodTemplate.Spec.InitContainers = nil
 				target.Roles = append(target.Roles, conductor)
 			}),
 			wantWebhookErrs: []string{
