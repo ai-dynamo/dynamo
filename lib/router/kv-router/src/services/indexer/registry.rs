@@ -3,8 +3,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::task::{Context, Poll};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
@@ -13,6 +16,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use dynamo_kv_indexer::KvIndexerMetrics;
 use dynamo_router_protocol::identity::RoutingPartitionId;
@@ -792,10 +796,10 @@ impl WorkerRegistry {
 
     /// Removes a worker (or one of its dp ranks) that has left `workers` from the
     /// partition's indexer, then drops the indexer once no worker names it (unless the
-    /// index retains empty indexers), under the index lifecycle lock. The work
-    /// runs on its own task: the record is already gone, so a caller dropped mid-removal
-    /// (an `/unregister` client that disconnects) would otherwise leave the worker
-    /// indexed with nothing to retry against.
+    /// index retains empty indexers), under the index lifecycle lock. The record is
+    /// already gone, so a caller dropped mid-removal (an `/unregister` client that
+    /// disconnects) would leave the worker indexed with nothing to retry against: the
+    /// work runs in place and only moves to a task if the caller is dropped first.
     async fn remove_from_index(
         &self,
         key: RoutingPartitionId,
@@ -804,7 +808,7 @@ impl WorkerRegistry {
     ) {
         let index = self.index.clone();
         let workers = self.workers.clone();
-        let removal = tokio::spawn(async move {
+        let removal = async move {
             if let Some(indexer) = index.indexer(&key) {
                 match dp_rank {
                     Some(dp_rank) => indexer.remove_worker_dp_rank(instance_id, dp_rank).await,
@@ -818,11 +822,36 @@ impl WorkerRegistry {
                     })
                     .await;
             }
-        });
-        if let Err(error) = removal.await
-            && error.is_panic()
+        };
+        FinishOnDrop(Some(Box::pin(removal.in_current_span()))).await;
+    }
+}
+
+/// Polls a future in place; if it is dropped before the future finishes, the rest runs
+/// on its own task, so cleanup that has started always completes.
+struct FinishOnDrop<F: Future<Output = ()> + Send + 'static>(Option<Pin<Box<F>>>);
+
+impl<F: Future<Output = ()> + Send + 'static> Future for FinishOnDrop<F> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(work) = self.0.as_mut() else {
+            return Poll::Ready(());
+        };
+        let poll = work.as_mut().poll(cx);
+        if poll.is_ready() {
+            self.0 = None;
+        }
+        poll
+    }
+}
+
+impl<F: Future<Output = ()> + Send + 'static> Drop for FinishOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(work) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            std::panic::resume_unwind(error.into_panic());
+            runtime.spawn(work);
         }
     }
 }
