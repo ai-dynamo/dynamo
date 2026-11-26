@@ -4,9 +4,18 @@
 //! Shared test utilities. The indexer event builders live in
 //! `dynamo_kv_indexer::testing` and are re-exported here by name.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use dynamo_admission::PolicyProfile;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_slot_tracker::ActiveSequencesMultiWorker;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerConfigLike;
+use crate::selector::DefaultWorkerSelector;
 pub use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
@@ -90,10 +99,10 @@ pub fn test_router_config(
 
 /// The reference worker-selection policy as a factory.
 pub fn reference_policy_factory() -> crate::types::WorkerSelectionPolicyFactory {
-    std::sync::Arc::new(|config, role, _| {
+    std::sync::Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
@@ -149,4 +158,117 @@ pub fn local_test_core(
         dynamo_router_protocol::worker_type::WorkerType::Aggregated,
         None,
     )
+}
+
+/// The scheduler the kernel's tests and benchmarks drive: no sequence publisher,
+/// [`SimpleWorkerConfig`] workers, and the default selector.
+pub type TestScheduler =
+    crate::LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>;
+
+/// A [`TestScheduler`] over `workers` and `profile`: no load estimator, overlap refresh, or
+/// host providers, prefill tokens tracked, a 60 s recheck, and no config monitor. Keep the
+/// returned sender for as long as the scheduler runs; publish worker changes through it.
+pub fn local_test_scheduler(
+    workers: HashMap<WorkerId, SimpleWorkerConfig>,
+    profile: PolicyProfile,
+    block_size: u32,
+    cancel_token: CancellationToken,
+) -> (
+    Arc<TestScheduler>,
+    watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+) {
+    let (scheduler, _, configs) = local_test_scheduler_with(
+        workers,
+        profile,
+        block_size,
+        cancel_token,
+        false,
+        None,
+        false,
+    );
+    (scheduler, configs)
+}
+
+/// As [`local_test_scheduler`], for the kernel's own tests: it also returns the slot tracker,
+/// and takes what that function fixes, which is replica sync, the prefill load estimator, and
+/// the config monitor.
+#[allow(clippy::type_complexity)]
+pub(crate) fn local_test_scheduler_with(
+    workers: HashMap<WorkerId, SimpleWorkerConfig>,
+    profile: PolicyProfile,
+    block_size: u32,
+    cancel_token: CancellationToken,
+    replica_sync: bool,
+    prefill_load_estimator: Option<Arc<dyn crate::PrefillLoadEstimator>>,
+    monitor_worker_configs: bool,
+) -> (
+    Arc<TestScheduler>,
+    Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+) {
+    let slots = Arc::new(ActiveSequencesMultiWorker::new(
+        NoopSequencePublisher,
+        block_size as usize,
+        workers
+            .iter()
+            .map(|(&id, config)| {
+                (
+                    id,
+                    (config.data_parallel_start_rank, config.data_parallel_size),
+                )
+            })
+            .collect(),
+        replica_sync,
+        0,
+        "test",
+    ));
+    let (configs, config_rx) = watch::channel(workers);
+    let scheduler = Arc::new(crate::LocalScheduler::new(
+        Arc::clone(&slots),
+        config_rx,
+        profile,
+        block_size,
+        DefaultWorkerSelector::new(None, "test"),
+        prefill_load_estimator,
+        None::<Arc<crate::NoopOverlapScoresRefresh>>,
+        None,
+        None,
+        None,
+        Duration::from_secs(60),
+        true,
+        cancel_token,
+        "test",
+        monitor_worker_configs,
+    ));
+    (scheduler, slots, configs)
+}
+
+/// A request of `isl_tokens` in `mode` with nothing else set: no tracking hashes, session,
+/// pin, class, or overlap.
+pub fn test_schedule_request(
+    mode: crate::ScheduleMode,
+    isl_tokens: usize,
+) -> crate::ScheduleRequest {
+    crate::ScheduleRequest {
+        accounting_attribution: Default::default(),
+        mode,
+        token_seq: None,
+        block_hashes: None,
+        isl_tokens,
+        lora_name: None,
+        expected_output_tokens: None,
+        affinity_target: None,
+        pinned_worker: None,
+        allowed_worker_ids: None,
+        routing_constraints: crate::RoutingConstraints::default(),
+        router_config_override: None,
+        priority_jump: 0.0,
+        strict_priority: 0,
+        policy_class: None,
+        session_context: None,
+        overlap: crate::OverlapSignals::default(),
+        kv_transfer_candidates: None,
+        retain_kv_transfer_chain: false,
+        shared_cache_hits: None,
+    }
 }

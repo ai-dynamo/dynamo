@@ -18,6 +18,7 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
@@ -657,9 +658,20 @@ async def test_environment_passes_startup_inventory_to_observer_and_clears_it_on
     assert not observer._collect_worker_counts().startup_in_progress
 
 
+def _global_planner(local):
+    """A pool Planner's GlobalPlannerConnector reading its DGD through ``local``."""
+    connector = GlobalPlannerConnector(Mock(), "runtime", "global")
+    connector._local_k8s_connector = local
+    connector._local_k8s_init_attempted = True
+    return connector
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("global_planner", [False, True])
 @pytest.mark.parametrize("mode", ["disagg", "agg"])
-async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(mode):
+async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(
+    mode, global_planner
+):
     deployment, pods = _deployment(), _pods()
     if mode == "agg":
         worker = deployment["spec"]["components"][1]
@@ -671,9 +683,10 @@ async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(mode
         pods = pods[1:]
         for pod in pods:
             pod.metadata.labels["nvidia.com/dynamo-component"] = "worker"
+    controller = _connector(deployment, pods)
     environment = PlannerEnvironmentImpl(
         config=_config(mode),
-        controller=_connector(deployment, pods),
+        controller=_global_planner(controller) if global_planner else controller,
         require_prefill=mode == "disagg",
         require_decode=True,
     )

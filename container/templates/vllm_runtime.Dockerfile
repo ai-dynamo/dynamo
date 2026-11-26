@@ -20,6 +20,8 @@ USER root
 # The NIM base removes some packages but keeps their conffiles (dpkg state rc).
 # Purge them so compliance does not attribute packages that no longer ship.
 RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+# Dynamo resets the NIM entrypoint and never starts the NIM nginx proxy.
+RUN rm -rf /opt/nim/.local/nginx
 {% endif %}
 
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
@@ -30,9 +32,10 @@ ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
 {% endif -%}
-ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
+{% else %}
+ARG NIXL_REF
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
@@ -66,20 +69,14 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
-# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
-# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
-# processes that do not import the nixl Python package first.
-ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+# Register the upstream nixl-cu${CUDA_MAJOR} wheel's libraries with the loader
+# and expose them at a stable prefix, so non-Python consumers (Rust nixl-sys)
+# use the same NIXL copy that Python imports.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN install_nixl_from_wheel \
-    --cuda-major "${CUDA_MAJOR}" \
-    --site-packages "${SITE_PACKAGES}" \
-    --prefix "${NIXL_PREFIX}" \
-    --skip-headers
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    python3 /tmp/register_nixl_libs.py --cuda-major "${CUDA_MAJOR}" --link "${NIXL_PREFIX}"
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
@@ -90,9 +87,8 @@ COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -103,6 +99,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 # rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -113,10 +111,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
         libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -144,17 +153,17 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     fi
 
 {% if device != "cuda" %}
-# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# Copy UCX and NIXL from nixl_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
 # XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
 # Copy NIXL Python wheels
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
 RUN apt-get update && \
@@ -230,7 +239,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% endif %}
 
 # Install device-specific NIXL wheels for non-CUDA devices.
-# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+# These are custom-built in nixl_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
@@ -248,7 +257,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisim-*.whl && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
@@ -348,21 +357,36 @@ RUN apt-get update && \
 # safe. dpkg-query keeps the match robust across base-image/arch version
 # suffixes (e.g. libavcodec58 vs 60).
 #
-# This grep is the COMPLETE, auditable set of what leaves the image: there is
-# deliberately NO apt-get autoremove, so the removal can never cascade into
-# unrelated auto-installed packages. That matters because the base image marks
-# both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
-# runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
-# wheels here ship no bundled cublas and load the system copies) as
-# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
-# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
-# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
-# dead weight, not a compliance issue.
+# This grep, together with `dependents` below, is the COMPLETE, auditable set
+# of what leaves the image: there is deliberately NO apt-get autoremove, so the
+# removal never sweeps up unrelated auto-installed packages. That matters
+# because the base image marks both the gcc/g++/make toolchain
+# (torch.inductor/Triton JIT shell out to it at runtime) and the CUDA math libs
+# (libcublas/libcusolver/libcusparse — the torch wheels here ship no bundled
+# cublas and load the system copies) as auto-installed. A bare
+# `autoremove --purge` sweeps all of those as "orphaned", which broke runtime
+# JIT (missing C compiler) in the 1.3.0 rc image. Any LGPL/BSD media libs left
+# orphaned (libva, libvdpau, ...) are license-clean dead weight, not a
+# compliance issue. librist, and the mbedTLS and cJSON libraries that only
+# librist uses, are named because nothing else links them.
+#
+# apt-get purge does remove each installed package that depends on a purged
+# one. In the current base, those are the seven packages in `dependents`. A
+# simulated purge runs first, and the build fails unless it removes every
+# matched package and nothing outside the match and `dependents`. A new
+# dependent in a later base then stops the build instead of leaving the image
+# unnoticed.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite|librist[0-9]|libmbedcrypto|libmbedtls|libmbedx509|libcjson)' \
         || true); \
+    dependents="libjack-jackd2-0 libopenmpt0t64 libpocketsphinx3 libpulse0 libsdl2-2.0-0 libsndfile1 libsphinxbase3t64"; \
     if [ -n "$purge" ]; then \
+        removed=$(apt-get -s purge $purge | awk '/^(Remv|Purg) /{sub(/:.*/, "", $2); print $2}'); \
+        [ -n "$removed" ] || { echo "ERROR: a simulated purge of the matched packages removes nothing" >&2; exit 1; }; \
+        kept=$(printf '%s\n' $purge | grep -vxF "$removed" || true); \
+        extra=$(printf '%s\n' $removed | grep -vxF "$(printf '%s\n' $purge $dependents)" || true); \
+        [ -z "$kept$extra" ] || { echo "ERROR: the purge would keep: ${kept:-none}; and also remove: ${extra:-none}" >&2; exit 1; }; \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
     fi; \
     rm -rf /var/lib/apt/lists/*
@@ -489,6 +513,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
+
+# LMCache 0.5.6 fails on vLLM 0.34; remove once the pin moves to a release that supports it.
+RUN --mount=type=bind,source=./container/deps/vllm/patch_lmcache.py,target=/tmp/patch_lmcache.py \
+    python3 /tmp/patch_lmcache.py
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an

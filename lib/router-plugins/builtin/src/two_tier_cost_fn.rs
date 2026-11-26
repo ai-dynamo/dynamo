@@ -30,7 +30,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
@@ -145,7 +145,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let cache = input
@@ -158,7 +158,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
                     WorkerSelectionPolicyError::failed("active request counts unavailable")
                 })?);
             }
-            select_row(&self.parameters, cache, load, context.request_blocks())
+            select_row(&self.parameters, cache, load, request.request_blocks())
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
         })
     }
@@ -170,16 +170,13 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
 
-    Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(TwoTierCostFnPicker { parameters }),
+        )
+    }))
 }
 
 pub fn register(
@@ -190,11 +187,7 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use dynamo_kv_router::plugins::prelude::*;
-    use dynamo_scheduler::host::WorkerSelectionInput;
-    use dynamo_scheduler::host::WorkerSelector;
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
 
     use super::*;
 
@@ -203,23 +196,6 @@ mod tests {
     const TEN_BLOCKS: usize = 160;
     const A: u64 = 29;
     const B: u64 = 41;
-
-    struct TestWorker;
-
-    impl WorkerConfigLike for TestWorker {
-        fn data_parallel_start_rank(&self) -> u32 {
-            0
-        }
-        fn data_parallel_size(&self) -> u32 {
-            1
-        }
-        fn max_num_batched_tokens(&self) -> Option<u64> {
-            None
-        }
-        fn total_kv_blocks(&self) -> Option<u64> {
-            Some(1024)
-        }
-    }
 
     fn worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::from_worker_id(id)
@@ -231,59 +207,22 @@ mod tests {
     }
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
-        let mut request = SchedulingRequest {
-            accounting_attribution: Default::default(),
-            mode: ScheduleMode::QueryOnly { request_id: None },
-            token_seq: None,
-            isl_tokens: TEN_BLOCKS,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            router_config_override: None,
-            track_prefill_tokens: true,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
-            worker_loads: Default::default(),
-            resp_tx: None,
-        };
+        let mut case = SelectionCase::new(TEN_BLOCKS, BLOCK_SIZE);
         for (id, overlap_blocks, active_requests) in workers {
-            request
-                .overlap
-                .tier_overlap_blocks
-                .device
-                .insert(worker(id), overlap_blocks);
-            request.worker_loads.insert(
-                worker(id),
-                WorkerLoadProjection {
-                    active_requests,
-                    ..Default::default()
-                },
+            case.set_worker(
+                id,
+                CaseWorker::new()
+                    .device_overlap_blocks(overlap_blocks)
+                    .active_requests(active_requests)
+                    .total_kv_blocks(1024),
             );
         }
-        let configs = HashMap::from(workers.map(|(id, _, _)| (id, TestWorker)));
-        WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
+        let policy = WorkerSelectionPolicy::new(
             "test",
             Vec::new(),
             Box::new(TwoTierCostFnPicker { parameters }),
-        )
-        .select_worker(WorkerSelectionInput::configured(
-            &configs,
-            &request,
-            request.eligibility(),
-            BLOCK_SIZE,
-        ))
-        .unwrap()
-        .worker
+        );
+        case.select(&policy).unwrap()
     }
 
     #[test]

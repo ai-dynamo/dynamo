@@ -29,14 +29,15 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::prelude::PrefillLoadHint;
+use crate::decode_progress::{DecodeProgressAggregate, DecodeProgressUpdate, Observation};
+use crate::wire::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
 ///
 /// Legacy selection services and standalone slot trackers use it as an absolute-age
 /// threshold. The embedded `KvRouter` uses it as the request-lease CLOCK scan interval;
 /// its second chance expires idle leases after approximately one to two scans.
-pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
+pub(crate) const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 /// How often we *check* for stale requests (30 seconds). This is not
 /// the expiration time, that is DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.
@@ -51,6 +52,7 @@ pub(super) struct RequestState {
     started_at: Instant,
     expected_output_tokens: Option<u32>,
     prefill_completed: bool,
+    decode_progress: Option<Box<Observation>>,
 }
 
 /// What marking a request's prefill complete changed.
@@ -121,7 +123,7 @@ pub(super) struct SequenceMutationOutcome {
 
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug)]
-pub struct ActiveSequences {
+pub(crate) struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     /// Requests not yet marked prefill-complete, whether or not they hold prompt load.
@@ -129,6 +131,7 @@ pub struct ActiveSequences {
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
+    decode_progress: DecodeProgressAggregate,
 }
 
 impl ActiveSequences {
@@ -153,6 +156,7 @@ impl ActiveSequences {
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
+            decode_progress: DecodeProgressAggregate::default(),
         }
     }
 
@@ -250,6 +254,7 @@ impl ActiveSequences {
                 started_at,
                 expected_output_tokens,
                 prefill_completed: false,
+                decode_progress: None,
             },
         );
         self.prefill_requests += 1;
@@ -280,6 +285,13 @@ impl ActiveSequences {
         completion
     }
 
+    /// Whether `request_id` is tracked here and past its prefill phase.
+    pub(super) fn is_prefill_completed(&self, request_id: &RequestId) -> bool {
+        self.requests
+            .get(request_id)
+            .is_some_and(|state| state.prefill_completed)
+    }
+
     /// Free all blocks associated with a request.
     ///
     /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
@@ -292,6 +304,7 @@ impl ActiveSequences {
         let _ = self.prefill.remove(request_id, decay_now);
 
         let request_state = self.requests.remove(request_id)?;
+        self.decode_progress.retire(request_state.decode_progress);
         if !request_state.prefill_completed {
             self.prefill_requests -= 1;
         }
@@ -339,6 +352,18 @@ impl ActiveSequences {
         true
     }
 
+    pub(super) fn observe_decode_progress(
+        &mut self,
+        request_id: &RequestId,
+        update: DecodeProgressUpdate,
+    ) -> bool {
+        let Some(request) = self.requests.get_mut(request_id) else {
+            return false;
+        };
+        self.decode_progress
+            .update(&mut request.decode_progress, update)
+    }
+
     /// Force expiry of stale requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
@@ -376,6 +401,13 @@ impl ActiveSequences {
 
         self.validate_state();
         outcome
+    }
+
+    pub(super) fn decode_progress_summary(&self) -> Option<crate::decode_progress::DecodeProgress> {
+        if self.prefill_requests != 0 {
+            return None;
+        }
+        self.decode_progress.summary(self.requests.len())
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {

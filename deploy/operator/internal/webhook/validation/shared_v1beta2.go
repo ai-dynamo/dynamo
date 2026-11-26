@@ -54,6 +54,10 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 	// Validate the final merge independently of typed rules; overrides remain authoritative.
 	input, err := aisimulate.Lower(spec)
 	if err != nil {
+		// Override syntax errors were already reported by the always-run AISimSpec validation.
+		if _, overrideErrs := aisimulate.InputOverrides(spec, fldPath.Child("aisim", "inputOverrides")); len(overrideErrs) != 0 {
+			return allErrs
+		}
 		return append(allErrs, field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error()))
 	}
 	if err := aisimulate.ValidateInput(input); err != nil {
@@ -135,22 +139,22 @@ func validateAISimSpec(
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Use the lowering package's decoder as the single interpretation of RawExtension.
-	overrides, err := aisimulate.InputOverrides(&nvidiacomv1beta2.NativeSearchInput{AISim: input})
-	if err != nil || overrides == nil {
-		// The lowering validation reports malformed override documents once.
-		return nil
+	path := fldPath.Child("inputOverrides")
+	overrides, allErrs := aisimulate.InputOverrides(&nvidiacomv1beta2.NativeSearchInput{AISim: input}, path)
+	if overrides == nil {
+		return allErrs
 	}
 
 	dgdrRunValue, found := overrides["dgdr_run"]
 	if !found {
-		return nil
+		return allErrs
 	}
 	dgdrRun, ok := dgdrRunValue.(map[string]any)
 	if !ok {
-		return field.ErrorList{field.Forbidden(
-			fldPath.Child("inputOverrides", "dgdr_run"),
+		return append(allErrs, field.Forbidden(
+			path.Key("dgdr_run"),
 			"must be an object because the operator owns required execution fields within it",
-		)}
+		))
 	}
 
 	// Search overrides remain authoritative; only execution values coupled to the
@@ -167,11 +171,10 @@ func validateAISimSpec(
 		"runtime_version_override",
 		"snapshot_dir",
 	}
-	allErrs := field.ErrorList{}
 	for _, key := range reserved {
 		if _, found := dgdrRun[key]; found {
 			allErrs = append(allErrs, field.Forbidden(
-				fldPath.Child("inputOverrides", "dgdr_run", key),
+				path.Key("dgdr_run").Key(key),
 				"is managed by the operator and cannot be overridden",
 			))
 		}

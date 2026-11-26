@@ -8,6 +8,8 @@ client does not launch or download a model; default collection deselects this
 module until the URL is set. Large-model qualification remains
 outside the shared CI GPU budget. Set DYNAMO_DECISION_REQUIRE_SDKS=1 to make
 missing official clients a failure instead of an optional-dependency skip.
+Set DYNAMO_DECISION_TEST_PROFILE=vllm_causal for one output token per question;
+the default sglang profile expects zero output tokens.
 
 Use the server origin without /v1 and the exact registered model alias. The
 recorded client profile is openai==3.26.0 and typesafe-sdk==0.7.2 in an isolated
@@ -53,7 +55,11 @@ def external_decision_server():
     assert parsed.path in ("", "/"), "Use the server origin, without /v1"
     model = os.environ.get("DYNAMO_DECISION_TEST_MODEL")
     assert model, "Set the exact registered model in DYNAMO_DECISION_TEST_MODEL"
-    return base_url.rstrip("/"), model
+    profile = os.environ.get("DYNAMO_DECISION_TEST_PROFILE", "sglang")
+    if profile not in ("sglang", "vllm_causal"):
+        pytest.fail(f"Unknown DYNAMO_DECISION_TEST_PROFILE: {profile!r}")
+    # decision_payload contains three questions, each producing one causal token.
+    return base_url.rstrip("/"), model, 3 if profile == "vllm_causal" else 0
 
 
 def _sdk(module_name):
@@ -66,7 +72,7 @@ def _sdk(module_name):
 
 @pytest.mark.parametrize("dialect", ("oai", "systemone"))
 def test_external_decision_wire_contract(external_decision_server, dialect):
-    base_url, model = external_decision_server
+    base_url, model, expected_output_tokens = external_decision_server
     route = "systemone" if dialect == "systemone" else "decisions"
     response = requests.post(
         f"{base_url}/v1/{route}",
@@ -75,11 +81,13 @@ def test_external_decision_wire_contract(external_decision_server, dialect):
     )
     assert response.status_code == 200, response.text
     assert_request_headers(response)
-    assert_decision_body(response.json(), model, dialect)
+    assert_decision_body(
+        response.json(), model, dialect, expected_output_tokens=expected_output_tokens
+    )
 
 
 def test_external_openai_sdk_evaluation(external_decision_server):
-    base_url, model = external_decision_server
+    base_url, model, expected_output_tokens = external_decision_server
     sdk = _sdk("openai")
     with sdk.OpenAI(
         base_url=f"{base_url}/v1",
@@ -96,7 +104,12 @@ def test_external_openai_sdk_evaluation(external_decision_server):
         response = client.decisions.with_raw_response.create(**decision_payload(model))
         assert_request_headers(response)
         result = response.parse()
-        assert_decision_body(result.model_dump(), model, "oai")
+        assert_decision_body(
+            result.model_dump(),
+            model,
+            "oai",
+            expected_output_tokens=expected_output_tokens,
+        )
         assert result._request_id == response.headers["x-request-id"]
         with pytest.raises(sdk.BadRequestError) as error:
             client.decisions.create(
@@ -107,7 +120,7 @@ def test_external_openai_sdk_evaluation(external_decision_server):
 
 
 def test_external_typesafe_sdk_evaluation(external_decision_server):
-    base_url, model = external_decision_server
+    base_url, model, expected_output_tokens = external_decision_server
     sdk = _sdk("typesafe_sdk")
     payload = decision_payload(model, "systemone")
     questions = {
@@ -137,7 +150,12 @@ def test_external_typesafe_sdk_evaluation(external_decision_server):
             result.request_id
             == result.raw_http_response.headers["x-typesafe-request-id"]
         )
-        assert_decision_body(result.raw_http_response.json(), model, "systemone")
+        assert_decision_body(
+            result.raw_http_response.json(),
+            model,
+            "systemone",
+            expected_output_tokens=expected_output_tokens,
+        )
         with pytest.raises(sdk.TypeSafeUnprocessableEntityError) as error:
             client.system_one(
                 state=payload["state"],
@@ -149,7 +167,9 @@ def test_external_typesafe_sdk_evaluation(external_decision_server):
 
 @pytest.mark.timeout(600)  # Six sequential HTTP calls can each take 60 seconds.
 def test_external_native_sglang_numeric_parity(external_decision_server):
-    base_url, model = external_decision_server
+    base_url, model, expected_output_tokens = external_decision_server
+    if expected_output_tokens:
+        pytest.skip("Native SGLang parity applies only to the sglang profile")
     native_url = os.environ.get("DYNAMO_DECISION_NATIVE_URL")
     if not native_url:
         pytest.skip(

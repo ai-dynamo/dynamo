@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aisimulate_core::engine::{EngineLaunchConfig, TimingModelConfig};
+use aisim_core::engine::{EngineLaunchConfig, TimingModelConfig};
 use anyhow::{Result, ensure};
 use dynamo_admission::host::RouterQueuePolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

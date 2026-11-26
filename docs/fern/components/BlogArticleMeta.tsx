@@ -17,6 +17,8 @@ type BlogArticleMetaProps = {
   category: string;
   date: string;
   readTime: string;
+  /** Set to false to show the article's images at once, without the scroll reveal. */
+  revealImages?: boolean;
 };
 
 function ShareIcon() {
@@ -30,10 +32,18 @@ function ShareIcon() {
   );
 }
 
-export function BlogArticleMeta({ authors, category, date, readTime }: BlogArticleMetaProps) {
+export function BlogArticleMeta({
+  authors,
+  category,
+  date,
+  readTime,
+  revealImages = true,
+}: BlogArticleMetaProps) {
   const [shareLabel, setShareLabel] = useState("Share");
 
   useEffect(() => {
+    if (!revealImages) return;
+
     const images = Array.from(
       document.querySelectorAll<HTMLImageElement>(
         "article:has(.dynamo-blog-article) img",
@@ -66,7 +76,7 @@ export function BlogArticleMeta({ authors, category, date, readTime }: BlogArtic
     });
 
     return () => observer.disconnect();
-  }, []);
+  }, [revealImages]);
 
   async function shareArticle() {
     const shareData = { title: document.title, url: window.location.href };

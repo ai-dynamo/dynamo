@@ -3,10 +3,11 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::default_policy_with_rng;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike, WorkerSelectionResult};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -21,6 +22,8 @@ pub struct DefaultWorkerSelector {
     worker_type: &'static str,
     policy: Arc<Mutex<WorkerSelectionPolicy>>,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
+    /// Factory and worker role of a configured policy; `None` runs Dynamo's default.
+    configured: Option<(WorkerSelectionPolicyFactory, WorkerType)>,
 }
 impl DefaultWorkerSelector {
     pub fn new(config: Option<SelectionConfig>, worker_type: &'static str) -> Self {
@@ -52,10 +55,47 @@ impl DefaultWorkerSelector {
             kv_router_config: config,
             worker_type,
             rng,
+            configured: None,
+        }
+    }
+    /// Run the policy `factory` builds for the `role` pool instead of Dynamo's default. The
+    /// factory builds it as it does for a live router, so no replay seed reaches it.
+    pub fn with_policy_factory(
+        config: SelectionConfig,
+        worker_type: &'static str,
+        factory: WorkerSelectionPolicyFactory,
+        role: WorkerType,
+    ) -> Self {
+        let partition = RoutingPartitionRef::new("replay", "default");
+        Self {
+            policy: Arc::new(Mutex::new(factory(WorkerSelectionPolicyContext::new(
+                &config, role, partition,
+            )))),
+            kv_router_config: config,
+            worker_type,
+            rng: None,
+            configured: Some((factory, role)),
         }
     }
     /// Handle that reads and updates this selector's runtime parameters from another owner.
     ///
+    /// The worker inputs whose resources a router starts for `role`: this selector's, plus
+    /// those of the role's configured hint policies. Rejects what the live router's setup
+    /// rejects ([`dynamo_kv_router::plugins::host::check_role`]).
+    pub fn check_role(
+        &self,
+        role: WorkerType,
+        hint_policies: dynamo_kv_router::plugins::host::RoleHintPolicies,
+        config: &dynamo_kv_router::config::KvRouterConfig,
+    ) -> Result<WorkerInputs, dynamo_kv_router::plugins::host::PluginConfigError> {
+        dynamo_kv_router::plugins::host::check_role(
+            role,
+            &self.policy.lock(),
+            hint_policies,
+            config,
+        )
+    }
+
     /// Every handle shares this selector's policy, so an update is visible to the next
     /// selection. A clone of the selector has its own policy and needs its own handle.
     pub fn runtime_control(&self) -> DefaultWorkerSelectorControl {
@@ -68,11 +108,19 @@ impl DefaultWorkerSelector {
 /// the random stream of the original.
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
-        Self::with_rng(
-            self.kv_router_config.clone(),
-            self.worker_type,
-            self.rng.clone(),
-        )
+        match &self.configured {
+            Some((factory, role)) => Self::with_policy_factory(
+                self.kv_router_config.clone(),
+                self.worker_type,
+                factory.clone(),
+                *role,
+            ),
+            None => Self::with_rng(
+                self.kv_router_config.clone(),
+                self.worker_type,
+                self.rng.clone(),
+            ),
+        }
     }
 }
 impl std::fmt::Debug for DefaultWorkerSelector {
@@ -88,7 +136,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }
     fn uses_exclusive_affinity_target(&self) -> bool {
-        true
+        self.policy.lock().uses_exclusive_affinity_target()
     }
     fn applies_worker_filters(&self) -> bool {
         <WorkerSelectionPolicy as WorkerSelector<C>>::applies_worker_filters(&self.policy.lock())

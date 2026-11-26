@@ -375,7 +375,7 @@ impl VirtualConnectorClient {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Copy)]
 /// The decision Planner made. The client should make necessary changes to the environment to make
 /// this true, and then call `complete` on the VirtualConnectorClient.

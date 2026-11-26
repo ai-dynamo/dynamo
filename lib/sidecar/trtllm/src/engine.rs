@@ -863,6 +863,7 @@ pub(crate) fn to_kv_event_source(
         dp_rank: source.data_parallel_rank.ok_or_else(|| {
             client::protocol_error("GetKvEventSources omitted data_parallel_rank")
         })?,
+        idempotent_stores: false,
     })
 }
 
