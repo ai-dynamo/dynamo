@@ -1130,7 +1130,8 @@ recompute the busy set and does not change startup-only router options such as `
 ### Frontend feature switches
 
 Environment variables controlling frontend extensions and protocol admission. The variables below
-are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-insensitive.
+are disabled by default unless their entry says otherwise. Truthy values are `1`, `true`, `yes`,
+or `on`, case-insensitive.
 
 <ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
   When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
@@ -1163,6 +1164,21 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_CONTROL_TOKENS_AS_TEXT" type="boolean" default="true">
+  Enabled by default with `--dyn-chat-processor dynamo`. In Jinja chat templates, Dynamo treats
+  recognized control-token spellings in messages, tool definitions, and `response_format` values
+  as ordinary text. A template can still interpret markers it reads from assistant history.
+  A trailing marker prefix can cause the renderer to split a prompt into segments even
+  without a complete marker spelling. A template that transforms protected text can cause
+  the request to fail.
+
+  Set the variable to `0`, `false`, `off`, or `no` to opt out for non-Harmony templates. Harmony
+  templates, such as the gpt-oss template, always apply their control-token protection. An unset
+  or blank value leaves protection enabled. Dynamo reads the value when the frontend process
+  builds its first prompt formatter. Restart the process after changing the setting. Dynamo
+  rejects rendered chat prompts containing NUL bytes before tokenization.
 </ParamField>
 
 ### Media refusal for text-only models

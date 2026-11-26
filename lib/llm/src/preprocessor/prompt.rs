@@ -405,6 +405,14 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    prompt_formatter_from_mdc_with(mdc, *crate::frontend_config::REQUEST_CONTROL_TOKENS_AS_TEXT)
+}
+
+/// [`prompt_formatter_from_mdc`] with `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT` given, not read.
+pub(crate) fn prompt_formatter_from_mdc_with(
+    mdc: &ModelDeploymentCard,
+    request_control_tokens_as_text: bool,
+) -> Result<PromptFormatter> {
     // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
     // It builds each prompt exactly the way the mistral-common library does, which
     // is also what stock vLLM uses for these checkpoints by default.
@@ -480,6 +488,19 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
             let mut config: ChatTemplate = serde_json::from_str(&contents).inspect_err(|err| {
                 crate::log_json_err(&file.display().to_string(), &contents, err)
             })?;
+
+            // Some HF models (e.g. DeepSeek-R1) list their chat markers only in
+            // tokenizer.json, so pass its added tokens to the renderer as well.
+            if let Some(TokenizerKind::HfTokenizerJson(tokenizer_file)) = &mdc.tokenizer
+                && let Some(path) = tokenizer_file.path()
+            {
+                let tokenizer_json = std::fs::read_to_string(path)
+                    .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                config = config
+                    .with_tokenizer_json(&tokenizer_json)
+                    .with_context(|| format!("added_tokens in '{}'", path.display()))?;
+            }
+            config = config.with_request_control_tokens_as_text(request_control_tokens_as_text);
 
             // Some HF models (e.g. Llama-4-Maverick) store the chat template in a
             // separate file, or it may be a custom template provided via CLI flag.

@@ -398,6 +398,11 @@ pub mod llm {
     pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
+    /// Render recognized control-token spellings in Jinja chat request text as
+    /// ordinary text by default. Set `0`, `false`, `off`, or `no` to opt out for
+    /// non-Harmony templates.
+    pub const DYN_REQUEST_CONTROL_TOKENS_AS_TEXT: &str = "DYN_REQUEST_CONTROL_TOKENS_AS_TEXT";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
     /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
@@ -1192,6 +1197,7 @@ mod tests {
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
+            llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT,
             llm::DYN_ENABLE_FRONTEND_ADMIN_API,
             llm::DYN_FRONTEND_ADMIN_HOST,
             llm::DYN_FRONTEND_ADMIN_PORT,

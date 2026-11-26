@@ -133,6 +133,10 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** A `DYN_LOG` filter scoped to `dynamo_llm`, `dynamo_llm::http`, `dynamo_llm::http::service`, or one of the modules in the table must also name `dynamo_http_server` or the new target, for example `dynamo_http_server=<level>`. There is no runtime alias, so the old directive no longer selects these lines.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Control-token spellings in chat request text tokenize as text by default** ([#18159](https://github.com/ai-dynamo/dynamo/pull/18159)). With `--dyn-chat-processor dynamo`, Jinja chat templates treat recognized control-token spellings in messages, tool definitions, and `response_format` values as ordinary text. Templates can still interpret markers they read from assistant history. Dynamo rejects rendered chat prompts containing NUL bytes before tokenization.
+
+  > **Migrate:** For non-Harmony Jinja templates that rely on clients sending control tokens in message text, set `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT=0`.
+
 <a id="v170"></a>
 
 ## v1.7.0 - Nov 23, 2026

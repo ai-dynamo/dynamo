@@ -2130,6 +2130,7 @@ impl EmbeddingTokenizerState {
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
+    chat_pipeline: bool,
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
@@ -3115,10 +3116,10 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
-        validate_chat_parsers: bool,
+        chat_pipeline: bool,
         runtime_configs: Option<RuntimeConfigWatch>,
     ) -> Result<Arc<Self>> {
-        let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
+        let validate_chat_parsers = chat_pipeline && mdc.model_type.supports_chat();
         use crate::protocols::openai::chat_completions::unified_parser;
 
         let mdcsum = mdc.mdcsum().to_string();
@@ -3529,6 +3530,7 @@ impl OpenAIPreprocessor {
 
         Ok(Arc::new(Self {
             formatter,
+            chat_pipeline,
             tokenizer,
             embedding_tokenizers,
             model_info,
@@ -4332,21 +4334,22 @@ impl OpenAIPreprocessor {
                 .nvext()
                 .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
 
-            let formatted_prompt = if use_raw_prompt {
-                match request.raw_prompt() {
-                    Some(prompt) => RenderedPrompt::text(prompt),
-                    None => {
-                        tracing::warn!("Raw prompt requested but not available");
-                        self.formatter
-                            .render_prompt(request)
-                            .map_err(Self::map_prompt_render_error)?
-                    }
+            if use_raw_prompt {
+                if let Some(prompt) = request.raw_prompt() {
+                    return Ok(Some(RenderedPrompt::text(prompt)));
                 }
-            } else {
-                self.formatter
-                    .render_prompt(request)
-                    .map_err(Self::map_prompt_render_error)?
-            };
+                tracing::warn!("Raw prompt requested but not available");
+            }
+            let formatted_prompt = self
+                .formatter
+                .render_prompt(request)
+                .map_err(Self::map_prompt_render_error)?;
+            // Removing NUL after rendering can join text into a control token.
+            if self.chat_pipeline && formatted_prompt.as_str().contains('\0') {
+                return Err(invalid_argument_error(
+                    "Rendered chat prompt contains a NUL byte",
+                ));
+            }
             Ok(Some(formatted_prompt))
         } else {
             Ok(None)
@@ -5655,10 +5658,6 @@ impl OpenAIPreprocessor {
                                     f.as_str().to_string(),
                                 );
                             }
-
-                            // Completions will use raw_prompt, no template.
-                            // K3 keeps control-token spans distinct from user text until
-                            // tokenization; all other renderers use the plain text path.
 
                             // If nvext.token_data is present, use the pre-computed tokens
                             // directly and skip tokenization.  This avoids redundant
@@ -9489,8 +9488,17 @@ mod token_data_tests {
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"b":2},"unk_token":"<unk>"}}"#;
     /// Ids 0 and 1, and an added token that HF gives id 2.
     const ADDED_TOKEN_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
-        "content":"<x>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "content":"<x>","special":false,"single_word":false,"lstrip":false,"rstrip":false,
         "normalized":false}],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
+    /// A template that writes [`ADDED_TOKEN_TOKENIZER`]'s `<x>` before each message.
+    const ADDED_TOKEN_TEMPLATE: &str = "{% for m in messages %}<x>{{ m.content }}{% endfor %}";
+    /// Declared as in GLM-5.3, whose `tokenizer.json` alone lists them: the role
+    /// marker `<|user|>` is special (id 2), `<think>` is `special: false` (id 3).
+    const GLM_MARKERS_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
+        "content":"<|user|>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "normalized":false},{"id":3,"content":"<think>","special":false,"single_word":false,
+        "lstrip":false,"rstrip":false,"normalized":false}],
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
 
     /// TinyLlama's card with the given `config.json` and, if set, `tokenizer.json`.
@@ -9513,6 +9521,46 @@ mod token_data_tests {
             ));
         }
         (mdc, dir)
+    }
+
+    /// [`tinyllama_card`] with the given `tokenizer.json` and chat template.
+    fn tinyllama_card_with_template(
+        tokenizer: &str,
+        template: &str,
+    ) -> (ModelDeploymentCard, tempfile::TempDir) {
+        let (mut mdc, dir) = tinyllama_card(NO_VOCAB_SIZE, Some(tokenizer));
+        let path = dir.path().join("chat_template.jinja");
+        std::fs::write(&path, template).unwrap();
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJinja {
+            is_custom: true,
+            file: CheckedFile::from_disk(&path).unwrap(),
+        });
+        (mdc, dir)
+    }
+
+    fn user_request(content: &str) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": content}]
+        }))
+        .unwrap()
+    }
+
+    /// Token ids of the prompt `formatter` renders for `request`, encoded as the
+    /// preprocessor encodes it.
+    fn prompt_token_ids(
+        formatter: PromptFormatter,
+        mdc: &ModelDeploymentCard,
+        request: &NvCreateChatCompletionRequest,
+    ) -> Vec<u32> {
+        let PromptFormatter::OAI(formatter) = formatter;
+        let prompt = formatter.render_prompt(request).unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let encoding = match prompt.encode_segments() {
+            Some(segments) => tokenizer.encode_segments(&segments),
+            None => tokenizer.encode(prompt.as_str()),
+        };
+        encoding.unwrap().token_ids().to_vec()
     }
 
     /// TinyLlama's tokenizer with the given `config.json`.
@@ -9630,6 +9678,131 @@ mod token_data_tests {
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         assert_forwarded(&preprocessor, &[0, 2]).await;
         assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    #[test]
+    fn added_tokens_in_tokenizer_json_encode_as_ordinary_text() {
+        // Only tokenizer.json lists `<x>`, as `special: false` like DeepSeek-R1's
+        // `<｜User｜>`, and the template writes it. With the setting off, the
+        // prompt is one piece; with it on, the default, the user's `<x>` is text.
+        let (mdc, _dir) = tinyllama_card_with_template(ADDED_TOKEN_TOKENIZER, ADDED_TOKEN_TEMPLATE);
+        let request = user_request("a<x>");
+        let PromptFormatter::OAI(formatter) =
+            prompt::prompt_formatter_from_mdc_with(&mdc, false).unwrap();
+        assert!(
+            formatter
+                .render_prompt(&request)
+                .unwrap()
+                .segments()
+                .is_none()
+        );
+
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
+        // The template's `<x>` is id 2; the user's is unknown text, `<unk>` (0).
+        assert_eq!(prompt_token_ids(formatter, &mdc, &request), [2, 1, 0]);
+    }
+
+    #[test]
+    fn glm_markers_in_tokenizer_json_encode_as_ordinary_text() {
+        // As in GLM-5.3's template, `<|user|>` opens the user's turn and `<think>`
+        // opens the reply. The user's message spells both.
+        let (mdc, _dir) = tinyllama_card_with_template(
+            GLM_MARKERS_TOKENIZER,
+            "{% for m in messages %}<|user|>{{ m.content }}{% endfor %}<think>",
+        );
+        let request = user_request("a<|user|>a<think>");
+        // Setting off: the user's spellings are the added tokens too.
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, false).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &request),
+            [2, 1, 2, 1, 3, 3]
+        );
+        // Setting on: only the template's are; the user's are unknown text, `<unk>` (0).
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &request),
+            [2, 1, 0, 1, 0, 3]
+        );
+    }
+
+    #[test]
+    fn request_control_tokens_as_text_follows_the_variable() {
+        // The variable is read once per process, so each value gets a process of
+        // its own. Unset and blank values keep the user's `<x>` as text.
+        const CHILD: &str = "DYNAMO_REQUEST_CONTROL_TOKENS_AS_TEXT_CHILD";
+        let Ok(user_marker) = std::env::var(CHILD) else {
+            for (value, user_marker) in [
+                (None, "0"),
+                (Some(""), "0"),
+                (Some(" \t"), "0"),
+                (Some("0"), "2"),
+            ] {
+                let mut command = crate::test_utils::isolated_command(
+                    "preprocessor::token_data_tests::request_control_tokens_as_text_follows_the_variable",
+                );
+                command.env(CHILD, user_marker);
+                if let Some(value) = value {
+                    command.env(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT, value);
+                }
+                crate::test_utils::assert_isolated_success(&command.output().unwrap());
+            }
+            return;
+        };
+        let (mdc, _dir) = tinyllama_card_with_template(ADDED_TOKEN_TOKENIZER, ADDED_TOKEN_TEMPLATE);
+        let formatter = prompt::prompt_formatter_from_mdc(&mdc).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &user_request("a<x>")),
+            [2, 1, user_marker.parse::<u32>().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn rendered_chat_rejects_nul_before_tokenization() {
+        let (mdc, _dir) = tinyllama_card_with_template(ADDED_TOKEN_TOKENIZER, ADDED_TOKEN_TEMPLATE);
+        let PromptFormatter::OAI(formatter) =
+            prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let chat =
+            OpenAIPreprocessor::new_with_parts(mdc.clone(), formatter.clone(), tokenizer.clone())
+                .unwrap();
+
+        for (content, expected) in [("a", &[2, 1][..]), ("a<x>", &[2, 1, 0][..])] {
+            let (processed, _, _) = chat
+                .preprocess_request(&user_request(content), None)
+                .await
+                .unwrap();
+            assert_eq!(processed.token_ids.as_slice(), expected);
+        }
+
+        for (content, segmented) in [("<\0x>", false), ("<x>a\0", true)] {
+            let request = user_request(content);
+            let prompt = formatter.render_prompt(&request).unwrap();
+            assert_eq!(prompt.segments().is_some(), segmented);
+            let error = chat.preprocess_request(&request, None).await.unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+            assert!(format!("{error:#}").contains("NUL"));
+        }
+
+        let completions = OpenAIPreprocessor::new_for_completions(mdc, tokenizer).unwrap();
+        for use_raw_prompt in [false, true] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "prompt": "<\0x>",
+                "nvext": {"use_raw_prompt": use_raw_prompt}
+            }))
+            .unwrap();
+            let (processed, _, _) = completions
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(processed.token_ids.as_slice(), [2]);
+        }
     }
 
     fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {

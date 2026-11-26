@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use dynamo_runtime::config::{
     env_is_truthy,
     environment_names::llm::{self as env_llm, metrics as env_metrics},
-    is_truthy,
+    is_truthy, parse_bool_opt,
 };
 
 use crate::protocols::openai::chat_completions::{
@@ -24,6 +24,16 @@ use crate::reasoning_field::ReasoningField;
 /// Process-wide strict-schema policy, initialized before the HTTP service accepts requests.
 pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
+
+/// Process-wide Jinja control-token handling. Enabled unless explicitly
+/// disabled. Read when the first prompt formatter is built.
+pub(crate) static REQUEST_CONTROL_TOKENS_AS_TEXT: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_opt)
+        .unwrap_or(true)
+});
 
 /// Metrics naming controls for frontend-owned services.
 ///
