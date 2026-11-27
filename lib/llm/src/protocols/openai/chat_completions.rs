@@ -874,7 +874,14 @@ impl NvCreateChatCompletionRequest {
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
-        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
+        // `nvext.greed_sampling` runs the request at temperature 0, so check that value.
+        let greedy = self.nvext.as_ref().and_then(|nvext| nvext.greed_sampling) == Some(true);
+        let temperature = if greedy {
+            Some(0.0)
+        } else {
+            self.inner.temperature
+        };
+        validate::validate_n_with_temperature(self.inner.n, temperature)?;
         validate::validate_continue_final_message(
             self.common.add_generation_prompt,
             self.common.continue_final_message,
