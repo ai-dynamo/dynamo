@@ -2510,7 +2510,22 @@ impl<
     /// Whether a lane head can dispatch now. A hold this asks about still arms the gate's
     /// recheck, so a newly exposed root is woken at its own deadline.
     fn has_dispatchable_ready_head(&mut self) -> bool {
-        let decay_now = Instant::now();
+        let gate = self.dispatch_gate.get().cloned();
+        self.with_dispatch_pass(gate.as_deref(), Instant::now(), |pending, pass| {
+            pending
+                .any_ready_head(|class_index, class, queued| pass.check(class_index, class, queued))
+        })
+    }
+
+    /// Runs `ask` over the pending queue with a pass that starts here: no class has a room
+    /// answer and the full ranks are not recorded yet. The earliest recheck the gate asked
+    /// for during the pass is kept.
+    fn with_dispatch_pass<R>(
+        &mut self,
+        gate: Option<&dyn DispatchGate>,
+        decay_now: Instant,
+        ask: impl FnOnce(&mut PolicyQueue<QueuedRequest>, &mut DispatchPass<'_, P, C>) -> R,
+    ) -> R {
         let gate_recheck_at = Cell::new(self.gate_recheck_at);
         self.class_room.clear();
         self.class_room.resize(self.pending.class_count(), None);
@@ -2518,7 +2533,7 @@ impl<
             slots: &self.slots,
             eligibility: &self.eligibility,
             workers: &self.workers_with_configs,
-            gate: self.dispatch_gate.get().map(|gate| gate.as_ref()),
+            gate,
             gate_recheck_at: &gate_recheck_at,
             reject: self
                 .pending
@@ -2530,11 +2545,9 @@ impl<
             class_room: &mut self.class_room,
             decay_now,
         };
-        let dispatchable = self
-            .pending
-            .any_ready_head(|class_index, class, queued| pass.check(class_index, class, queued));
+        let result = ask(&mut self.pending, &mut pass);
         self.gate_recheck_at = gate_recheck_at.get();
-        dispatchable
+        result
     }
 
     /// Consume recorded capacity changes before draining. A worker free re-asks the lanes
@@ -2614,31 +2627,11 @@ impl<
             // Load is read after the previous admission booked, so this one sees that
             // reservation. Frees and peer bookings from other tasks can land between
             // two reads, as they can right after the gate.
-            let gate_recheck_at = Cell::new(self.gate_recheck_at);
-            let extracted = {
-                self.class_room.clear();
-                self.class_room.resize(self.pending.class_count(), None);
-                let mut pass = DispatchPass {
-                    slots: &self.slots,
-                    eligibility: &self.eligibility,
-                    workers: &self.workers_with_configs,
-                    gate: gate.as_deref(),
-                    gate_recheck_at: &gate_recheck_at,
-                    reject: self
-                        .pending
-                        .has_affinity_backlog()
-                        .then_some(self.reject_thresholds.as_ref())
-                        .flatten(),
-                    full_ranks: &mut self.gate_full_ranks,
-                    full_ranks_fresh: false,
-                    class_room: &mut self.class_room,
-                    decay_now,
-                };
-                self.pending.extract_next(|class_index, class, queued| {
+            let extracted = self.with_dispatch_pass(gate.as_deref(), decay_now, |pending, pass| {
+                pending.extract_next(|class_index, class, queued| {
                     pass.check(class_index, class, queued)
                 })
-            };
-            self.gate_recheck_at = gate_recheck_at.get();
+            });
             let Some((mut candidate, charge)) = extracted else {
                 break;
             };
