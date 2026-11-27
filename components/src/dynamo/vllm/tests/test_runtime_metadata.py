@@ -12,7 +12,12 @@ import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelInput, ModelType, WorkerType
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    MAX_LOGPROBS_RUNTIME_KEY,
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+    publish_vllm_max_logprobs,
+)
 from dynamo.vllm.engine_generate import (
     VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
     VLLM_GENERATE_CAPABILITY,
@@ -88,6 +93,26 @@ def test_vllm_token_budget_matches_rejection_policy():
         "reject_prompt_overflow": True,
         "reject_total_overflow": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("engine_max_logprobs", "expected"),
+    [
+        (32, 32),
+        # vLLM's "no cap" is checked against the vocabulary size.
+        (-1, 32000),
+    ],
+)
+def test_vllm_max_logprobs_matches_engine_limit(engine_max_logprobs, expected):
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    model_config = SimpleNamespace(
+        max_logprobs=engine_max_logprobs, get_vocab_size=lambda: 32000
+    )
+    publish_vllm_max_logprobs(runtime_config, model_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        MAX_LOGPROBS_RUNTIME_KEY, json.dumps(expected)
+    )
 
 
 def test_build_sampling_params_caps_oversized_max_tokens():

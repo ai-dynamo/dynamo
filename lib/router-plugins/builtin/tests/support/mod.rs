@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::*;
 use dynamo_scheduler::host::WorkerSelectionInput;
+use dynamo_scheduler::host::{
+    OverlapSignals, RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerConfigLike,
+};
+use dynamo_slot_tracker::WorkerLoadProjection;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
@@ -31,15 +35,13 @@ pub fn fixture(
         token_seq: None,
         isl_tokens: prompt_tokens,
         lora_name: None,
-        expected_output_tokens: None,
+        caller_hints: Default::default(),
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints::default(),
         router_config_override: None,
         track_prefill_tokens: true,
-        priority_jump: 0.0,
-        strict_priority: 0,
         policy_class: None,
         session_context: None,
         overlap: OverlapSignals::default(),

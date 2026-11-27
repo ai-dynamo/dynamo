@@ -51,7 +51,7 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 74,
     "nvidia.com/v1beta1": 76,
-    "nvidia.com/v1beta2": 41,
+    "nvidia.com/v1beta2": 42,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -552,6 +552,12 @@ def test_render_mdx_carries_no_react_component_or_data_import(native_mdx: str) -
     Markdown extraction apply. A React mount would hide all of it."""
     assert "ApiKubernetesReference" not in native_mdx
     assert "api-reference.data" not in native_mdx
+
+
+def test_render_mdx_keeps_null_override_marker_copyable(native_mdx: str) -> None:
+    """The deletion marker must render as literal JSON inside inline code."""
+    assert '`{"$null":true}`' in native_mdx
+    assert r'\&#123;"$null":true\&#125;' not in native_mdx
 
 
 def test_render_mdx_drops_the_hand_built_llms_only_twin(native_mdx: str) -> None:

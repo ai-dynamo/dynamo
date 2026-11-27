@@ -19,6 +19,7 @@ use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsCon
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::protocols::tensor::TensorModelConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
@@ -83,6 +84,7 @@ pub struct LocalModelBuilder {
     namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    tensor_model_config: Option<TensorModelConfig>,
 }
 
 impl Default for LocalModelBuilder {
@@ -117,6 +119,7 @@ impl Default for LocalModelBuilder {
             namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
+            tensor_model_config: Default::default(),
         }
     }
 }
@@ -328,6 +331,14 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn tensor_model_config(
+        &mut self,
+        tensor_model_config: Option<TensorModelConfig>,
+    ) -> &mut Self {
+        self.tensor_model_config = tensor_model_config;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
@@ -371,6 +382,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.tensor_model_config = self.tensor_model_config.clone();
             card.router_config = self.router_config.clone();
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
@@ -435,6 +447,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.tensor_model_config = self.tensor_model_config.clone();
         card.router_config = self.router_config.clone();
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
@@ -501,20 +514,42 @@ pub async fn register_model_card(
     endpoint: &Endpoint,
     card: &ModelDeploymentCard,
 ) -> anyhow::Result<()> {
-    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
-    let model_suffix = derive_lora_suffix(lora_name);
-
-    let discovery = endpoint.drt().discovery();
-    let wire_card = card.for_mdc_wire();
-    let spec = DiscoverySpec::from_model_with_suffix(
+    let spec = model_card_spec(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        &wire_card,
-        model_suffix,
+        card,
     )?;
-    let _instance = discovery.register(spec).await?;
+    let _instance = endpoint.drt().discovery().register(spec).await?;
     Ok(())
+}
+
+/// The discovery record [`register_model_card`] publishes for `card`, for a
+/// worker whose instance id is `instance_id` rather than this process's.
+pub fn model_card_instance(
+    namespace: String,
+    component: String,
+    endpoint: String,
+    card: &ModelDeploymentCard,
+    instance_id: u64,
+) -> anyhow::Result<DiscoveryInstance> {
+    Ok(model_card_spec(namespace, component, endpoint, card)?.into_instance(instance_id))
+}
+
+fn model_card_spec(
+    namespace: String,
+    component: String,
+    endpoint: String,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<DiscoverySpec> {
+    let model_suffix = derive_lora_suffix(card.lora.as_ref().map(|info| info.name.as_str()));
+    DiscoverySpec::from_model_with_suffix(
+        namespace,
+        component,
+        endpoint,
+        &card.for_mdc_wire(),
+        model_suffix,
+    )
 }
 
 /// Replace the caller-managed taints on this worker's existing model card.

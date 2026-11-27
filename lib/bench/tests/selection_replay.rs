@@ -115,6 +115,22 @@ fn replays_every_request_through_the_frontend_lifecycle() {
                 "{outcome} in {mode:?}"
             );
         }
+        // The window counts activity, and less of it than the whole run.
+        // (A saturation run this small can end before the sampler sees the window.)
+        if let Mode::Fixed { .. } = mode {
+            let window = result.window.as_ref().expect("the window opened");
+            assert!(window.events_issued > 0);
+            for (window, run) in [
+                (window.cache.stored_blocks, result.cache.stored_blocks),
+                (window.cache.prompt_blocks, result.cache.prompt_blocks),
+                (
+                    window.index_events_applied["stored/ok"],
+                    result.index_events_applied["stored/ok"],
+                ),
+            ] {
+                assert!(0 < window && window < run, "{window} of {run}");
+            }
+        }
     }
 }
 

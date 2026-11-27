@@ -17,6 +17,7 @@ dynamo-kv-hashing = { workspace = true }
 tracing = { workspace = true }
 dynamo-llm = { workspace = true }
 anyhow = { workspace = true }
+dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-error = { workspace = true, features = ["http"] }
 axum = { workspace = true }

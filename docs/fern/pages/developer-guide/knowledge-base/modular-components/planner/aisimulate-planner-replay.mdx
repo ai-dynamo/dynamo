@@ -925,6 +925,6 @@ Scenario 2 at about 4.5 GB with `max_parallel: 8`.
   also set how the startup router counts cached tokens, which a runtime update does not change.
   A router started with `shared_cache_multiplier` at 0 builds no KV fetch inputs, and a runtime
   update cannot add them. Retune rejects all three and each error says why.
-- **Credit-0 candidates get no KV fetch hints.** A candidate with `overlap_score_credit: 0` is
-  replayed on a fresh router that builds no KV index and so attaches no hints, while the live
-  router keeps its startup index. This matters only for workers that use KVCR.
+- **Retune replays send no KV fetch hints.** Retune requires the builtin default router policy,
+  which lists no `kv_fetch` hint policy. Neither a candidate replay nor the live router then sends
+  `kv.fetch` hints, so workers that use KVCR pull nothing from peers.

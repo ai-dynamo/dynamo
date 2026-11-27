@@ -842,6 +842,19 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
+/// Checks an optional log-probability count against `max`, the serving
+/// model's limit: 20 unless its workers publish their own `max_logprobs`. The
+/// library rules are fixed at 20, so this check is local. `label` names the
+/// field in the error (`Top_logprobs` or `Logprobs`).
+pub fn validate_max_logprobs(label: &str, count: Option<u8>, max: u8) -> Result<(), anyhow::Error> {
+    if let Some(count) = count
+        && count > max
+    {
+        anyhow::bail!("{label} must be between 0 and {max}, got {count}");
+    }
+    Ok(())
+}
+
 /// Checks the optional OpenAI `best_of` count [0, 20], then Dynamo's local
 /// `best_of >= n` rule when both are present. None succeeds. Returns the library
 /// diagnostic for a range failure and a local error for the relationship.
@@ -1294,6 +1307,29 @@ mod tests {
         validate_logprobs(Some(MAX_TOP_LOGPROBS)).unwrap();
         let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1)).unwrap_err();
         assert!(err.to_string().contains("between 0 and 20"), "{err}");
+    }
+
+    /// The limit is the serving model's, so the check follows the maximum it
+    /// is given, above or below the default, in the library rule's words.
+    #[test]
+    fn validate_max_logprobs_follows_the_given_maximum() {
+        for max in [0, 5, MAX_TOP_LOGPROBS, 32, u8::MAX] {
+            for accepted in [None, Some(0), Some(max)] {
+                validate_max_logprobs("Top_logprobs", accepted, max).unwrap();
+            }
+        }
+        assert_eq!(
+            validate_max_logprobs("Top_logprobs", Some(33), 32)
+                .unwrap_err()
+                .to_string(),
+            "Top_logprobs must be between 0 and 32, got 33"
+        );
+        assert_eq!(
+            validate_max_logprobs("Logprobs", Some(21), MAX_LOGPROBS)
+                .unwrap_err()
+                .to_string(),
+            validate_logprobs(Some(21)).unwrap_err().to_string()
+        );
     }
 
     #[test]
