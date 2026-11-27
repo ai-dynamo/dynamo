@@ -11,9 +11,11 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
+	overridesPath := field.NewPath("spec", "aisim", "inputOverrides")
 	tests := []struct {
 		name  string
 		test  admissionTestCase
@@ -207,7 +209,7 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 			test: admissionTestCase{
 				object: schemaRunForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
 				wantWebhookErrors: []string{
-					"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+					"spec.aisim.inputOverrides[dgdr_run][namespace]: Forbidden: is managed by the operator and cannot be overridden",
 					`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
 				},
 			},
@@ -263,7 +265,29 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 				oldObject:          schemaRunForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
 				object:             schemaRunForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, map[string]string{"updated": "true"}),
 				wantWebhookErrors: []string{
-					"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+					"spec.aisim.inputOverrides[dgdr_run][namespace]: Forbidden: is managed by the operator and cannot be overridden",
+				},
+			},
+		},
+		{
+			name: "Run create aggregates malformed directives and protected execution fields",
+			test: admissionTestCase{
+				object: schemaRunForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, nil),
+				wantFieldErrors: field.ErrorList{
+					field.Invalid(overridesPath.Key("dgdr_run").Key("settings"), "<redacted>", "$null must be the boolean true and the only object field"),
+					field.Forbidden(overridesPath.Key("dgdr_run").Key("namespace"), "is managed by the operator and cannot be overridden"),
+				},
+			},
+		},
+		{
+			name: "Run metadata updates report every array marker with exact paths",
+			test: admissionTestCase{
+				seedWithoutWebhook: true,
+				oldObject:          schemaRunForAdmission(`{"dgdr_run":{"settings":[{"$null":true},{"nested":{"$null":true}}]}}`, nil),
+				object:             schemaRunForAdmission(`{"dgdr_run":{"settings":[{"$null":true},{"nested":{"$null":true}}]}}`, map[string]string{"updated": "true"}),
+				wantFieldErrors: field.ErrorList{
+					field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Index(0), "$null is not allowed inside arrays"),
+					field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Index(1).Key("nested"), "$null is not allowed inside arrays"),
 				},
 			},
 		},

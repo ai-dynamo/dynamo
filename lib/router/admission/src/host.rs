@@ -13,9 +13,11 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_slot_tracker::BusyThresholds;
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::RequestInfo;
+use dynamo_worker_selection::host::CallerHints;
 use tokio::time::Instant;
 
-use crate::classifier::{ClassificationOverrides, ClassifyRequest};
+use crate::classifier::{ClassificationOverrides, ClassifyRequest, DispatchHead};
 
 pub use crate::classifier::{AbortCause, RequestProgress, RequestProgressUpdater};
 pub use crate::lane_key::LaneKey;
@@ -43,6 +45,16 @@ pub fn request_progress(
     RequestProgress::new(initial_context_tokens)
 }
 
+/// The view of one queue head a dispatch gate reads, over the facts of the queued request.
+/// The queue builds one per head it asks the gate about.
+pub fn dispatch_head<'a>(
+    info: RequestInfo<'a>,
+    policy_class: &'a str,
+    queued_at: Instant,
+) -> DispatchHead<'a> {
+    DispatchHead::from_info(info, policy_class, queued_at)
+}
+
 /// How the kernel builds the request a classifier reads, and what it reads back. A plugin
 /// reads a [`ClassifyRequest`] and calls its `set_*` methods; its tests get one through
 /// `dynamo_kv_router::plugins::testing`.
@@ -58,6 +70,10 @@ pub trait ClassifyRequestHostExt: sealed::Sealed + Sized {
     fn with_session_context(self, session_context: SessionContext) -> Self;
 
     fn with_pinned_worker(self, pinned_worker: Option<WorkerWithDpRank>) -> Self;
+
+    /// What the caller sent with the request: its expected output length and its two
+    /// priorities, the priority within its strict tier and the strict tier.
+    fn with_caller_hints(self, caller_hints: CallerHints) -> Self;
 
     /// Copy tracking hashes into storage owned by this classification attempt.
     fn with_sequence_hashes(self, hashes: Option<&[SequenceHash]>) -> Self;

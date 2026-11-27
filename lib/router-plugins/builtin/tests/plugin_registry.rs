@@ -15,7 +15,7 @@ impl RequestClassifier for PassThrough {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         Ok(request)
     }
 }

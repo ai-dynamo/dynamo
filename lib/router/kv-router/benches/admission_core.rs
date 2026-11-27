@@ -63,8 +63,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dynamo_admission::{
-    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, PolicyProfile, RequestClassifier, RequestLifecycle, RouterQueuePolicy,
+    ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    PolicyProfile, RequestClassifier, RequestClassifierError, RequestLifecycle, RouterQueuePolicy,
 };
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
 use dynamo_router_protocol::session::SessionContext;
@@ -96,7 +96,7 @@ impl RequestClassifier for SessionLanes {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let session = request.info().session_context();
         if let Some(session) = session.map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);

@@ -135,6 +135,12 @@ Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` 
 after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
 set other transfer fields, or delete the transfer model with `null`.
 
+<Note>
+  Client-side `kubectl apply` incorrectly removes native `null` values. Use
+  `{$null: true}` for deletions, or submit native nulls with `kubectl create`
+  or `kubectl apply --server-side`.
+</Note>
+
 ### v1beta2 DGD Overrides
 
 DGDR v1beta2 is available without a feature gate and is not feature complete.
@@ -1523,21 +1529,20 @@ with `traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traff
 These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
-override deletes the named field or parent object, and the operator does not restore it. For
-example, this override deletes the lowered source:
+or `{$null: true}` override deletes the named field or parent object, and the operator does not
+restore it. For example, this override deletes the lowered traffic configuration:
 
 ```yaml
 spec:
   aisim:
     inputOverrides:
-      traffic:
-        source: null
+      traffic: null  # or equivalent {$null: true} for kubectl apply
 ```
 
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
-claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. AISimulate validates
-the resulting input when the Run's Job starts, and an input it rejects fails the Run; admission does
-not validate it against the AISimulate schema yet.
+claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. Admission validates
+the merged input against the bundled AISimulate schema; the Run's Job also applies AISimulate's
+runtime validation.
 
 ### Trace claim lifecycle
 

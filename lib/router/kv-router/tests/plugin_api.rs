@@ -34,7 +34,7 @@ impl WorkerFilter for ContractPolicy {
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let _: Option<&SessionContext> = request.info().session_context();
-        let _: Option<u32> = request.expected_output_tokens();
+        let _: Option<u32> = request.info().expected_output_tokens();
         let _: WorkerWithDpRank = candidate.worker();
         let cache = candidate.cache().expect("requested cache inputs");
         Ok(cache.device_overlap_blocks() + cache.host_overlap_blocks() >= 0.0)
@@ -85,10 +85,13 @@ impl RequestClassifier for ContractClassifier {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let info: RequestInfo<'_> = request.info();
         let _: Option<&str> = info.request_id();
         let _: usize = info.isl_tokens();
+        let _: Option<u32> = info.expected_output_tokens();
+        let _: f64 = info.priority_jump();
+        let _: u32 = info.strict_priority();
         let _: Option<&[u64]> = request.sequence_hashes();
         let _: &RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
@@ -99,7 +102,11 @@ impl RequestClassifier for ContractClassifier {
         struct Open;
         impl DispatchGate for Open {
             fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
-                let _: Option<&str> = head.info().request_id();
+                let info: RequestInfo<'_> = head.info();
+                let _: Option<&str> = info.request_id();
+                let _: Option<u32> = info.expected_output_tokens();
+                let _: f64 = info.priority_jump();
+                let _: u32 = info.strict_priority();
                 DispatchDecision::Go { target: None }
             }
         }

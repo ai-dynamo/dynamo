@@ -348,7 +348,11 @@ type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
-	// field. The dgdr_run member must remain an object, and its operator-owned
+	// field. The exact `{"$null":true}` alias is valid only as an object-field value
+	// outside arrays; all other uses of $null are rejected on every write.
+	// Use the alias with client-side kubectl apply, which removes native nulls;
+	// kubectl create and server-side apply preserve them. A null document supplies
+	// no overrides. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
 	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
