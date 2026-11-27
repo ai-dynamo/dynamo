@@ -71,9 +71,8 @@ def reject_required_extra_inputs(
     task_label: str,
     endpoint: str,
 ) -> None:
-    # Requests carry only the selected STRING input, so every other input
-    # must be optional; otherwise the model passes readiness and Triton
-    # rejects every request for the missing input.
+    # Requests carry only the selected STRING input, so a required extra
+    # input would pass readiness and then fail every request.
     required = [i.name for i in config.input if i.name != name and not i.optional]
     if required:
         raise ValueError(
