@@ -494,6 +494,8 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
                       - page: Router Filtering
                         path: pages/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
+                      - page: Held Workers
+                        path: pages/developer-guide/knowledge-base/modular-components/router/held-workers.md
                       - page: Deficit Round Robin
                         path: pages/developer-guide/knowledge-base/modular-components/router/deficit-round-robin.md
                   - section: Configure and Operate

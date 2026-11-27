@@ -255,6 +255,7 @@ class CounterWorkerProcess:
         router_mode: str = "device-aware-weighted",
         initial_taints: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
         system_ports: tuple[int, int] | None = None,
+        worker_env: tuple[dict[str, str], dict[str, str]] | None = None,
     ):
         if initial_taints is not None and len(initial_taints) != 2:
             raise ValueError(
@@ -274,6 +275,7 @@ class CounterWorkerProcess:
         self._router_mode = router_mode
         self._initial_taints = initial_taints or ((), ())
         self._system_ports = system_ports
+        self._worker_env = worker_env or ({}, {})
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -318,6 +320,7 @@ class CounterWorkerProcess:
         self, worker_index: int
     ) -> tuple[dict[str, str], list[int], list[str]]:
         env = os.environ.copy()
+        env.update(self._worker_env[worker_index])
         if self._system_ports is None:
             return env, [], []
 
@@ -1880,6 +1883,343 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             store_backend="etcd",
             request_plane=request_plane,
             router_mode="kv",
+            min_initial_workers=workers.num_workers,
+        ):
+            asyncio.run(run_test(workers))
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("router_mode", ["round-robin", "random", "least-loaded", "kv"])
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_held_worker_takes_only_named_requests_until_released(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    request_plane,
+    event_plane,
+    num_system_ports,
+    router_mode,
+):
+    """A worker started with DYN_START_HELD is discovered, serves only a request that names
+    it, and joins automatic routing once its hold is released through its own admin API.
+    """
+    assert event_plane == "zmq"
+    assert num_system_ports == 2
+    held_system_port, ready_system_port = dynamo_dynamic_ports.system_ports
+    held_url = f"http://127.0.0.1:{held_system_port}"
+    ready_url = f"http://127.0.0.1:{ready_system_port}"
+    # Report health from the generate endpoint, as a deployed worker does, so that the hold is
+    # the only reason a worker is not ready.
+    endpoint_health = {"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": '["generate"]'}
+
+    def read_count(path: str) -> int:
+        try:
+            value = Path(path).read_text().strip()
+            return int(value) if value else 0
+        except (OSError, ValueError):
+            return 0
+
+    def payload(prompt: str, nvext: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = {
+            **COUNTER_TEST_PAYLOAD,
+            "stream": False,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if nvext is not None:
+            body["nvext"] = nvext
+        return body
+
+    async def run_test(workers: CounterWorkerProcess) -> None:
+        frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        held_count = workers.cpu_count_file
+        ready_count = workers.gpu_count_file
+
+        await wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=workers.num_workers,
+            timeout=60,
+            test_payload=payload("readiness"),
+            engine_workers=workers,
+            store_backend="etcd",
+            request_plane=request_plane,
+        )
+
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+
+            async def get_json(url: str) -> tuple[int, dict[str, Any]]:
+                async with session.get(url) as response:
+                    return response.status, await response.json(content_type=None)
+
+            async def post_json(
+                url: str, body: dict[str, Any]
+            ) -> tuple[int, dict[str, Any]]:
+                async with session.post(url, json=body) as response:
+                    return response.status, await response.json(content_type=None)
+
+            async def chat(body: dict[str, Any]) -> None:
+                async with session.post(chat_url, json=body) as response:
+                    assert response.status == 200, await response.text()
+
+            # The held worker says so, is not ready, and stays alive. The other is neither.
+            status, hold = await get_json(f"{held_url}/v1/hold")
+            assert status == 200, hold
+            assert hold["held"] is True, hold
+            held_instance_id = hold["instance_id"]
+            status, health = await get_json(f"{held_url}/health")
+            assert status == 503, health
+            assert health["held"] is True, health
+            status, _ = await get_json(f"{held_url}/live")
+            assert status == 200
+            status, hold = await get_json(f"{ready_url}/v1/hold")
+            assert (status, hold["held"]) == (200, False), hold
+            status, _ = await get_json(f"{ready_url}/health")
+            assert status == 200
+
+            # The frontend discovered both workers, and knows which one is held.
+            status, health = await get_json(f"{frontend_url}/health?instances=true")
+            assert status == 200, health
+            discovered = {
+                instance["instance_id"]: instance.get("held", False)
+                for instance in health["instances"]
+                if instance["namespace"] == workers.namespace
+                and instance["endpoint"] == "generate"
+            }
+            assert len(discovered) == 2, health
+            assert discovered[held_instance_id] is True, health
+            assert sorted(discovered.values()) == [False, True], health
+
+            # Ordinary traffic never lands on the held worker.
+            assert read_count(held_count) == 0
+            before_ready = read_count(ready_count)
+            for index in range(10):
+                await chat(payload(f"unpinned {index}"))
+            assert read_count(held_count) == 0
+            assert read_count(ready_count) == before_ready + 10
+
+            # A request that names the held worker reaches it, and does not release it.
+            await chat(
+                payload("pinned", nvext={"backend_instance_id": held_instance_id})
+            )
+            assert read_count(held_count) == 1
+            before_ready = read_count(ready_count)
+            for index in range(10):
+                await chat(payload(f"still held {index}"))
+            assert read_count(held_count) == 1
+            assert read_count(ready_count) == before_ready + 10
+
+            # A release meant for another instance leaves the worker held.
+            status, body = await post_json(
+                f"{held_url}/v1/hold/release", {"instance_id": held_instance_id + 1}
+            )
+            assert status == 409, body
+            assert body["held"] is True, body
+            assert body["instance_id"] == held_instance_id, body
+
+            # The release. Frontends see the record change and route to the worker.
+            status, body = await post_json(
+                f"{held_url}/v1/hold/release", {"instance_id": held_instance_id}
+            )
+            assert status == 200, body
+            assert body == {
+                "instance_id": held_instance_id,
+                "held": False,
+                "released": True,
+            }
+            deadline = asyncio.get_running_loop().time() + 30
+            index = 0
+            while read_count(held_count) < 2:
+                assert (
+                    asyncio.get_running_loop().time() < deadline
+                ), "the released worker took no unpinned request within 30s"
+                await chat(payload(f"released {index}"))
+                index += 1
+                await asyncio.sleep(0.05)
+
+            # The worker is ready, and repeating the release changes nothing.
+            status, health = await get_json(f"{held_url}/health")
+            assert status == 200, health
+            assert "held" not in health, health
+            status, body = await post_json(
+                f"{held_url}/v1/hold/release", {"instance_id": held_instance_id}
+            )
+            assert status == 200, body
+            assert (body["held"], body["released"]) == (False, False), body
+
+    with CounterWorkerProcess(
+        request,
+        request_plane=request_plane,
+        router_mode=router_mode,
+        system_ports=(held_system_port, ready_system_port),
+        worker_env=(
+            {**endpoint_health, "DYN_START_HELD": "true"},
+            endpoint_health,
+        ),
+    ) as workers:
+        with FrontendRouterProcess(
+            request=request,
+            block_size=BLOCK_SIZE,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            namespace=workers.namespace,
+            store_backend="etcd",
+            request_plane=request_plane,
+            router_mode=router_mode,
+            min_initial_workers=workers.num_workers,
+        ):
+            asyncio.run(run_test(workers))
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("router_mode", ["round-robin", "kv"])
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_model_with_only_held_workers_serves_only_named_requests(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    request_plane,
+    event_plane,
+    num_system_ports,
+    router_mode,
+):
+    """A model whose workers are all held is not listed and refuses ordinary requests, but
+    its pipeline is built: a request that names a worker is served. Releasing one worker
+    makes the model serve ordinary requests on that worker.
+    """
+    assert event_plane == "zmq"
+    assert num_system_ports == 2
+    first_system_port, second_system_port = dynamo_dynamic_ports.system_ports
+    first_url = f"http://127.0.0.1:{first_system_port}"
+    held_env = {
+        "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": '["generate"]',
+        "DYN_START_HELD": "true",
+    }
+
+    def read_count(path: str) -> int:
+        try:
+            value = Path(path).read_text().strip()
+            return int(value) if value else 0
+        except (OSError, ValueError):
+            return 0
+
+    def payload(nvext: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = {**COUNTER_TEST_PAYLOAD, "stream": False}
+        if nvext is not None:
+            body["nvext"] = nvext
+        return body
+
+    async def run_test(workers: CounterWorkerProcess) -> None:
+        frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        first_count = workers.cpu_count_file
+        second_count = workers.gpu_count_file
+        loop = asyncio.get_running_loop()
+
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+
+            async def get_json(url: str) -> tuple[int, dict[str, Any]]:
+                async with session.get(url) as response:
+                    return response.status, await response.json(content_type=None)
+
+            async def chat_status(body: dict[str, Any]) -> int:
+                async with session.post(chat_url, json=body) as response:
+                    await response.read()
+                    return response.status
+
+            async def listed_models() -> list[str]:
+                status, models = await get_json(f"{frontend_url}/v1/models")
+                assert status == 200, models
+                return [model["id"] for model in models["data"]]
+
+            async def poll_until(description: str, condition) -> None:
+                deadline = loop.time() + 60
+                while not await condition():
+                    assert (
+                        loop.time() < deadline
+                    ), f"timed out waiting for {description}"
+                    await asyncio.sleep(0.2)
+
+            # The frontend discovers both workers, both held.
+            async def both_workers_discovered_held() -> bool:
+                try:
+                    status, health = await get_json(
+                        f"{frontend_url}/health?instances=true"
+                    )
+                except aiohttp.ClientError:
+                    return False
+                held = [
+                    instance.get("held", False)
+                    for instance in health.get("instances", [])
+                    if instance["namespace"] == workers.namespace
+                    and instance["endpoint"] == "generate"
+                ]
+                return status == 200 and held == [True, True]
+
+            await poll_until(
+                "the frontend to discover both held workers",
+                both_workers_discovered_held,
+            )
+            status, hold = await get_json(f"{first_url}/v1/hold")
+            assert (status, hold["held"]) == (200, True), hold
+            first_instance_id = hold["instance_id"]
+            named = payload(nvext={"backend_instance_id": first_instance_id})
+
+            # The pipeline is built while every worker is held: a named request is served.
+            async def named_request_served() -> bool:
+                return await chat_status(named) == 200
+
+            await poll_until(
+                "a request that names a held worker to be served", named_request_served
+            )
+            served_while_held = read_count(first_count)
+            assert served_while_held >= 1
+            assert read_count(second_count) == 0
+
+            # The model takes no ordinary request and is not listed.
+            assert await chat_status(payload()) == 503
+            assert COUNTER_TEST_PAYLOAD["model"] not in await listed_models()
+            assert read_count(first_count) == served_while_held
+            assert read_count(second_count) == 0
+
+            # Releasing one worker makes the model serve ordinary requests, on that worker.
+            async with session.post(
+                f"{first_url}/v1/hold/release", json={"instance_id": first_instance_id}
+            ) as response:
+                assert response.status == 200, await response.text()
+
+            async def ordinary_request_served() -> bool:
+                return await chat_status(payload()) == 200
+
+            await poll_until(
+                "the released worker to take an ordinary request",
+                ordinary_request_served,
+            )
+            for _ in range(5):
+                assert await chat_status(payload()) == 200
+            assert read_count(first_count) >= served_while_held + 6
+            assert read_count(second_count) == 0
+            assert COUNTER_TEST_PAYLOAD["model"] in await listed_models()
+
+    with CounterWorkerProcess(
+        request,
+        request_plane=request_plane,
+        router_mode=router_mode,
+        system_ports=(first_system_port, second_system_port),
+        worker_env=(held_env, held_env),
+    ) as workers:
+        with FrontendRouterProcess(
+            request=request,
+            block_size=BLOCK_SIZE,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            namespace=workers.namespace,
+            store_backend="etcd",
+            request_plane=request_plane,
+            router_mode=router_mode,
             min_initial_workers=workers.num_workers,
         ):
             asyncio.run(run_test(workers))

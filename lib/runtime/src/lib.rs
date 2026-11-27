@@ -43,6 +43,7 @@ mod otlp;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;
+pub mod routing_hold;
 mod routing_policy;
 pub mod runnable;
 pub mod runtime;
