@@ -18,7 +18,6 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -238,10 +237,7 @@ func (r *graphReconciler) placeCyborgPods(
 		return cmp.Or(cmp.Compare(number(a, grovecommon.LabelPodCliquePodIndex), number(b, grovecommon.LabelPodCliquePodIndex)), cmp.Compare(a.Name, b.Name))
 	}
 
-	// A scale-in keeps the lower ranks, so the ranks of a fabric pod stay below its count.
-	slices.SortFunc(placed, func(a, b *corev1.Pod) int {
-		return cmp.Or(cmp.Compare(number(a, cyborgFabricPodRankLabel), number(b, cyborgFabricPodRankLabel)), byGroveIndex(a, b))
-	})
+	slices.SortFunc(placed, byGroveIndex)
 	slices.SortFunc(unplaced, byGroveIndex)
 
 	// Each fabric pod has replicas positions. A rank is used one time in a fabric
@@ -262,12 +258,16 @@ func (r *graphReconciler) placeCyborgPods(
 	// A placed Pod keeps its position and its numbers for its life. A Pod without
 	// its own numbers has no position: two passes can give one number to two Pods
 	// when the second pass does not observe the write of the first one, and the
-	// containers of a Pod read its labels only when they start.
+	// containers of a Pod read its labels only when they start. A change of the
+	// count also takes the position of a Pod whose rank is not below the count or
+	// whose replica index is not congruent to its rank. A new Pod then takes the
+	// free numbers.
 	for _, pod := range placed {
 		fabricPod := pod.Labels[cyborgFabricPodLabel]
 		rank, rankErr := strconv.Atoi(pod.Labels[cyborgFabricPodRankLabel])
 		index, indexErr := strconv.Atoi(pod.Labels[cyborgReplicaIndexLabel])
-		if rankErr != nil || indexErr != nil || open[fabricPod] == 0 || ranks[fabricPod][rank] || indexes[index] {
+		valid := rankErr == nil && indexErr == nil && rank >= 0 && rank < int(replicas) && index >= 0 && index%int(replicas) == rank
+		if !valid || open[fabricPod] == 0 || ranks[fabricPod][rank] || indexes[index] {
 			surplus = append(surplus, pod)
 			continue
 		}
@@ -363,12 +363,13 @@ func (r *graphReconciler) placeCyborgPods(
 		return nil
 	}
 
-	// The placement is the only owner of this capacity, so the write has no version precondition.
-	scale := &autoscalingv1.Scale{
-		Name: clique.Name, Namespace: clique.Namespace,
-		Spec: autoscalingv1.ScaleSpec{Replicas: capacity},
-	}
-	if err := r.SubResource("scale").Update(ctx, clique, client.WithSubResourceBody(scale)); err != nil {
+	// Grove can replace this PodClique with one of the same name that the placement
+	// does not own. The resource version refuses a write from an old observation,
+	// and the next version of the PodClique starts a new pass.
+	switch err := updateScale(ctx, r.Client, clique, capacity); {
+	case apierrors.IsConflict(err), apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
 		return fmt.Errorf("scale Cyborg PodClique %q: %w", clique.Name, err)
 	}
 	logger.Info("Scaled Cyborg PodClique for its placement", "replicas", capacity, "fabricPods", fabricPods)

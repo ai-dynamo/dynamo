@@ -46,7 +46,9 @@ SPDX-License-Identifier: Apache-2.0
   Deleting the DGD removes its LPXGD through owner garbage collection.
   A missing/deleting DGD or incomplete input handoff stops publication; it does
   not authorize cleanup. A DGD UID mismatch is an error. Disabled integration
-  also leaves existing workloads intact.
+  also leaves existing workloads intact. The Cyborg fabric-pod placement is the
+  exception: it reads only observed objects, so it continues to pin Pods, delete
+  surplus Pods and set the capacity of its PodCliques.
 - Index LPRs by controlling PCS UID, validating the owner's API version and kind
   in the index. Do not add a PCS-name index or namespace-wide request scan.
 - PCS identity derives from the LPXGD UID and stays stable across input edits.
@@ -96,6 +98,8 @@ SPDX-License-Identifier: Apache-2.0
   throughout RollingRecreate without blocking its scaling. Initial Coherent
   configuration acknowledgement does not require scheduler requests or Ready pods.
   Continue observing readiness and component status while scaling is deferred.
+  The Cyborg fabric-pod placement is the exception to the PCS order: it writes
+  the capacity of its PodCliques from observed objects before the PCS write.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.
@@ -205,13 +209,19 @@ SPDX-License-Identifier: Apache-2.0
   to change its Grove index. Cyborg reads its numbers only when its containers
   start, and the Pods that stay after a prune have Grove indexes above their
   count.
+- A Pod keeps its position only while its rank is below the count and its
+  replica index is congruent to its rank modulo the count. After a change of
+  the count, each other Pod is surplus, and a new Pod takes the free numbers.
 - Delete surplus Pods before a lower capacity, and write that capacity only in
   a pass that removes no Pod and finds the capacity of live Pods. If Grove
   observes the lower capacity first, it selects the Pods to remove by itself.
   While a lower capacity is pending, do not delete a Pod without a placement:
   Grove creates it again.
-- Do not delete a Pod in a terminal phase. Grove deletes it and creates a Pod
-  in its place (ai-dynamo/grove#938).
+- Do not add a case for a Pod in a terminal phase. The placement handles it as
+  each other Pod until Grove deletes it and creates a Pod in its place
+  (ai-dynamo/grove#938).
+- Write the capacity with the observed resource version of the PodClique. Grove
+  can replace a PodClique with one of the same name that has no placement label.
 - The placement needs a scheduler that places each pinned Pod by itself, such
   as the default scheduler. KAI schedules the PodClique as one gang and stops
   at a member that cannot run.

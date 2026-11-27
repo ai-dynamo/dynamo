@@ -129,7 +129,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	require.NoError(t, r.Get(ctx, cliqueKey, clique))
 	require.Equal(t, int32(1), clique.Spec.Replicas)
 
-	t.Log("Scale: two replicas mean two Cyborg Pods in each occupied fabric pod")
+	t.Log("Scale: two replicas mean two Cyborg Pods in each occupied fabric pod; the Pod with replica index 1 and rank 0 loses its position, and Grove creates a Pod in its place")
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = new(int32(2))
 	updateTestDGD(t, r, child, dgd)
@@ -139,12 +139,13 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	}
 	require.NoError(t, r.Get(ctx, cliqueKey, clique))
 	require.Equal(t, int32(2), clique.Spec.Replicas)
-	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	require.Empty(t, listTestCyborgPods(t, ctx, r.Client, clique))
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0), newTestReleasedCyborgPod(clique, 1))
 	_, err = r.Reconcile(ctx, key)
 	require.NoError(t, err)
 	pods = listTestCyborgPods(t, ctx, r.Client, clique)
 	require.Equal(t, []string{"b", "b"}, testCyborgFabricPods(pods))
-	require.Equal(t, []string{"1/3", "0/1"}, testCyborgRanks(pods), "the new Pod takes the free rank, and the lowest free replica index that is congruent to it")
+	require.Equal(t, []string{"0/0", "1/1"}, testCyborgRanks(pods), "each replica index is congruent to its rank modulo the new count")
 
 	t.Log("Provision again when the scheduler releases the plan, and keep the Pods that are in place")
 	requests, err = r.getPipelineRequests(ctx, pcs)
@@ -163,7 +164,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	require.NoError(t, err)
 	pods = listTestCyborgPods(t, ctx, r.Client, clique)
 	require.Equal(t, []string{"b", "b", "a", "a", "c", "c"}, testCyborgFabricPods(pods))
-	require.Equal(t, []string{"1/3", "0/1", "0/2", "1/5", "0/4", "1/7"}, testCyborgRanks(pods), "each fabric pod has the ranks 0 and 1, and no replica index occurs two times")
+	require.Equal(t, []string{"0/0", "1/1", "0/2", "1/3", "0/4", "1/5"}, testCyborgRanks(pods), "each fabric pod has the ranks 0 and 1, and no replica index occurs two times")
 }
 
 func TestLPXCyborgPlacementDoesNotWaitForDesiredState(t *testing.T) {
@@ -482,6 +483,20 @@ func TestLPXCyborgPlacementOfPods(t *testing.T) {
 			want:     []string{"2 b 0/2", "6 d 0/6"}, wantCapacity: 4,
 		},
 		{
+			name:     "a scale-in does not keep a rank that is not below the new count: the new Pod takes rank 0",
+			replicas: 1, capacity: 2, nodes: nodes("a", "b"),
+			requests: []*lpxv1alpha1.LPUPipelineRequest{request("target", bound, "b")},
+			pods:     []*corev1.Pod{gated(2, placement), placed(3, "b", 1)},
+			want:     []string{"2 b 0/2"}, wantCapacity: 2,
+		},
+		{
+			name:     "a scale-out does not keep a replica index that is not congruent to its rank",
+			replicas: 2, capacity: 2, nodes: nodes("a", "b"),
+			requests: []*lpxv1alpha1.LPUPipelineRequest{request("target", bound, "b")},
+			pods:     []*corev1.Pod{gated(0, placement), placed(1, "b", 0)},
+			want:     []string{"0 b 0/0"}, wantCapacity: 2,
+		},
+		{
 			name:     "a placed Pod without its own rank and replica index has no position",
 			replicas: 2, capacity: 2, nodes: nodes("a"),
 			pods: []*corev1.Pod{placed(0, "a", 0), placed(1, "a", 0), unranked},
@@ -577,6 +592,37 @@ func TestLPXCyborgPlacementContinuesPastOnePodClique(t *testing.T) {
 		map[string]*grovev1alpha1.PodClique{unselectable.Name: unselectable, selectable.Name: selectable}, nil)
 	require.ErrorContains(t, err, unselectable.Name)
 	require.Equal(t, []string{"0 a 0/0"}, describeTestCyborgPods(listTestCyborgPods(t, ctx, r.Client, selectable)))
+}
+
+func TestLPXCyborgPlacementDoesNotScaleFromAnOldObservation(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("The pass observes a placed PodClique with capacity for one of two fabric pods")
+	pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: "default"}
+	pcs.Spec.Template.Cliques = []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "cond", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}}
+	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{Name: "lpx", CliqueNames: []string{"cond"}}}
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{Name: "pcs-0-lpx", Namespace: "default"}
+	pcsg.Spec.Replicas = 1
+	observed := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1", Labels: map[string]string{
+		cyborgPlacementLabel: cyborgPlacementPerFabricPod,
+	}}
+	observed.Spec.Replicas = 1
+	r := &graphReconciler{
+		Client: newLPXTestClient(t, observed.DeepCopy(), newTestFabricPodNode("gpu-a", "a"), newTestFabricPodNode("gpu-b", "b")),
+		config: &configv1alpha1.OperatorConfiguration{},
+	}
+
+	t.Log("The role drops the placement, and the PodClique of that name no longer has the label")
+	current := observed.DeepCopy()
+	current.Labels = nil
+	require.NoError(t, r.Update(ctx, current))
+
+	t.Log("The placement does not scale the PodClique that it no longer owns, and reports no error: the new version starts a new pass")
+	err := r.reconcileCyborgPlacement(ctx, pcs,
+		map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg}, map[string]*grovev1alpha1.PodClique{observed.Name: observed}, nil)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(current), current))
+	require.Equal(t, int32(1), current.Spec.Replicas)
 }
 
 // newTestPlacedPipelineRequest returns one model's request for a workload replica, with a
