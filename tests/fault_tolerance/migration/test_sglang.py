@@ -8,7 +8,6 @@ import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from pathlib import Path
 
 import psutil
 import pytest
@@ -371,7 +370,6 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        log_root: Path,
         disagg_mode: str | None = None,
         max_model_len: int = 8192,
         enable_metrics: bool = False,
@@ -483,7 +481,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        log_dir = log_root / worker_id
+        log_dir = f"{request.node.name}_{worker_id}"
 
         super().__init__(
             command=command,
@@ -515,7 +513,6 @@ def test_request_migration_sglang_aggregated(
     immediate_kill,
     request_api,
     stream,
-    tmp_path,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -542,14 +539,12 @@ def test_request_migration_sglang_aggregated(
             request,
             "worker1",
             frontend.frontend_port,
-            tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
         )
         worker2 = DynamoWorkerProcess(
             request,
             "worker2",
             frontend.frontend_port,
-            tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
         )
         with managed_processes_concurrently(worker1, worker2):
@@ -597,7 +592,6 @@ def test_request_migration_sglang_kv_transfer(
     immediate_kill,
     request_api,
     stream,
-    tmp_path,
 ):
     """
     End-to-end test for request migration with KV re-transfer in disaggregated mode.
@@ -629,7 +623,6 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="prefill",
             max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
             enable_metrics=True,
@@ -638,7 +631,6 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker1",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="decode",
             max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
         )
@@ -646,7 +638,6 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker2",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="decode",
             max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
         )
@@ -718,7 +709,6 @@ def test_request_migration_sglang_decode(
     migration_max_seq_len,
     immediate_kill,
     request_api,
-    tmp_path,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -747,7 +737,6 @@ def test_request_migration_sglang_decode(
             request,
             "worker0",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="prefill",
             max_model_len=DECODE_MAX_MODEL_LEN,
         )
@@ -755,7 +744,6 @@ def test_request_migration_sglang_decode(
             request,
             "worker1",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="decode",
             max_model_len=DECODE_MAX_MODEL_LEN,
         )
@@ -763,7 +751,6 @@ def test_request_migration_sglang_decode(
             request,
             "worker2",
             frontend.frontend_port,
-            tmp_path,
             disagg_mode="decode",
             max_model_len=DECODE_MAX_MODEL_LEN,
         )
@@ -814,7 +801,6 @@ def test_request_migration_sglang_spec_decoding(
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
-    tmp_path,
 ):
     """
     End-to-end test for aggregated request migration between EAGLE3 workers.
@@ -834,7 +820,6 @@ def test_request_migration_sglang_spec_decoding(
             request,
             "worker1",
             frontend.frontend_port,
-            tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
             enable_metrics=True,
             extra_args=EAGLE3_ARGS,
@@ -844,7 +829,6 @@ def test_request_migration_sglang_spec_decoding(
             request,
             "worker2",
             frontend.frontend_port,
-            tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
             enable_metrics=True,
             extra_args=EAGLE3_ARGS,
