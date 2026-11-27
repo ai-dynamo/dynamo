@@ -682,9 +682,8 @@ def test_etcd_lease_loss_zombie_vllm_frozen_engine(
 
                     # Freeze the engine: the in-flight request is now
                     # non-cancellable (cannot complete or be aborted). Resume/kill
-                    # in finally before the worker context unwinds, and wait for
-                    # the engine to exit, so a SIGSTOP-ed engine can't hang
-                    # teardown or strand a GPU-holding process for the next test.
+                    # in finally, then wait for exit, so a SIGSTOP-ed engine can't
+                    # hang teardown or strand a GPU-holding process for the next test.
                     frozen_pids = _freeze_vllm_engine_descendants(worker.proc.pid)
                     try:
                         time.sleep(1)
