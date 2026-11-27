@@ -10,12 +10,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    multi_worker_sequence::{ReplicaRequestLeaseObserver, active_request_expiry_duration},
-    scheduling::{
-        AttemptId,
-        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-    },
+use dynamo_router_protocol::attempt::AttemptId;
+use dynamo_scheduler::host::SchedulerBookingCleanup;
+use dynamo_slot_tracker::host::{
+    ReplicaRequestLeaseObserver, SchedulerBookingDescriptor, active_request_expiry_duration,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -255,6 +253,41 @@ impl RequestLeaseManager {
         debug_assert!(installed, "request lease manager scheduler set twice");
     }
 
+    /// Offer every lease to `keepalive` twice per scan interval until `cancellation`.
+    pub(crate) fn start_keepalives(
+        &self,
+        keepalive: impl Fn(&SchedulerBookingDescriptor) + Send + 'static,
+        cancellation: CancellationToken,
+    ) {
+        let manager = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            // Half the scan interval, so a peer's mirrored lease is touched inside each
+            // of its own scan windows whatever the phase between the two routers' timers.
+            let mut interval = tokio::time::interval(active_request_expiry_duration() / 2);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        let Some(manager) = manager.upgrade() else {
+                            break;
+                        };
+                        let records = manager
+                            .active
+                            .lock()
+                            .by_attempt
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for record in records {
+                            keepalive(&record.booking);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     pub(crate) fn replica_observer(&self) -> Arc<dyn ReplicaRequestLeaseObserver> {
         // The scheduler actor owns slots and their observer. A strong manager reference
         // here would keep the actor's own command sender alive through booking cleanup.
@@ -332,9 +365,10 @@ impl RequestLeaseManager {
         self.inner.enqueue_completion(record);
     }
 
-    async fn finish(&self, record: &Arc<RequestLeaseRecord>) {
+    /// Returns `false` when another lifecycle path already claimed the record.
+    async fn finish(&self, record: &Arc<RequestLeaseRecord>) -> bool {
         if !record.clock.claim_now() {
-            return;
+            return false;
         }
         self.inner.remove(record);
 
@@ -381,6 +415,25 @@ impl RequestLeaseManager {
                 %error,
                 "Failed to enqueue approximate LRU request release"
             ),
+        }
+        true
+    }
+
+    /// Release the scheduler booking now, even if another path owns the
+    /// record's cleanup and has not applied it yet. Attempt-scoped, so it is a
+    /// no-op once that cleanup lands and cannot free a later attempt.
+    async fn release_booking(&self, booking: &SchedulerBookingDescriptor) {
+        let Some(scheduler) = self.inner.scheduler("released", booking) else {
+            return;
+        };
+        if let Err(error) = scheduler.enqueue_and_wait(booking.clone()).await {
+            tracing::warn!(
+                request_id = %booking.request_id,
+                worker = ?booking.worker,
+                attempt_id = %booking.attempt_id,
+                %error,
+                "Failed to release scheduler booking"
+            );
         }
     }
 }
@@ -429,6 +482,39 @@ impl RequestAttemptLease {
 
     pub(crate) async fn finish(&self) {
         self.manager.finish(&self.record).await;
+    }
+
+    pub(crate) fn release_handle(&self) -> RequestAttemptRelease {
+        RequestAttemptRelease {
+            manager: self.manager.clone(),
+            record: Arc::clone(&self.record),
+        }
+    }
+}
+
+/// Releases one attempt's booking before the lease that owns it completes.
+/// Release is idempotent and scoped to this attempt, so the owner's eventual
+/// completion is a no-op and cannot free a later attempt of the same request.
+/// The booking is gone when `release` returns, so a migration retry can
+/// re-book the same request ID.
+pub(crate) struct RequestAttemptRelease {
+    manager: RequestLeaseManager,
+    record: Arc<RequestLeaseRecord>,
+}
+
+impl RequestAttemptRelease {
+    pub(crate) async fn release(&self) {
+        if !self.manager.finish(&self.record).await {
+            self.manager.release_booking(&self.record.booking).await;
+        }
+    }
+}
+
+impl std::fmt::Debug for RequestAttemptRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestAttemptRelease")
+            .field("booking", &self.record.booking)
+            .finish()
     }
 }
 
@@ -498,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn replica_observer_forwards_live_callbacks_without_retaining_manager() {
-        use dynamo_kv_router::protocols::WorkerWithDpRank;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
 
@@ -565,6 +651,104 @@ mod tests {
         observer.progressed(&booking);
         observer.completed(&booking);
         assert!(manager.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn attempt_release_frees_booking_when_another_path_owns_cleanup() {
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
+
+        use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
+
+        let router = tracked_router("attempt-release-lost-claim").await;
+        let request_id = "attempt-release-lost-claim".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let sequence_request = || SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: None,
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+        let scheduler = router.selection.scheduler();
+        let attempt_id = scheduler
+            .add_request_admitted(sequence_request())
+            .await
+            .unwrap();
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id,
+        };
+        let lease = router.request_leases.register_local(booking.clone(), None);
+        let release = lease.release_handle();
+
+        // Another lifecycle path has claimed the attempt but not yet released it.
+        assert!(lease.record.clock.claim_now());
+        assert!(scheduler.has_booking(&booking));
+
+        release.release().await;
+        assert!(!scheduler.has_booking(&booking));
+
+        let retry_attempt_id = scheduler
+            .add_request_admitted(sequence_request())
+            .await
+            .unwrap();
+        let retry_booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id: retry_attempt_id,
+        };
+        release.release().await;
+        drop(lease);
+        assert!(scheduler.has_booking(&retry_booking));
+
+        scheduler.free(&request_id).await.unwrap();
+        router.cancellation_token.cancel();
+    }
+
+    /// The owner's keepalive timer holds a peer's mirrored lease past two scan
+    /// periods; once the owner's lease is gone, the peer's reaper reclaims it.
+    #[tokio::test(start_paused = true)]
+    async fn keepalives_hold_a_peer_lease_until_the_owner_stops() {
+        use dynamo_router_protocol::{attempt::AttemptIdMinter, worker::WorkerWithDpRank};
+
+        let period = active_request_expiry_duration();
+        let cancel = CancellationToken::new();
+        let manager = || RequestLeaseManager {
+            inner: Arc::new(RequestLeaseManagerInner {
+                active: Mutex::new(ActiveRequestLeases::default()),
+                scheduler: OnceLock::new(),
+            }),
+        };
+        let (owner, peer) = (manager(), manager());
+        // A replicated keepalive reaches the peer's lease as `progressed`, which
+        // is `touch_booking`.
+        let touch_peer = {
+            let peer = peer.clone();
+            move |booking: &SchedulerBookingDescriptor| peer.touch_booking(booking)
+        };
+        owner.start_keepalives(touch_peer, cancel.clone());
+        start_reaper(Arc::downgrade(&peer.inner), period, cancel.clone());
+        // Both timers tick once immediately; register after that.
+        tokio::task::yield_now().await;
+        let booking = SchedulerBookingDescriptor {
+            request_id: "streaming".to_string(),
+            worker: WorkerWithDpRank::new(0, 0),
+            attempt_id: AttemptIdMinter::new().mint(),
+        };
+        let lease = owner.register_local(booking.clone(), None);
+        peer.register_remote(booking.clone());
+
+        // Without keepalives the peer reclaims the lease at its second scan.
+        tokio::time::sleep(period * 11 / 4).await;
+        assert!(peer.inner.matching_record(&booking).is_some());
+
+        drop(lease);
+        tokio::time::sleep(period * 2).await;
+        assert!(peer.inner.matching_record(&booking).is_none());
+        cancel.cancel();
     }
 
     #[test]

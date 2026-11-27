@@ -6,6 +6,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import warnings
 from typing import List, Optional, Union
@@ -16,6 +17,7 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import (
+    Deprecated,
     add_argument,
     add_negatable_bool_argument,
     parse_bool,
@@ -25,6 +27,7 @@ from dynamo.common.utils.nixl_telemetry import nixl_prometheus_base_port
 from . import __version__
 from .benchmark_points import (
     BENCHMARK_MODES,
+    FPM_POWER_MIN_WINDOW_S,
     BenchmarkMode,
     BenchmarkPoints,
     load_benchmark_points_file,
@@ -138,6 +141,19 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYNAMO_ARTIFACT_ROUTER_PROFILE",
             default=None,
             help="JSON array of [router_id, expert_count, top_k] entries for generation-artifact route capture.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--systemone-serial",
+            env_var="DYN_VLLM_SYSTEMONE_SERIAL",
+            default=False,
+            env_value_type=parse_bool,
+            help=(
+                "Opt in to decision scoring on a qualified serialized worker. "
+                "Requires --max-num-seqs=1 and --logprobs-mode=raw_logprobs; "
+                "does not change engine scheduling settings."
+            ),
         )
 
         add_negatable_bool_argument(
@@ -274,9 +290,19 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--transcription-worker",
+            env_var="DYN_VLLM_TRANSCRIPTION_WORKER",
+            default=False,
+            help="Run as an aggregated speech-to-text worker using vLLM's native "
+            "OpenAI transcription serving layer.",
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--realtime",
             env_var="DYN_VLLM_REALTIME",
             default=False,
+            deprecated=Deprecated("--endpoint-types realtime", remove_in="v1.9"),
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
             "supports text-only realtime and transcription sessions. "
@@ -302,6 +328,21 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Run in headless mode for multi-node TP/PP. "
             "Secondary nodes run vLLM workers only, no dynamo endpoints. "
             "See vLLM multi-node data parallel documentation for more details.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_VLLM_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the Dynamo worker process once "
+                "the engine is initialized, before the model is registered, so later "
+                "full (gen2) collections stop re-walking the static heap. vLLM already "
+                "does this in its EngineCore, GPU workers and API server; this covers "
+                "the Dynamo process that replaces the API server. Opt in only after "
+                "validating memory usage for the workload."
+            ),
         )
 
         # ModelExpress P2P
@@ -579,6 +620,24 @@ class DynamoVllmArgGroup(ArgGroup):
                 "to at least twice this cap keeps every swept rung warmable."
             ),
         )
+        add_argument(
+            g,
+            flag_name="--benchmark-power-window-s",
+            env_var="DYN_BENCHMARK_POWER_WINDOW_S",
+            default=0.0,
+            arg_type=float,
+            help=(
+                "Minimum power window per benchmark point, in seconds (default: "
+                "0, disabled). After a point's latency sample, the point repeats "
+                "in synchronized iterations until this much time has elapsed, and "
+                "the NVML energy counter of every GPU of the rank is read at the "
+                "window's edges. The latency sample is collected as without the "
+                "window. Every measured point then takes at least this long, so "
+                "scale --benchmark-timeout with it: at 2 s, the default 900 s "
+                "fits about 450 points. "
+                f"Must be 0 or at least {FPM_POWER_MIN_WINDOW_S}."
+            ),
+        )
 
 
 # @dataclass()
@@ -589,6 +648,7 @@ class DynamoVllmConfig(ConfigBase):
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
     artifact_router_profile: Optional[str] = None
+    systemone_serial: bool = False
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -604,6 +664,7 @@ class DynamoVllmConfig(ConfigBase):
     embedding_worker: bool = False
     embedding_frontend_tokenization: bool = False
     embedding_worker_processes: int = 1
+    transcription_worker: bool = False
     realtime: bool = False
     classify_worker: bool = False
 
@@ -612,6 +673,8 @@ class DynamoVllmConfig(ConfigBase):
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
+
+    freeze_gc_after_init: bool = False
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
@@ -632,6 +695,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
     benchmark_max_batch_size: Optional[int] = None
+    benchmark_power_window_s: float = 0.0
     prefill_max_new_token_samples: int = 64
     prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
@@ -663,16 +727,43 @@ class DynamoVllmConfig(ConfigBase):
         _configured_artifact_router_profile(self.artifact_router_profile)
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
+        self._validate_systemone_serial()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
         self._validate_embedding_worker_processes()
+        self._validate_transcription_worker_exclusivity()
         self._validate_realtime_worker_exclusivity()
         self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
+        self._validate_freeze_gc_after_init()
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
+
+    def _validate_systemone_serial(self) -> None:
+        if not self.systemone_serial:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError("--systemone-serial requires --disaggregation-mode=agg")
+        incompatible = (
+            "use_vllm_tokenizer",
+            "enable_rl",
+            "enable_multimodal",
+            "route_to_encoder",
+            "custom_encoder_class",
+            "embedding_worker",
+            "transcription_worker",
+            "classify_worker",
+            "realtime",
+            "headless",
+            "benchmark_mode",
+        )
+        for name in incompatible:
+            if getattr(self, name):
+                raise ValueError(
+                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
+                )
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None
@@ -789,6 +880,15 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
             raise ValueError("--benchmark-timeout must be positive")
+        power_window_s = self.benchmark_power_window_s
+        if power_window_s != 0 and not (
+            math.isfinite(power_window_s) and power_window_s >= FPM_POWER_MIN_WINDOW_S
+        ):
+            # A shorter window could never be reported as a measurement.
+            raise ValueError(
+                "--benchmark-power-window-s must be 0 (disabled) or at least "
+                f"{FPM_POWER_MIN_WINDOW_S}"
+            )
         # Fail at startup rather than at manifest-writing time: a repeat count
         # of zero produces a manifest with no prefill rows, and the run that
         # reads it back looks like one that simply had nothing to measure.
@@ -997,6 +1097,21 @@ class DynamoVllmConfig(ConfigBase):
                     f"reserves {right_ports}. Configure non-overlapping ports."
                 )
 
+    def _validate_freeze_gc_after_init(self) -> None:
+        """The freeze runs in register_vllm_model, so reject roles that never call it."""
+        if not self.freeze_gc_after_init:
+            return
+        if self.headless:
+            raise ValueError(
+                "--freeze-gc-after-init cannot be combined with --headless: headless "
+                "nodes register no Dynamo endpoint, so the freeze would never run."
+            )
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            raise ValueError(
+                "--freeze-gc-after-init is not supported with "
+                "--disaggregation-mode=encode."
+            )
+
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""
         if not self.realtime:
@@ -1008,12 +1123,16 @@ class DynamoVllmConfig(ConfigBase):
                 else self.disaggregation_mode
             )
             raise ValueError(
-                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+                f"--endpoint-types realtime is only valid with --disaggregation-mode=agg (got {mode})."
             )
         if self.embedding_worker:
-            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --embedding-worker."
+            )
         if self.classify_worker:
-            raise ValueError("--realtime cannot be combined with --classify-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --classify-worker."
+            )
         for enabled, option in (
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
@@ -1021,15 +1140,61 @@ class DynamoVllmConfig(ConfigBase):
             (self.headless, "--headless"),
         ):
             if enabled:
-                raise ValueError(f"--realtime cannot be combined with {option}.")
+                raise ValueError(
+                    f"--endpoint-types realtime cannot be combined with {option}."
+                )
         if self.enable_multimodal:
             raise ValueError(
-                "--realtime cannot be combined with multimodal worker flags."
+                "--endpoint-types realtime cannot be combined with multimodal worker flags."
             )
         if self.benchmark_mode is not None:
-            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --benchmark-mode."
+            )
         if getattr(getattr(self, "engine_args", None), "enable_lora", False):
-            raise ValueError("--realtime cannot be combined with --enable-lora.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --enable-lora."
+            )
+
+    def _validate_transcription_worker_exclusivity(self) -> None:
+        """Transcription serving uses a dedicated aggregated ASR worker."""
+        if not self.transcription_worker:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                "--transcription-worker is only valid with "
+                f"--disaggregation-mode=agg (got {mode})."
+            )
+        for enabled, option in (
+            (self.embedding_worker, "--embedding-worker"),
+            (self.classify_worker, "--classify-worker"),
+            (self.realtime, "--endpoint-types realtime"),
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(
+                    f"--transcription-worker cannot be combined with {option}."
+                )
+        if self.enable_multimodal:
+            raise ValueError(
+                "--transcription-worker cannot be combined with multimodal worker flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--transcription-worker cannot be combined with --benchmark-mode."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--transcription-worker cannot be combined with --enable-lora."
+            )
 
     def _validate_classify_worker_exclusivity(self) -> None:
         """Classify worker is aggregated-only and exclusive of multimodal /

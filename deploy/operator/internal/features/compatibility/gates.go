@@ -17,12 +17,23 @@
 
 package compatibility
 
-import semver "github.com/Masterminds/semver/v3"
+import (
+	semver "github.com/Masterminds/semver/v3"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+)
 
 // Feature gates gated on the operator origin version (the operator version that
 // first reconciled / created the DGD resource).
 
 var (
+	// FrontendStartupProbe requires runtime support and pins defaults to new workloads.
+	// The published 1.6 operator did not render this default, even for 1.6 runtimes.
+	FrontendStartupProbe = RuntimeGate{
+		Name:              "FrontendStartupProbe",
+		MinOriginVersion:  *semver.MustParse("1.7.0"),
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6},
+	}
+
 	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
 	// Existing graphs retain their persisted minimum form. This gate does not select a rollout strategy.
 	GroveNativeMinAvailable = Gate{
@@ -45,5 +56,30 @@ var (
 	MultinodeTopologyAliases = Gate{
 		Name:             "MultinodeTopologyAliases",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
+
+	// TRTLLMMpirunMapByNode places GPUs-per-pod mpirun ranks on each TRT-LLM node. Enabled for
+	// DGDs created by operator >= 1.7.0 so an upgrade does not roll existing multinode workloads.
+	TRTLLMMpirunMapByNode = Gate{
+		Name:             "TRTLLMMpirunMapByNode",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
+	// FrontendSidecarProbeReplacement makes an authored frontend-sidecar probe
+	// replace the operator default as a complete value, matching main and the
+	// runtime sidecar. The published 1.6 operator field-merged these probes with
+	// its defaults, so older workloads keep that merge to preserve their rendered
+	// pod template across an operator-only upgrade.
+	FrontendSidecarProbeReplacement = Gate{
+		Name:             "FrontendSidecarProbeReplacement",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
+	// OrderedEnvironmentVariables gates order-preserving environment variable
+	// composition. Enabled for DGDs originally created by operator >= 1.8.0 so
+	// an operator upgrade does not reorder existing workloads.
+	OrderedEnvironmentVariables = Gate{
+		Name:             "OrderedEnvironmentVariables",
+		MinOriginVersion: *semver.MustParse("1.8.0"),
 	}
 )

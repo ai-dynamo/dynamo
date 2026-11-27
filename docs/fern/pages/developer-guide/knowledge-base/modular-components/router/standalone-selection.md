@@ -76,6 +76,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
 | `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
 | `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` | `300` | Override the absolute request age at which the standalone slot tracker may reclaim stale active state. |
+| `DYN_ZMQ_IO_THREADS` | `4` | I/O threads per shared ZMQ context. KV-event, replay, and replica-sync sockets share contexts of up to 1023 sockets each, the libzmq limit. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -135,6 +136,21 @@ Content-Type: application/json
 `data_parallel_size` is 1; a multi-rank worker that sets it stays `incomplete`
 because the replay protocol carries no rank.
 
+For raw sources using [wide-token SGLang builds](../backends/sglang/multimodal.md#wide-token-sglang-builds), set the boolean `engine_owned_mm_identity` to `true` in the worker record on each selector replica. It applies to all of that worker's DP ranks and defaults to `false`. To update an already registered SGLang worker:
+
+```http
+PATCH /workers/1
+Content-Type: application/json
+
+{"engine_owned_mm_identity": true}
+```
+
+Omitting the field in a patch leaves its value unchanged; pass `false` to disable it. Changing its effective value resets the worker's listeners and indexed cache state, as described under [Worker Restarts](#worker-restarts).
+
+Custom discovery sources must include the setting in their worker records. The Kubernetes EPP adapter does not detect the SGLang build and currently leaves this setting unset, which uses `false`.
+
+For raw SGLang sources, also set the boolean `idempotent_stores` to `true`. SGLang sends one remove per block however many times it stored the block, so the indexer must not count [repeated block stores](standalone-indexer.md#repeated-block-stores). The default, `false`, counts them, as vLLM sources need. The setting applies to all of the worker's DP ranks, and a patch handles it as it does `engine_owned_mm_identity`. The Kubernetes EPP adapter sets it to `true` when `DYN_EPP_TOKENIZER_PROTOCOL` is `sglang-renderer`.
+
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
 record. If the model or routing group changes, the worker is removed from the
@@ -175,10 +191,13 @@ sequence watermark or invalidate old cache ownership.
 
 With KV events enabled, `POST /workers` or `PATCH /workers/{worker_id}` for an
 existing schedulable worker reconciles its indexer registration rank by rank: a rank
-whose event endpoint and replay endpoint are unchanged keeps its listener, its
+whose event endpoint, replay endpoint, and effective `engine_owned_mm_identity`
+and `idempotent_stores` values are unchanged keeps its listener, its
 sequence watermark, and its indexed blocks, so capacity or topology updates do not
-drain the cache view. A rank whose endpoint changed gets a new listener with a fresh
-watermark. Because an unchanged update keeps the old watermark, it does not recover a
+drain the cache view. For either setting, omitting it and explicit `false` are equivalent.
+A changed endpoint or effective setting clears that rank's indexed blocks
+and creates a listener with a fresh watermark. Because an unchanged update keeps
+the old watermark, it does not recover a
 publisher that restarted at the same address: for that, call
 `DELETE /workers/{worker_id}`, wait for the response, then `POST /workers` with the
 current record, or register the restarted publisher under a new `kv_events_endpoint`.
@@ -348,7 +367,7 @@ hash producer with the same algorithm, key, and key ID as the selector.
 
 Both `POST /select` and `POST /select_and_reserve` accept an optional `session_id` string. With `--session-affinity-ttl-secs` enabled, each model and routing group has its own binding table. `/select_and_reserve` binds a new session to the selected worker and holds its lease until the reservation is released or expires. The idle TTL starts when the last lease is released. `/select` can use an existing binding but does not create one.
 
-Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionContext::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
+Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it as `session_id()` on the value `WorkerSelectionRequest::info().session_context()` returns, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 The pending-selection cache keeps the session metadata, so a later `POST /reservations` for that selection binds the session to the booked worker, the same as `/select_and_reserve` does. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
 
@@ -373,7 +392,7 @@ present, the flat `session_id` field is ignored.
 }
 ```
 
-Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
+Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionRequest::info().session_context()`.
 
 The optional `agent_headers` map carries upstream-captured header names and ordered lists of string values to the policy's `SessionContext.agent_headers()` accessor. Both selection endpoints preserve these values without interpreting them. Supply the map in the request body; the selection API does not extract coding-agent metadata from its own HTTP headers.
 

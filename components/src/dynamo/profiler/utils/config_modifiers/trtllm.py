@@ -20,6 +20,7 @@ from dynamo.profiler.utils.config import (
     parse_override_engine_args,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -260,6 +261,18 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
     return config
 
 
+# Flags that set KV-event publishing explicitly, including the deprecated
+# combined alias that dynamo.trtllm expands to --[no-]publish-kv-events.
+_KV_EVENT_FLAGS = frozenset(
+    (
+        "--publish-kv-events",
+        "--no-publish-kv-events",
+        "--publish-events-and-metrics",
+        "--no-publish-events-and-metrics",
+    )
+)
+
+
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
@@ -271,6 +284,22 @@ class TrtllmConfigModifier(BaseConfigModifier):
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD components."""
         return update_image(config, image)
+
+    @classmethod
+    def _finalize_disagg_cli_args(
+        cls, args: list[str], role: SubComponentType
+    ) -> list[str]:
+        # dynamo.trtllm defaults to aggregated serving, so each worker needs its role.
+        finalized = set_unique_argument_value(
+            break_arguments(args), "--disaggregation-mode", role.value
+        )
+        # The disagg blueprint publishes prefill KV events for the KV router; an
+        # explicit choice stays authoritative.
+        if role == SubComponentType.PREFILL and not any(
+            arg.split("=", 1)[0] in _KV_EVENT_FLAGS for arg in finalized
+        ):
+            finalized = append_argument(finalized, "--publish-kv-events")
+        return finalized
 
     @classmethod
     def convert_config(

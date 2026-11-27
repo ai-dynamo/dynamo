@@ -44,11 +44,12 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
+ARG NATS_COMMIT={{ context.dynamo.nats_commit }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
+ARG ETCD_COMMIT={{ context.dynamo.etcd_commit }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
@@ -64,20 +65,18 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
+{% if device in ("xpu", "cpu") -%}
+{% if "nixl_ucx_ref" in context[framework].get(device_key, {}) -%}
+ARG NIXL_UCX_REF={{ context[framework][device_key].nixl_ucx_ref }}
+{% else -%}
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-{# Resolved most-specific first: per-target, then per-device, then framework. #}
-{% if "nixl_ref" in context[framework].get(target, {}) -%}
-ARG NIXL_REF={{ context[framework][target].nixl_ref }}
-{% elif "nixl_ref" in context[framework].get(device_key, {}) -%}
+{% endif -%}
+{% endif -%}
+{# Resolved most-specific first: per-device, then framework. #}
+{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
 ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
 {% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
-{% endif -%}
-{% if device == "cuda" %}
-ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
-ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
-ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
-ARG HWLOC_VERSION={{ context.dynamo.hwloc_version }}
 {% endif %}
 
 {% if target == "dev" or target == "local-dev" %}
@@ -100,31 +99,17 @@ ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 {% endif %}
 
 {% if framework == "vllm" -%}
-ARG MAX_JOBS={{ context.vllm.max_jobs }}
-ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
-ARG TOKENIZERS_VERSION={{ context.vllm.tokenizers_version }}
+{% if context.vllm[device_key].transformers_version is defined -%}
+ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
+ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
+{% endif -%}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
-{% if device == "cuda" -%}
-# If left blank, then we will fallback to vLLM defaults
-ARG DEEPGEMM_REF=""
-
-# aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
-ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
-{% endif %}
-{%- endif -%}
+{% endif -%}
 
 {% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
-{%- endif -%}
-
-{% if framework == "sglang" and device == "xpu" -%}
-# SGLang XPU build: clone and build from source (no pre-built runtime image)
-ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}
-ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
-ARG SGLANG_KERNEL_GIT_URL={{ context.sglang.xpu.sglang_kernel_git_url }}
-ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}

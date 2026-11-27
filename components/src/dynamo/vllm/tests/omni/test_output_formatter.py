@@ -57,6 +57,7 @@ def _make_request_output(
     output.text = text
     output.finish_reason = finish_reason
     output.token_ids = [1, 2, 3]  # 3 completion tokens
+    output.cumulative_token_ids = None  # plain vLLM output, not vLLM-Omni
     ro = MagicMock()
     ro.outputs = [output]
     ro.prompt_token_ids = [
@@ -245,6 +246,11 @@ class TestDiffusionFormatterPrepareImages:
         assert len(results) == 3
 
 
+def _generated_images(count: int, size: tuple[int, int] = (8, 8)) -> list:
+    """Real PIL images, as the diffusion engine returns them."""
+    return [Image.new("RGB", size, color="red") for _ in range(count)]
+
+
 class TestDiffusionFormatterImage:
     @pytest.mark.asyncio
     async def test_b64_outputs_report_decoded_encoding_and_size(self):
@@ -395,6 +401,9 @@ class TestDiffusionFormatterImage:
         )
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
+        # The chat shape is unchanged: image accounting is an images-API field.
+        assert "usage" not in chunk
+        assert "nvext" not in chunk
 
     @pytest.mark.asyncio
     async def test_image_generation_b64_format(self):
@@ -427,6 +436,49 @@ class TestDiffusionFormatterImage:
         assert chunk["data"][0]["b64_json"] is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "requested_steps", [4, None], ids=["steps", "model-default"]
+    )
+    async def test_format_reports_image_accounting_from_an_async_omni_stage_output(
+        self, requested_steps
+    ):
+        """The stage output `AsyncOmni` yields carries the images and the
+        orchestrator's stage metrics, not the step count the engine ran. The
+        accounting counts the images in the output and takes `input_images`
+        and `num_inference_steps` from the handler. Token usage stays unset:
+        a diffusion model has no token counts."""
+        f = _make_diffusion_formatter()
+        # Shaped like `OmniBase._process_single_result`'s return value.
+        stage = SimpleNamespace(
+            request_id="req-1",
+            final_output_type="image",
+            images=_generated_images(2, size=(64, 32)),
+            metrics={
+                "stage_metrics": {"stage_0": {"duration_ms": 12.0}},
+                "stage_id": 0,
+                "final_output_type": "image",
+                "num_tokens_in": 0,
+                "num_tokens_out": 0,
+            },
+        )
+        chunk = await f.format(
+            stage,
+            "req-1",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            input_images=1,
+            num_inference_steps=requested_steps,
+        )
+        assert len(chunk["data"]) == 2
+        assert "usage" not in chunk
+        assert chunk["size"] == "64x32"
+        assert chunk["output_format"] == "png"
+        expected = {"output_images": 2, "input_images": 1}
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        assert chunk["nvext"]["usage"] == expected
+
+    @pytest.mark.asyncio
     async def test_empty_images_returns_error(self):
         from dynamo.common.utils.output_modalities import RequestType
 
@@ -435,6 +487,35 @@ class TestDiffusionFormatterImage:
             [], "req-1", request_type=RequestType.IMAGE_GENERATION
         )
         assert "Error" in chunk["choices"][0]["delta"]["content"]
+
+
+class TestImageOutputFormat:
+    def test_normalizer_returns_a_value_the_response_model_accepts(self):
+        """The normalizer casts its result to `ImageOutputFormat`; the cast is
+        honest only while the encoder table, the alias, and the generated
+        `NvImagesResponse.output_format` Literal name the same values."""
+        from typing import Literal, get_args, get_origin
+
+        from dynamo.common.protocols.image_protocol import NvImagesResponse
+        from dynamo.vllm.omni.output_formatter import (
+            _IMAGE_OUTPUT_FORMATS,
+            ImageOutputFormat,
+            _normalize_image_output_options,
+        )
+
+        allowed = set(get_args(ImageOutputFormat))
+        assert set(_IMAGE_OUTPUT_FORMATS) == allowed
+
+        response_annotation = NvImagesResponse.model_fields["output_format"].annotation
+        response_literal = next(
+            arg for arg in get_args(response_annotation) if get_origin(arg) is Literal
+        )
+        assert set(get_args(response_literal)) == allowed
+
+        for value in sorted(allowed):
+            assert _normalize_image_output_options(value, None) == value
+            assert _normalize_image_output_options(value.upper(), None) == value
+        assert _normalize_image_output_options(None, None) == "png"
 
 
 class TestDiffusionFormatterVideo:
@@ -1016,6 +1097,53 @@ class TestAudioFormatterFormat:
         assert response is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_delta_metadata_does_not_fail_valid_audio(self, streaming):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState() if streaming else AudioAggregateState()
+        context = {
+            "audio_stream_state" if streaming else "audio_aggregate_state": state,
+            "output_format": "pcm",
+        }
+        # DELTA output can retain sr after the engine drains the audio key.
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        # Qwen3-TTS also keeps its running codec_frames, so a step that decoded
+        # no new samples arrives as codec_frames and sr alone.
+        codec_only = {
+            "codec_frames": torch.zeros((1, 16), dtype=torch.long),
+            "sr": 24000,
+        }
+        assert await formatter.format(codec_only, "req-1", **context) is None
+        response = await formatter.format(
+            {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+            "req-1",
+            **context,
+        )
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        if not streaming:
+            response = await formatter.finish_aggregate(
+                "req-1", state, output_format="pcm"
+            )
+        assert response["status"] == "completed"
+        assert len(base64.b64decode(response["data"][0]["b64_json"])) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_delta_metadata_alone_cannot_complete_audio(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+        for payload in (
+            {"sr": 24000},
+            {"codec_frames": torch.zeros((1, 16), dtype=torch.long), "sr": 24000},
+        ):
+            assert (
+                await formatter.format(payload, "req-1", audio_aggregate_state=state)
+                is None
+            )
+        response = await formatter.finish_aggregate("req-1", state)
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
+
+    @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
@@ -1463,9 +1591,10 @@ class TestOutputFormatter:
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = _make_request_output("hello world")
+        stage = SimpleNamespace(
+            final_output_type="text",
+            outputs=_make_request_output("hello world").outputs,
+        )
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
         )
@@ -1517,15 +1646,55 @@ class TestOutputFormatter:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_text_without_request_output_returns_none(self):
+    async def test_text_without_outputs_returns_none(self):
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = None
+        stage = SimpleNamespace(final_output_type="text", outputs=[])
         result = await f.format(stage, "req-1")
         assert result is None
+
+
+class TestOutputFormatterRealOmniText:
+    """Text formatting against the real vLLM-Omni output class.
+
+    Since vLLM-Omni 0.28, ``OmniRequestOutput`` carries ``outputs`` directly and
+    has no ``request_output``. This is the single cumulative final object the
+    disaggregated stage router formats.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_cumulative_output(self):
+        omni_outputs = pytest.importorskip("vllm_omni.outputs")
+        from vllm.outputs import CompletionOutput
+
+        real = omni_outputs.OmniRequestOutput(
+            request_id="req-1",
+            final_output_type="text",
+            prompt_token_ids=[10, 20, 30, 40, 50],
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello world",
+                    token_ids=[1, 2, 3],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+        )
+
+        chunk = await OutputFormatter(model_name="test-model").format(
+            real, "req-1", request_type=RequestType.CHAT_COMPLETION
+        )
+
+        assert chunk is not None
+        choice = chunk["choices"][0]
+        assert choice["delta"]["content"] == real.outputs[0].text
+        assert choice["finish_reason"] == "stop"
+        assert chunk["usage"]["prompt_tokens"] == len(real.prompt_token_ids)
+        assert chunk["usage"]["completion_tokens"] == len(real.outputs[0].token_ids)
+        assert chunk["usage"]["total_tokens"] == 8
 
 
 # ── AudioFormatter — output_format field (new branch behavior) ──────────────

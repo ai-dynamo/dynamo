@@ -118,6 +118,15 @@ impl TcpClient {
         info: ConnectionInfo,
         cancellation_counter: Option<IntCounter>,
     ) -> Result<StreamSender> {
+        Self::create_response_stream_with_guard(context, info, cancellation_counter, None).await
+    }
+
+    pub(crate) async fn create_response_stream_with_guard(
+        context: Arc<dyn AsyncEngineContext>,
+        info: ConnectionInfo,
+        cancellation_counter: Option<IntCounter>,
+        writer_guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<StreamSender> {
         let info =
             TcpStreamConnectionInfo::try_from(info).context("tcp-stream-connection-info-error")?;
         tracing::trace!("Creating response stream for {:?}", info);
@@ -142,11 +151,8 @@ impl TcpClient {
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
 
-        // this is a oneshot channel that will be used to signal when the stream is closed
-        // when the stream sender is dropped, the bytes_rx will be closed and the forwarder task will exit
-        // the forwarder task will capture the alive_rx half of the oneshot channel; this will close the alive channel
-        // so the holder of the alive_tx half will be notified that the stream is closed; the alive_tx channel will be
-        // captured by the monitor task
+        // The reader watches the receiver lifetime to distinguish a live writer
+        // from one that has already finished producing responses.
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
         let reader_span = tracing::Span::current();
@@ -185,14 +191,11 @@ impl TcpClient {
         // set up the channel to send bytes to the transport layer
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
 
-        // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
         let writer_context = context.clone();
-        let writer_task = tokio::spawn(handle_writer(
-            framed_writer,
-            bytes_rx,
-            alive_rx,
-            writer_context,
-        ));
+        let writer_task = tokio::spawn(async move {
+            let _writer_guard = writer_guard;
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
 
         let subject = info.subject.clone();
         let monitor_context = context;
@@ -288,7 +291,9 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx.into(),
+        })
     }
 }
 
@@ -593,6 +598,7 @@ async fn wait_for_server_shutdown(
     Ok(())
 }
 
+/// Read peer controls and count an unexpected EOF that cancels a live request.
 async fn handle_reader(
     framed_reader: FramedRead<BoxRead, TwoPartCodec>,
     context: Arc<dyn AsyncEngineContext>,
@@ -670,6 +676,11 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
+                        if !alive_tx.is_closed() && !context.is_stopped() {
+                            cancellation_seen = true;
+                            record_upstream_cancellation(context.as_ref(), "eof");
+                            context.kill();
+                        }
                         break;
                     }
                 }
@@ -685,6 +696,7 @@ async fn handle_reader(
     framed_reader
 }
 
+/// Forward responses until the producer finishes or the context is cancelled.
 async fn handle_writer(
     mut framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
     mut bytes_rx: tokio::sync::mpsc::Receiver<TwoPartMessage>,
@@ -737,14 +749,15 @@ async fn handle_writer(
         }
     }
 
-    // Send sentinel only on normal closure
+    // Mark the writer finished before the peer can reply to Sentinel with FIN.
+    drop(alive_rx);
+
     if send_sentinel {
         let message = serde_json::to_vec(&ControlMessage::Sentinel)?;
         let msg = TwoPartMessage::from_header(message.into());
         framed_writer.send(msg).await?;
     }
 
-    drop(alive_rx);
     Ok(framed_writer)
 }
 
@@ -812,6 +825,7 @@ mod tests {
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
         );
@@ -842,7 +856,6 @@ mod tests {
         framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
         bytes_tx: mpsc::Sender<TwoPartMessage>,
         bytes_rx: mpsc::Receiver<TwoPartMessage>,
-        alive_tx: oneshot::Sender<()>,
         alive_rx: oneshot::Receiver<()>,
         controller: Arc<Controller>,
     }
@@ -855,7 +868,7 @@ mod tests {
             FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
 
         let (bytes_tx, bytes_rx) = mpsc::channel(64);
-        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let (_, alive_rx) = oneshot::channel::<()>();
         let controller = Arc::new(Controller::default());
 
         WriterHarness {
@@ -863,7 +876,6 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
-            alive_tx,
             alive_rx,
             controller,
         }
@@ -924,6 +936,173 @@ mod tests {
             expected_sentinel.as_slice(),
             "sentinel header should match serialized ControlMessage::Sentinel"
         );
+    }
+
+    /// EOF cancels live requests once; an upstream Stop or Kill keeps its state.
+    #[tokio::test]
+    async fn test_peer_eof_cancels_idle_response_writer() {
+        for control in [None, Some(ControlMessage::Stop), Some(ControlMessage::Kill)] {
+            let (client, server) = create_tcp_pair().await;
+            let (read_half, write_half) = tokio::io::split(client);
+            let reader = FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+            let writer =
+                FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+            let (bytes_tx, bytes_rx) = mpsc::channel(64);
+            let (alive_tx, alive_rx) = oneshot::channel();
+            let controller = Arc::new(Controller::default());
+            let counter = IntCounter::new("tcp_peer_eof", "EOF regression").unwrap();
+            let reader_task = tokio::spawn(handle_reader(
+                reader,
+                controller.clone(),
+                alive_tx,
+                Some(counter.clone()),
+            ));
+            let writer_task = tokio::spawn(handle_writer(
+                writer,
+                bytes_rx,
+                alive_rx,
+                controller.clone(),
+            ));
+            let mut server = FramedWrite::new(server, TwoPartCodec::default());
+            if let Some(control) = &control {
+                server.send(control_message(control)).await.unwrap();
+            }
+            server.close().await.unwrap();
+            let mut server = server.into_inner();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                reader_task.await.unwrap();
+                drop(writer_task.await.unwrap().unwrap());
+                assert_eq!(
+                    server.read(&mut [0]).await.unwrap(),
+                    0,
+                    "control={control:?}"
+                );
+            })
+            .await
+            .unwrap_or_else(|_| panic!("peer EOF must wake an idle writer: control={control:?}"));
+            assert_eq!(
+                controller.is_killed(),
+                !matches!(control, Some(ControlMessage::Stop)),
+                "control={control:?}"
+            );
+            assert!(bytes_tx.is_closed(), "control={control:?}");
+            assert_eq!(counter.get(), 1, "control={control:?}");
+        }
+    }
+
+    /// A blocked socket send must not delay cancellation of the engine context.
+    #[tokio::test]
+    async fn test_peer_eof_cancels_context_during_blocked_send() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (client, mut peer) = tokio::io::duplex(1);
+            let (read_half, write_half) = tokio::io::split(client);
+            let reader = FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+            let writer =
+                FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+            let (bytes_tx, bytes_rx) = mpsc::channel(1);
+            let (alive_tx, alive_rx) = oneshot::channel();
+            let controller = Arc::new(Controller::default());
+            let counter = IntCounter::new("tcp_eof_during_send", "EOF regression").unwrap();
+            let reader_task = tokio::spawn(handle_reader(
+                reader,
+                controller.clone(),
+                alive_tx,
+                Some(counter.clone()),
+            ));
+            let writer_task = tokio::spawn(handle_writer(
+                writer,
+                bytes_rx,
+                alive_rx,
+                controller.clone(),
+            ));
+            bytes_tx
+                .send(TwoPartMessage::from_header(Bytes::from_static(b"response")))
+                .await
+                .unwrap();
+
+            // The frame cannot fit in the one-byte buffer. Reading its first byte
+            // proves the writer entered send; keep the peer's read half open.
+            peer.read_exact(&mut [0]).await.unwrap();
+            peer.shutdown().await.unwrap();
+            reader_task.await.unwrap();
+            assert!(controller.is_killed());
+            assert_eq!(counter.get(), 1);
+
+            drop(peer);
+            writer_task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("reader must cancel without waiting for the socket send");
+    }
+
+    #[tokio::test]
+    async fn test_peer_eof_preserves_already_stopped_context() {
+        let ReaderHarness {
+            mut framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx,
+            controller,
+        } = reader_harness().await;
+        let counter = IntCounter::new("tcp_eof_after_stop", "EOF regression").unwrap();
+        controller.stop();
+        framed_server.close().await.unwrap();
+
+        // Keep the writer's receiver alive so only the Stop guard can suppress Kill.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle_reader(
+                framed_reader,
+                controller.clone(),
+                alive_tx,
+                Some(counter.clone()),
+            ),
+        )
+        .await
+        .expect("reader must exit on EOF");
+        assert!(controller.is_stopped());
+        assert!(!controller.is_killed());
+        assert_eq!(counter.get(), 0);
+        drop(alive_rx);
+    }
+
+    #[tokio::test]
+    async fn response_writer_retains_guard_while_socket_has_pending_output() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let context = Arc::new(Controller::default());
+        let info: ConnectionInfo = TcpStreamConnectionInfo {
+            address: listener.local_addr().unwrap().to_string(),
+            subject: "drain-test".to_string(),
+            context: context.id().to_string(),
+            stream_type: StreamType::Response,
+        }
+        .into();
+        let guard = Arc::new(());
+        let sender =
+            TcpClient::create_response_stream_with_guard(context, info, None, Some(guard.clone()))
+                .await
+                .unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+
+        // Larger than the loopback socket buffers, so dropping the publisher
+        // while the peer is paused leaves the writer with pending output.
+        let data = Bytes::from(vec![1; 16 * 1024 * 1024]);
+        sender.send(data.clone()).await.unwrap();
+        drop(sender);
+        tokio::task::yield_now().await;
+        assert_eq!(Arc::strong_count(&guard), 2);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut reader = FramedRead::new(peer, TwoPartCodec::default());
+            recv_msg(&mut reader).await; // transport handshake
+            assert_data_only_message(recv_msg(&mut reader).await, &data);
+            assert_sentinel_message(recv_msg(&mut reader).await);
+            while Arc::strong_count(&guard) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Test that handle_writer forwards messages from the channel to the framed writer
@@ -1161,28 +1340,30 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Test that alive_rx is dropped after handle_writer completes
     #[tokio::test]
-    async fn test_handle_writer_drops_alive_rx() {
-        let WriterHarness {
-            framed_writer,
-            bytes_tx,
-            bytes_rx,
-            alive_tx,
-            alive_rx,
-            controller,
-            ..
-        } = writer_harness().await;
+    async fn test_writer_marks_completion_before_sentinel_finishes() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (outgoing, peer) = tokio::io::duplex(1);
+            let writer = FramedWrite::new(Box::new(outgoing) as BoxWrite, TwoPartCodec::default());
+            let (bytes_tx, bytes_rx) = mpsc::channel(1);
+            let (mut alive_tx, alive_rx) = oneshot::channel();
+            drop(bytes_tx);
+            let task = tokio::spawn(handle_writer(
+                writer,
+                bytes_rx,
+                alive_rx,
+                Arc::new(Controller::default()),
+            ));
 
-        // Close the sender to trigger normal termination
-        drop(bytes_tx);
-
-        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
-
-        assert!(result.is_ok());
-
-        // alive_tx should now be closed because alive_rx was dropped
-        assert!(alive_tx.is_closed());
+            // Sentinel cannot fit until the peer reads. The reader must already
+            // see a completed writer if the peer sends FIN during this window.
+            alive_tx.closed().await;
+            let mut peer = FramedRead::new(peer, TwoPartCodec::default());
+            assert_sentinel_message(peer.next().await.unwrap().unwrap());
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("writer must mark normal completion before flushing Sentinel");
     }
 
     /// Test handle_writer with header-only messages (control messages)
@@ -1540,57 +1721,6 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_reader should exit when alive channel is closed"
-        );
-    }
-
-    /// Response-stream EOF is the normal server FIN after a closing Sentinel.
-    /// It must not be counted as a cancellation by itself.
-    #[tokio::test]
-    async fn test_handle_reader_eof_does_not_count_cancellation() {
-        let ReaderHarness {
-            mut framed_server,
-            framed_reader,
-            alive_tx,
-            alive_rx: _alive_rx,
-            controller,
-        } = reader_harness().await;
-        let cancellation_counter = IntCounter::new(
-            "tcp_client_reader_clean_eof_cancellations_test",
-            "test cancellation counter",
-        )
-        .unwrap();
-
-        // Spawn the reader task
-        let counter_clone = cancellation_counter.clone();
-        let controller_clone = controller.clone();
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(
-                framed_reader,
-                controller_clone,
-                alive_tx,
-                Some(counter_clone),
-            )
-            .await
-        });
-
-        // Close the framed server to signal EOF to the client
-        framed_server.close().await.unwrap();
-
-        // Reader should exit due to stream closure
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), reader_handle).await;
-
-        assert!(
-            result.is_ok(),
-            "handle_reader should exit when stream is closed"
-        );
-        assert!(
-            !controller.is_stopped() && !controller.is_killed(),
-            "response-stream EOF must not cancel the context"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            0,
-            "response-stream EOF must not increment the cancellation counter"
         );
     }
 

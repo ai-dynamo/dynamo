@@ -1,0 +1,74 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.globalview.v1;
+
+// One stream publishes one DGD from one PoolRelay replica.
+service PoolViewReceiver
+{
+  rpc Publish(stream PoolViewFrame) returns (PublishResult);
+}
+
+message PoolViewFrame
+{
+  oneof event
+  {
+    Hello hello = 1;
+    Snapshot snapshot = 2;
+    Upsert upsert = 3;
+    Remove remove = 4;
+  }
+}
+
+// The first frame identifies the logical service and the connecting replica.
+message Hello
+{
+  PoolKey pool_key = 1;
+  string logical_service = 2;
+  string replica_id = 3;
+  uint64 incarnation = 4;
+}
+
+message PoolKey
+{
+  string cluster_id = 1;
+  string namespace = 2;
+  string dgd_name = 3;
+}
+
+// A snapshot replaces the state for this replica. An absent pool is not routable.
+message Snapshot
+{
+  uint64 revision = 1;
+  bool pool_present = 2;
+  PoolState state = 3;
+}
+
+message Upsert
+{
+  uint64 revision = 1;
+  PoolState state = 2;
+}
+
+// Each field carries its existing dynamo.kvrelay.v1 protobuf message,
+// preserving its version, contract marker, replica identity, and completeness.
+// Catalog and readiness are required. Empty load fields mean no window yet.
+message PoolState
+{
+  bytes catalog = 1;       // KvPoolCatalogUpdate
+  bytes readiness = 2;     // ServingReadinessUpdate
+  bytes serving_load = 3;  // ServingLoadUpdate
+  bytes kv_load = 4;       // KvPoolLoadUpdate
+}
+
+message Remove
+{
+  uint64 revision = 1;
+}
+
+message PublishResult
+{
+  uint64 accepted_revision = 1;
+}

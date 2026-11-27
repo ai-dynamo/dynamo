@@ -23,7 +23,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -90,7 +89,7 @@ func TestLPXReadyConditionClassifiesState(t *testing.T) {
 	} {
 		t.Run(string(test.state), func(t *testing.T) {
 			t.Log("One Ready condition carries the condition and the complete diagnostic")
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 7}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 7}
 			setReadyCondition(child, test.state, "current observation")
 			require.Len(t, child.Status.Conditions, 1)
 			ready := child.Status.Conditions[0]
@@ -107,7 +106,7 @@ func TestLPXStatusSkipsUnchangedObservations(t *testing.T) {
 	for _, state := range []v1beta1.DGDState{v1beta1.DGDStatePending, v1beta1.DGDStateSuccessful, v1beta1.DGDStateFailed} {
 		t.Run(string(state), func(t *testing.T) {
 			t.Log("Start from a persisted status with stable condition transition times")
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", Generation: 1, ResourceVersion: "1"}}
+			child := &v1alpha1.LPXGraphDeployment{Name: "graph", Namespace: "default", Generation: 1, ResourceVersion: "1"}
 			setReadyCondition(child, state, "current observation")
 			transition := metav1.NewTime(time.Now().Add(-time.Hour).UTC().Truncate(time.Second))
 			for index := range child.Status.Conditions {
@@ -179,13 +178,13 @@ func TestPipelineRequestReadyConditionGolden(t *testing.T) {
 		t.Run(string(status.Phase), func(t *testing.T) {
 			t.Log("Project the current receipt without altering it or changing Ready's transition time")
 			deployment := &v1alpha1.LPXGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Generation: 7},
+				Generation: 7,
 				Status: v1alpha1.LPXGraphDeploymentStatus{Conditions: []metav1.Condition{{
 					Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionFalse,
 					LastTransitionTime: metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
 				}}},
 			}
-			request := &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{Generation: 7}, Status: status.DeepCopy()}
+			request := &lpxv1alpha1.LPUPipelineRequest{Generation: 7, Status: status.DeepCopy()}
 			before := request.DeepCopy()
 			requests := map[string]*lpxv1alpha1.LPUPipelineRequest{"observed": request}
 			require.False(t, setPipelineRequestReadyCondition(&deployment.Status.Conditions, deployment.Generation, requests))
@@ -221,19 +220,19 @@ func TestPipelineRequestReadyConditionRequiresCurrentReceipts(t *testing.T) {
 		runtime  v1beta1.DGDState
 		allBound bool
 	}{
-		{name: "Bound preserves runtime readiness", phase: lpxv1alpha1.RequestPhaseBound, observed: ptr.To(int64(7)), runtime: v1beta1.DGDStateSuccessful, allBound: true},
-		{name: "Bound still needs runtime readiness", phase: lpxv1alpha1.RequestPhaseBound, observed: ptr.To(int64(7)), runtime: v1beta1.DGDStatePending, allBound: true},
-		{name: "stale Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: ptr.To(int64(6)), runtime: v1beta1.DGDStateSuccessful},
+		{name: "Bound preserves runtime readiness", phase: lpxv1alpha1.RequestPhaseBound, observed: new(int64(7)), runtime: v1beta1.DGDStateSuccessful, allBound: true},
+		{name: "Bound still needs runtime readiness", phase: lpxv1alpha1.RequestPhaseBound, observed: new(int64(7)), runtime: v1beta1.DGDStatePending, allBound: true},
+		{name: "stale Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: new(int64(6)), runtime: v1beta1.DGDStateSuccessful},
 		{name: "unobserved Bound", phase: lpxv1alpha1.RequestPhaseBound, runtime: v1beta1.DGDStateSuccessful},
-		{name: "stale failure", phase: lpxv1alpha1.RequestPhaseUnsupported, observed: ptr.To(int64(6)), runtime: v1beta1.DGDStatePending},
+		{name: "stale failure", phase: lpxv1alpha1.RequestPhaseUnsupported, observed: new(int64(6)), runtime: v1beta1.DGDStatePending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Combine scheduler freshness with the previously observed runtime condition")
-			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 7}}
+			child := &v1alpha1.LPXGraphDeployment{Generation: 7}
 			setReadyCondition(child, tc.runtime, "Runtime observation")
 			before := child.Status.DeepCopy()
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{Generation: 7},
+				Generation: 7,
 				Status: &lpxv1alpha1.LPUPipelineRequestStatus{
 					Phase: tc.phase, ObservedGeneration: tc.observed,
 					Diagnostics: []lpxv1alpha1.StatusDiagnostic{{Detail: "Old diagnostic"}},
@@ -269,21 +268,21 @@ func TestSchedulingFailureCoversPipelineRequests(t *testing.T) {
 		{name: "no condition", noCondition: true},
 		{name: "false condition", conditionStatus: metav1.ConditionFalse, reason: pipelineRequestDeadlineExceededReason, generation: 2},
 		{name: "unrelated failure", conditionStatus: metav1.ConditionTrue, reason: "OtherFailure", generation: 2},
-		{name: "previous generation covers older cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 1, start: ptr.To(metav1.NewTime(failedAt.Add(-time.Minute))), wantCovered: true},
-		{name: "previous generation does not cover newer cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 1, start: ptr.To(metav1.NewTime(failedAt.Add(time.Second)))},
+		{name: "previous generation covers older cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 1, start: new(metav1.NewTime(failedAt.Add(-time.Minute))), wantCovered: true},
+		{name: "previous generation does not cover newer cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 1, start: new(metav1.NewTime(failedAt.Add(time.Second)))},
 		{name: "missing failure timestamp", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, noFailureTime: true, wantCurrent: true},
-		{name: "older cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt.Add(-time.Minute))), wantCurrent: true, wantCovered: true},
-		{name: "same timestamp", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt)), wantCurrent: true},
-		{name: "newer cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt.Add(time.Second))), wantCurrent: true},
+		{name: "older cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: new(metav1.NewTime(failedAt.Add(-time.Minute))), wantCurrent: true, wantCovered: true},
+		{name: "same timestamp", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: new(metav1.NewTime(failedAt)), wantCurrent: true},
+		{name: "newer cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: new(metav1.NewTime(failedAt.Add(time.Second))), wantCurrent: true},
 		{name: "no scheduler receipt uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, noStatus: true, wantCurrent: true, wantCovered: true},
 		{name: "no scheduling start uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, wantCurrent: true, wantCovered: true},
 		{name: "zero scheduling start uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: &metav1.Time{}, wantCurrent: true, wantCovered: true},
-		{name: "creation after failure is not covered", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, created: ptr.To(metav1.NewTime(failedAt.Add(time.Second))), noStatus: true, wantCurrent: true},
+		{name: "creation after failure is not covered", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, created: new(metav1.NewTime(failedAt.Add(time.Second))), noStatus: true, wantCurrent: true},
 		{name: "unpublished request is not covered", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, created: &metav1.Time{}, noStatus: true, wantCurrent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("A durable failure authorizes cleanup of older cycles independently of retry generation")
-			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			deployment := &v1alpha1.LPXGraphDeployment{Generation: 2}
 			if !tc.noCondition {
 				condition := metav1.Condition{
 					Type: schedulingFailedCondition, Status: tc.conditionStatus, Reason: tc.reason,
@@ -295,8 +294,8 @@ func TestSchedulingFailureCoversPipelineRequests(t *testing.T) {
 				deployment.Status.Conditions = []metav1.Condition{condition}
 			}
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(failedAt.Add(-time.Hour))},
-				Status:     &lpxv1alpha1.LPUPipelineRequestStatus{SchedulingStartedAt: tc.start},
+				CreationTimestamp: metav1.NewTime(failedAt.Add(-time.Hour)),
+				Status:            &lpxv1alpha1.LPUPipelineRequestStatus{SchedulingStartedAt: tc.start},
 			}
 			if tc.created != nil {
 				request.CreationTimestamp = *tc.created
@@ -325,7 +324,7 @@ func TestSetSchedulingFailedCondition(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Keep the recorded generation and timestamp unless a newly expired cycle requires renewal")
-			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			deployment := &v1alpha1.LPXGraphDeployment{Generation: 2}
 			before := metav1.NewTime(time.Now().Add(-time.Hour))
 			if tc.previousGeneration != 0 {
 				deployment.Status.Conditions = []metav1.Condition{{
@@ -359,7 +358,7 @@ func TestClearPreviousSchedulingFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Only a later desired generation authorizes retrying expired pipeline requests")
-			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			deployment := &v1alpha1.LPXGraphDeployment{Generation: 2}
 			if tc.recordedGeneration > 0 {
 				deployment.Status.Conditions = []metav1.Condition{{
 					Type: schedulingFailedCondition, Status: metav1.ConditionTrue,

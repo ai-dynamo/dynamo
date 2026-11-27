@@ -3,12 +3,12 @@
 
 //! Canonical AISimulate model construction and pure Rust scheduler adapters.
 #[cfg(feature = "ais-forward-pass")]
-use aisimulate_core::{
+use aisim_core::{
     ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfModelConfig, ForwardPassPerfReadiness,
     ScheduledRequestMetrics,
 };
-use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AisCallback;
+use dynamo_scheduler::host::PrefillLoadEstimator;
 use pyo3::prelude::*;
 use std::sync::Arc;
 #[cfg(feature = "ais-forward-pass")]
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 #[cfg(feature = "ais-forward-pass")]
 pub(super) struct RustAisCallback {
-    model: ForwardPassPerfModel,
+    model: Arc<ForwardPassPerfModel>,
     nextn: u32,
 }
 
@@ -106,7 +106,7 @@ impl AisCallback for RustAisCallback {
         // Legacy API returns a trajectory sum. Mocker uses osl=2, i.e. one
         // generation step at isl+1; preserve this exact context convention.
         let mut total = 0.0;
-        let stride = aisimulate_core::perfmodel::engine::DEFAULT_STATIC_STRIDE as usize;
+        let stride = aisim_core::perfmodel::engine::DEFAULT_STATIC_STRIDE as usize;
         for step in (1..osl).step_by(stride) {
             let context = isl
                 .checked_add(step)
@@ -115,6 +115,10 @@ impl AisCallback for RustAisCallback {
                 * (osl - step).min(stride) as f64;
         }
         Ok(total)
+    }
+
+    fn forward_pass_model(&self) -> Option<Arc<ForwardPassPerfModel>> {
+        Some(Arc::clone(&self.model))
     }
 }
 
@@ -138,10 +142,24 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = config
-        .speculation
-        .as_ref()
-        .map_or(config.nextn, |spec| spec.num_speculative_tokens());
+    let nextn = match config.speculation.as_ref() {
+        None => config.nextn,
+        Some(spec) if spec.kind == "ngram" => spec
+            .params
+            .get("num_speculative_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|depth| u32::try_from(depth).ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "ngram num_speculative_tokens must be a nonnegative u32",
+                )
+            })?,
+        Some(_) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Router/Mocker supports only ngram speculation or legacy nextn",
+            ));
+        }
+    };
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
@@ -152,14 +170,17 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
     }
     if nextn > 0
         && model.provenance().is_some_and(|p| {
-            p.selected_estimation_mode == aisimulate_core::EstimationMode::FpmInterpolation
+            p.selected_estimation_mode == aisim_core::EstimationMode::FpmInterpolation
         })
     {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "AIS canonical FPM queries do not yet support speculative FPM interpolation; use op_level",
         ));
     }
-    Ok(RustAisCallback { model, nextn })
+    Ok(RustAisCallback {
+        model: Arc::new(model),
+        nextn,
+    })
 }
 
 #[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]

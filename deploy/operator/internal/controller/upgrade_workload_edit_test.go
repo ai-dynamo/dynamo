@@ -1,0 +1,194 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+// Every edited component must reach its immediate workload, including both multinode roles.
+func upgradeWorkerEditError(objects []unstructured.Unstructured, workers []string, desiredHash string) error {
+	edited := map[string]bool{}
+	matched := map[string]int{}
+	for _, object := range objects {
+		component := object.GetLabels()["nvidia.com/dynamo-component"]
+
+		// Component workloads must belong to the requested worker generation.
+		if object.GetKind() == "Deployment" || object.GetKind() == "LeaderWorkerSet" {
+			if object.GetLabels()["nvidia.com/dynamo-worker-hash"] != desiredHash {
+				continue
+			}
+			matched[component]++
+			if matched[component] > 1 {
+				return fmt.Errorf("component %s has multiple workloads for worker hash %s", component, desiredHash)
+			}
+		}
+
+		switch object.GetKind() {
+		case "Deployment":
+			edited[component] = edited[component] || upgradeTemplateHasEdit(object.Object, "spec", "template")
+		case "LeaderWorkerSet":
+			edited[component] = edited[component] || upgradeLWSHasEdit(object.Object)
+		case "DisaggregatedSet":
+			roles, _, err := unstructured.NestedSlice(object.Object, "spec", "roles")
+			if err != nil {
+				return err
+			}
+			for i, value := range roles {
+				role, ok := value.(map[string]any)
+				if !ok {
+					return fmt.Errorf("DisaggregatedSet %s role %d is not an object", object.GetName(), i)
+				}
+				name, ok := role["name"].(string)
+				if !ok {
+					return fmt.Errorf("DisaggregatedSet %s role %d has no string name", object.GetName(), i)
+				}
+
+				// DS generations live on both embedded Pod templates, not the DS itself.
+				currentGeneration := true
+				for _, template := range []string{"leaderTemplate", "workerTemplate"} {
+					hash, found, err := unstructured.NestedString(role, "spec", "leaderWorkerTemplate", template, "metadata", "labels", "nvidia.com/dynamo-worker-hash")
+					if err != nil {
+						return fmt.Errorf("DisaggregatedSet %s role %s %s worker hash: %w", object.GetName(), name, template, err)
+					}
+					currentGeneration = currentGeneration && found && hash == desiredHash
+				}
+				edited[name] = edited[name] || (currentGeneration && upgradeLWSHasEdit(role))
+			}
+		}
+	}
+	for _, worker := range workers {
+		if !edited[worker] {
+			return fmt.Errorf("worker edit has not reached all templates for %s", worker)
+		}
+	}
+	return nil
+}
+
+func upgradeLWSHasEdit(object map[string]any) bool {
+	return upgradeTemplateHasEdit(object, "spec", "leaderWorkerTemplate", "leaderTemplate") &&
+		upgradeTemplateHasEdit(object, "spec", "leaderWorkerTemplate", "workerTemplate")
+}
+
+func upgradeTemplateHasEdit(object map[string]any, path ...string) bool {
+	containers, _, err := unstructured.NestedSlice(object, append(path, "spec", "containers")...)
+	if err != nil {
+		return false
+	}
+	for _, value := range containers {
+		container := value.(map[string]any)
+		if container["name"] != "main" {
+			continue
+		}
+		variables, _, err := unstructured.NestedSlice(container, "env")
+		if err != nil {
+			return false
+		}
+		for _, value := range variables {
+			variable := value.(map[string]any)
+			if variable["name"] == "WORKER_REVISION" && variable["value"] == "2" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestUpgradeMultinodeWorkerEdit(t *testing.T) {
+	for _, kind := range []string{"LeaderWorkerSet", "DisaggregatedSet"} {
+		cases := []string{"none", "leader", "worker", "decode"}
+		if kind == "DisaggregatedSet" {
+			cases = append(cases, "old-leader-hash", "old-worker-hash", "missing-hash")
+		}
+		for _, missing := range cases {
+			t.Run(kind+"/"+missing, func(t *testing.T) {
+				t.Log("Require the edit in both templates of every worker component")
+				var objects []unstructured.Unstructured
+				var roles []any
+				for _, name := range []string{"prefill", "decode"} {
+					role := map[string]any{"name": name, "spec": map[string]any{}}
+					for _, template := range []string{"leader", "worker"} {
+						pod := map[string]any{
+							"metadata": map[string]any{"labels": map[string]any{"nvidia.com/dynamo-worker-hash": "new"}},
+							"spec":     map[string]any{"containers": []any{map[string]any{"name": "main"}}},
+						}
+						if kind == "DisaggregatedSet" && name == "prefill" {
+							if missing == "old-"+template+"-hash" {
+								require.NoError(t, unstructured.SetNestedField(pod, "old", "metadata", "labels", "nvidia.com/dynamo-worker-hash"))
+							}
+							if missing == "missing-hash" && template == "worker" {
+								unstructured.RemoveNestedField(pod, "metadata", "labels", "nvidia.com/dynamo-worker-hash")
+							}
+						}
+						if missing != template && missing != name {
+							require.NoError(t, unstructured.SetNestedSlice(pod, []any{map[string]any{
+								"name": "main", "env": []any{map[string]any{"name": "WORKER_REVISION", "value": "2"}},
+							}}, "spec", "containers"))
+						}
+						require.NoError(t, unstructured.SetNestedMap(role, pod, "spec", "leaderWorkerTemplate", template+"Template"))
+					}
+					roles = append(roles, role)
+					objects = append(objects, unstructured.Unstructured{Object: map[string]any{
+						"kind": kind, "metadata": map[string]any{"labels": map[string]any{"nvidia.com/dynamo-component": name, "nvidia.com/dynamo-worker-hash": "new"}}, "spec": role["spec"],
+					}})
+				}
+				if kind == "DisaggregatedSet" {
+					objects = []unstructured.Unstructured{{Object: map[string]any{"kind": kind, "spec": map[string]any{"roles": roles}}}}
+				}
+				err := upgradeWorkerEditError(objects, []string{"prefill", "decode"}, "new")
+				if missing == "none" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+			})
+		}
+	}
+}
+
+func TestUpgradeWorkerEditMalformedRoles(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		role any
+		want string
+	}{
+		{name: "not-an-object", role: "invalid", want: "role 0 is not an object"},
+		{name: "missing-name", role: map[string]any{}, want: "role 0 has no string name"},
+		{name: "invalid-name", role: map[string]any{"name": int64(1)}, want: "role 0 has no string name"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Malformed DS roles report context instead of panicking during polling")
+			object := unstructured.Unstructured{Object: map[string]any{
+				"kind": "DisaggregatedSet", "metadata": map[string]any{"name": "workers"},
+				"spec": map[string]any{"roles": []any{test.role}},
+			}}
+			require.ErrorContains(t, upgradeWorkerEditError([]unstructured.Unstructured{object}, []string{"prefill"}, "new"), test.want)
+		})
+	}
+}
+
+func TestUpgradeWorkerEditGeneration(t *testing.T) {
+	t.Log("An edited Deployment from an old generation must not satisfy a new worker edit")
+	object := unstructured.Unstructured{Object: map[string]any{
+		"kind": "Deployment", "metadata": map[string]any{"labels": map[string]any{
+			"nvidia.com/dynamo-component": "prefill", "nvidia.com/dynamo-worker-hash": "old",
+		}},
+	}}
+	require.NoError(t, unstructured.SetNestedSlice(object.Object, []any{map[string]any{
+		"name": "main", "env": []any{map[string]any{"name": "WORKER_REVISION", "value": "2"}},
+	}}, "spec", "template", "spec", "containers"))
+	require.NoError(t, upgradeWorkerEditError([]unstructured.Unstructured{object}, []string{"prefill"}, "old"))
+	require.Error(t, upgradeWorkerEditError([]unstructured.Unstructured{object}, []string{"prefill"}, "new"))
+
+	t.Log("Require exactly one edited workload for each worker in the requested generation")
+	current := object.DeepCopy()
+	current.SetLabels(map[string]string{"nvidia.com/dynamo-component": "prefill", "nvidia.com/dynamo-worker-hash": "new"})
+	require.NoError(t, upgradeWorkerEditError([]unstructured.Unstructured{object, *current}, []string{"prefill"}, "new"))
+	require.Error(t, upgradeWorkerEditError([]unstructured.Unstructured{*current, *current}, []string{"prefill"}, "new"))
+	require.Error(t, upgradeWorkerEditError([]unstructured.Unstructured{*current}, []string{"prefill", "decode"}, "new"))
+}

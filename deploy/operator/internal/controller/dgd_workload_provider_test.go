@@ -26,6 +26,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -190,12 +191,10 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Store one DGD and the workload families visible during adoption")
 			seed := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "graph",
-					Namespace:   "default",
-					UID:         types.UID("graph-uid"),
-					Annotations: maps.Clone(tt.annotations),
-				},
+				Name:        "graph",
+				Namespace:   "default",
+				UID:         types.UID("graph-uid"),
+				Annotations: maps.Clone(tt.annotations),
 			}
 			objects := []client.Object{seed}
 			for i, workload := range tt.workloads {
@@ -285,7 +284,7 @@ func newProviderTestWorkload(
 		return &grovev1alpha1.PodCliqueSet{ObjectMeta: objectMeta}
 	case workloadProviderDisaggregatedSet:
 		ds := newDisaggregatedSetObject()
-		ds.SetName(disaggregatedSetName(dgd))
+		ds.SetName(disaggregatedset.Name(dgd))
 		ds.SetNamespace(dgd.Namespace)
 		ds.SetOwnerReferences(ownerReferences)
 		return ds
@@ -299,7 +298,7 @@ func TestEnsureWorkloadProviderRestoresObjectAfterPatchFailure(t *testing.T) {
 	t.Log("Inject a provider patch failure for an unannotated DGD")
 	patchErr := errors.New("patch failed")
 	seed := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 	}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -345,13 +344,11 @@ func TestDynamoGraphDeploymentReconcileReportsUnsupportedWorkloadProvider(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Store a DGD with an unsupported immutable workload provider")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "graph",
-					Namespace:  "default",
-					Generation: 4,
-					Annotations: map[string]string{
-						consts.KubeAnnotationWorkloadProvider: "unknown",
-					},
+				Name:       "graph",
+				Namespace:  "default",
+				Generation: 4,
+				Annotations: map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
 				},
 			}
 			builder := fake.NewClientBuilder().

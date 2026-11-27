@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+use dynamo_runtime::SystemHealth;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
@@ -114,12 +115,13 @@ impl FpmEventRelay {
         let cancel_clone = cancel.clone();
 
         let trace = rt.block_on(init_fpm_trace(component));
+        let progress = EngineProgress::new(&endpoint);
 
         let publisher =
             rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace, progress).await;
         });
 
         Ok(Self { cancel })
@@ -135,6 +137,7 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
         trace: Option<crate::fpm_trace::FpmTrace>,
+        mut progress: EngineProgress,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -160,6 +163,9 @@ impl FpmEventRelay {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                // Before the publish, so a slow event plane does not
+                                // delay this frame's signal to the health check.
+                                progress.note_frame(&payload);
                                 tap_relay_fpm(&payload, trace.as_ref());
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
@@ -190,6 +196,84 @@ impl Drop for FpmEventRelay {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// Tells an endpoint's health check that the engine completed a forward pass.
+///
+/// A canary sent during a long prefill is not answered until the prefill ends.
+/// While it waits, each completed pass restarts its timeout, so a busy engine is
+/// not mistaken for a stalled one. A pass never changes health status.
+struct EngineProgress {
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+    endpoint_name: String,
+    /// Whether canary health checks are on. Fixed for the life of the process.
+    enabled: bool,
+    /// Cached once the endpoint has registered its health check target.
+    notifier: Option<Arc<tokio::sync::Notify>>,
+    warned_unreadable: bool,
+}
+
+impl EngineProgress {
+    fn new(endpoint: &Endpoint) -> Self {
+        let system_health = endpoint.component().drt().system_health();
+        let enabled = system_health.lock().health_check_enabled();
+        Self {
+            system_health,
+            endpoint_name: endpoint.name().to_string(),
+            enabled,
+            notifier: None,
+            warned_unreadable: false,
+        }
+    }
+
+    /// Report a completed forward pass.
+    fn note(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if self.notifier.is_none() {
+            self.notifier = self
+                .system_health
+                .lock()
+                .get_endpoint_progress_notifier(&self.endpoint_name);
+        }
+        if let Some(notifier) = &self.notifier {
+            notifier.notify_one();
+        }
+    }
+
+    /// Report a relayed frame if it is a completed forward pass.
+    fn note_frame(&mut self, payload: &[u8]) {
+        if !self.enabled {
+            return;
+        }
+        match is_completed_pass(payload) {
+            Ok(true) => self.note(),
+            Ok(false) => {}
+            Err(error) => {
+                if !self.warned_unreadable {
+                    self.warned_unreadable = true;
+                    tracing::warn!(
+                        %error,
+                        "FPM relay: cannot read wall_time from a frame; forward passes will not extend the canary timeout"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The field of a relayed frame that tells a completed forward pass from a
+/// heartbeat. Frames are msgpack maps, so the other fields are skipped.
+#[derive(serde::Deserialize)]
+struct FpmPassPeek {
+    wall_time: f64,
+}
+
+/// Whether `payload` reports a completed forward pass. A heartbeat carries
+/// `wall_time == 0.0`, including one sent while a long pass is still running.
+fn is_completed_pass(payload: &[u8]) -> Result<bool, rmp_serde::decode::Error> {
+    rmp_serde::from_slice::<FpmPassPeek>(payload).map(|frame| frame.wall_time > 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +417,7 @@ impl FpmDirectPublisher {
 
         let publisher = EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await?;
         let trace = init_fpm_trace(component).await;
+        let mut progress = EngineProgress::new(&endpoint);
 
         // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
         // serializes them into a reusable buffer and preserves event-plane publish ordering.
@@ -350,6 +435,9 @@ impl FpmDirectPublisher {
                     result = pub_rx.recv() => {
                         match result {
                             Some(pending) => {
+                                if pending.snapshot.wall_time_secs > 0.0 {
+                                    progress.note();
+                                }
                                 match serialize_fpm_into(
                                     &mut payload,
                                     &pending.snapshot,
@@ -465,6 +553,42 @@ mod tests {
         // Trace persistence is auxiliary. Reporting an initialization failure
         // must not turn it into a constructor error for either FPM publisher.
         assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
+    }
+
+    /// A completed pass extends a waiting canary. A stalled engine keeps sending
+    /// heartbeats, so a heartbeat must not look like one.
+    ///
+    /// The relay reads frames encoded by the Python `ForwardPassMetrics`
+    /// publisher, not by `serialize_fpm`. These bytes are
+    /// `forward_pass_metrics.encode()` output from msgspec 0.22.0: a 0.48 s pass
+    /// that prefilled 2048 tokens, and a heartbeat sent during a long pass, which
+    /// reports only the waiting queue.
+    #[test]
+    fn is_completed_pass_excludes_heartbeats() {
+        const PYTHON_PASS: &[u8] = b"\x87\xa7version\x01\xa9worker_id\xa1w\xa7dp_rank\x00\
+          \xaacounter_id\x01\xa9wall_time\xcb?\xde\xb8Q\xeb\x85\x1e\
+          \xb8\xb2scheduled_requests\x87\xb4num_prefill_requests\x01\
+          \xb2sum_prefill_tokens\xcd\x08\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb5sum_prefill_kv_tokens\x00\xb3num_decode_requests\x00\
+          \xb4sum_decode_kv_tokens\x00\xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xafqueued_requests\x86\xb4num_prefill_requests\x00\
+          \xb2sum_prefill_tokens\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb3num_decode_requests\x00\xb4sum_decode_kv_tokens\x00\
+          \xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00";
+        const PYTHON_HEARTBEAT: &[u8] = b"\x87\xa7version\x01\xa9worker_id\xa1w\xa7dp_rank\x00\
+          \xaacounter_id\x02\xa9wall_time\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb2scheduled_requests\x87\xb4num_prefill_requests\x00\
+          \xb2sum_prefill_tokens\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb5sum_prefill_kv_tokens\x00\xb3num_decode_requests\x00\
+          \xb4sum_decode_kv_tokens\x00\xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xafqueued_requests\x86\xb4num_prefill_requests\x01\
+          \xb2sum_prefill_tokens\x01\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb3num_decode_requests\x00\xb4sum_decode_kv_tokens\x00\
+          \xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00";
+
+        assert!(is_completed_pass(PYTHON_PASS).unwrap());
+        assert!(!is_completed_pass(PYTHON_HEARTBEAT).unwrap());
+        assert!(is_completed_pass(b"not msgpack").is_err());
     }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips

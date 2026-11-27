@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
+from dynamo.common.http.base import HttpStatusError
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
@@ -182,6 +184,19 @@ class TestImageDiffusionWorkerHandler:
         assert response["data"][0]["url"].startswith("file:///tmp/images/users/")
 
     @pytest.mark.asyncio
+    async def test_generate_defaults_to_url_format(self, handler, mock_context):
+        """A request without response_format gets a URL."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
+        )
+
+        request = {"prompt": "A green square", "model": "test-model"}
+        results = [result async for result in handler.generate(request, mock_context)]
+
+        assert results[0]["data"][0]["url"].startswith("file:///tmp/images/users/")
+
+    @pytest.mark.asyncio
     async def test_generate_success_b64_format(self, handler, mock_context):
         """Test successful image generation with base64 response format."""
         # Create a simple test image
@@ -254,6 +269,49 @@ class TestImageDiffusionWorkerHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_generate_keeps_an_explicit_value_that_differs_from_the_default(
+        self, handler, mock_context
+    ):
+        """One denoising step and a guidance scale of zero are forwarded as
+        sent. A `value or default` fallback would replace both."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+        request = {
+            "prompt": "A green square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "nvext": {"num_inference_steps": 1, "guidance_scale": 0.0},
+        }
+
+        async for _ in handler.generate(request, mock_context):
+            pass
+
+        sampling = handler.generator.generate.call_args.kwargs["sampling_params_kwargs"]
+        assert (sampling["num_inference_steps"], sampling["guidance_scale"]) == (
+            1,
+            0.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_zero_inference_steps(self, handler, mock_context):
+        """Zero steps is outside the shared contract, as it is at the frontend."""
+        handler.generator.generate = Mock()
+        request = {
+            "prompt": "A green square",
+            "model": "test-model",
+            "nvext": {"num_inference_steps": 0},
+        }
+
+        with pytest.raises(InvalidArgument, match="num_inference_steps"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generate_error_propagates(self, handler, mock_context):
         """Generation failures must raise, not be swallowed.
 
@@ -297,6 +355,28 @@ class TestImageDiffusionWorkerHandler:
         }
 
         with pytest.raises(InvalidArgument, match="input_reference"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_two_input_references_raises_invalid_argument(
+        self, handler, mock_context
+    ):
+        """The engine edits one image: a second reference is a 400, not dropped."""
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": [
+                "https://example.com/a.png",
+                "https://example.com/b.png",
+            ],
+        }
+
+        with pytest.raises(InvalidArgument, match="one input_reference"):
             async for _ in handler.generate(request, mock_context):
                 pass
 
@@ -407,7 +487,9 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
 
         request = {
             "prompt": "A yellow square",
@@ -423,25 +505,22 @@ class TestImageDiffusionWorkerHandler:
             },
         }
 
-        # Execute generation
-        results = []
         mock_context.trace_headers = MagicMock(
             return_value={"traceparent": "00-1234567890-1234567890-01"}
         )
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
+        async for _ in handler.generate(request, mock_context):
+            pass
 
-        # Verify results
-        handler._generate_images.assert_called_once_with(
-            prompt="A yellow square",
-            width=256,
-            height=256,
-            num_inference_steps=10,
-            guidance_scale=7.5,
-            seed=42,
-            negative_prompt="negative",
-            input_reference=None,
-        )
+        assert handler.generator.generate.call_args[1]["sampling_params_kwargs"] == {
+            "prompt": "A yellow square",
+            "negative_prompt": "negative",
+            "height": 256,
+            "width": 256,
+            "num_inference_steps": 10,
+            "save_output": False,
+            "guidance_scale": 7.5,
+            "seed": 42,
+        }
 
     @pytest.mark.asyncio
     async def test_generate_i2i_passes_image_path(
@@ -540,8 +619,9 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [403, 404, 415])
     async def test_generate_i2i_maps_a_4xx_fetch_to_invalid_argument(
-        self, handler, mock_context, tmp_path, monkeypatch
+        self, handler, mock_context, monkeypatch, status
     ):
         """A 4xx from the origin the client chose is the client's problem.
 
@@ -550,14 +630,12 @@ class TestImageDiffusionWorkerHandler:
         URL is not echoed back -- it has no length limit and the video handler
         puts str(exc) straight in its response body.
         """
-        from dynamo.common.http.base import HttpStatusError
-
         handler.generator.generate = Mock()
         monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
-        url = "http://example.com/" + "u" * 5000
+        url = "http://127.0.0.1/" + "u" * 5000
 
         async def fake_fetch(u, timeout, *, policy=None, max_bytes=None):
-            raise HttpStatusError(404, "Not Found", u)
+            raise HttpStatusError(status, "private origin details", u)
 
         monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
         request = {
@@ -568,11 +646,16 @@ class TestImageDiffusionWorkerHandler:
             "input_reference": url,
         }
 
-        with pytest.raises(InvalidArgument, match="HTTP 404") as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler.generate(request, mock_context):
                 pass
 
         assert "uuuu" not in str(excinfo.value)
+        assert "private origin details" not in str(excinfo.value)
+        assert str(excinfo.value) == (
+            IMAGE_FETCH_ERROR_MESSAGES.get(status)
+            or f"input_reference could not be fetched (HTTP {status})"
+        )
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
@@ -666,13 +749,18 @@ class TestNParameter:
 
     @pytest.mark.asyncio
     async def test_n_above_max_is_rejected(self, handler, mock_context):
-        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
-        image handler's [1, 10] validation (no silent clamping)."""
+        """n above 10 is rejected by the shared request model, as the frontend
+        rejects it (no silent clamping). The InvalidArgument reaches the client
+        as a 400 that names the field and the rule, not the rejected value."""
         self._mock_one_image(handler)
 
-        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+        with pytest.raises(
+            InvalidArgument, match="less than or equal to 10"
+        ) as excinfo:
             async for _ in handler.generate(self._request(n=99), mock_context):
                 pass
+        assert str(excinfo.value).startswith("n: ")
+        assert "99" not in str(excinfo.value)
         assert handler.generator.generate.call_count == 0
 
     @pytest.mark.asyncio
@@ -680,7 +768,7 @@ class TestNParameter:
         """n=0 must not silently produce one image."""
         self._mock_one_image(handler)
 
-        with pytest.raises(InvalidArgument, match=r"n must be in \[1, 10\]"):
+        with pytest.raises(InvalidArgument, match="greater than or equal to 1"):
             async for _ in handler.generate(self._request(n=0), mock_context):
                 pass
         assert handler.generator.generate.call_count == 0

@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -42,11 +43,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 
 	// Add frontend-specific defaults
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 		},
 		InitialDelaySeconds: 15, // Frontend ready to serve requests in ~5-10 seconds
 		PeriodSeconds:       10,
@@ -55,11 +54,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
-				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/health",
+			Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 		},
 		InitialDelaySeconds: 10, // Frontend ready to serve requests in ~5-10 seconds
 		PeriodSeconds:       10,
@@ -67,14 +64,12 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		FailureThreshold:    3,
 	}
 
-	// Allow dependency connections to finish before liveness can restart the frontend.
-	if runtimefeatures.FrontendStartupProbe.Enabled(context.RuntimeVersion) {
+	// Preserve existing graphs while allowing new frontends to wait for dependencies.
+	if compatibility.FrontendStartupProbe.Enabled(context.RuntimeVersion, context.Annotations) {
 		container.StartupProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/live",
-					Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-				},
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 			PeriodSeconds:    10,
 			TimeoutSeconds:   1,

@@ -5,11 +5,14 @@
 
 import json
 import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import zmq
 
 pytest.importorskip("vllm.usage.usage_lib")
 
@@ -37,22 +40,12 @@ def _vllm_config():
 
 
 def _core_engine_launch_object(engine_manager, addresses):
-    """The shape vLLM 0.28 yields: a ``CoreEngineLaunch`` dataclass.
-
-    Reproduced locally rather than imported, because the name does not exist
-    in the vLLM releases that yield the tuple below.
-    """
     return SimpleNamespace(
         engine_manager=engine_manager,
         coordinator=None,
         addresses=addresses,
         tensor_queue=None,
     )
-
-
-def _core_engine_launch_tuple(engine_manager, addresses):
-    """The shape vLLM yields before 0.28, including the 0.27.1 XPU images."""
-    return (engine_manager, None, addresses, None)
 
 
 def test_child_environment_offsets_system_port_by_index(monkeypatch):
@@ -62,11 +55,13 @@ def test_child_environment_offsets_system_port_by_index(monkeypatch):
         process_index=2,
         addresses_json='{"process_count": 4}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert env[processes._ROLE_ENV] == processes._CHILD_ROLE
     assert env[processes._INDEX_ENV] == "2"
     assert env[processes._PARENT_PID_ENV] == "123"
+    assert env[processes._LISTENER_FDS_ENV] == "[3, 4]"
     # The parent keeps 19401 as index 0, so children start one above it.
     assert env["DYN_SYSTEM_PORT"] == "19403"
     assert env["PYTHONUNBUFFERED"] == "1"
@@ -85,6 +80,7 @@ def test_child_environment_preserves_non_positive_system_port(monkeypatch, raw):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert env["DYN_SYSTEM_PORT"] == raw
@@ -97,6 +93,7 @@ def test_child_environment_omits_system_port_when_parent_has_none(monkeypatch):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert "DYN_SYSTEM_PORT" not in env
@@ -181,6 +178,7 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
         engine_manager=engine_manager,
         rpc_directory=rpc_directory,
         previous_rpc_base_path="/tmp/original-rpc",
+        zmq_listeners=Mock(),
     )
     group.cleanup(timeout=2.0)
     group.cleanup(timeout=2.0)
@@ -202,6 +200,7 @@ def test_process_group_reports_unexpected_child_exit():
         engine_manager=Mock(),
         rpc_directory=rpc_directory,
         previous_rpc_base_path=None,
+        zmq_listeners=Mock(),
         parent_failure_callback=callback,
     )
 
@@ -210,11 +209,6 @@ def test_process_group_reports_unexpected_child_exit():
 
     callback.assert_called_once_with(2, 17)
     group._stopping.set()
-
-
-def _assert_names_verified_versions(message):
-    for version in processes._VERIFIED_VLLM_VERSIONS:
-        assert version in message
 
 
 def test_unpack_core_engine_launch_names_a_renamed_field():
@@ -226,27 +220,10 @@ def test_unpack_core_engine_launch_names_a_renamed_field():
 
     message = str(raised.value)
     assert "tensor_queue" in message
-    _assert_names_verified_versions(message)
     assert isinstance(raised.value.__cause__, AttributeError)
 
 
-@pytest.mark.parametrize("size", [3, 5], ids=["short-tuple", "long-tuple"])
-def test_unpack_core_engine_launch_rejects_a_resized_tuple(size):
-    """A tuple of the wrong arity must not reach the caller's four-name unpack."""
-    with pytest.raises(RuntimeError) as raised:
-        processes._unpack_core_engine_launch(tuple(range(size)))
-
-    message = str(raised.value)
-    assert f"{size}-tuple" in message
-    _assert_names_verified_versions(message)
-
-
-@pytest.mark.parametrize(
-    "make_launch",
-    [_core_engine_launch_object, _core_engine_launch_tuple],
-    ids=["core-engine-launch-object", "legacy-tuple"],
-)
-def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_launch):
+def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     process_count = 4
     addresses = SimpleNamespace(
         inputs=[f"in{i}" for i in range(process_count)],
@@ -267,13 +244,28 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     # call with the wrong arity fails here instead of at startup.
     @contextmanager
     def launch_context(vllm_config, executor_class, log_stats, addresses):
-        yield make_launch(engine_manager, addresses)
+        yield _core_engine_launch_object(engine_manager, addresses)
 
     parent_client = Mock()
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "get_engine_zmq_addresses", lambda *_: addresses)
+    # Stand in for vLLM's supervisor-bound EngineZmqListeners.
+    zmq_listeners = SimpleNamespace(
+        addresses=addresses,
+        inputs=[
+            SimpleNamespace(socket=Mock(**{"fileno.return_value": 100 + i}))
+            for i in range(process_count)
+        ],
+        outputs=[
+            SimpleNamespace(socket=Mock(**{"fileno.return_value": 200 + i}))
+            for i in range(process_count)
+        ],
+        cleanup=Mock(),
+    )
+    monkeypatch.setattr(
+        processes, "bind_engine_zmq_listeners", lambda *_: zmq_listeners
+    )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)
@@ -301,9 +293,14 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     assert len(children) == process_count - 1
     assert group.engine_manager is engine_manager
     group.cleanup()
+    zmq_listeners.cleanup.assert_called_once()
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):
+    monkeypatch.setenv(processes._LISTENER_FDS_ENV, "[5, 6]")
+    monkeypatch.setattr(
+        processes, "socket", SimpleNamespace(socket=lambda fileno: fileno)
+    )
     monkeypatch.setenv(processes._ROLE_ENV, processes._CHILD_ROLE)
     monkeypatch.setenv(processes._INDEX_ENV, "1")
     monkeypatch.setenv(
@@ -336,3 +333,105 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["process_index"] == 1
     assert attach.call_args.kwargs["input_address"] == "in1"
     assert attach.call_args.kwargs["output_address"] == "out1"
+    assert attach.call_args.kwargs["listeners"] == (5, 6)
+
+
+def _run_listener_child():
+    """Child process of the listener test: adopt the inherited sockets and echo."""
+    from vllm.utils.network_utils import make_zmq_socket
+
+    with zmq.Context() as context:
+
+        def create_client(*, client_addresses, **_kwargs):
+            return tuple(
+                make_zmq_socket(
+                    context,
+                    client_addresses[f"{name}_address"],
+                    kind,
+                    listener=client_addresses[f"{name}_listener"],
+                )
+                for name, kind in (("input", zmq.ROUTER), ("output", zmq.PULL))
+            )
+
+        with patch.object(processes.AsyncLLM, "from_vllm_config", create_client):
+            sockets, _, group = processes.create_shared_embedding_engine_client(
+                vllm_config=SimpleNamespace(parallel_config=SimpleNamespace()),
+                process_count=2,
+                usage_context=None,
+                stat_loggers=[],
+                enable_log_requests=False,
+                disable_log_stats=True,
+            )
+        assert group is None
+        try:
+            for socket in sockets:
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
+            assert sockets[1].recv() == b"output"
+            identity, payload = sockets[0].recv_multipart()
+            sockets[0].send_multipart([identity, payload])
+        finally:
+            for socket in sockets:
+                socket.close(linger=0)
+
+
+@pytest.mark.timeout(180)
+def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
+    config = _vllm_config()
+    config.parallel_config = SimpleNamespace(
+        data_parallel_size_local=1,
+        data_parallel_rank_local=None,
+        data_parallel_size=1,
+        data_parallel_master_ip="127.0.0.1",
+        local_engines_only=True,
+        enable_elastic_ep=False,
+    )
+    addresses = None
+
+    @contextmanager
+    def launch_context(_config, _executor, _log_stats, bound_addresses):
+        nonlocal addresses
+        addresses = bound_addresses
+        yield _core_engine_launch_object(Mock(), bound_addresses)
+
+    real_popen = subprocess.Popen
+
+    def launch_child(_command, **kwargs):
+        return real_popen([sys.executable, __file__], **kwargs)
+
+    monkeypatch.delenv(processes._ROLE_ENV, raising=False)
+    monkeypatch.setattr(processes, "launch_core_engines", launch_context)
+    monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
+    monkeypatch.setattr(processes.subprocess, "Popen", launch_child)
+    monkeypatch.setattr(processes.AsyncLLM, "from_vllm_config", Mock())
+    monkeypatch.setattr(
+        processes.EmbeddingWorkerProcessGroup, "start_monitor", lambda _self: None
+    )
+    _, _, group = processes.create_shared_embedding_engine_client(
+        vllm_config=config,
+        process_count=2,
+        usage_context=UsageContext.OPENAI_API_SERVER,
+        stat_loggers=[],
+        enable_log_requests=False,
+        disable_log_stats=True,
+    )
+    assert group is not None
+    try:
+        with zmq.Context() as context, context.socket(
+            zmq.PUSH
+        ) as output, context.socket(zmq.DEALER) as input_socket:
+            for socket in (output, input_socket):
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
+                socket.setsockopt(zmq.SNDTIMEO, 30000)
+            output.connect(addresses.outputs[1])
+            input_socket.connect(addresses.inputs[1])
+            output.send(b"output")
+            input_socket.send(b"input")
+            assert input_socket.recv() == b"input"
+        assert group.children[0][1].wait(timeout=30) == 0
+    finally:
+        group.cleanup()
+
+
+if __name__ == "__main__":
+    _run_listener_child()

@@ -10,7 +10,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -33,6 +32,7 @@ const (
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 	roleLaunchOwnership       roleLaunchOwnership
+	environment               *podEnvironment
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -48,7 +48,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			// on top of --load-format gms. Standalone inter-pod GMS should not set
 			// it: those engines are active clients of the dedicated GMS weight
 			// server, not shadow engines waiting for failover activation.
-			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"}})
 		}
 	}
 
@@ -75,14 +75,14 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 
 		if roleTemplateMP || (!preserveRoleLaunch && shouldUseMpBackend(annotations)) {
-			container.Env = append(container.Env, corev1.EnvVar{
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
 						FieldPath: "status.podIP",
 					},
 				},
-			})
+			}})
 		}
 
 		// Remove probes for multinode workers.
@@ -118,10 +118,10 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 					},
 				}
 			}
-			container.Env = append(container.Env,
-				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
-				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
-			)
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{
+				{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			})
 		}
 	}
 
@@ -290,12 +290,10 @@ func GetWaitLeaderConfigMapName(dgdName string) string {
 // Python script. One ConfigMap is created per DGD and owned by the DGD.
 func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      GetWaitLeaderConfigMapName(dgdName),
-			Namespace: namespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
-			},
+		Name:      GetWaitLeaderConfigMapName(dgdName),
+		Namespace: namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
 		},
 		Data: map[string]string{
 			waitLeaderScriptKey: WaitLeaderScript,
@@ -315,12 +313,8 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: waitLeaderVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmName,
-				},
-			},
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: cmName,
 		},
 	})
 
@@ -397,7 +391,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 // getExpandedArgs will expand the containers args in the case where
 // the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
 func getExpandedArgs(container *corev1.Container) []string {
-	expandedArgs := []string{}
+	expandedArgs := make([]string, 0, len(container.Args))
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}

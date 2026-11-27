@@ -53,6 +53,12 @@ inputs:
   target_azure_acr_password:
     description: 'Azure ACR password for target registry'
     required: false
+  target_registry_user:
+    description: 'Username for target_registry'
+    required: false
+  target_registry_password:
+    description: 'Password or token for target_registry'
+    required: false
   override_arch:
     description: 'Copy only the specified architecture (e.g. amd64). If empty, copies all platforms (manifest list).'
     required: false
@@ -83,6 +89,9 @@ runs:
         azure_acr_hostname: ${{ inputs.target_azure_acr_hostname }}
         azure_acr_user: ${{ inputs.target_azure_acr_user }}
         azure_acr_password: ${{ inputs.target_azure_acr_password }}
+        registry: ${{ inputs.target_registry }}
+        username: ${{ inputs.target_registry_user }}
+        password: ${{ inputs.target_registry_password }}
 
     - name: Copy Image
       id: copy

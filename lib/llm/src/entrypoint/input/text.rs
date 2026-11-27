@@ -110,6 +110,8 @@ async fn main_loop(
             .build()?;
 
         let req = NvCreateChatCompletionRequest {
+            responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -118,6 +120,7 @@ async fn main_loop(
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         };
 

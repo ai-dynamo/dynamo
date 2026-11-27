@@ -121,7 +121,7 @@ Set an explicit minimum at component scope. Dynamo resolves the target when omit
 |---|---|---|
 | Standalone single-node component | `PodCliqueTemplateSpec` | `spec.minAvailable` |
 | Multinode, inter-pod GPU memory service, or forced scaling group | `PodCliqueScalingGroupConfig` | `minAvailable` |
-| LPX component with a conductor role | `PodCliqueScalingGroupConfig` | `minAvailable` |
+| LPX component with a conductor role or an agent `runtime` init container | `PodCliqueScalingGroupConfig` | `minAvailable` |
 
 A standalone prefill component can specify:
 
@@ -150,7 +150,9 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <Note>
-  Each new non-LPX component must supply `spec.components[*].podTemplate.spec.containers[name=main]` with a non-empty `image`. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. If that image has no parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to its Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply a shared `podTemplate` or complete `roles[].podTemplate` definitions. Each supplied template must include `spec.containers[name=main]` with a non-empty `image`. Existing components without a `podTemplate` may retain that omission on update.
+
+  For components with `type: frontend`, `worker`, `prefill`, `decode`, `planner`, or `epp`, admission requires `spec.components[*].runtimeVersionOverride` when any runtime image tag lacks a parseable semantic version. The override must also be set when the parsed tag differs from the Dynamo runtime version. In sidecar mode, this applies to runtime init container images. Main container images are not used to infer Dynamo versions, including for roles without a runtime init container. Components without a `type` do not require an override. Custom helper types are also exempt in `v1alpha1` only; `v1beta1` does not allow custom types. Setting a previously unset type to one of the six types above revalidates its runtime version; an already set type is immutable. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`. The DGDR-level field supplies a default when generating components.
 
   LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
@@ -160,13 +162,28 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from the Dynamo launcher (`python -m dynamo.<backend>`) in each worker engine's `containers[name=main]`. When set, it must match the detected launcher. The operator does not infer a backend from a native engine command such as `vllm-rs`, a shell wrapper, or an image entrypoint, because the resolved backend is part of the worker-generation hash; native sidecar components set this field explicitly, as the examples do, to receive backend and compilation-cache defaults. See [Dynamo Sidecar Mode](dynamo-component-deployment.mdx#dynamo-sidecar-mode). Runtime sidecar launch wrappers do not affect inference. LPX components omit this field. Backend-specific defaults apply to `main`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
+  General environment defaults for each component's regular `main` container and declared `runtime`
+  init container. Container-specific definitions take precedence. For operator origins 1.8.0 and
+  later, list order is preserved within each source and references between sources are
+  topologically ordered; cycles fail rendering. Generated DCDs preserve this list separately in
+  their own `spec.env`. Older or missing origins retain legacy sorted composition.
+  Admission requires unique names within this root list, regardless of origin. An existing
+  duplicate list can remain unchanged on update only for earlier or missing origins. Origins
+  1.8.0 and later reject duplicates even when the list is unchanged; repair a stored list before
+  making unrelated updates. Changing any value, source, position, or member requires unique names
+  throughout. Names in different layers may still override one another.
+  New or changed entries must not combine a non-empty `value` with `valueFrom`. Alpha component
+  `spec.services.<name>.envs` lists follow the same uniqueness and value/source rules, with
+  unchanged-list duplicate ratcheting only for earlier or missing origins.
+  The alpha root field is `spec.envs`. This webhook rule leaves the root list's OpenAPI merge
+  semantics unchanged so legacy-origin duplicate lists can be ratcheted.
+  See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>
@@ -256,7 +273,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 The operator maintains observed state under `status`.
 
 <ParamField path="status.state" type="string" default="initializing">
-  High-level textual status of the graph deployment lifecycle.
+  High-level textual status of the graph deployment lifecycle. It is `failed`, even during a rolling update, while a Deployment-backed or Grove-managed component has a crash-looping container. A Deployment-backed component reports it through the DCD `Available` condition. DisaggregatedSet workers and LeaderWorkerSet-backed components are not covered: LeaderWorkerSet recreates the whole group at the first container restart.
 </ParamField>
 
 <ParamField path="status.conditions" type="[]metav1.Condition">
@@ -281,7 +298,7 @@ The operator maintains observed state under `status`.
 
 <Indent>
   <ParamField path="observedID" type="string">
-    The restart ID currently being processed. Matches `spec.restart.id`.
+    The restart ID currently being processed. Matches `spec.restart.id`; this acknowledges the request, not its completion.
   </ParamField>
   <ParamField path="phase" type="RestartPhase">
     Phase of the restart.
@@ -290,6 +307,7 @@ The operator maintains observed state under `status`.
   </ParamField>
   <ParamField path="inProgress" type="[]string">
     Names of the components currently being restarted.
+    For component and Grove workloads, a component remains in progress until its rendered workload carries the requested restart ID and passes the provider's generation and readiness checks.
   </ParamField>
 </Indent>
 
@@ -490,11 +508,11 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order. Omitted when the rendered command declares none of those flags. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Effective primary model identity resolved from model flags on the fully rendered serving Pod in combined mode. Absent in native sidecar mode, where Kubernetes Planner uses the model published in runtime registration. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-  Explicit Dynamo runtime component identity resolved from the serving Pod's `--endpoint` value. Omitted when the rendered command does not declare a component override. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Dynamo runtime component identity resolved from a qualified `--endpoint` in combined mode. Absent in native sidecar mode: Kubernetes Planner associates registrations with the active component's serving Pods by owner UID and uses the registered component name. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">

@@ -68,3 +68,11 @@ example:
 
 Remove the shim when the corresponding version leaves the supported window;
 do not carry compatibility branches forward indefinitely.
+
+# Frontend Serving-Load Metrics
+
+The frontend's request metrics live in `dynamo-http-server`; their rules are in [`../http-server/AGENTS.md`](../http-server/AGENTS.md). This crate adapts model cards and discovery into those metrics (`http/service/metrics.rs`) and publishes the frame they build for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`).
+
+## Decision Cleanup Diagnostics
+
+Report decision cleanup overruns through the request-correlated warning, not a separate metric until a continuous consumer is identified. Preserve the current tracing span when spawning cleanup, and retain admission until local work finishes. Use the warning to investigate overdue cleanup; it does not prove physical GPU settlement. This diagnostic adds no Prometheus series.

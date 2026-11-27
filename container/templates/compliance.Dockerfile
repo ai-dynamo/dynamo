@@ -56,6 +56,10 @@
 #   - sglang uses `--site-packages "$(... sysconfig ...)"` because the
 #     upstream image installs into system Python via
 #     `pip install --break-system-packages`, not a venv.
+{%- if framework == "sglang" and device == "xpu" %}
+#     sglang XPU is excluded: its lmsysorg/sglang:*-xpu base installs into
+#     /opt/venv, so it takes the VIRTUAL_ENV branch like vllm xpu/cpu.
+{%- endif %}
 #   - native always runs (image filter "{framework}-{target}[-efa]"), attributing
 #     the from-source binaries the python/rust/dpkg scanners miss (ffmpeg, libvpx,
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
@@ -101,6 +105,8 @@ COPY --from=epp /rust-licenses /tmp/rust-licenses
 # baseline is captured, which leaves the whole base image attributed and fails
 # the policy gate below on any denied license the base carries.
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
+# The Dynamo version, from pyproject.toml; picks the NGC source archive version.
+ARG DYNAMO_VERSION="{{ dynamo_version }}"
 ARG TARGETARCH
 # Resolve where this image's Python packages live at runtime rather than per
 # framework: venv-based images export VIRTUAL_ENV (trtllm, vllm xpu/cpu, dev),
@@ -108,7 +114,9 @@ ARG TARGETARCH
 # `pip --system`, sglang via `pip --break-system-packages`). Pick the matching
 # generator flag so it always finds the deps — passing an empty
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
-RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+{#- The enterprise variant has both: the NIM venv layers over system Python,
+    where Dynamo installs. #}
+RUN {% if framework == "sglang" and device != "xpu" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}PKG_ARG="--venv ${VIRTUAL_ENV} --site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
     --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
@@ -119,6 +127,7 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     --native-yaml /opt/compliance/native_packages.yaml \
     --native-image {{ framework }}-{{ target }}{% if make_efa %}-efa{% endif %} \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    ${DYNAMO_VERSION:+--source-version ${DYNAMO_VERSION}} \
     -v
 # Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
 # row), replacing the per-ecosystem loop. Non-zero exit fails the build.
@@ -155,8 +164,10 @@ RUN python3 -m compliance.scan_codecs \
 #
 # Single FROM-scratch stage exposing the unified compliance tree for CI
 # extraction (one `-compliance` artifact): flat NOTICES-<Eco>.txt + the unified
-# osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX). Export is bounded
-# by these files' size (a few MB) regardless of runtime image size.
+# osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX) + THIRD-PARTY.txt.
+# Export is bounded by these files' size (several MB; THIRD-PARTY.txt
+# repeats the NOTICES and adds base Debian copyright files) regardless of
+# runtime image size.
 
 FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /
@@ -178,6 +189,7 @@ RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-ful
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=go_tools_builder /out/native-sources/ /opt/native-sources/
 COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
 {% if target == "frontend" %}
 # Same SBOM the licenses stage uses, here to select /epp's crates out of the
@@ -190,8 +202,9 @@ COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
+{#- Dynamo's Rust wheels are in system Python on the enterprise variant, not the NIM venv. #}
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+        {% if framework == "sglang" and device != "xpu" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}RUST_PKG_ARG="--rust-site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \

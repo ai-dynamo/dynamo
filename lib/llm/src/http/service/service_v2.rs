@@ -4,33 +4,37 @@
 use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
 
-use super::Metrics;
 use super::RouteDoc;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::metrics::{
+    register_frontend_metrics_start_time_metric, register_lora_allocation_metrics,
+    register_model_ready_metric,
+};
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
-use anyhow::{Context, Result};
-use axum_server::tls_rustls::RustlsConfig;
+use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_http_server::lifecycle::{
+    InflightPermit, ServiceObserver, ServiceStage, echo_request_id_header, track_inflight_response,
+};
+use dynamo_http_server::metrics::Metrics;
+use dynamo_http_server::server::{HttpServer, HttpServerConfig, listen_socket_addr};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
@@ -42,29 +46,16 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use std::net::{IpAddr, SocketAddr};
-use tokio::sync::Notify;
+use std::net::SocketAddr;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+use crate::frontend_config::{
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
+    MediaRejectionConfig, MetricsConfig,
 };
-
-/// Middleware that echoes `x-request-id` from request to response headers.
-async fn echo_request_id_header(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let x_request_id = request.headers().get("x-request-id").cloned();
-    let mut response = next.run(request).await;
-    if let Some(value) = x_request_id {
-        response.headers_mut().insert("x-request-id", value);
-    }
-    response
-}
 
 /// State used to select the error format for unmatched routes.
 #[derive(Clone)]
@@ -99,16 +90,85 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+fn draining_inference_response(version: Version) -> axum::response::Response {
+    close_draining_connection(
+        super::openai::ErrorMessage::_service_unavailable().into_response(),
+        version,
+    )
+}
+
+fn close_draining_connection(
+    mut response: axum::response::Response,
+    version: Version,
+) -> axum::response::Response {
+    if version <= Version::HTTP_11 {
+        *response.version_mut() = version;
+        // Do not let connection pools keep sending requests to a retiring frontend.
+        response.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    response
+}
+
+/// Error protocol of a mounted inference route, used when the readiness gate
+/// rejects a request before the route's own error handling runs.
+#[derive(Clone, Copy)]
+enum MountedProtocol {
+    Decision(dynamo_decisions::Dialect),
+    Anthropic,
+}
+
+struct InferenceReadinessState {
+    state: Arc<State>,
+    mounted_protocols: HashMap<String, MountedProtocol>,
+}
+
+impl InferenceReadinessState {
+    fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
+        // Records the unavailable failure once; the protocol bodies below must not record again.
+        let (status, axum::Json(error)) = super::openai::ErrorMessage::_service_unavailable();
+        let protocol = request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .filter(|_| request.method() == axum::http::Method::POST)
+            .and_then(|path| self.mounted_protocols.get(path.as_str()));
+        let dialect = match protocol {
+            Some(&MountedProtocol::Decision(dialect)) => dialect,
+            Some(MountedProtocol::Anthropic) => {
+                let response = super::anthropic::readiness_rejection_response(
+                    request.headers(),
+                    status,
+                    error.message(),
+                );
+                return close_draining_connection(response, request.version());
+            }
+            None => return draining_inference_response(request.version()),
+        };
+        let decision_error = dynamo_decisions::DecisionError::new(
+            dialect,
+            status.as_u16(),
+            "server_error",
+            error.message(),
+        );
+        let mut response = (status, axum::Json(decision_error.response_body())).into_response();
+        let request_id = super::openai::get_or_create_request_id(request.headers());
+        super::systemone::attach_request_ids(&mut response, &request_id);
+        close_draining_connection(response, request.version())
+    }
+}
+
 async fn track_inflight_inference(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
+    let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let permit = state.acquire_inflight();
@@ -116,18 +176,11 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let response = next.run(request).await;
-    let (parts, body) = response.into_parts();
-    // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    track_inflight_response(response, permit)
 }
 
 /// HTTP service shared state
@@ -141,9 +194,62 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
+    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    pub(super) migration_limit: u32,
+    systemone_admission: Arc<Semaphore>,
+    systemone_preflight_admission: Arc<Semaphore>,
+    systemone_max_inflight_branches: usize,
+    systemone_max_input_tokens: usize,
+    systemone_request_timeout: Duration,
+}
+
+const DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES: usize = 256;
+const DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS: usize = 65_536;
+const MAX_SYSTEMONE_INFLIGHT_BRANCHES: usize = 4096;
+const MAX_SYSTEMONE_INPUT_TOKENS: usize = 1_048_576;
+const MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS: usize = 3600;
+const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
+
+fn bounded_systemone_limit(env_name: &'static str, default: usize, maximum: usize) -> usize {
+    match std::env::var(env_name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => {
+                if parsed > maximum {
+                    tracing::warn!(
+                        env = env_name,
+                        requested = parsed,
+                        effective = maximum,
+                        "lowering configured System One limit"
+                    );
+                } else if parsed > default {
+                    tracing::warn!(
+                        env = env_name,
+                        effective = parsed,
+                        default,
+                        "raising System One resource limit above the default"
+                    );
+                }
+                parsed.min(maximum)
+            }
+            _ => {
+                tracing::warn!(
+                    env = env_name,
+                    value,
+                    default,
+                    "ignoring invalid System One limit"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => {
+            tracing::warn!(env = env_name, %error, default, "ignoring invalid System One limit");
+            default
+        }
+    }
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -154,9 +260,11 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
+    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    migration_limit: u32,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -273,169 +381,6 @@ impl BackendErrorCheck {
     }
 }
 
-/// Lifecycle stage for the HTTP frontend.
-///
-/// The stage gates readiness and request admission separately from the runtime
-/// cancellation token so the frontend can stop accepting new requests before
-/// tearing down discovery and transport state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceStage {
-    /// The frontend is ready to admit new inference requests.
-    Ready = 0,
-    /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
-    /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
-}
-
-impl ServiceStage {
-    fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Ready,
-            1 => Self::Draining,
-            _ => Self::Stopping,
-        }
-    }
-}
-
-impl std::fmt::Display for ServiceStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ready => f.write_str("ready"),
-            Self::Draining => f.write_str("draining"),
-            Self::Stopping => f.write_str("stopping"),
-        }
-    }
-}
-
-/// Shared HTTP frontend lifecycle and inflight request tracker.
-///
-/// `ServiceObserver` is shared by HTTP handlers, health endpoints, and the
-/// shutdown path. It lets shutdown first mark the frontend as draining, then
-/// wait for admitted inference response bodies to complete before cancelling
-/// runtime state.
-#[derive(Debug)]
-pub struct ServiceObserver {
-    stage: AtomicU8,
-    inflight_inference: AtomicU64,
-    inflight_zero: Notify,
-}
-
-impl Default for ServiceObserver {
-    fn default() -> Self {
-        Self {
-            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
-            inflight_inference: AtomicU64::new(0),
-            inflight_zero: Notify::new(),
-        }
-    }
-}
-
-impl ServiceObserver {
-    /// Return the current frontend lifecycle stage.
-    pub fn stage(&self) -> ServiceStage {
-        ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
-    }
-
-    /// Return true when the frontend should admit new inference requests.
-    pub fn is_ready(&self) -> bool {
-        self.stage() == ServiceStage::Ready
-    }
-
-    /// Mark the frontend as draining.
-    ///
-    /// Draining makes readiness fail and causes request admission checks to
-    /// reject new inference requests while existing response bodies continue.
-    pub fn start_draining(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering draining stage"
-        );
-        self.stage
-            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
-    }
-
-    /// Mark the frontend as stopping.
-    ///
-    /// Stopping is entered after inflight requests drain or the graceful
-    /// shutdown timeout expires.
-    pub fn start_stopping(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering stopping stage"
-        );
-        self.stage
-            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
-    }
-
-    /// Track one admitted inference response body.
-    ///
-    /// The returned permit must live for the full HTTP response body lifetime,
-    /// including streaming responses. Dropping the permit decrements the
-    /// inflight count and wakes shutdown waiters when the count reaches zero.
-    pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
-        self.inflight_inference.fetch_add(1, Ordering::Relaxed);
-        InflightPermit {
-            observer: self.clone(),
-        }
-    }
-
-    /// Return the number of admitted inference requests still in flight.
-    pub fn inflight_count(&self) -> u64 {
-        self.inflight_inference.load(Ordering::Acquire)
-    }
-
-    /// Wait until all admitted inference requests drain or `timeout` expires.
-    ///
-    /// Returns `true` when inflight work drained before the timeout and `false`
-    /// when shutdown should proceed because the timeout expired.
-    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.inflight_zero.notified();
-                tokio::pin!(notified);
-                // Register before reading the count so a final permit drop
-                // cannot notify between the count check and the await.
-                notified.as_mut().enable();
-                if self.inflight_count() == 0 {
-                    break;
-                }
-                notified.as_mut().await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-}
-
-/// RAII guard for one admitted inference response.
-///
-/// This permit is held by a response-body wrapper so it is released only when
-/// the client response body finishes or is dropped.
-pub struct InflightPermit {
-    observer: Arc<ServiceObserver>,
-}
-
-impl Drop for InflightPermit {
-    fn drop(&mut self) {
-        if self
-            .observer
-            .inflight_inference
-            .fetch_sub(1, Ordering::AcqRel)
-            == 1
-            && self.observer.stage() != ServiceStage::Ready
-        {
-            self.observer.inflight_zero.notify_waiters();
-        }
-    }
-}
-
 #[derive(Default, Debug)]
 struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
@@ -447,10 +392,12 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    transcriptions_endpoints_enabled: AtomicBool,
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
     generate_endpoints_enabled: AtomicBool,
+    systemone_endpoints_enabled: AtomicBool,
     batch_endpoints_enabled: AtomicBool,
 }
 
@@ -466,12 +413,16 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
+                .load(Ordering::Relaxed),
             EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
             EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::SystemOne => self.systemone_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
@@ -505,6 +456,9 @@ impl StateFlags {
             EndpointType::Audios => self
                 .audios_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Realtime => self
                 .realtime_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -516,6 +470,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Generate => self
                 .generate_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::SystemOne => self
+                .systemone_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Batch => self
                 .batch_endpoints_enabled
@@ -531,6 +488,11 @@ impl State {
         cancel_token: CancellationToken,
         config: StateConfig,
     ) -> Self {
+        let systemone_max_inflight_branches = bounded_systemone_limit(
+            env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            MAX_SYSTEMONE_INFLIGHT_BRANCHES,
+        );
         Self {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
@@ -547,17 +509,36 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                transcriptions_endpoints_enabled: AtomicBool::new(false),
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
                 generate_endpoints_enabled: AtomicBool::new(false),
+                systemone_endpoints_enabled: AtomicBool::new(false),
                 batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             responses_api_enabled: config.responses_api_enabled,
+            generate_api_enabled: config.generate_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            migration_limit: config.migration_limit,
+            systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
+            systemone_preflight_admission: Arc::new(Semaphore::new(
+                SYSTEMONE_MAX_CONCURRENT_PREFLIGHT,
+            )),
+            systemone_max_inflight_branches,
+            systemone_max_input_tokens: bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+                DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS,
+                MAX_SYSTEMONE_INPUT_TOKENS,
+            ),
+            systemone_request_timeout: Duration::from_secs(bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
+                300,
+                MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS,
+            ) as u64),
         }
     }
 
@@ -572,6 +553,30 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub(crate) fn systemone_admission(&self) -> Arc<Semaphore> {
+        self.systemone_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_inflight_branches(&self) -> usize {
+        self.systemone_max_inflight_branches
+    }
+
+    pub(crate) fn systemone_preflight_admission(&self) -> Arc<Semaphore> {
+        self.systemone_preflight_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_input_tokens(&self) -> usize {
+        self.systemone_max_input_tokens
+    }
+
+    pub(crate) fn systemone_request_timeout(&self) -> Duration {
+        self.systemone_request_timeout
+    }
+
+    pub(crate) fn systemone_enabled(&self) -> bool {
+        self.frontend_api_config.systemone_enabled()
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -612,8 +617,16 @@ impl State {
             (model.has_images_engine(), EndpointType::Images),
             (model.has_videos_engine(), EndpointType::Videos),
             (model.has_audios_engine(), EndpointType::Audios),
+            (
+                model.has_transcriptions_engine(),
+                EndpointType::Transcriptions,
+            ),
             (model.has_realtime_engine(), EndpointType::Realtime),
-            (model.has_generate_engine(), EndpointType::Generate),
+            (
+                model.has_generate_engine()
+                    && (self.generate_api_enabled || !self.systemone_enabled()),
+                EndpointType::Generate,
+            ),
         ];
         routes.iter().any(|(has_engine, _)| *has_engine)
             && routes
@@ -723,6 +736,14 @@ impl State {
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
     }
+
+    pub fn media_rejection(&self) -> MediaRejectionConfig {
+        self.frontend_api_config.media_rejection()
+    }
+
+    pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
+        self.frontend_api_config.chat_template_defaults()
+    }
 }
 
 #[derive(Clone)]
@@ -743,11 +764,36 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
+    /// Admin routes, served on their own listener when enabled.
+    admin: Option<AdminListener>,
+    frontend_load_target: Option<FrontendLoadTarget>,
+    /// The registry the HTTP service's own metrics are registered into.
+    prometheus_registry: prometheus::Registry,
+    /// Keeps `prometheus_registry` attached to the DRT's metrics tree while any clone of this service lives.
+    _drt_metrics_attachment: Option<Arc<dynamo_runtime::metrics::AttachedPrometheusRegistry>>,
+}
+
+/// Admin routes and the address they are served on.
+#[derive(Clone)]
+struct AdminListener {
+    router: axum::Router,
+    addr: SocketAddr,
+}
+
+/// Where this service publishes frontend load.
+#[derive(Clone)]
+struct FrontendLoadTarget {
+    runtime: DistributedRuntime,
+    namespace: String,
 }
 
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct HttpServiceConfig {
+    /// Replacement worker attempts per eligible realtime transcription socket.
+    #[builder(default)]
+    migration_limit: u32,
+
     #[builder(default = "8787")]
     port: u16,
 
@@ -837,19 +883,33 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_nvext: bool,
 
-    /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`; env-truthy
-    /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
-    #[builder(default = "true")]
+    /// Serve `/router_policy` (including its busy-threshold subresource) and the
+    /// legacy `/busy_threshold` API on the admin listener. Default `false`;
+    /// env-truthy `DYN_ENABLE_FRONTEND_ADMIN_API` also enables it.
+    #[builder(default = "false")]
     enable_admin_api: bool,
 
     /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
     #[builder(default = "default_rl_port()")]
     rl_port: u16,
 
-    /// Distributed runtime used by the RL worker discovery API.
+    /// Host for the admin listener. Defaults to `DYN_FRONTEND_ADMIN_HOST` or `127.0.0.1`.
+    #[builder(setter(into), default = "default_admin_host()")]
+    admin_host: String,
+
+    /// Port for the admin listener. Defaults to `DYN_FRONTEND_ADMIN_PORT` or 8002.
+    #[builder(default = "default_admin_port()")]
+    admin_port: u16,
+
+    /// Distributed runtime used by the RL worker discovery API and to publish
+    /// frontend load to the Pool Relay.
     #[builder(default = "None")]
-    runtime: Option<Arc<DistributedRuntime>>,
+    runtime: Option<DistributedRuntime>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    /// See [`frontend_load_namespace`](crate::frontend_load::frontend_load_namespace).
+    #[builder(default = "None")]
+    namespace: Option<String>,
 
     /// Interval for SSE comment frames while a streaming response is idle.
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
@@ -871,9 +931,28 @@ fn default_rl_port() -> u16 {
         .unwrap_or(8001)
 }
 
+fn default_admin_host() -> String {
+    std::env::var(env_llm::DYN_FRONTEND_ADMIN_HOST).unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+fn default_admin_port() -> u16 {
+    std::env::var(env_llm::DYN_FRONTEND_ADMIN_PORT)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8002)
+}
+
 impl HttpService {
     pub fn builder() -> HttpServiceConfigBuilder {
         HttpServiceConfigBuilder::default()
+    }
+
+    /// The registry this service's own metrics (`dynamo_frontend_*` and the
+    /// rest) are registered into. Public only for the integration tests in
+    /// `tests/http_metrics.rs`.
+    #[doc(hidden)]
+    pub fn prometheus_registry(&self) -> &prometheus::Registry {
+        &self.prometheus_registry
     }
 
     pub fn state_clone(&self) -> Arc<State> {
@@ -902,13 +981,11 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
-        self.run_inner(cancel_token, None, None).await
+        self.run_inner(cancel_token, None).await
     }
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
-    /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
-    /// service built with `enable_tls(true)`.
+    /// port-allocation gap for tests that need to know the bound port up front.
     ///
     /// [`spawn`]: HttpService::spawn
     pub async fn spawn_with_listener(
@@ -921,206 +998,102 @@ impl HttpService {
     }
 
     /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
-    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
-    /// restriction.
+    /// binding `{host}:{port}` internally.
     ///
     /// [`run`]: HttpService::run
-    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
     pub async fn run_with_listener(
         &self,
         cancel_token: CancellationToken,
         listener: tokio::net::TcpListener,
     ) -> Result<()> {
-        self.run_inner(cancel_token, Some(listener), None).await
+        self.run_inner(cancel_token, Some(listener)).await
     }
 
     async fn run_inner(
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
-        server_handle: Option<axum_server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
         }
 
-        let address = format!("{}:{}", self.host, self.port);
-        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
-        tracing::info!(protocol, address, "Starting HTTP(S) service");
+        let server = HttpServer::prepare(
+            self.router.clone(),
+            HttpServerConfig {
+                host: self.host.clone(),
+                port: self.port,
+                enable_tls: self.enable_tls,
+                tls_cert_path: self.tls_cert_path.clone(),
+                tls_key_path: self.tls_key_path.clone(),
+                tls_client_ca_cert_path: self.tls_client_ca_cert_path.clone(),
+            },
+            listener,
+        )
+        .await?;
+        // Telemetry continues during drain and stops on every service exit path.
+        let publisher_cancel = CancellationToken::new();
+        let _publisher_guard = publisher_cancel.clone().drop_guard();
 
-        let router = self.router.clone();
-        let observer = cancel_token.child_token();
+        self.spawn_admin_listener_if_configured(&cancel_token, server.tls_acceptor())?;
+        self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
-        let state = self.state.clone();
-        let state_cancel = state.cancel_token().clone();
+        // Spawn canary after all fallible startup so it won't leak on early errors
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+        self.start_frontend_load_publisher(&publisher_cancel);
 
-        if self.enable_tls {
-            if listener.is_some() {
-                return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode. \
-                     Use run()/spawn() (which bind internally) when enable_tls is set."
-                ));
-            }
-            let addr = listen_socket_addr(&self.host, self.port)?;
-            let cert_path = self
-                .tls_cert_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
-            let key_path = self
-                .tls_key_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-            let mut server_config = dynamo_runtime::tls_utils::server_tls_config(
-                cert_path,
-                key_path,
-                self.tls_client_ca_cert_path.as_deref(),
+        server
+            .serve(
+                self.state.service_observer(),
+                self.state.cancel_token().clone(),
+                cancel_token,
             )
-            .context("Failed to create TLS config")?;
-            server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            let config = RustlsConfig::from_config(Arc::new(server_config));
+            .await?;
+        Ok(())
+    }
 
-            let handle = server_handle.unwrap_or_default();
-            let std_listener = bind_listener(addr)
-                .and_then(|l| l.into_std())
-                .map_err(|e| {
-                    tracing::error!(
-                        protocol = %protocol,
-                        address = %address,
-                        error = %e,
-                        "Failed to bind server to address"
-                    );
-                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
-                })?;
-            let server = axum_server::from_tcp_rustls(std_listener, config)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-
-            let server = async {
-                tokio::pin!(server);
-                tokio::select! {
-                    result = &mut server => result,
-                    address = handle.listening() => {
-                        if let Some(address) = address {
-                            tracing::info!(%address, "HTTPS server listening");
-                        }
-                        server.await
-                    }
-                }
-            };
-
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            tokio::pin!(server);
-            tokio::select! {
-                result = &mut server => {
-                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                }
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTPS server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    let drain_started = tokio::time::Instant::now();
-                    let (result, ()) = tokio::join!(&mut server, async {
-                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                            tracing::warn!(
-                                inflight_requests = state.inflight_count(),
-                                "Timed out waiting for inflight inference requests to drain"
-                            );
-                        }
-                        handle.graceful_shutdown(Some(
-                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
-                        ));
-                    });
-                    state.start_stopping();
-                    state_cancel.cancel();
-                    result.context("HTTPS server shutdown")?;
-                }
-            }
-        } else {
-            let listener = match listener {
-                Some(l) => l,
-                None => {
-                    let addr = listen_socket_addr(&self.host, self.port)?;
-                    bind_listener(addr).map_err(|e| {
-                        tracing::error!(
-                            protocol = %protocol,
-                            address = %address,
-                            error = %e,
-                            "Failed to bind server to address"
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                                protocol,
-                                self.port
-                            ),
-                            _ => anyhow::anyhow!(
-                                "Failed to start {} server on {}: {}",
-                                protocol,
-                                address,
-                                e
-                            ),
-                        }
-                    })?
-                }
-            };
-
-            let std_listener = listener.into_std()?;
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            let handle = server_handle.unwrap_or_default();
-            let server = axum_server::from_tcp(std_listener)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-            tokio::pin!(server);
-            tokio::select! {
-                result = &mut server => {
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                },
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTP server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    let drain_started = tokio::time::Instant::now();
-                    let (result, ()) = tokio::join!(&mut server, async {
-                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                            tracing::warn!(
-                                inflight_requests = state.inflight_count(),
-                                "Timed out waiting for inflight inference requests to drain"
-                            );
-                        }
-                        handle.graceful_shutdown(Some(
-                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
-                        ));
-                    });
-                    state.start_stopping();
-                    state_cancel.cancel();
-                    result.context("HTTP server shutdown")?;
-                }
-            }
-            self.state.start_stopping();
-            cancel_token.cancel();
+    fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
+        if !crate::pool_relay::serving_load_publishing_enabled() {
+            return;
         }
+        let Some(target) = &self.frontend_load_target else {
+            return;
+        };
+        let observer = self.state.service_observer();
+        crate::frontend_load::start_frontend_load_publisher(
+            target.runtime.clone(),
+            target.namespace.clone(),
+            self.state.manager_clone(),
+            self.state.metrics_clone(),
+            move || observer.is_ready(),
+            cancel_token.child_token(),
+        );
+    }
 
+    /// Serves the admin routes on their own listener, with the same TLS settings as
+    /// the HTTP service.
+    fn spawn_admin_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> Result<()> {
+        let Some(admin) = self.admin.clone() else {
+            return Ok(());
+        };
+        let listener = dynamo_http_server::server::bind_listener(admin.addr)
+            .map_err(|e| anyhow::anyhow!("Failed to bind admin listener on {}: {e}", admin.addr))?;
+        tracing::info!(address = %admin.addr, "Admin listener started");
+        let admin_cancel = cancel_token.child_token();
+        tokio::spawn(dynamo_http_server::server::serve(
+            listener,
+            tls,
+            admin.router,
+            dynamo_http_server::server::write_idle_timeout(),
+            async move {
+                admin_cancel.cancelled_owned().await;
+                Duration::ZERO
+            },
+        ));
         Ok(())
     }
 
@@ -1170,8 +1143,11 @@ impl HttpService {
     ///
     /// Batch API availability is configured when the service is built and cannot be changed here.
     pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) -> Result<()> {
-        if endpoint_type == EndpointType::Batch {
-            anyhow::bail!("batch endpoint availability is fixed when the HTTP service is built");
+        if matches!(endpoint_type, EndpointType::Batch | EndpointType::SystemOne) {
+            anyhow::bail!(
+                "{} endpoint availability is fixed when the HTTP service is built",
+                endpoint_type.as_str()
+            );
         }
 
         self.state.flags.set(&endpoint_type, enable);
@@ -1187,66 +1163,6 @@ impl HttpService {
     pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
         self.state.flags.get(&endpoint_type)
     }
-}
-
-fn get_graceful_shutdown_timeout() -> usize {
-    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(5)
-}
-
-fn write_idle_timeout() -> Duration {
-    std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .filter(|duration| tokio::time::Instant::now().checked_add(*duration).is_some())
-        .unwrap_or(Duration::from_secs(120))
-}
-
-const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
-
-// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
-fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
-    value
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| (1..=i32::MAX as u32).contains(n))
-        .unwrap_or(DEFAULT_LISTEN_BACKLOG)
-}
-
-fn listen_backlog() -> u32 {
-    parse_listen_backlog(std::env::var(env_llm::DYN_HTTP_LISTEN_BACKLOG))
-}
-
-/// Build the listen address from an IP literal host. IPv6 brackets are optional,
-/// so `::` and `[::]` are equivalent.
-fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
-    let literal = host.trim();
-    let literal = literal
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(literal);
-    let ip: IpAddr = literal
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid address '{host}:{port}': {e}"))?;
-    Ok(SocketAddr::new(ip, port))
-}
-
-/// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
-/// clients connecting within seconds overflow that, and overflowed connections
-/// are delayed or, depending on host TCP settings, fail.
-fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
-    let socket = if addr.is_ipv4() {
-        tokio::net::TcpSocket::new_v4()?
-    } else {
-        tokio::net::TcpSocket::new_v6()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(listen_backlog())
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -1291,6 +1207,54 @@ pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE
 /// Environment variable to set the SGLang Generate endpoint path
 /// (default: `/generate`).
 pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+/// Environment variable to set the System One endpoint path (default: `/v1/systemone`).
+pub(super) static HTTP_SVC_SYSTEMONE_PATH_ENV: &str = "DYN_HTTP_SVC_SYSTEMONE_PATH";
+/// Resolve legacy backend switches once; readiness and routing use the same formats.
+fn configured_generate_routes(
+    enable_engine_apis: bool,
+) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
+    use crate::generate_format::{named, selected};
+    resolve_generate_routes(
+        [
+            (
+                (enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV))
+                    .then(|| named("vllm")),
+                HTTP_SVC_VLLM_GENERATE_PATH_ENV,
+                "/inference/v1/generate",
+            ),
+            (
+                (enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV)).then(selected),
+                HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
+                "/generate",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(format, path_env, default_path)| {
+            format.map(|format| {
+                (
+                    format,
+                    var(path_env).unwrap_or_else(|_| default_path.to_string()),
+                )
+            })
+        }),
+    )
+}
+
+fn resolve_generate_routes(
+    entries: impl IntoIterator<Item = (Result<crate::generate_format::SharedFormat>, String)>,
+) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
+    let mut routes = Vec::new();
+    for (format, path) in entries {
+        validate_generate_route_path(&path)?;
+        anyhow::ensure!(
+            !routes.iter().any(|(existing, _)| existing == &path),
+            "duplicate Generate route path: {path}"
+        );
+        routes.push((path, format?));
+    }
+    Ok(routes)
+}
+
 fn validate_generate_route_path(path: &str) -> Result<()> {
     if !path.starts_with("/") {
         anyhow::bail!("Generate route path must start with '/': {path:?}");
@@ -1340,24 +1304,20 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        super::image_edits::validate_config()?;
+        LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
-        let vllm_generate_enabled =
-            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
-        let sglang_generate_enabled =
-            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
-        let generate_engine_capabilities = [
-            vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
+        let systemone_enabled = frontend_api_config.systemone_enabled();
+        let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
+        let generate_engine_capabilities = generate_routes
+            .iter()
+            .map(|(_, format)| format.capability())
+            .collect::<Vec<_>>();
         let model_manager = Arc::new(ModelManager::new());
-        let cancel_token = config.cancel_token.unwrap_or_default();
+        let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -1367,12 +1327,10 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        // Both surfaces are on by default; an env-truthy DISABLE var turns them
-        // off. The builder flag can also force off (e.g. tests), and wins.
+        // nvext is on by default; an env-truthy DISABLE var turns it off. The
+        // builder flag can also force it off (e.g. tests), and wins.
         let nvext_enabled =
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
-        let admin_api_enabled =
-            config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -1381,9 +1339,11 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 responses_api_enabled: config.enable_responses_endpoints,
+                generate_api_enabled: !generate_routes.is_empty(),
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
+                migration_limit: config.migration_limit,
             },
         ));
         state
@@ -1406,14 +1366,19 @@ impl HttpServiceConfigBuilder {
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
         );
-        state.flags.set(
-            &EndpointType::Generate,
-            !generate_engine_capabilities.is_empty(),
-        );
+        state
+            .flags
+            .set(&EndpointType::Generate, !generate_routes.is_empty());
+        state.flags.set(&EndpointType::SystemOne, systemone_enabled);
 
         // enable prometheus metrics
-        let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        let registry = dynamo_http_server::metrics::Registry::new();
+        register_frontend_metrics_start_time_metric(&registry)?;
+        metrics::register_with_model_manager(
+            &state.metrics_clone(),
+            &registry,
+            state.manager_clone(),
+        )?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
@@ -1466,9 +1431,9 @@ impl HttpServiceConfigBuilder {
         // System routes (health, metrics, models) — debug-level spans
         let mut system_routes = vec![
             metrics::router(
-                registry,
+                registry.clone(),
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
-                config.drt_metrics,
+                config.drt_metrics.clone(),
             ),
             if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
@@ -1481,17 +1446,6 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
-        if admin_api_enabled {
-            system_routes.push(super::busy_threshold::busy_threshold_router(
-                state.clone(),
-                None,
-            ));
-        } else {
-            tracing::info!(
-                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — busy_threshold routes not registered"
-            );
-        }
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
@@ -1501,7 +1455,7 @@ impl HttpServiceConfigBuilder {
                 gateway,
                 var(HTTP_SVC_FILES_PATH_ENV).ok(),
                 var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
-                super::openai::get_body_limit(),
+                dynamo_http_server::request::get_body_limit(),
                 super::batch_proxy::upload_body_limit(),
                 state.cancel_token().clone(),
             )?);
@@ -1516,12 +1470,30 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            vllm_generate_enabled,
-            sglang_generate_enabled,
+            generate_routes,
+            systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
+        // Route docs carry the resolved paths, including custom Anthropic bases.
+        let mounted_protocols = endpoint_routes
+            .iter()
+            .flat_map(|(endpoint, docs, _)| docs.iter().map(move |doc| (*endpoint, doc)))
+            .filter_map(|(endpoint, doc)| {
+                let protocol = match endpoint {
+                    EndpointType::SystemOne if doc.path() == super::systemone::DECISIONS_PATH => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::OpenAi)
+                    }
+                    EndpointType::SystemOne => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::Jev)
+                    }
+                    EndpointType::AnthropicMessages => MountedProtocol::Anthropic,
+                    _ => return None,
+                };
+                Some((doc.path().to_owned(), protocol))
+            })
+            .collect();
         let mut inference_router = axum::Router::new();
-        for (route_docs, route) in endpoint_routes {
+        for (_, route_docs, route) in endpoint_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
@@ -1531,7 +1503,10 @@ impl HttpServiceConfigBuilder {
                 .on_response(on_response),
         );
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            Arc::new(InferenceReadinessState {
+                state: state.clone(),
+                mounted_protocols,
+            }),
             track_inflight_inference,
         ));
 
@@ -1546,6 +1521,32 @@ impl HttpServiceConfigBuilder {
         );
         append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
+
+        // Admin routes are served on their own listener, so they are documented after the
+        // inference port's `/openapi.json` is built: `route_docs()` lists them, that spec does not.
+        // TODO: Add authentication to the admin listener.
+        let admin_api_enabled =
+            config.enable_admin_api || env_is_truthy(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+        let admin = if admin_api_enabled {
+            let mut admin_router = axum::Router::new();
+            for (route_docs, route) in [
+                super::router_policy::router_policy_router(state.manager_clone()),
+                super::busy_threshold::busy_threshold_router(state.clone(), None),
+            ] {
+                append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
+                admin_router = admin_router.merge(route);
+            }
+            Some(AdminListener {
+                router: admin_router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+                addr: listen_socket_addr(&config.admin_host, config.admin_port)?,
+            })
+        } else {
+            None
+        };
 
         system_router = system_router.layer(
             TraceLayer::new_for_http()
@@ -1587,7 +1588,7 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            let router = super::openai::rl_router(drt.clone())?;
+            let router = super::openai::rl_router(Arc::new(drt.clone()))?;
             tracing::info!(
                 rl_port = config.rl_port,
                 "RL worker discovery enabled at /v1/rl/workers"
@@ -1603,6 +1604,13 @@ impl HttpServiceConfigBuilder {
             None
         };
 
+        // Attach only once nothing above can fail, so a failed build leaves no
+        // registry behind on the DRT.
+        let drt_metrics_attachment = config
+            .drt_metrics
+            .as_ref()
+            .map(|drt_metrics| Arc::new(drt_metrics.add_prometheus_registry(registry.clone())));
+
         Ok(HttpService {
             state,
             router,
@@ -1616,6 +1624,13 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
+            admin,
+            frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
+                runtime,
+                namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
+            }),
+            prometheus_registry: registry,
+            _drt_metrics_attachment: drt_metrics_attachment,
         })
     }
 
@@ -1668,14 +1683,21 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn media_rejection(mut self, media_rejection: MediaRejectionConfig) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_media_rejection(media_rejection);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        vllm_generate_enabled: bool,
-        sglang_generate_enabled: bool,
+        generate_routes: Vec<(String, crate::generate_format::SharedFormat)>,
+        systemone_enabled: bool,
         enable_batch_endpoints: bool,
-    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
+    ) -> Result<Vec<(EndpointType, Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1696,6 +1718,8 @@ impl HttpServiceConfigBuilder {
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (transcriptions_docs, transcriptions_route) =
+            super::transcriptions::transcriptions_router(state.clone(), None);
         let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
@@ -1712,6 +1736,10 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(
+            EndpointType::Transcriptions,
+            (transcriptions_docs, transcriptions_route),
+        );
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
@@ -1737,25 +1765,27 @@ impl HttpServiceConfigBuilder {
             );
         }
 
-        if vllm_generate_enabled || sglang_generate_enabled {
+        if systemone_enabled {
+            tracing::warn!("The Decisions and System One APIs are experimental.");
+            let path = var(HTTP_SVC_SYSTEMONE_PATH_ENV).ok();
+            if let Some(path) = path.as_deref() {
+                validate_generate_route_path(path)?;
+                anyhow::ensure!(
+                    path != super::systemone::DECISIONS_PATH,
+                    "System One route must not collide with /v1/decisions"
+                );
+            }
+            let (docs, route) = super::systemone::router(state.clone(), path);
+            endpoint_routes.insert(EndpointType::SystemOne, (docs, route));
+        }
+
+        if !generate_routes.is_empty() {
             tracing::warn!("The engine-native Generate APIs are experimental.");
             let mut generate_docs = Vec::new();
             let mut generate_route = axum::Router::new();
-            if vllm_generate_enabled {
-                let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
-                if let Some(path) = generate_path.as_deref() {
-                    validate_generate_route_path(path)?;
-                }
-                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
-                generate_docs.extend(docs);
-                generate_route = generate_route.merge(route);
-            }
-            if sglang_generate_enabled {
-                let generate_path = var(HTTP_SVC_SGLANG_GENERATE_PATH_ENV).ok();
-                if let Some(path) = generate_path.as_deref() {
-                    validate_generate_route_path(path)?;
-                }
-                let (docs, route) = super::sglang_generate::router(state.clone(), generate_path);
+            for (path, format) in generate_routes {
+                let (docs, route) =
+                    super::format_generate::router(state.clone(), Some(path), format);
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
@@ -1784,7 +1814,7 @@ impl HttpServiceConfigBuilder {
                     }
                 },
             ));
-            routes.push((docs, route));
+            routes.push((endpoint_type, docs, route));
         }
         Ok(routes)
     }
@@ -1793,10 +1823,96 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use crate::local_model::runtime_config::{
+        SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn bounded_systemone_limit_accepts_operator_increases_and_warns_when_clamped() {
+        let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        for (configured, effective, warned) in [
+            ("128", 128, false),
+            ("1024", 1024, false),
+            ("8192", 4096, true),
+        ] {
+            let mut capture = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(capture.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                temp_env::with_var("DYN_TEST_DECISION_LIMIT", Some(configured), || {
+                    assert_eq!(
+                        bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
+                        effective
+                    );
+                });
+            });
+            capture.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            capture.read_to_string(&mut logs).unwrap();
+            assert_eq!(
+                logs.contains("lowering configured System One limit"),
+                warned
+            );
+            assert_eq!(
+                logs.contains("raising System One resource limit above the default"),
+                configured == "1024"
+            );
+            if warned {
+                assert!(logs.contains("requested=8192"), "{logs}");
+                assert!(logs.contains("effective=4096"), "{logs}");
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_systemone_limits_reject_invalid_values_and_preserve_defaults() {
+        for configured in [
+            None,
+            Some("0"),
+            Some("-1"),
+            Some("abc"),
+            Some("184467440737095516160"),
+        ] {
+            temp_env::with_var("DYN_TEST_DECISION_LIMIT", configured, || {
+                assert_eq!(
+                    bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
+                    256
+                );
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn raised_systemone_limits_reach_state_and_admission() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES, Some("512")),
+                (env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS, Some("131072")),
+                (env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS, Some("600")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let state = service.state_clone();
+                assert_eq!(state.systemone_max_inflight_branches(), 512);
+                assert_eq!(state.systemone_max_input_tokens(), 131_072);
+                assert_eq!(state.systemone_request_timeout(), Duration::from_secs(600));
+                assert!(
+                    state
+                        .systemone_admission()
+                        .try_acquire_many_owned(512)
+                        .is_ok()
+                );
+            },
+        );
+    }
 
     struct MtlsTestCertificates {
         ca: NamedTempFile,
@@ -1880,18 +1996,9 @@ mod tests {
             .build()
             .unwrap();
         let cancel = CancellationToken::new();
-        let tls_handle = axum_server::Handle::new();
-        let server_handle = tls_handle.clone();
-        let server_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_inner(server_cancel, None, Some(server_handle))
-                .await
-        });
-        let addr = tokio::time::timeout(Duration::from_secs(2), tls_handle.listening())
-            .await
-            .expect("TLS service did not start")
-            .expect("TLS service failed to bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = service.spawn_with_listener(cancel.clone(), listener).await;
 
         let root = reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
             .unwrap();
@@ -2205,8 +2312,14 @@ mod tests {
         handle.abort();
     }
 
+    // These tests own route readiness, not either backend's wire format.
+    fn install_readiness_formats() {
+        crate::generate_format::test_formats::install();
+    }
+
     #[tokio::test]
     async fn model_readiness_waits_for_generate_route_without_dispatching_inference() {
+        install_readiness_formats();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let service = HttpService::builder()
@@ -2250,6 +2363,42 @@ mod tests {
         assert_eq!(
             client.get(&url).send().await.unwrap().status(),
             reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_transcriptions_route() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_transcriptions_model("whisper", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, false)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/whisper/ready");
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, true)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
         );
         handle.abort();
     }
@@ -2560,6 +2709,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_health_lists_instances_only_on_request() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        state
+            .discovery()
+            .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+                transport: dynamo_runtime::component::TransportType::Nats(
+                    "nats://localhost:4222".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            health,
+            serde_json::json!({"status": "healthy", "stage": "ready"})
+        );
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health?instances=true"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(
+            health["endpoints"],
+            serde_json::json!(["dyn://ns.backend.generate"])
+        );
+        assert_eq!(health["instances"].as_array().unwrap().len(), 1);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn test_service_observer_waits_for_inflight_requests() {
         let observer = Arc::new(ServiceObserver::default());
         let permit = observer.acquire_inflight();
@@ -2586,46 +2785,96 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
-    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
-    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
-    /// tests).
     #[tokio::test]
-    async fn test_admin_api_disabled_404s_busy_threshold() {
-        let cancel_token = Arc::new(CancellationToken::new());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let service = HttpService::builder()
-            .port(port)
-            .enable_admin_api(false)
+    async fn track_inflight_inference_preserves_length() {
+        use axum::body::HttpBody;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
+    }
+
+    #[tokio::test]
+    async fn test_admin_routes_only_on_admin_listener() {
+        // Off by default, and bound to loopback when enabled.
+        assert!(HttpService::builder().build().unwrap().admin.is_none());
+        let enabled = HttpService::builder()
+            .enable_admin_api(true)
             .build()
             .unwrap();
+        assert!(enabled.admin.unwrap().addr.ip().is_loopback());
 
-        let service_token = cancel_token.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_with_listener((*service_token).clone(), listener)
+        let admin_port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (port, _, handle) =
+            spawn_service(|builder| builder.enable_admin_api(true).admin_port(admin_port)).await;
+
+        let client = reqwest::Client::new();
+        for (method, path) in [
+            (reqwest::Method::GET, "/busy_threshold"),
+            (reqwest::Method::POST, "/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy/busy_threshold"),
+            (reqwest::Method::POST, "/router_policy/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy"),
+            (reqwest::Method::PATCH, "/router_policy"),
+        ] {
+            let response = client
+                .request(method, format!("http://localhost:{port}{path}"))
+                .json(&serde_json::json!({"model": "missing"}))
+                .send()
                 .await
                 .unwrap();
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{}/busy_threshold", port))
+        let admin = client
+            .get(format!("http://127.0.0.1:{admin_port}/busy_threshold"))
             .send()
             .await
-            .expect("request failed");
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
-
-        // And /live still works (sanity: only the admin surface is gated).
-        let live = reqwest::Client::new()
-            .get(format!("http://localhost:{}/live", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(live.status(), reqwest::StatusCode::OK);
-
-        cancel_token.cancel();
+            .expect("admin request failed");
+        assert_eq!(admin.status(), reqwest::StatusCode::OK);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_admin_port_bind_failure_aborts_startup() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken_port = taken.local_addr().unwrap().port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let service = HttpService::builder()
+            .enable_admin_api(true)
+            .admin_port(taken_port)
+            .build()
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.run_with_listener(CancellationToken::new(), listener),
+        )
+        .await
+        .expect("startup did not abort");
+        assert!(result.is_err());
     }
 
     /// Starts an `HttpService` on an ephemeral local port.
@@ -2810,23 +3059,12 @@ mod tests {
                     let cancel = CancellationToken::new();
                     let _guard = cancel.clone().drop_guard();
                     let server_cancel = cancel.clone();
-                    let handle = axum_server::Handle::new();
-                    let server_handle = handle.clone();
-                    let listener = if is_tls {
-                        None
-                    } else {
-                        Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
-                    };
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
                     let mut task =
                         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                            service
-                                .run_inner(server_cancel, listener, Some(server_handle))
-                                .await
+                            service.run_with_listener(server_cancel, listener).await
                         }));
-                    let addr = tokio::time::timeout(Duration::from_secs(2), handle.listening())
-                        .await
-                        .unwrap()
-                        .unwrap();
                     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
                     let mut client: Box<dyn Connection> = if is_tls {
                         let config = dynamo_runtime::tls_utils::client_tls_config(
@@ -2875,7 +3113,6 @@ mod tests {
                     tokio::time::timeout(Duration::from_secs(1), released.cancelled())
                         .await
                         .expect("frontend retained upstream response");
-                    handle.shutdown();
                     drop(client);
                     upstream_task.abort();
                     let _ = upstream_task.await;
@@ -2884,6 +3121,76 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                for (tls, before_headers) in [(false, false), (true, true)] {
+                        let certificates = make_mtls_test_certificates();
+                        let parent = CancellationToken::new();
+                        let mut service = HttpService::builder()
+                            .host("127.0.0.1").port(0).enable_tls(tls)
+                            .cancel_token(Some(parent.clone()))
+                            .tls_cert_path(tls.then(|| certificates.server_cert.path().to_path_buf()))
+                            .tls_key_path(tls.then(|| certificates.server_key.path().to_path_buf()))
+                            .build().unwrap();
+                        let state = service.state_clone();
+                        let entered = CancellationToken::new();
+                        let released = CancellationToken::new();
+                        let handler_entered = entered.clone();
+                        let handler_released = released.clone();
+                        service.router = axum::Router::new().route("/blocked", axum::routing::get(move || {
+                            let entered = handler_entered.clone();
+                            let guard = handler_released.clone().drop_guard();
+                            async move {
+                                entered.cancel();
+                                if before_headers { std::future::pending::<()>().await; }
+                                Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"));
+                                    std::future::pending::<()>().await;
+                                })
+                            }
+                        })).layer(axum::middleware::from_fn_with_state(
+                            Arc::new(InferenceReadinessState {
+                                state: state.clone(),
+                                mounted_protocols: HashMap::new(),
+                            }),
+                            track_inflight_inference,
+                        ));
+                        let cancel = CancellationToken::new();
+                        let server_cancel = cancel.clone();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                        let client = reqwest::Client::builder().no_proxy().danger_accept_invalid_certs(true)
+                            .timeout(Duration::from_secs(4)).build().unwrap();
+                        let request = client.get(format!("{}://{address}/blocked", if tls { "https" } else { "http" })).send();
+                        let mut request = Some(tokio::spawn(request));
+                        tokio::time::timeout(Duration::from_secs(2), entered.cancelled()).await.unwrap();
+                        let response = if before_headers { None } else { Some(request.take().unwrap().await.unwrap().unwrap()) };
+                        cancel.cancel();
+                        if let Some(response) = response {
+                            assert!(response.bytes().await.is_err(), "interruption must not look like EOF");
+                        }
+                        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+                        tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
+                        if let Some(request) = request
+                            && let Ok(response) = request.await.unwrap()
+                        {
+                            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                        assert_eq!(state.inflight_count(), 0);
+                        assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
+                }
+            },
+        ).await;
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error
@@ -3066,6 +3373,8 @@ mod tests {
     /// Verifies that unmatched routes under the Anthropic Messages API path return
     /// the Anthropic error envelope.
     #[tokio::test]
+    // Serial because other tests set `DYN_HTTP_SVC_ANTHROPIC_PATH`.
+    #[serial_test::serial]
     async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
         let (port, _state, handle) =
             spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
@@ -3518,65 +3827,6 @@ mod tests {
     }
 
     #[test]
-    fn test_listen_backlog_env_var() {
-        assert_eq!(
-            parse_listen_backlog(Err(std::env::VarError::NotPresent)),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok("0".to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok("invalid".to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
-            DEFAULT_LISTEN_BACKLOG
-        );
-        assert_eq!(
-            parse_listen_backlog(Ok(i32::MAX.to_string())),
-            i32::MAX as u32
-        );
-        assert_eq!(parse_listen_backlog(Ok(" 8192 ".to_string())), 8192);
-    }
-
-    #[tokio::test]
-    async fn test_bind_listener_accepts_connections() {
-        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert_ne!(addr.port(), 0);
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (_server_side, peer) = listener.accept().await.unwrap();
-        assert_eq!(peer, client.local_addr().unwrap());
-    }
-
-    #[test]
-    fn test_listen_socket_addr_accepts_ip_literals() {
-        for (host, expected) in [
-            ("0.0.0.0", "0.0.0.0:8000"),
-            ("127.0.0.1", "127.0.0.1:8000"),
-            ("::", "[::]:8000"),
-            ("[::]", "[::]:8000"),
-            (" [::1] ", "[::1]:8000"),
-        ] {
-            assert_eq!(
-                listen_socket_addr(host, 8000).unwrap(),
-                expected.parse::<SocketAddr>().unwrap(),
-                "{host}"
-            );
-        }
-        for host in ["localhost", "[::", "::1]", ""] {
-            let error = listen_socket_addr(host, 8000).unwrap_err().to_string();
-            assert!(
-                error.starts_with(&format!("Invalid address '{host}:8000'")),
-                "{host}: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn test_sse_keep_alive_for_deferred_response() {
         let configured = Duration::from_millis(5000);
         assert_eq!(
@@ -3599,6 +3849,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn generate_capabilities_follow_startup_gates() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -3638,7 +3889,268 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn generate_route_paths_follow_backend_env_overrides() {
+    fn decisions_mount_both_routes_without_enabling_public_generate_capabilities() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_SYSTEMONE_PATH_ENV, None),
+            ],
+            || {
+                let mut api = FrontendApiConfig::default();
+                api.set_systemone_enabled(true);
+                let service = HttpService::builder()
+                    .frontend_api_config(api)
+                    .enable_chat_endpoints(true)
+                    .build()
+                    .unwrap();
+
+                assert!(service.generate_engine_capabilities().is_empty());
+                assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
+                assert!(!service.model_endpoint_enabled(EndpointType::Generate));
+                let routes = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                assert!(routes.contains(&"POST /v1/systemone".to_string()));
+                assert!(routes.contains(&"POST /v1/decisions".to_string()));
+                assert!(!routes.contains(&"POST /generate".to_string()));
+                let state = service.state_clone();
+                state
+                    .manager()
+                    .add_chat_completions_model(
+                        "decision-model",
+                        "chat-worker",
+                        Arc::new(crate::engines::StreamingEngineAdapter::new(
+                            crate::engines::make_echo_engine(),
+                        )),
+                    )
+                    .unwrap();
+                state
+                    .manager()
+                    .add_generate_model(
+                        "decision-model",
+                        "scoring-worker",
+                        Arc::new(ReadinessOnlyEngine),
+                    )
+                    .unwrap();
+                let model = state.manager().get_model("decision-model").unwrap();
+                assert!(model.has_chat_engine());
+                assert!(model.has_generate_engine());
+                assert!(state.model_http_routes_ready(&model));
+                assert!(
+                    service
+                        .enable_model_endpoint(EndpointType::SystemOne, false)
+                        .is_err()
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn systemone_route_cannot_override_decisions() {
+        temp_env::with_var(HTTP_SVC_SYSTEMONE_PATH_ENV, Some("/v1/decisions"), || {
+            let mut api = FrontendApiConfig::default();
+            api.set_systemone_enabled(true);
+            let result = HttpService::builder().frontend_api_config(api).build();
+            assert!(result.is_err());
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decision_readiness_rejections_preserve_mounted_protocol_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/decide")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_SYSTEMONE_PATH_ENV, configured_path)],
+                async move {
+                    let mut api = FrontendApiConfig::default();
+                    api.set_systemone_enabled(true);
+                    let service = HttpService::builder()
+                        .frontend_api_config(api)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let systemone_path = configured_path.unwrap_or("/v1/systemone");
+                    for (path, client_id) in [
+                        (systemone_path, Some("readiness-request")),
+                        ("/v1/decisions", Some("readiness-request")),
+                        ("/v1/responses", Some("readiness-request")),
+                        (systemone_path, None),
+                        ("/v1/decisions", None),
+                    ] {
+                        let mut request = axum::http::Request::post(path)
+                            .header("content-type", "application/json");
+                        if let Some(client_id) = client_id {
+                            request = request.header("x-request-id", client_id);
+                        }
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(request.body(Body::from("{}")).unwrap())
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        );
+                        if path != "/v1/responses" {
+                            assert_eq!(response.headers()["x-dynamo-systemone-version"], "1");
+                            let canonical_id = &response.headers()["x-typesafe-request-id"];
+                            assert!(uuid::Uuid::parse_str(canonical_id.to_str().unwrap()).is_ok());
+                            if let Some(client_id) = client_id {
+                                assert_eq!(response.headers()["x-request-id"], client_id);
+                            } else {
+                                assert_eq!(&response.headers()["x-request-id"], canonical_id);
+                            }
+                        }
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        if path == systemone_path {
+                            assert_eq!(body["detail"], "Service is not ready");
+                            assert_eq!(body["code"], "server_error");
+                            assert!(body.get("error").is_none());
+                        } else if path == "/v1/decisions" {
+                            assert_eq!(body["error"]["message"], "Service is not ready");
+                            assert_eq!(body["error"]["code"], "server_error");
+                        } else {
+                            assert_eq!(body["code"], 503);
+                        }
+                    }
+                    let unmatched = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post(format!("{systemone_path}/not-registered"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn anthropic_readiness_rejections_preserve_envelope_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/messages")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_ANTHROPIC_PATH_ENV, configured_path)],
+                async move {
+                    let service = HttpService::builder()
+                        .enable_anthropic_endpoints(true)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let base = configured_path.unwrap_or("/v1/messages");
+                    let count_tokens = format!("{base}/count_tokens");
+                    for path in [base, count_tokens.as_str()] {
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(
+                                axum::http::Request::post(path)
+                                    .header("content-type", "application/json")
+                                    .header("anthropic-version", "2023-06-01")
+                                    .header("x-request-id", "anthropic-readiness")
+                                    .body(Body::from("{}"))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "{path}"
+                        );
+                        assert_eq!(response.headers()[header::CONNECTION], "close");
+                        let request_id = response.headers()["request-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        // The server owns `request-id`; clients correlate with `x-request-id`.
+                        assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+                        assert_eq!(response.headers()["x-request-id"], "anthropic-readiness");
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["type"], "error", "{path}: {body}");
+                        assert_eq!(body["error"]["type"], "overloaded_error");
+                        assert_eq!(body["error"]["message"], "Service is not ready");
+                        assert_eq!(body["request_id"], request_id.as_str());
+                    }
+
+                    // Other inference routes keep the OpenAI body.
+                    let control = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post("/v1/chat/completions")
+                                .header("content-type", "application/json")
+                                .body(Body::from("{}"))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        control.status(),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    let body = axum::body::to_bytes(control.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(body["code"], 503);
+                    assert_ne!(body["type"], "error");
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn systemone_does_not_bypass_disabled_public_generate_route() {
+        crate::generate_format::test_formats::install();
+        let mut api = FrontendApiConfig::default();
+        api.set_systemone_enabled(true);
+        let service = HttpService::builder()
+            .frontend_api_config(api)
+            .enable_engine_apis(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("generate-model", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        let model = state.manager().get_model("generate-model").unwrap();
+        assert!(state.model_http_routes_ready(&model));
+        service
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        assert!(!state.model_http_routes_ready(&model));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_route_paths_use_overrides() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
@@ -3660,6 +4172,23 @@ mod tests {
                 assert!(!route_docs.contains(&"POST /generate".to_string()));
                 assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
             },
+        );
+    }
+
+    #[test]
+    fn generate_route_paths_reject_collisions() {
+        install_readiness_formats();
+        let error = resolve_generate_routes(["vllm", "sglang"].map(|name| {
+            (
+                crate::generate_format::named(name),
+                "/native/shared".to_string(),
+            )
+        }))
+        .err()
+        .expect("duplicate path must fail");
+        assert_eq!(
+            error.to_string(),
+            "duplicate Generate route path: /native/shared"
         );
     }
 

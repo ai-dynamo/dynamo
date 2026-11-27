@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -94,7 +94,7 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 			EnvFrom: []corev1.EnvFromSource{{
 				Prefix: "WORKER_",
 				ConfigMapRef: &corev1.ConfigMapEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
+					Name: "worker-config",
 				},
 			}},
 			Resources: corev1.ResourceRequirements{
@@ -113,8 +113,8 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 				{Name: "config", MountPath: "/etc/worker", ReadOnly: true},
 			},
 			SecurityContext: &corev1.SecurityContext{
-				RunAsNonRoot:             ptr.To(true),
-				AllowPrivilegeEscalation: ptr.To(false),
+				RunAsNonRoot:             new(true),
+				AllowPrivilegeEscalation: new(false),
 			},
 		}},
 		InitContainers: []corev1.Container{{
@@ -131,26 +131,26 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 		Volumes: []corev1.Volume{
 			{
 				Name: "models",
-				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: "model-cache",
 					ReadOnly:  true,
-				}},
+				},
 			},
 			{
 				Name: "config",
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
-				}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: "worker-config",
+				},
 			},
 		},
 		HostNetwork:           true,
 		HostPID:               true,
-		ShareProcessNamespace: ptr.To(true),
+		ShareProcessNamespace: new(true),
 		SecurityContext: &corev1.PodSecurityContext{
-			RunAsNonRoot: ptr.To(true),
+			RunAsNonRoot: new(true),
 			FSGroup:      ptr.To[int64](1000),
 		},
-		RuntimeClassName: ptr.To("nvidia"),
+		RuntimeClassName: new("nvidia"),
 		NodeName:         "gpu-node-07",
 		NodeSelector: map[string]string{
 			"kubernetes.io/arch":     "amd64",
@@ -181,6 +181,7 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com/h100",
+		false,
 	)
 	require.NoError(t, err)
 
@@ -210,19 +211,19 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	})
 
 	t.Log("When their snapshot compatibility hashes are computed")
-	firstHash, err := ComputeSnapshotCompatibilityHash(&first, "main", "vllm", "disabled", "")
+	firstHash, err := ComputeSnapshotCompatibilityHash(&first, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
-	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "")
+	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
-	t.Log("Then graph, Pod, worker-generation, and helper-sidecar identity do not make the artifact incompatible")
+	t.Log("Then graph, Pod, worker-generation, served-name, and helper-sidecar identity do not make the artifact incompatible")
 	assert.Equal(t, firstHash, secondHash)
 	assert.Len(t, firstHash, 64)
 }
 
 func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testing.T) {
 	base := snapshotCompatibilityTestPodTemplate("capture-dgd", "capture-ns", "worker-a")
-	baseHash, err := ComputeSnapshotCompatibilityHash(&base, "main", "vllm", "disabled", "")
+	baseHash, err := ComputeSnapshotCompatibilityHash(&base, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -264,6 +265,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			gmsMode: "disabled",
 		},
 		{
+			name: "offline policy",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "HF_HUB_OFFLINE", Value: "1"})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
 			name: "GPU node selector",
 			mutate: func(template *corev1.PodTemplateSpec) {
 				template.Spec.NodeSelector = map[string]string{"nvidia.com/gpu.product": "H100"}
@@ -288,9 +297,9 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 				)
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: "model-cache",
-					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 						ClaimName: "capture-dgd-model-cache",
-					}},
+					},
 				})
 			},
 			backend: "vllm",
@@ -299,7 +308,7 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 		{
 			name: "CUDA shared-memory support",
 			mutate: func(template *corev1.PodTemplateSpec) {
-				template.Annotations = map[string]string{consts.CUDASharedMemorySupportAnnotation: "enabled"}
+				template.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
 			},
 			backend: "vllm",
 			gmsMode: "disabled",
@@ -322,7 +331,7 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			changed := base.DeepCopy()
 			test.mutate(changed)
-			changedHash, err := ComputeSnapshotCompatibilityHash(changed, "main", test.backend, test.gmsMode, "")
+			changedHash, err := ComputeSnapshotCompatibilityHash(changed, "main", test.backend, test.gmsMode, "", false)
 			require.NoError(t, err)
 			assert.NotEqual(t, baseHash, changedHash)
 		})
@@ -337,6 +346,7 @@ func TestComputeSnapshotCompatibilityHashRejectsGMSDeviceClassChanges(t *testing
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com",
+		false,
 	)
 	require.NoError(t, err)
 	h100ClassHash, err := ComputeSnapshotCompatibilityHash(
@@ -345,6 +355,7 @@ func TestComputeSnapshotCompatibilityHashRejectsGMSDeviceClassChanges(t *testing
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com/h100",
+		false,
 	)
 	require.NoError(t, err)
 
@@ -362,9 +373,9 @@ func TestComputeSnapshotCompatibilityHashPreservesEnvironmentOrder(t *testing.T)
 	reordered.Spec.Containers[0].Env[0], reordered.Spec.Containers[0].Env[1] =
 		reordered.Spec.Containers[0].Env[1], reordered.Spec.Containers[0].Env[0]
 
-	orderedHash, err := ComputeSnapshotCompatibilityHash(&ordered, "main", "vllm", "disabled", "")
+	orderedHash, err := ComputeSnapshotCompatibilityHash(&ordered, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
-	reorderedHash, err := ComputeSnapshotCompatibilityHash(reordered, "main", "vllm", "disabled", "")
+	reorderedHash, err := ComputeSnapshotCompatibilityHash(reordered, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, orderedHash, reorderedHash,
@@ -399,8 +410,11 @@ func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
 		}
 	}
 
+	// Refresh the offline policy without changing the persisted v2 hash contract.
+	require.Contains(t, pythonNames, "HF_HUB_OFFLINE")
+	delete(pythonNames, "HF_HUB_OFFLINE")
 	assert.Equal(t, pythonNames, snapshotRestoreEnvironmentNames,
-		"Go compatibility filtering must track the Python restore-context allowlist")
+		"Go compatibility filtering must track Python restore env except HF_HUB_OFFLINE, retained in v2")
 }
 
 func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix string) corev1.PodTemplateSpec {
@@ -418,6 +432,7 @@ func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix strin
 					{Name: "DYN_NAMESPACE", Value: namespace + "-runtime"},
 					{Name: "DYN_NAMESPACE_WORKER_SUFFIX", Value: workerSuffix},
 					{Name: "POD_NAME", Value: dgdName + "-pod"},
+					{Name: "DYN_SERVED_MODEL_NAME", Value: dgdName + "/model"},
 				},
 			}},
 		},

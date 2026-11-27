@@ -20,29 +20,33 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
+mod image_edits;
 pub mod metadata;
 mod openai;
-mod write_timeout;
+mod transcriptions;
 
 pub mod busy_threshold;
 pub mod disconnect;
-pub mod error;
+pub(crate) mod error;
+pub mod format_generate;
 pub mod frontend_extension;
-pub mod generate;
+
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod response_headers;
+pub mod router_policy;
 pub mod service_v2;
-pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
-    validate_extension_route_path,
+    validate_extension_route_method, validate_extension_route_path,
 };
-pub use metrics::Metrics;
 
 use crate::{
     preprocessor::OpenAIPreprocessor,
@@ -88,7 +92,10 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        parsing_options.tool_call_parser.as_deref(),
+        (
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,
@@ -102,6 +109,7 @@ fn apply_request_tool_call_parsing_options(
             request,
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
+            unified_family,
             uses_structural_tag,
             effective_tools.as_ref(),
         )?;
@@ -119,8 +127,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -134,6 +142,42 @@ mod tests {
                 .unwrap()
                 .reasoning_disabled
         );
+    }
+
+    #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons unless the request or a default turns thinking off.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |defaults: &crate::frontend_config::ChatTemplateDefaults,
+                                  kwargs: Value| {
+            let mut req = request(json!("auto"));
+            req.chat_template_args = serde_json::from_value(kwargs).unwrap();
+            defaults.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut defaults = crate::frontend_config::ChatTemplateDefaults::default();
+        assert!(!reasoning_disabled(&defaults, Value::Null));
+        defaults.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&defaults, Value::Null));
+        for unset in [Value::Null, json!("auto")] {
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"enable_thinking": unset})
+            ));
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"reasoning_effort": unset})
+            ));
+        }
+        assert!(!reasoning_disabled(
+            &defaults,
+            json!({"enable_thinking": true})
+        ));
     }
 
     #[test]
@@ -217,16 +261,72 @@ mod tests {
                     let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
                     assert_eq!(
                         result.reasoning_disabled,
-                        if family == "gemma4" {
-                            thinking != Some(true)
-                        } else {
-                            thinking == Some(false)
+                        match family {
+                            "gpt_oss" => false,
+                            "glm47" => false,
+                            "beam" => false,
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
+                            "mistral_4" => false,
+                            _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
                     );
                 }
             }
         }
+    }
+
+    // A non-streaming forced choice on the Unified mistral_4 family must re-read
+    // the aggregated native output, not hand it to the guided-JSON reader.
+    #[tokio::test]
+    async fn unified_mistral_forced_choices_batch_native_calls() {
+        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_forced_choices_batch_native_calls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let raw =
+            r#"[THINK]need the weather[/THINK][TOOL_CALLS]get_weather[ARGS]{"location":"Paris"}"#;
+        let options = apply_request_tool_call_parsing_options(
+            ParsingOptions::new(Some("mistral".into()), Some("mistral".into())),
+            &request(json!({"type": "function", "function": {"name": "get_weather"}})),
+        )
+        .unwrap();
+        assert_eq!(options.guided_tool_constraint, GuidedToolConstraint::None);
+        let chunk = serde_json::from_value(json!({"id":"test", "object":"chat.completion.chunk",
+            "created":0, "model":"test", "choices":[{"index":0,
+            "delta":{"content":raw}, "finish_reason":"stop"}]}))
+        .unwrap();
+
+        let result = DeltaAggregator::apply(
+            futures::stream::iter([Annotated::from_data(chunk)]),
+            options,
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("need the weather")
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+            json!({"location": "Paris"})
+        );
     }
 
     #[test]
@@ -432,6 +532,105 @@ mod tests {
             "an operator-configured structural tag must apply to any registry-supported \
              parser, not only the Kimi-intrinsic case"
         );
+    }
+
+    #[test]
+    fn harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "1",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, parallel, expected) in [
+                (
+                    json!("required"),
+                    None,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(true),
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(false),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!("auto"),
+                    Some(true),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    None,
+                    GuidedToolConstraint::StructuralTag,
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
+                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut request = request(choice);
+                request.inner.parallel_tool_calls = parallel;
+                let result = apply_request_tool_call_parsing_options(options, &request).unwrap();
+                assert_eq!(
+                    result.guided_tool_constraint, expected,
+                    "{parser} {parallel:?}"
+                );
+            }
+        }
     }
 
     // The low-level ParsingOptions default remains conservative. Regular
@@ -766,6 +965,8 @@ pub enum OpenApiRouteKind {
     Completions,
     Embeddings,
     Responses,
+    Decisions,
+    SystemOne,
 }
 
 /// Documentation for a route, with optional handler-specific schema metadata.

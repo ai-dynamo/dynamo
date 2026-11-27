@@ -71,6 +71,83 @@ pub struct NvCreateCompletionResponse {
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// The prompt a choice echoes back (`echo: true`), built once the engine reports
+    /// its prompt logprobs. In-process only, never serialized on its own: the unary
+    /// aggregator prepends it to the choice and the SSE path folds it into the chunk
+    /// that carries it (see [`NvCreateCompletionResponse::fold_echo`]).
+    #[serde(skip)]
+    pub echo: Option<CompletionEcho>,
+}
+
+/// The prompt side of a completions choice for `echo: true`: the prompt text and, when
+/// the request asked for `logprobs`, one entry per prompt token in the same layout as
+/// the completion's `logprobs` (position 0 has no logprob, as in the OpenAI API).
+///
+/// The two parts can travel on different chunks: the text goes out on the choice's
+/// first chunk, the prompt logprobs on the chunk that carries the engine's payload
+/// (the final one on vLLM and SGLang). A part that already went out is empty here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionEcho {
+    pub choice_index: u32,
+    pub text: String,
+    pub logprobs: Option<dynamo_protocols::types::Logprobs>,
+}
+
+impl CompletionEcho {
+    /// Combine the parts of one choice's echo that arrived on different chunks.
+    pub fn merge(&mut self, other: CompletionEcho) {
+        if self.text.is_empty() {
+            self.text = other.text;
+        }
+        if self.logprobs.is_none() {
+            self.logprobs = other.logprobs;
+        }
+    }
+
+    /// Put the echoed prompt ahead of the completion: text first, then the prompt
+    /// positions before the generated ones. Generated `text_offset`s move past the
+    /// echoed text.
+    pub fn prepend_to(self, choice: &mut dynamo_protocols::types::Choice) {
+        let echoed_len = self.text.len() as u32;
+        choice.text.insert_str(0, &self.text);
+        let Some(mut logprobs) = self.logprobs else {
+            return;
+        };
+        if let Some(generated) = choice.logprobs.take() {
+            logprobs.tokens.extend(generated.tokens);
+            logprobs.token_logprobs.extend(generated.token_logprobs);
+            logprobs.top_logprobs.extend(generated.top_logprobs);
+            logprobs.text_offset.extend(
+                generated
+                    .text_offset
+                    .into_iter()
+                    .map(|offset| offset + echoed_len),
+            );
+        }
+        choice.logprobs = Some(logprobs);
+    }
+}
+
+impl NvCreateCompletionResponse {
+    /// Fold a pending echo into its choice. For consumers that serialize this chunk as
+    /// is (SSE); the unary aggregator prepends the echo once the stream has ended.
+    pub fn fold_echo(&mut self) {
+        let Some(echo) = self.echo.take() else {
+            return;
+        };
+        match self
+            .inner
+            .choices
+            .iter_mut()
+            .find(|choice| choice.index == echo.choice_index)
+        {
+            Some(choice) => echo.prepend_to(choice),
+            None => tracing::warn!(
+                choice_index = echo.choice_index,
+                "completions echo dropped: the chunk carrying it has no matching choice"
+            ),
+        }
+    }
 }
 
 /// Schema-only import for the wholly re-exported async-openai response type.
@@ -232,6 +309,20 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         self.inner.best_of
     }
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
+    }
 }
 
 impl CommonExtProvider for NvCreateCompletionRequest {
@@ -299,7 +390,12 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
@@ -362,7 +458,11 @@ impl ResponseFactory {
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
         };
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        }
     }
 }
 
@@ -466,9 +566,13 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
         self.common.prompt_logprobs.or_else(|| {
+            // `echo` with `logprobs` rebuilds the prompt positions from the engine's
+            // prompt logprobs, with as many alternatives per position as `logprobs`
+            // asks for; `echo` alone only needs the prompt text.
             self.inner
                 .echo
-                .and_then(|echo| if echo { Some(1) } else { None })
+                .filter(|echo| *echo)
+                .and_then(|_| self.inner.logprobs.map(u32::from))
         })
     }
 
@@ -493,6 +597,14 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        self.validate_with_max_logprobs(validate::MAX_LOGPROBS)
+    }
+}
+
+impl NvCreateCompletionRequest {
+    /// [`ValidateRequest::validate`], with `logprobs` checked against
+    /// `max_logprobs` (the serving model's limit) instead of the default.
+    pub fn validate_with_max_logprobs(&self, max_logprobs: u8) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
@@ -527,7 +639,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         )?;
         // none for stream
         // none for stream_options
-        validate::validate_logprobs(self.inner.logprobs)?;
+        validate::validate_max_logprobs("Logprobs", self.inner.logprobs, max_logprobs)?;
         // none for echo
         validate::validate_stop(&self.inner.stop)?;
         validate::validate_presence_penalty(self.inner.presence_penalty)?;
@@ -656,6 +768,31 @@ mod tests {
             .expect("Failed to extract output options");
 
         assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_empty_logit_bias_map_extracts_as_none() {
+        // `logit_bias: {}` is a no-op request. It must normalize to `None` so
+        // it serializes as `null` and stays safe for N-2 workers that predate
+        // the field (a `{}` would reach their sampling-options filter and
+        // fail on the unknown key).
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "logit_bias": {}
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("empty logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("empty logit_bias extraction failed");
+
+        assert!(
+            sampling_options.logit_bias.is_none(),
+            "an empty logit_bias map must extract as None, got {:?}",
+            sampling_options.logit_bias
+        );
     }
 
     #[test]

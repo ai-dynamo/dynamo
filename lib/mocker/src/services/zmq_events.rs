@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::residency::StorageTier;
 use futures::{Sink, SinkExt, StreamExt};
 use serde::Serialize;
 use tmq::{
@@ -45,6 +46,8 @@ enum ZmqRawKvEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<&'static str>,
         group_idx: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
@@ -294,6 +297,7 @@ pub(crate) fn encode_event_batch(
                 event.block_token_ids.as_deref(),
                 block_size,
                 event.storage_tier,
+                event.session_id.as_deref(),
             )
         })
         .collect::<Vec<_>>();
@@ -314,6 +318,7 @@ fn convert_to_zmq_events(
     block_token_ids: Option<&[Vec<u32>]>,
     block_size: u32,
     storage_tier: StorageTier,
+    session_id: Option<&str>,
 ) -> Vec<ZmqRawKvEvent> {
     let medium = storage_tier.to_kv_medium();
     match &event.data {
@@ -340,6 +345,7 @@ fn convert_to_zmq_events(
                 block_size,
                 medium,
                 group_idx: 0,
+                session_id: session_id.map(str::to_owned),
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
@@ -420,10 +426,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash,
-    };
+    use dynamo_kv_events::event::{KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 
@@ -500,6 +504,7 @@ mod tests {
             event: stored_event(),
             block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
             storage_tier: StorageTier::Device,
+            session_id: Some("wire-session".into()),
         })
         .unwrap();
         let ctx = Context::new();
@@ -527,7 +532,7 @@ mod tests {
         .await
         .expect("replay must return the published event");
         assert_eq!(frames[2], 0u64.to_be_bytes());
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&frames[3]).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&frames[3]).unwrap();
         assert_eq!(batch.data_parallel_rank, Some(0));
         assert_eq!(batch.events.len(), 1);
     }
@@ -539,6 +544,7 @@ mod tests {
             Some(&[vec![1, 2, 3, 4]]),
             4,
             StorageTier::HostPinned,
+            None,
         );
 
         let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
@@ -554,6 +560,7 @@ mod tests {
             Some(&[vec![1, 2, 3, 4]]),
             4,
             StorageTier::Device,
+            None,
         );
 
         let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
@@ -564,13 +571,14 @@ mod tests {
 
     #[test]
     fn encoded_batch_decodes_through_router_zmq_wire() {
-        use dynamo_kv_router::protocols::KvCacheRemoveData;
-        use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
+        use dynamo_kv_events::event::KvCacheRemoveData;
+        use dynamo_kv_events::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
 
         let stored = RawKvEvent {
             event: stored_event(),
             block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
             storage_tier: StorageTier::Device,
+            session_id: Some("wire-session".into()),
         };
         // Device tier omits `medium`: under positional (unnamed) encoding the
         // required `group_idx` shifts into `medium`'s slot and BlockRemoved
@@ -585,6 +593,7 @@ mod tests {
             },
             block_token_ids: None,
             storage_tier: StorageTier::Device,
+            session_id: Some("wire-session".into()),
         };
 
         // Host-pinned stored events also mis-decode positionally: the medium
@@ -593,6 +602,7 @@ mod tests {
             event: stored_event(),
             block_token_ids: Some(vec![vec![5, 6, 7, 8]]),
             storage_tier: StorageTier::HostPinned,
+            session_id: None,
         };
 
         let payload = encode_event_batch(&[stored, removed, stored_pinned], 4, 3)
@@ -609,6 +619,7 @@ mod tests {
                 token_ids,
                 medium,
                 group_idx,
+                session_id,
                 ..
             },
             WireKvEvent::BlockRemoved {
@@ -636,6 +647,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![10]
         );
+        assert_eq!(session_id.as_deref(), Some("wire-session"));
         assert_eq!(token_ids, &vec![1, 2, 3, 4]);
         assert_eq!(*medium, None);
         assert_eq!(*group_idx, Some(0));

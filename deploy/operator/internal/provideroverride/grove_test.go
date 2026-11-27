@@ -165,7 +165,7 @@ func providerOverrideFixture(target, value string) *nvidiacomv1beta1.ProviderOve
 	}
 }
 
-func assertNestedValue(t *testing.T, object map[string]interface{}, want interface{}, fields ...string) {
+func assertNestedValue(t *testing.T, object map[string]any, want any, fields ...string) {
 	t.Helper()
 	got, found, err := unstructured.NestedFieldNoCopy(object, fields...)
 	if err != nil || !found || got != want {
@@ -175,10 +175,10 @@ func assertNestedValue(t *testing.T, object map[string]interface{}, want interfa
 
 func assertNamedNestedValue(
 	t *testing.T,
-	object map[string]interface{},
+	object map[string]any,
 	listPath []string,
 	name string,
-	want interface{},
+	want any,
 	fields ...string,
 ) {
 	t.Helper()
@@ -187,7 +187,7 @@ func assertNamedNestedValue(
 		t.Fatalf("list at %v = (found=%t, err=%v)", listPath, found, err)
 	}
 	for _, rawItem := range items {
-		item, ok := rawItem.(map[string]interface{})
+		item, ok := rawItem.(map[string]any)
 		if !ok || item["name"] != name {
 			continue
 		}

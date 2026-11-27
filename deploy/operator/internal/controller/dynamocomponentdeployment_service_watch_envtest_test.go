@@ -34,13 +34,13 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{
-			SetupOptions: SetupOptions{Config: config, RuntimeConfig: runtimeConfig},
+			Config: config, RuntimeConfig: runtimeConfig,
 		})
 	})
 
 	replicas := int32(1)
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "service-watch", Namespace: env.Namespace()},
+		Name: "service-watch", Namespace: env.Namespace(),
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{

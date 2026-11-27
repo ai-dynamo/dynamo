@@ -49,13 +49,17 @@ class MdcSource(Protocol):
 
 
 def is_model_card(wrapper: dict) -> bool:
-    """Filter that excludes LoRA-adapter cards from a CRD wrapper dict.
+    """Return whether a Kubernetes wrapper registers a base serving model.
 
-    K8s CRDs store both Model and LoRA cards together; discovery-sourced
-    entries are already scoped to the ``Model`` variant, so this filter
-    only matters for the CRD path.
+    Adapters also use the Model variant. Match the adapter identity rule in
+    lib/runtime/src/discovery/mod.rs: a model suffix or non-null LoRA metadata
+    identifies an adapter, not the worker's primary model.
     """
-    return wrapper.get("type") == "Model"
+    return (
+        wrapper.get("type") == "Model"
+        and wrapper.get("model_suffix") is None
+        and (wrapper.get("card_json") or {}).get("lora") is None
+    )
 
 
 def is_prefill_card(card_json: dict) -> bool:

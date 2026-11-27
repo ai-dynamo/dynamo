@@ -11,10 +11,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -480,10 +480,10 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
-		ReadyReplicas:   ptr.To(podClique.Status.ReadyReplicas),
+		ReadyReplicas:   new(podClique.Status.ReadyReplicas),
 	}
 	if componentReadiness.revision.generationObserved {
-		componentReadiness.status.ScheduledReplicas = ptr.To(podClique.Status.ScheduledReplicas)
+		componentReadiness.status.ScheduledReplicas = new(podClique.Status.ScheduledReplicas)
 	}
 
 	// The cache must observe the requested scale before readiness or namespace cutover.
@@ -823,28 +823,30 @@ func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
 	runtimeConfig *controller_common.RuntimeConfig,
 	validatedQueueName string,
+	schedulerName string,
 ) {
-	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
 	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return
 	}
 
-	// Check if user has manually set schedulerName - if so, respect their choice
-	if clique.Spec.PodSpec.SchedulerName != "" && clique.Spec.PodSpec.SchedulerName != commonconsts.KaiSchedulerName {
+	// Keep the default for programmatic callers that have not run configuration defaulting.
+	if schedulerName == "" {
+		schedulerName = configv1alpha1.DefaultKaiSchedulerName
+	}
+
+	// Preserve overrides selecting a scheduler outside the configured KAI integration.
+	if clique.Spec.PodSpec.SchedulerName != "" && clique.Spec.PodSpec.SchedulerName != schedulerName {
 		return
 	}
 
-	// Use the pre-validated queue name
-	queueName := validatedQueueName
-
 	// Inject schedulerName
-	clique.Spec.PodSpec.SchedulerName = commonconsts.KaiSchedulerName
+	clique.Spec.PodSpec.SchedulerName = schedulerName
 
 	// Inject queue label
 	if clique.Labels == nil {
 		clique.Labels = make(map[string]string)
 	}
-	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queueName
+	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = validatedQueueName
 }
 
 // injectVolcanoSchedulerIfEnabled injects Volcano scheduler settings into a clique if Volcano scheduler integration is enabled.

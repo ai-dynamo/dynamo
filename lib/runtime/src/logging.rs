@@ -98,19 +98,14 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
+use crate::otlp::{
+    OtlpProtocol, get_service_name, otlp_protocol_from_env, parse_key_value_list,
+    resolve_otlp_endpoint, resolve_signal_otlp_protocol,
+};
 use crate::telemetry::{LIFECYCLE_TARGET, lifecycle_tracing_enabled};
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
-
-/// Default OTLP endpoint
-const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
-
-/// Default OTLP HTTP endpoint
-const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
-
-/// Default service name
-const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
@@ -146,97 +141,6 @@ impl Default for LoggingConfig {
 /// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
 fn otlp_exporter_enabled() -> bool {
     env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
-}
-
-/// Get the service name from environment or use default
-pub(crate) fn get_service_name() -> String {
-    std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
-        .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OtlpProtocol {
-    Grpc,
-    HttpProtobuf,
-}
-
-impl OtlpProtocol {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Grpc => "grpc",
-            Self::HttpProtobuf => "http/protobuf",
-        }
-    }
-}
-
-fn parse_otlp_protocol_for_env(value: Option<&str>, env_name: &str) -> OtlpProtocol {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => OtlpProtocol::Grpc,
-        Some(value) if value.eq_ignore_ascii_case("grpc") => OtlpProtocol::Grpc,
-        Some(value) if value.eq_ignore_ascii_case("http/protobuf") => OtlpProtocol::HttpProtobuf,
-        Some(value) => {
-            eprintln!(
-                "WARNING: unsupported {} '{}'; falling back to grpc",
-                env_name, value
-            );
-            OtlpProtocol::Grpc
-        }
-    }
-}
-
-fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
-    parse_otlp_protocol_for_env(value, env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
-}
-
-pub(crate) fn otlp_protocol_from_env() -> OtlpProtocol {
-    parse_otlp_protocol(
-        std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
-            .ok()
-            .as_deref(),
-    )
-}
-
-pub(crate) fn resolve_signal_otlp_protocol(
-    generic_protocol: OtlpProtocol,
-    signal_protocol: Option<&str>,
-    signal_protocol_env: &str,
-) -> OtlpProtocol {
-    match signal_protocol
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => parse_otlp_protocol_for_env(Some(value), signal_protocol_env),
-        None => generic_protocol,
-    }
-}
-
-fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
-    let endpoint = endpoint.trim_end_matches('/');
-    format!("{endpoint}{path}")
-}
-
-pub(crate) fn resolve_otlp_endpoint(
-    protocol: OtlpProtocol,
-    signal_endpoint: Option<String>,
-    generic_endpoint: Option<String>,
-    http_path: &str,
-) -> String {
-    if let Some(endpoint) = signal_endpoint.filter(|value| !value.trim().is_empty()) {
-        return endpoint;
-    }
-
-    match protocol {
-        OtlpProtocol::Grpc => generic_endpoint
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_OTLP_ENDPOINT.to_string()),
-        OtlpProtocol::HttpProtobuf => append_otlp_http_path(
-            generic_endpoint
-                .filter(|value| !value.trim().is_empty())
-                .as_deref()
-                .unwrap_or(DEFAULT_OTLP_HTTP_ENDPOINT),
-            http_path,
-        ),
-    }
 }
 
 fn parse_trace_sample_ratio(value: Option<&str>) -> Option<f64> {
@@ -292,7 +196,7 @@ fn otlp_metadata_for(signal_env: &str) -> tonic::metadata::MetadataMap {
         .or_else(|_| std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_HEADERS))
         .unwrap_or_default();
 
-    for (key, value) in crate::metrics::otlp_export::parse_key_value_list(&raw) {
+    for (key, value) in parse_key_value_list(&raw) {
         match (
             tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
             tonic::metadata::MetadataValue::try_from(&value),
@@ -539,19 +443,44 @@ impl GenericHeaders for std::collections::HashMap<String, String> {
     }
 }
 
-struct GenericHeaderExtractor<'a, H>(&'a H);
+struct GenericHeaderExtractor<'a, H> {
+    headers: &'a H,
+    /// Stands in for the `traceparent` header when set.
+    traceparent: Option<String>,
+}
 
 impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key)
+        match &self.traceparent {
+            Some(traceparent) if key == "traceparent" => Some(traceparent),
+            _ => self.headers.get(key),
+        }
     }
 
     fn keys(&self) -> Vec<&str> {
         ["traceparent", "tracestate"]
             .into_iter()
-            .filter(|key| self.0.get(key).is_some())
+            .filter(|key| self.headers.get(key).is_some())
             .collect()
     }
+}
+
+/// Returns a version-00 `traceparent` with trace-flags above `02` reduced to the sampled bit.
+///
+/// `opentelemetry_sdk` 0.31 rejects such a header, for example `03` (sampled plus the W3C
+/// Level 2 random-trace-id flag). W3C says to ignore unknown flags, as 0.32 does itself.
+fn mask_trace_flags(traceparent: &str) -> Option<String> {
+    let traceparent = traceparent.trim();
+    let flags = traceparent.strip_prefix("00-")?.rsplit('-').next()?;
+    let bits = u8::from_str_radix(flags, 16).ok()?;
+    // Uppercase flags are invalid: leave them for the propagator to reject.
+    if bits <= 2 || flags.contains(|c: char| !matches!(c, '0'..='9' | 'a'..='f')) {
+        return None;
+    }
+    let mut masked = traceparent.to_owned();
+    let sampled = if bits & 1 == 0 { "00" } else { "01" };
+    masked.replace_range(traceparent.len() - flags.len().., sampled);
+    Some(masked)
 }
 
 fn extract_trace_parent<H: GenericHeaders>(
@@ -572,7 +501,10 @@ fn extract_trace_parent<H: GenericHeaders>(
     let context = if valid_widths {
         TRACE_PROPAGATOR.extract_with_context(
             &opentelemetry::Context::new(),
-            &GenericHeaderExtractor(headers),
+            &GenericHeaderExtractor {
+                headers,
+                traceparent: headers.get("traceparent").and_then(mask_trace_flags),
+            },
         )
     } else {
         opentelemetry::Context::new()
@@ -590,6 +522,8 @@ fn extract_trace_parent<H: GenericHeaders>(
         (None, None, None, None)
     };
 
+    // Transport hop only: workers read the frontend's forwarded `request-id`.
+    // HTTP ingress spans ignore it so a client cannot choose the internal request id.
     let request_id = headers
         .get("request-id")
         .or_else(|| headers.get("x-dynamo-request-id"))
@@ -626,12 +560,9 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Ensure every inference request has a request_id on the span.
-    // This is the single source of truth — workers and get_or_create_request_id
-    // read it back via DistributedTraceIdLayer.
-    let request_id = trace_parent
-        .request_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Always server-minted and the single source of truth; client `request-id` headers are
+    // ignored. Client correlation travels separately as `x_request_id`.
+    let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::info_span!(
             target: "request_span",
@@ -676,10 +607,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Ensure every system request has a request_id on the span.
-    let request_id = trace_parent
-        .request_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::debug_span!(
         target: "system_span",
@@ -1359,9 +1287,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
         let tracer = tracer_provider.tracer(service_name.to_string());
+        // Filter outside the `Option`: a bare `None` layer registers interest in every
+        // callsite, so each disabled `debug!`/`trace!` would run every per-layer filter
+        // on every call instead of being skipped at its callsite.
         let otel_logs_layer = logger_provider_opt
             .as_ref()
-            .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
+            .map(OpenTelemetryTracingBridge::new)
+            .with_filter(otel_logs_filter_layer);
 
         let l = console_layer(console_format, span_events, fmt_filter_layer);
         tracing_subscriber::registry()
@@ -2004,6 +1936,7 @@ impl tracing::field::Visit for JsonVisitor {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::otlp::DEFAULT_OTLP_ENDPOINT;
     use anyhow::{Result, anyhow};
     use chrono::{DateTime, Utc};
     use jsonschema::{Draft, JSONSchema};
@@ -2143,108 +2076,6 @@ pub mod tests {
             targets_filter(&config, None),
             Err(TargetsFilterFallback::Dynamic)
         ));
-    }
-
-    #[test]
-    fn otlp_protocol_defaults_to_grpc() {
-        assert_eq!(parse_otlp_protocol(None), OtlpProtocol::Grpc);
-        assert_eq!(parse_otlp_protocol(Some("")), OtlpProtocol::Grpc);
-        assert_eq!(parse_otlp_protocol(Some("grpc")), OtlpProtocol::Grpc);
-        assert_eq!(
-            parse_otlp_protocol(Some("http/protobuf")),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(
-            parse_otlp_protocol(Some("HTTP/PROTOBUF")),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(parse_otlp_protocol(Some("bad")), OtlpProtocol::Grpc);
-    }
-
-    #[test]
-    fn otlp_signal_protocol_overrides_generic_protocol() {
-        let generic_protocol = OtlpProtocol::Grpc;
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                Some("http/protobuf"),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                Some(""),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::Grpc
-        );
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                None,
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::Grpc
-        );
-    }
-
-    #[test]
-    fn otlp_http_endpoint_appends_signal_paths_from_generic_endpoint() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com".to_string()),
-                "/v1/traces",
-            ),
-            "https://llm-observe.weizhipin.com/v1/traces"
-        );
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com/".to_string()),
-                "/v1/logs",
-            ),
-            "https://llm-observe.weizhipin.com/v1/logs"
-        );
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com/v1/traces".to_string()),
-                "/v1/traces",
-            ),
-            "https://llm-observe.weizhipin.com/v1/traces/v1/traces"
-        );
-    }
-
-    #[test]
-    fn otlp_signal_endpoint_is_used_verbatim() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                Some("https://collector.example/custom/traces".to_string()),
-                Some("https://collector.example".to_string()),
-                "/v1/traces",
-            ),
-            "https://collector.example/custom/traces"
-        );
-    }
-
-    #[test]
-    fn otlp_grpc_endpoint_keeps_generic_endpoint_verbatim() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::Grpc,
-                None,
-                Some("http://otel-collector:4317".to_string()),
-                "/v1/traces",
-            ),
-            "http://otel-collector:4317"
-        );
     }
 
     #[test]
@@ -2419,12 +2250,25 @@ pub mod tests {
             "00-bad-2222222222222222-01",                              // bad trace_id
             "00-11111111111111111111111111111111-bad-01",              // bad span_id
             "00-11111111111111111111111111111111-2222222222222222-0x", // bad flags
+            "00-11111111111111111111111111111111-2222222222222222-0B", // uppercase flags
         ] {
             assert_eq!(
                 parse_traceparent(tp),
                 (None, None, None),
                 "should reject: {tp}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_traceparent_masks_unknown_version_00_flags() {
+        // `03` is sampled plus the W3C Level 2 random-trace-id flag.
+        for (flags, expected) in [("03", "01"), ("fe", "00")] {
+            let (trace_id, _, trace_flags) = parse_traceparent(&format!(
+                "00-11111111111111111111111111111111-2222222222222222-{flags}"
+            ));
+            assert!(trace_id.is_some(), "flags {flags}");
+            assert_eq!(trace_flags.as_deref(), Some(expected), "flags {flags}");
         }
     }
 
@@ -2471,6 +2315,7 @@ pub mod tests {
         // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
         // also installs the global `log` LogTracer and would poison a later
         // `logging::init()` with SetLoggerError).
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(DistributedTraceIdLayer),
         );
@@ -2496,6 +2341,7 @@ pub mod tests {
         // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
         // also installs the global `log` LogTracer and would poison a later
         // `logging::init()` with SetLoggerError).
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(DistributedTraceIdLayer),
         );
@@ -2526,6 +2372,48 @@ pub mod tests {
     }
 
     #[test]
+    fn http_request_spans_mint_request_id_and_ignore_client_headers() {
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("test");
+        // Core `set_default`: `SubscriberInitExt::set_default` installs the global `log`
+        // LogTracer, which would make a later `logging::init()` fail with SetLoggerError.
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(DistributedTraceIdLayer),
+        );
+        let client_id = "11111111-2222-3333-4444-555555555555";
+        let make_req = || {
+            Request::builder()
+                .header("request-id", client_id)
+                .header("x-dynamo-request-id", client_id)
+                .header("x-request-id", "client-correlation")
+                .body(())
+                .unwrap()
+        };
+
+        let mut seen = Vec::new();
+        for make_span in [
+            make_inference_request_span::<()>,
+            make_inference_request_span::<()>,
+            make_system_request_span::<()>,
+        ] {
+            let span = make_span(&make_req());
+            let _enter = span.enter();
+            let ctx = get_distributed_tracing_context().expect("span has trace context");
+            let request_id = ctx.request_id.expect("span has a request_id");
+            assert_ne!(request_id, client_id);
+            assert!(Uuid::parse_str(&request_id).is_ok());
+            assert_eq!(ctx.x_request_id.as_deref(), Some("client-correlation"));
+            seen.push(request_id);
+        }
+        assert_ne!(seen[0], seen[1], "each HTTP request must get its own id");
+
+        let trace_parent = TraceParent::from_headers(make_req().headers());
+        assert_eq!(trace_parent.request_id.as_deref(), Some(client_id));
+    }
+
+    #[test]
     fn root_context_uses_otel_unsampled_decision() {
         let provider = SdkTracerProvider::builder()
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOff)
@@ -2534,6 +2422,7 @@ pub mod tests {
         // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
         // installing the global `log` LogTracer, which would poison a later
         // `logging::init()` with SetLoggerError.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -2563,6 +2452,7 @@ pub mod tests {
         // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
         // installing the global `log` LogTracer, which would poison a later
         // `logging::init()` with SetLoggerError.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -3293,6 +3183,9 @@ pub mod tests {
         let file_name = tmp_file.path().to_str().unwrap();
         let guard = StderrOverride::from_file(file_name)?;
         init();
+
+        // Trace context without OTLP export must keep levels below `DYN_LOG` disabled.
+        assert!(!tracing::enabled!(tracing::Level::TRACE));
 
         // Run parent/child/grandchild spans (all INFO level by default)
         parent().await;

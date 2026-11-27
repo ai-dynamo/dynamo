@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
@@ -13,19 +14,19 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
+use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
-    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
-    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
-    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_deprecated_overlap_score_weight_override,
+    KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
-use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
+use dynamo_llm::frontend_config::{
+    ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
+};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -34,6 +35,11 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_scheduler::host::{
+    RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    TrackingHashAlgorithm as RsTrackingHashAlgorithm,
+};
+use dynamo_worker_selection::host::ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind;
 
 use super::ais_callback::create_ais_prefill_load_estimator;
 use super::replay::{
@@ -49,7 +55,7 @@ use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
-    config.validate_config().map_err(PyValueError::new_err)
+    config.validate().map_err(PyValueError::new_err)
 }
 
 fn warn_overlap_score_weight_deprecated() {
@@ -65,7 +71,7 @@ fn apply_deprecated_overlap_score_weight(
     apply_deprecated_overlap_score_weight_override(value, overlap_score_credit, prefill_load_scale);
 }
 
-#[pyclass(eq, eq_int)]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 #[repr(i32)]
 pub enum EngineType {
@@ -74,7 +80,7 @@ pub enum EngineType {
     Mocker = 3,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Default, Clone, Debug)]
 pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
@@ -86,7 +92,7 @@ impl KvRouterConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AisPerfConfig {
     config: serde_json::Value,
@@ -108,9 +114,9 @@ pub(super) fn normalize_ais_perf_config(
         py.import("builtins")?.call_method1("dict", (config,))?
     };
     let canonical = py
-        .import("aisimulate_core.sdk")?
+        .import("aisim_core.sdk")?
         .getattr("ForwardPassPerfModelConfig")?
-        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+        .call((), Some(mapping.cast::<pyo3::types::PyDict>()?))?;
     Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
 }
 
@@ -251,6 +257,52 @@ impl KvRouterConfig {
         self.clone()
     }
 
+    /// Serialize this configuration as JSON that `from_json` accepts.
+    ///
+    /// The serialization is lossy: the process-local fields `router_approximate_cache_policy`,
+    /// `router_prefill_policy`, `router_decode_policy` and the replay model selector are not
+    /// serialized, so `from_json` restores their defaults. Re-serializing the parsed result
+    /// yields the same JSON.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            PyValueError::new_err(format!("Failed to serialize KvRouterConfig JSON: {e}"))
+        })
+    }
+
+    /// Resolved default-policy parameters a router built from this configuration starts with
+    /// for `worker_type` (`"aggregated"`, `"prefill"` or `"decode"`).
+    ///
+    /// The keys are the `PATCH /router_policy` parameter names. Plain decode workers (decode
+    /// without conditional disaggregation) report zero cache credits. Raises `ValueError` when
+    /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
+    /// policy instance for `worker_type`: its own parameters are not resolved here.
+    fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
+        let selected = self
+            .inner
+            .selected_worker_selection_policy_instance_for(role)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(instance) = selected {
+            return Err(PyValueError::new_err(format!(
+                "policy_parameters covers the builtin default policy only; this configuration \
+                 selects worker-selection policy instance {instance:?} for {worker_type}"
+            )));
+        }
+        dynamo_router_policies::startup_policy_parameters(
+            &dynamo_worker_selection::host::SelectionConfig::from(&self.inner),
+            role,
+        )
+        .into_iter()
+        .map(|(name, value)| match value.as_f64() {
+            Some(value) => Ok((name, value)),
+            None => Err(PyValueError::new_err(format!(
+                "policy parameter {name} is not a number: {value}"
+            ))),
+        })
+        .collect()
+    }
+
     #[getter]
     fn overlap_score_credit(&self) -> f64 {
         self.inner.overlap_score_credit
@@ -359,7 +411,7 @@ impl KvRouterConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
     #[pyo3(get, set)]
@@ -444,19 +496,19 @@ impl From<RouterConfig> for RsRouterConfig {
 /// Wrapper to hold Python callback and its TaskLocals for async execution
 #[derive(Clone)]
 struct PyEngineFactory {
-    callback: Arc<PyObject>,
+    callback: Arc<Py<PyAny>>,
     locals: Arc<TaskLocals>,
 }
 
 impl std::fmt::Debug for PyEngineFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PyEngineFactory")
-            .field("callback", &"<PyObject>")
+            .field("callback", &"<Py<PyAny>>")
             .finish()
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub(crate) struct EntrypointArgs {
     engine_type: EngineType,
@@ -472,6 +524,7 @@ pub(crate) struct EntrypointArgs {
     batch_gateway_url: Option<String>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
+    chat_template_defaults: ChatTemplateDefaults,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
@@ -492,7 +545,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -516,11 +569,12 @@ impl EntrypointArgs {
         is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
-        chat_engine_factory: Option<PyObject>,
+        chat_engine_factory: Option<Py<PyAny>>,
         ais_perf_config: Option<AisPerfConfig>,
         tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
+        enable_systemone_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
@@ -528,6 +582,9 @@ impl EntrypointArgs {
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
         batch_gateway_url: Option<String>,
+        reject_media: Option<bool>,
+        reject_media_status_code: Option<u16>,
+        default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -574,6 +631,19 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let mut chat_template_defaults = ChatTemplateDefaults::default();
+        chat_template_defaults.set_default_chat_template_kwargs(
+            default_chat_template_kwargs
+                .map(|kwargs| {
+                    pythonize::depythonize(kwargs).map_err(|err| {
+                        PyValueError::new_err(format!(
+                            "default_chat_template_kwargs must be a JSON object: {err}"
+                        ))
+                    })
+                })
+                .transpose()?,
+        );
+
         let mut runtime_config = runtime_config.unwrap_or_default();
         if let Some(tokenizer_backend) = tokenizer_backend {
             runtime_config
@@ -586,6 +656,26 @@ impl EntrypointArgs {
                 .set_tokenizer_fallback_enabled(Some(tokenizer_fallback));
         }
         runtime_config.validate_config()?;
+
+        let mut frontend_api_config = FrontendApiConfig::from_optional_flags(
+            enable_anthropic_api,
+            enable_systemone_api,
+            strip_anthropic_preamble,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
+            reasoning_field,
+        );
+        if reject_media.is_some() || reject_media_status_code.is_some() {
+            let config = frontend_api_config.get_or_insert_with(FrontendApiConfig::default);
+            let defaults = config.media_rejection();
+            config.set_media_rejection(
+                MediaRejectionConfig::new(
+                    reject_media.unwrap_or_else(|| defaults.enabled()),
+                    reject_media_status_code.unwrap_or_else(|| defaults.status_code()),
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            );
+        }
 
         Ok(EntrypointArgs {
             engine_type,
@@ -600,13 +690,8 @@ impl EntrypointArgs {
             http_metrics_port,
             batch_gateway_url,
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
-            frontend_api_config: FrontendApiConfig::from_optional_flags(
-                enable_anthropic_api,
-                strip_anthropic_preamble,
-                enable_streaming_tool_dispatch,
-                enable_streaming_reasoning_dispatch,
-                reasoning_field,
-            ),
+            frontend_api_config,
+            chat_template_defaults,
             tls_cert_path,
             tls_key_path,
             tls_client_ca_cert_path,
@@ -627,7 +712,7 @@ impl EntrypointArgs {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub(crate) struct EngineConfig {
     inner: RsEngineConfig,
@@ -665,6 +750,7 @@ pub fn make_engine<'p>(
     if let Some(frontend_api_config) = args.frontend_api_config.clone() {
         builder.frontend_api_config(frontend_api_config);
     }
+    builder.chat_template_defaults(args.chat_template_defaults.clone());
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
@@ -717,8 +803,9 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
             let locals = locals.clone();
 
             Box::pin(async move {
+                let runtime_config = card.runtime_config.clone();
                 // Acquire GIL to call Python callback and convert coroutine to future
-                let py_future = Python::with_gil(|py| {
+                let py_future = Python::attach(|py| {
                     let py_instance_id =
                         Py::new(py, crate::ModelCardInstanceId { inner: instance_id }).map_err(
                             |e| anyhow::anyhow!("Failed to create Python ModelCardInstanceId: {e}"),
@@ -749,11 +836,11 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     .map_err(|e| anyhow::anyhow!("chat_engine_factory callback failed: {}", e))?;
 
                 // Extract PythonAsyncEngine from the Python result and wrap in Arc
-                let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {
+                let engine: OpenAIChatCompletionsStreamingEngine = Python::attach(|py| {
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config)))
                 })?;
 
                 Ok(engine)
@@ -782,7 +869,7 @@ async fn select_engine(
                 .ais_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
+                    Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -799,7 +886,7 @@ async fn select_engine(
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|config_json| {
-                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
+                        Python::attach(|py| Ok(mocker_config_from_json(py, &config_json)?))
                     })
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -815,18 +902,26 @@ async fn select_engine(
                 MockerConfig::default()
             };
 
-            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
+            mocker_args = Python::attach(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                local_model.display_name().to_string(),
+            )
+            .await?;
 
+            // This config is the mocker worker: every endpoint serving it, or a
+            // clone of it, admits through this one gate.
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,
+                admission_gate: WorkerAdmissionGate::default(),
             }
         }
     };
@@ -838,14 +933,19 @@ async fn select_engine(
 #[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
 pub fn run_input<'p>(
     py: Python<'p>,
-    distributed_runtime: super::DistributedRuntime,
+    distributed_runtime: Bound<'p, super::DistributedRuntime>,
     input: &str,
     engine_config: EngineConfig,
-    frontend_route_extensions: Option<PyObject>,
+    frontend_route_extensions: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
-    let frontend_route_extensions =
-        super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    // Route handlers see this same object as `ctx.runtime`.
+    let frontend_route_extensions = super::frontend_routes::frontend_route_extensions_from_py(
+        py,
+        frontend_route_extensions,
+        distributed_runtime.clone().into_any().unbind(),
+    )?;
+    let distributed_runtime = distributed_runtime.borrow().clone();
     let plugins = crate::router_plugins(
         &engine_config
             .inner
@@ -888,7 +988,7 @@ pub fn run_input<'p>(
 }
 
 fn validate_router_plugin_input(
-    plugins: &dynamo_kv_router::plugins::RouterPlugins,
+    plugins: &dynamo_kv_router::plugins::host::RouterPlugins,
     input: &Input,
     is_kv_routing: bool,
 ) -> Result<(), &'static str> {
@@ -913,7 +1013,7 @@ where
 #[cfg(test)]
 mod plugin_input_tests {
     use super::*;
-    use dynamo_kv_router::plugins::RouterPlugins;
+    use dynamo_kv_router::plugins::host::RouterPlugins;
 
     #[test]
     fn resolved_builtin_supports_stock_inputs_and_routing_modes() {
@@ -929,7 +1029,7 @@ mod plugin_input_tests {
     #[test]
     fn explicit_policy_retains_frontend_restrictions() {
         let plugins = RouterPlugins::default()
-            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+            .with_worker_selection(dynamo_router_policies::default_factory());
         assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
         assert_eq!(
             validate_router_plugin_input(&plugins, &Input::Http, false),

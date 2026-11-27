@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lychee:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
 
       - name: Check out repository
@@ -105,7 +105,7 @@ jobs:
 
   broken-links-check:
     name: Check for broken markdown links
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository

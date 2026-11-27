@@ -12,35 +12,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/yaml"
 )
 
 const (
-	fieldManager       = "dynamo-crd-apply"
-	versionAnnotation  = "dynamo.nvidia.com/operator-version"
-	dgdrV1Beta2Flag    = "dgdr-v1beta2-enabled"
-	dgdrV1Beta2Version = "v1beta2"
-
-	dgdrCRDName      = "dynamographdeploymentrequests.nvidia.com"
-	dgdrRunCRDName   = "dynamographdeploymentruns.nvidia.com"
-	dgdrCandidateCRD = "dynamographdeploymentcandidates.nvidia.com"
+	fieldManager      = "dynamo-crd-apply"
+	versionAnnotation = "dynamo.nvidia.com/operator-version"
 )
 
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
 	lpxEnabled := flag.Bool("lpx-enabled", false, "Install the experimental LPXGraphDeployment CRD")
-	dgdrV1Beta2Enabled := flag.Bool(dgdrV1Beta2Flag, false, "Install the experimental DGDR v1beta2 API schemas")
 	conversionWebhookServiceName := flag.String(
 		"conversion-webhook-service-name",
 		"",
@@ -55,14 +46,6 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("crd-apply")
-	if *dgdrV1Beta2Enabled {
-		log.Info(
-			"WARNING: enabled experimental DGDR v1beta2 API schemas; use only on development clusters. "+
-				"DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects are persisted in etcd, "+
-				"and incompatible schema changes may block future CRD upgrades",
-			"flag", dgdrV1Beta2Flag,
-		)
-	}
 
 	config, err := ctrl.GetConfig()
 	if err != nil {
@@ -105,10 +88,6 @@ func main() {
 		if crd.Name == "lpxgraphdeployments.nvidia.com" && !*lpxEnabled {
 			continue
 		}
-		if !*dgdrV1Beta2Enabled && !configureDGDRV1Beta2CRD(crd) {
-			log.Info("Skipped disabled experimental CRD", "crd", crd.Name, "flag", dgdrV1Beta2Flag)
-			continue
-		}
 
 		if *version != "" {
 			if crd.Annotations == nil {
@@ -139,7 +118,7 @@ func main() {
 			patchData,
 			metav1.PatchOptions{
 				FieldManager: fieldManager,
-				Force:        ptr.To(true),
+				Force:        new(true),
 			},
 		)
 		if err != nil {
@@ -157,23 +136,6 @@ func main() {
 	}
 
 	log.Info("CRD apply complete", "applied", applied)
-}
-
-// configureDGDRV1Beta2CRD removes experimental API discovery when the flag is disabled.
-// Existing standalone CRDs are skipped, not deleted, to avoid destructive upgrades.
-func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool {
-	switch crd.Name {
-	case dgdrRunCRDName, dgdrCandidateCRD:
-		return false
-	case dgdrCRDName:
-		crd.Spec.Versions = slices.DeleteFunc(
-			crd.Spec.Versions,
-			func(version apiextensionsv1.CustomResourceDefinitionVersion) bool {
-				return version.Name == dgdrV1Beta2Version
-			},
-		)
-	}
-	return true
 }
 
 func configureConversionWebhookService(

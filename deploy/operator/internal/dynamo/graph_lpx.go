@@ -13,14 +13,14 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
-
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -64,7 +64,7 @@ func RenderLPXPodCliqueSet(
 	return pcs, nil
 }
 
-// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
+// RenderLPXWorkloadTemplates renders one workload's roles and scaling group.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
 // Inputs are not mutated.
 func RenderLPXWorkloadTemplates(
@@ -95,14 +95,10 @@ func RenderLPXWorkloadTemplates(
 	// The conductor component owns the complete workload's disruption budget.
 	if component.ProviderOverride != nil {
 		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
-			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(budget)}
+			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(budget)}
 		}
 	}
 
-	// Scope the rendered resources to the graph's Kubernetes namespace.
-	for _, resource := range rendered.Resources {
-		resource.SetNamespace(source.Namespace)
-	}
 	return rendered, nil
 }
 
@@ -265,8 +261,8 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 	}
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MinAvailable: ptr.To(provideroverride.EffectiveGroveMinAvailable(p.component)),
-		Stages:       make(map[string]corev1.PodTemplateSpec),
+		MinAvailable: new(provideroverride.EffectiveGroveMinAvailable(p.component)),
+		Stages:       make(map[string]dynamolpx.PodTemplate),
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -281,26 +277,29 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
-		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, lpuDefaults)
+		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
+		lpuTemplate, environment, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
+			p.discoveryContext, defaults)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
-		input.Stages[component.ComponentName] = *lpuTemplate
+		input.Stages[component.ComponentName] = dynamolpx.PodTemplate{Template: *lpuTemplate, Environment: environment}
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
-		if component != p.component {
+
+		// Only the serving component's declared conductor contributes a template.
+		if component != p.component || conductor == nil {
 			continue
 		}
 
 		// The serving role owns its startup independently of the Agent template.
-		if workload.Pipeline() != dynamolpx.PipelineLPX {
+		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-				p.discoveryContext, lpuDefaults)
+			template, environment, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
+				p.discoveryContext, defaults)
 			if err != nil {
 				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
+			input.Conductor = &dynamolpx.PodTemplate{Template: *template, Environment: environment}
 			continue
 		}
 
@@ -312,11 +311,10 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
-		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
 		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
-		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
+		gpuTemplate, environment, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.conductor: failed to generate podSpec for role %s: %w", component.ComponentName, gpu.r.Name, err)
@@ -330,7 +328,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
-		input.Cyborg = clique
+		input.Cyborg = &dynamolpx.CliqueTemplate{Template: clique, Environment: environment}
 	}
 	return input, nil
 }
@@ -394,13 +392,23 @@ func renderSelectedLPXRole(
 	secretsRetriever SecretsRetriever,
 	discoveryContext DiscoveryContext,
 	defaults *podTemplateRuntimeDefaults,
-) (*corev1.PodTemplateSpec, error) {
+) (*corev1.PodTemplateSpec, *semanticenv.ContainerLayers, error) {
 	componentName := component.ComponentName
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
 	metadata.Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
-	applyDGDTemplateDefaults(component, dgd, nil)
-	basePodSpec, err := generateBasePodSpecWithDefaults(
+	// LPX sidecars use the worker-hash suffix for their serving namespace.
+	if GetDynamoSidecar(component) != nil {
+		ensurePodTemplate(component).Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
+	}
+	applyDGDTemplateDefaults(component, dgd, nil, false)
+
+	// Only the selected hybrid GPU role publishes graph-owned KV-transfer settings.
+	options := GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env}
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dgd) {
+		options.KVTransferPolicy = KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
+	}
+	basePodSpec, environment, err := generateBasePodSpecWithDefaults(
 		component,
 		BackendFrameworkNoop,
 		secretsRetriever,
@@ -414,25 +422,35 @@ func renderSelectedLPXRole(
 		nil,
 		defaults,
 		func() (int64, error) { return 0, nil },
+		options,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
 	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext
 
-	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
-	explicitVolumes := component.PodTemplate.Spec.Volumes
-	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
-		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,
-			func(explicit corev1.Volume) bool { return explicit.Name == volume.Name })
-	})
+	// LPX places host-network Pods itself and refuses declared container ports, so only the
+	// template's own sidecar ports and probes remain.
+	if authored := GetDynamoSidecar(component); authored != nil && basePodSpec.HostNetwork {
+		for i := range basePodSpec.InitContainers {
+			runtime := &basePodSpec.InitContainers[i]
+			if runtime.Name != commonconsts.RuntimeContainerName {
+				continue
+			}
+			runtime.Ports = slices.Clone(authored.Ports)
+			runtime.StartupProbe = authored.StartupProbe.DeepCopy()
+			runtime.LivenessProbe = authored.LivenessProbe.DeepCopy()
+			runtime.ReadinessProbe = authored.ReadinessProbe.DeepCopy()
+		}
+	}
+
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(metadata.Annotations, annotationKey)
 	}
 	return &corev1.PodTemplateSpec{
 		ObjectMeta: metadata,
 		Spec:       *basePodSpec,
-	}, nil
+	}, environment, nil
 }

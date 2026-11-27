@@ -11,13 +11,13 @@ use prometheus::{
     proto::{Metric, MetricFamily},
 };
 
-use super::metrics::{
-    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
-    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
-};
 use crate::discovery::ModelManager;
 use crate::discovery::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+use dynamo_http_server::metrics::{
+    UNSET_DP_RANK_LABEL, WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE,
+    WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 
 const GROUP_LABELS: &[&str] = &[
     "model",
@@ -169,7 +169,7 @@ impl WorkerMetricsCollector {
         let Some(ranks) = allowed.get(&(worker, worker_type.to_string())) else {
             return false;
         };
-        (allow_unset_rank && rank == "none")
+        (allow_unset_rank && rank == UNSET_DP_RANK_LABEL)
             || rank.parse::<u32>().is_ok_and(|rank| ranks.contains(&rank))
     }
 }

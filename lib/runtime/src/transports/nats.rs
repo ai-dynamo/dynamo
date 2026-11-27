@@ -51,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::config::env_config::positive_secs_or_default;
 use crate::config::environment_names::nats as env_nats;
 pub use crate::slug::Slug;
 use tracing as log;
@@ -366,29 +367,12 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const STARTUP_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
-    match value {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-        },
-        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
-    }
+    positive_secs_or_default(
+        env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+        value,
+        DEFAULT_STARTUP_CONNECT_TIMEOUT,
+        |message| tracing::warn!("{message}"),
+    )
 }
 
 fn default_startup_connect_timeout() -> Duration {
@@ -1155,6 +1139,25 @@ mod tests {
     use super::*;
     use figment::Jail;
     use serde::{Deserialize, Serialize};
+
+    #[test]
+    fn timeout_warnings_keep_transport_target() {
+        let warnings = crate::config::env_config::tests::capture_warnings(
+            "dynamo_runtime::transports::nats",
+            || {
+                for value in [None, Some("45"), Some("0"), Some("invalid")] {
+                    let _ = startup_connect_timeout_from_value(value);
+                }
+            },
+        );
+        assert_eq!(warnings.lines().count(), 2);
+        assert!(warnings.contains(
+            "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS must be >= 1; got 0. Falling back to 120."
+        ));
+        assert!(warnings.contains(
+            "Invalid NATS_STARTUP_CONNECT_TIMEOUT_SECONDS='invalid' (invalid digit found in string). Falling back to 120."
+        ));
+    }
 
     #[test]
     fn parses_startup_connect_timeout() {

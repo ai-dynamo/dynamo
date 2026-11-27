@@ -47,7 +47,10 @@ CHILD = textwrap.dedent(
 
     async def fetch_cached_models(count=1):
         for _ in range(count):
-            fetched = Path(await core.fetch_model(MODEL, True))
+            raw = await core.fetch_model(MODEL, True)
+            # The stub returns str. pyo3 0.24 and later convert PathBuf to pathlib.Path.
+            assert type(raw) is str, type(raw)
+            fetched = Path(raw)
             assert fetched.resolve() == expected_snapshot.resolve(), (
                 fetched,
                 expected_snapshot,

@@ -27,10 +27,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -53,6 +53,8 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
+// Reconcile syncs one DCD per component of dgd and returns their readiness. The
+// graph fails while any DCD reports a crash-looping container.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -60,6 +62,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
+	syncedDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{}
 	logger := log.FromContext(ctx)
 
 	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
@@ -105,12 +108,14 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 				return dcd, false, nil
 			},
+			commoncontroller.WithPreservedListOrder(compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)),
 		)
 		if err != nil {
 			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
+		syncedDCDs = append(syncedDCDs, syncedDCD)
 	}
 
 	if rollingUpdateCtx.InProgress() {
@@ -120,7 +125,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), syncedDCDs)
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {
@@ -228,7 +233,7 @@ func applyCheckpointStartupPolicy(
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
-		component.Replicas = ptr.To(int32(0))
+		component.Replicas = new(int32(0))
 	}
 	return nil
 }

@@ -1,32 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `disconnect` module provides a mechanism for our axum http services to monitoring and responding
-//! to disconnects from the client.
+//! Stream monitors for the frontend's SSE responses.
 //!
-//! There are two potential phases in any request where we need to handle the disconnect.
+//! [`dynamo_http_server::disconnect`] has the connection monitor and its [`ConnectionHandle`], and
+//! describes the two phases of a request in which the client can disconnect. This module is the
+//! streaming phase: the `monitor_for_disconnects*` functions own the stream's [`ConnectionHandle`],
+//! arm it, and disarm it when the stream ends gracefully. A producer reports an application error
+//! to its monitor through a `StreamErrorSignal`.
 //!
-//! For unary, request-response, there is just a single phase where the primary task that axum kicks off
-//! to handle the request will be dropped if the client disconnects. In order for us to have a long running
-//! task, like an LLM request, we need to spawn our long running task in a separate task and then spawn
-//! a second task that will monitor for disconnects from the client. The primary task which spawned the
-//! two tasks will hold an "armed" [`ConnectionHandle`] which will issue a [`ConnectionStatus::ClosedUnexpectedly`]
-//! if the task is dropped before it is [`ConnectionHandle::disarm`]ed.
-//!
-//! For the streaming case, request in - stream out, we need a second [`ConnectionHandle`] which will be owned
-//! by the stream. A streaming response is when the [`axum::response::Response]] is a [axum::response::Sse] stream.
-//! This means the primary task handle will go out of scope when it returns the stream. When we create our
-//! SSE stream, we capture the second [`ConnectionHandle`] and arm it. If the stream closes gracefully, the
-//! second handle will be disarmed, otherwise, the stream was dropped and the [`Drop`] trait on the [`ConnectionHandle`]
-//! triggers a [`ConnectionStatus::ClosedUnexpectedly`] signal.
-//!
-//! The [`ConnectionHandle`] is a simple wrapper around a [`tokio::sync::oneshot::Sender`] which will send a
-//! [`ConnectionStatus`] enum to the primary task. The primary task will then use this to determine if it should
-//! cancel the request or not.
-//!
-//! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
-//!
+//! When the source stream fails, the monitor ends the response itself: it yields a structured error
+//! as a `data:` frame, followed by `data: [DONE]` only on the routes that use that sentinel.
 
 use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::engine::AsyncEngineContext;
@@ -39,8 +23,16 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
-use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use crate::http::service::error::{Protocol, public_message_for};
+use dynamo_error::http::{ClientErrorAction, SanitizedError, http_action_for_error};
+use dynamo_http_server::disconnect::ConnectionHandle;
+#[cfg(test)]
+use dynamo_http_server::disconnect::{
+    ConnectionStatus, connection_monitor, create_connection_monitor,
+};
+#[cfg(test)]
+use dynamo_http_server::metrics::{CancellationLabels, Metrics};
+use dynamo_http_server::metrics::{ErrorType, InflightGuard};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -58,18 +50,6 @@ pub fn backend_stream_timeout() -> Option<Duration> {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .map(|secs| Duration::from_secs(secs.saturating_mul(2)))
-}
-
-#[derive(Clone, Copy)]
-pub enum ConnectionStatus {
-    Disabled,
-    ClosedUnexpectedly,
-    ClosedGracefully,
-}
-
-pub struct ConnectionHandle {
-    sender: Option<tokio::sync::oneshot::Sender<ConnectionStatus>>,
-    on_drop: ConnectionStatus,
 }
 
 /// One-shot application error reported by an SSE producer.
@@ -139,7 +119,7 @@ impl StreamErrorSignal {
         };
         if let Some(error) = &failure.semantic_error {
             if error.class() != ErrorClass::Cancelled {
-                crate::http::service::metrics::record_failure(error);
+                dynamo_http_server::metrics::record_failure(error);
             }
             return;
         }
@@ -152,9 +132,10 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
-        crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
+        dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
     }
 }
 
@@ -240,125 +221,6 @@ impl Drop for SignaledConnectionHandle {
     }
 }
 
-impl ConnectionHandle {
-    /// Handle which by default will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-    pub fn create_disarmed(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::ClosedGracefully,
-        }
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-    pub fn create_armed(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::ClosedUnexpectedly,
-        }
-    }
-
-    /// Handle which will not issue a signal when dropped.
-    pub fn create_disabled(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::Disabled,
-        }
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-    pub fn disarm(&mut self) {
-        self.on_drop = ConnectionStatus::ClosedGracefully;
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-    pub fn arm(&mut self) {
-        self.on_drop = ConnectionStatus::ClosedUnexpectedly;
-    }
-}
-
-impl Drop for ConnectionHandle {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(self.on_drop);
-        }
-    }
-}
-
-/// Creates a pair of handles which will monitor for disconnects from the client.
-///
-/// The first handle is armed and will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-/// The second handle is disarmed and will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-///
-/// The handles are returned in the order of the first being armed and the second being disarmed.
-pub async fn create_connection_monitor(
-    engine_context: Arc<dyn AsyncEngineContext>,
-    metrics: Option<Arc<Metrics>>,
-    cancellation_labels: CancellationLabels,
-) -> (ConnectionHandle, ConnectionHandle) {
-    // these oneshot channels monitor possible disconnects from the client in two different scopes:
-    // - the local task (connection_handle)
-    // - an optionally streaming response (stream_handle)
-    let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
-    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
-
-    // detached task that will naturally close when both handles are dropped
-    tokio::spawn(connection_monitor(
-        engine_context.clone(),
-        connection_rx,
-        stream_rx,
-        metrics,
-        cancellation_labels,
-    ));
-
-    // Two handles, the first is armed, the second is disarmed
-    (
-        ConnectionHandle::create_armed(connection_tx),
-        ConnectionHandle::create_disabled(stream_tx),
-    )
-}
-
-#[tracing::instrument(level = "trace", skip_all, fields(request_id = %engine_context.id()))]
-async fn connection_monitor(
-    engine_context: Arc<dyn AsyncEngineContext>,
-    connection_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
-    stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
-    metrics: Option<Arc<Metrics>>,
-    cancellation_labels: CancellationLabels,
-) {
-    match connection_rx.await {
-        Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::warn!("Connection closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-                metrics.inc_cancellation(&cancellation_labels);
-            }
-            engine_context.kill();
-        }
-        Ok(ConnectionStatus::ClosedGracefully) => {
-            tracing::trace!("Connection closed gracefully");
-        }
-        Ok(ConnectionStatus::Disabled) => {}
-    }
-
-    match stream_rx.await {
-        Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            tracing::warn!("Stream closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-                metrics.inc_cancellation(&cancellation_labels);
-            }
-            engine_context.kill();
-        }
-        Ok(ConnectionStatus::ClosedGracefully) => {
-            tracing::trace!("Stream closed gracefully");
-        }
-        Ok(ConnectionStatus::Disabled) => {}
-    }
-}
-
-type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
-
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
@@ -399,8 +261,9 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             "Request cancelled",
         ),
     };
-    let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let message =
+        public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| message.to_string());
+    let error_type = if status == dynamo_error::http::overload_status_code() {
         "service_unavailable"
     } else {
         match status {
@@ -467,7 +330,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -553,6 +416,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
     stream_handle: ConnectionHandle,
     activity_rx: mpsc::UnboundedReceiver<()>,
     error_signal: StreamErrorSignal,
+    emit_done_sentinel: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -564,7 +428,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
-            ..Default::default()
+            emit_done_sentinel,
         },
     )
 }
@@ -594,7 +458,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
     options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
@@ -777,7 +641,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+    use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
     use dynamo_runtime::pipeline::context::Controller;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -978,6 +842,7 @@ mod tests {
                     handle,
                     rx,
                     StreamErrorSignal::default(),
+                    true,
                 ))
                 .await
             } else {
@@ -1190,7 +1055,7 @@ mod tests {
         connection_handle.disarm();
         drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
-        let semantic_counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+        let semantic_counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
             .with_label_values(&["Internal", "runtime.internal"]);
         let semantic_before = semantic_counter.get();
         let producer_error_signal = error_signal.clone();
@@ -1330,10 +1195,113 @@ mod tests {
         assert_eq!(body["error"]["type"], "service_unavailable");
         assert_eq!(
             body["error"]["code"],
-            crate::http::service::error::overload_status_code().as_u16()
+            dynamo_error::http::overload_status_code().as_u16()
         );
     }
 
+    #[test]
+    fn semantic_stream_error_renders_context_length_details() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            body["error"]["message"],
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("maximum context length is 8192 tokens"));
+        assert!(message.contains("4000 prompt tokens"));
+        assert!(message.contains("5000 requested output tokens"));
+        assert!(message.contains("9000 tokens total"));
+        assert!(
+            !message.contains("prompt is too long"),
+            "combined-budget errors must not blame the prompt alone, got: {message}"
+        );
+    }
+
+    #[test]
+    fn semantic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+                prompt_tokens: Some(8192),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            message,
+            "This model's maximum context length is 8192 tokens. However, your messages \
+             resulted in 8192 tokens, which leaves no room for output. Please reduce the length \
+             of the messages."
+        );
+        assert!(!message.contains("prompt is too long"));
+    }
+
+    #[test]
+    fn semantic_stream_error_keeps_class_message_for_other_invalid_requests() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Invalid request");
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
+        );
+    }
     #[tokio::test]
     async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
         let error_signal = StreamErrorSignal::default();

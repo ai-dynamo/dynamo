@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Note to AI agents: keep this page minimal (intro, support matrix, launch example,
-# Kubernetes example, topologies). Do not edit it unless the user explicitly asks.
+# Note to AI agents: keep this page minimal (intro, launch example, Kubernetes
+# example, topologies). Do not edit it unless the user explicitly asks.
 title: vLLM Sidecar
 subtitle: Run Dynamo beside a stock vLLM engine through native gRPC.
 ---
@@ -18,14 +18,6 @@ for the architecture.
 > [!TIP]
 > For the best and latest support, use the upstream vLLM nightly image,
 > which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
-
-## Support Matrix
-
-| Feature | Supported |
-|---|---|
-| Aggregated | Yes |
-| Disaggregated | Yes |
-| KV routing | Yes |
 
 ## Launch Locally
 
@@ -57,6 +49,8 @@ Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
+
+For multinode, see the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml) and the [DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml).
 
 ## Topologies
 

@@ -15,6 +15,7 @@ from .common import check_module_available
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from mistral_common.tokens.tokenizers.base import SpecialTokens
+    from vllm.entrypoints.generate.base.protocol import FunctionDefinition
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,
@@ -26,7 +27,6 @@ if HAS_VLLM:
     from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor
-    from dynamo.frontend.vllm_protocol import FunctionDefinition
 
     MistralReasoningParser = ReasoningParserManager.get_reasoning_parser("mistral")
 else:
@@ -65,14 +65,6 @@ class _InnerTokenizer:
     """Mimics the inner ``tokenizer.tokenizer`` accessed by MistralReasoningParser."""
 
     def get_special_token(self, token):
-        # vLLM 0.17.0 renamed get_control_token -> get_special_token
-        return self._token_lookup(token)
-
-    def get_control_token(self, token):
-        # kept for older vLLM compat
-        return self._token_lookup(token)
-
-    def _token_lookup(self, token):
         return {
             SpecialTokens.begin_think: THINK_START_TOKEN_ID,
             SpecialTokens.end_think: THINK_END_TOKEN_ID,

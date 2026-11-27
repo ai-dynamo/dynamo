@@ -14,12 +14,26 @@ use crate::local_model::runtime_config::{
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
 use dynamo_protocols::types::ResponseFormat;
+#[cfg(test)]
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+
+/// Get selectable parser names with registered structural-tag builders.
+pub fn structural_tag_parser_names() -> Vec<&'static str> {
+    let mut names = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+    names.extend_from_slice(unified_family_names());
+    names.retain(|name| {
+        v1::StructuralTagBuilder::for_parser(name).is_some() || v2::supports_family(name)
+    });
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 struct StructuralTagBuildRequest<'a> {
     tool_choice: &'a ToolChoice,
@@ -63,14 +77,23 @@ pub(crate) enum SelectedStructuralTagBuilder {
 }
 
 impl SelectedStructuralTagBuilder {
-    fn for_parser(parser_name: &str) -> Option<Self> {
-        if v2::enabled()
-            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
-        {
-            return Some(Self::V2(builder));
+    fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
+        if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
+            return Some(builder);
         }
 
         v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    pub(super) fn for_unified_parser(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<(&'static str, Self)> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            tool_call_parser,
+            reasoning_parser,
+        )?;
+        v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
     fn build(
@@ -117,8 +140,31 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("kimi_k2")
 }
 
+// Beam tool calls live on the Harmony wire: an analysis channel first, then the
+// `<|start|>assistant to=NAME<|channel|>analysis <|constrain|>xml<|message|>` call
+// header with an `rfl:parameter` body. The generic forced-tool JSON grammar replaces
+// that whole wire with a bare JSON object, so the model emits no analysis channel and
+// the response carries no `reasoning_content`; the Beam chat template then rejects the
+// follow-up request whose history replays that tool-call turn without its reasoning.
+// Forced choices therefore stay on the parser path; the preprocessor installs a regex
+// over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
+// and still forces the call header of an allowed tool.
+pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
+    parser_name == Some("beam")
+}
+
+fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
+    matches!(parser_name, Some("muse_spark_open" | "muse_spark"))
+}
+
+// Spark's unified parser can be selected through either parser slot. Its
+// forced-tool grammar must use that same family when only reasoning is set.
+fn structural_tag_parser<'a>(tool: Option<&'a str>, reasoning: Option<&'a str>) -> Option<&'a str> {
+    tool.or_else(|| reasoning.filter(|parser| is_muse_spark_parser(Some(parser))))
+}
+
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
-    // K2 forced calls and K3 named calls cannot use Dynamo's generic JSON-schema
+    // K2/Muse Spark forced calls and K3 named calls cannot use the generic JSON-schema
     // fallback because both families emit native, marker-delimited formats.
     // Treat their structural tags as part of implementing these standard OpenAI
     // request shapes, not as an operator opt-in. K3 required remains on its
@@ -126,6 +172,8 @@ fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &To
     (is_kimi_k2_parser(parser_name)
         && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
         || (is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_)))
+        || (is_muse_spark_parser(parser_name)
+            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
 }
 
 pub(super) fn requires_native_tool_call_format(
@@ -133,20 +181,326 @@ pub(super) fn requires_native_tool_call_format(
     tool_choice: &ToolChoice,
 ) -> bool {
     // The generic forced-tool JSON grammar describes a different wire format
-    // from Kimi's native marker-delimited calls. This also covers K3 required,
-    // which uses its prompt/parser path when structural guidance is off.
-    (is_kimi_k2_parser(parser_name)
-        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
-        || (is_kimi_k3_parser(parser_name)
-            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
+    // from Kimi's native marker-delimited calls, Beam's Harmony calls and Muse Spark's
+    // calls. Required/named choices use best-effort prompting when no structural-tag
+    // builder is available. This also covers K3 required, which uses its prompt/parser
+    // path when structural guidance is off.
+    let forced = matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_));
+    forced
+        && (is_kimi_k2_parser(parser_name)
+            || is_kimi_k3_parser(parser_name)
+            || is_beam_parser(parser_name)
+            || is_muse_spark_parser(parser_name))
 }
 
 fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Whether a request is entitled to use a structural tag, bundled with proof the
-/// parser registry can actually build one.
+/// Name the first regex construct in `pattern` that XGrammar cannot compile in
+/// any tag format. `pattern` is ECMA-262, as JSON Schema specifies. The Python
+/// frontend asks XGrammar directly; its test checks this table against it.
+///
+/// Runs per request, so it scans bytes: every syntax character is ASCII.
+fn unsupported_regex_construct(pattern: &str) -> Option<&'static str> {
+    let bytes = pattern.as_bytes();
+    let at = |i: usize| bytes.get(i).copied();
+    let mut i = 0;
+    let mut in_class = false;
+    // Whether the previous token can take a quantifier.
+    let mut can_repeat = false;
+    // After a quantifier: 1 while a lazy `?` may follow, 2 once it has.
+    let mut quantified = 0;
+    while let Some(c) = at(i) {
+        let following = at(i + 1);
+        if in_class {
+            match c {
+                b'\\' => i += 1,
+                b']' => in_class = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, b'*' | b'+' | b'?' | b'{') {
+            if c == b'?' && quantified == 1 {
+                quantified = 2;
+                i += 1;
+                continue;
+            }
+            if quantified != 0 {
+                return Some("consecutive quantifiers");
+            }
+            if c == b'{' {
+                match repetition_end(bytes, i) {
+                    Some(end) => i = end,
+                    None => return Some("malformed repetition"),
+                }
+            }
+            if !can_repeat {
+                return Some("quantifier without an element");
+            }
+            can_repeat = false;
+            quantified = 1;
+            i += 1;
+            continue;
+        }
+        quantified = 0;
+        can_repeat = true;
+        match c {
+            b'\\' => {
+                match following {
+                    Some(b'1'..=b'9' | b'k') => return Some("backreference"),
+                    Some(b'b' | b'B') => return Some("word boundary"),
+                    Some(b'p' | b'P') => return Some("Unicode property escape"),
+                    _ => {}
+                }
+                // `\u{...}` is one escape; its braces are not a repetition.
+                i = unicode_escape_end(bytes, i).unwrap_or(i + 1);
+            }
+            b'[' => {
+                if following == Some(b']') {
+                    return Some("empty character class");
+                }
+                in_class = true;
+                if following == Some(b'^') {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                can_repeat = false;
+                if following == Some(b'?') {
+                    match (at(i + 2), at(i + 3)) {
+                        (Some(b'<'), Some(b'=' | b'!')) => return Some("lookbehind"),
+                        (Some(b'=' | b'!'), _) => return Some("lookahead"),
+                        // `(?:` opens a group; `(?<` continues with a name.
+                        (Some(b':'), _) => i += 2,
+                        (Some(b'<'), _) => i += 1,
+                        _ => return Some("group modifier"),
+                    }
+                }
+            }
+            b'|' | b'^' | b'$' => can_repeat = false,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// XGrammar rejects repetition counts above this.
+const MAX_REPETITION: u64 = 1_000_000_000_000_000;
+
+/// Index of the `}` closing a well-formed `{n}`, `{n,}`, or `{n,m}` at `start`.
+fn repetition_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let number = |from: usize| {
+        let digits = bytes.get(from..).unwrap_or_default();
+        let len = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+        // Over 16 digits is always above the limit; up to 16 cannot overflow.
+        let value = match len {
+            0 => Some(None),
+            1..=16 => std::str::from_utf8(&digits[..len])
+                .ok()
+                .and_then(|digits| digits.parse::<u64>().ok())
+                .filter(|&count| count <= MAX_REPETITION)
+                .map(Some),
+            _ => None,
+        };
+        value.map(|value| (from + len, value))
+    };
+    let (end, min) = number(start + 1)?;
+    let min = min?;
+    match bytes.get(end) {
+        Some(b'}') => Some(end),
+        Some(b',') => {
+            let (end, max) = number(end + 1)?;
+            (bytes.get(end) == Some(&b'}') && max.is_none_or(|max| max >= min)).then_some(end)
+        }
+        _ => None,
+    }
+}
+
+/// Index of the `}` closing a `\u{hex}` escape at `start`.
+fn unicode_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start + 1..start + 3) != Some(b"u{".as_slice()) {
+        return None;
+    }
+    let hex = &bytes[start + 3..];
+    let len = hex.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+    (len > 0 && hex.get(len) == Some(&b'}')).then_some(start + 3 + len)
+}
+
+/// Instance data, not schemas.
+const INSTANCE_KEYWORDS: [&str; 4] = ["const", "default", "enum", "examples"];
+/// Searched by value only, so a property named `default` is still checked.
+const SUBSCHEMA_MAPS: [&str; 6] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
+
+/// Name the first unsupported regex in `pattern` values or `patternProperties` keys.
+fn unsupported_schema_construct(schema: &serde_json::Value) -> Option<&'static str> {
+    match schema {
+        serde_json::Value::Array(items) => items.iter().find_map(unsupported_schema_construct),
+        serde_json::Value::Object(map) => {
+            let own = map
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .and_then(unsupported_regex_construct)
+                .or_else(|| {
+                    map.get("patternProperties")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|patterns| {
+                            patterns
+                                .keys()
+                                .find_map(|pattern| unsupported_regex_construct(pattern))
+                        })
+                });
+            if own.is_some() {
+                return own;
+            }
+            map.iter()
+                .find_map(|(key, value)| match (key.as_str(), value) {
+                    (key, _) if INSTANCE_KEYWORDS.contains(&key) => None,
+                    (key, serde_json::Value::Object(subschemas))
+                        if SUBSCHEMA_MAPS.contains(&key) =>
+                    {
+                        subschemas.values().find_map(unsupported_schema_construct)
+                    }
+                    _ => unsupported_schema_construct(value),
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Remove `pattern` values XGrammar cannot compile, in place. Fails on an
+/// unsupported `patternProperties` key, since removing it would change which
+/// property names are allowed.
+fn strip_unsupported_patterns(schema: &mut serde_json::Value) -> Result<(), &'static str> {
+    match schema {
+        serde_json::Value::Array(items) => {
+            items.iter_mut().try_for_each(strip_unsupported_patterns)
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(construct) = map
+                .get("patternProperties")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|patterns| {
+                    patterns
+                        .keys()
+                        .find_map(|pattern| unsupported_regex_construct(pattern))
+                })
+            {
+                return Err(construct);
+            }
+            if map
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|pattern| unsupported_regex_construct(pattern).is_some())
+            {
+                map.remove("pattern");
+            }
+            map.iter_mut()
+                .try_for_each(|(key, value)| match (key.as_str(), value) {
+                    (key, _) if INSTANCE_KEYWORDS.contains(&key) => Ok(()),
+                    (key, serde_json::Value::Object(subschemas))
+                        if SUBSCHEMA_MAPS.contains(&key) =>
+                    {
+                        subschemas
+                            .values_mut()
+                            .try_for_each(strip_unsupported_patterns)
+                    }
+                    (_, value) => strip_unsupported_patterns(value),
+                })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Leave regexes XGrammar cannot compile out of schemas Dynamo enforces on its
+/// own: omitted `strict` under schema mode `auto`, which OpenAI treats as
+/// non-strict. Otherwise one bad `pattern` fails the whole request. Explicit
+/// `strict` and schema mode `strict` are left for the backend to reject.
+fn adapt_unsupported_auto_schemas<'a>(
+    parser_name: &str,
+    tools: &'a [ToolDefinition],
+    schema_mode: StructuralTagSchemaMode,
+) -> Cow<'a, [ToolDefinition]> {
+    if !matches!(schema_mode, StructuralTagSchemaMode::Auto) {
+        return Cow::Borrowed(tools);
+    }
+    let unsupported = |tool: &ToolDefinition| {
+        tool.strict
+            .is_none()
+            .then(|| {
+                tool.parameters
+                    .as_ref()
+                    .and_then(unsupported_schema_construct)
+            })
+            .flatten()
+    };
+    if !tools.iter().any(|tool| unsupported(tool).is_some()) {
+        return Cow::Borrowed(tools);
+    }
+    Cow::Owned(
+        tools
+            .iter()
+            .map(|tool| {
+                let mut parameters = tool.parameters.clone();
+                let mut strict = tool.strict;
+                if let Some(construct) = unsupported(tool) {
+                    match parameters.as_mut().map(strip_unsupported_patterns) {
+                        Some(Err(construct)) => {
+                            tracing::debug!(
+                                parser = parser_name,
+                                tool = %tool.name,
+                                construct,
+                                "patternProperties uses a regex the grammar backend cannot \
+                                 compile; not enforcing the tool's arguments"
+                            );
+                            parameters = tool.parameters.clone();
+                            strict = Some(false);
+                        }
+                        _ => tracing::debug!(
+                            parser = parser_name,
+                            tool = %tool.name,
+                            construct,
+                            "Leaving a pattern the grammar backend cannot compile out of \
+                             the tool's argument grammar"
+                        ),
+                    }
+                }
+                ToolDefinition {
+                    name: tool.name.clone(),
+                    parameters,
+                    strict,
+                }
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn uses_gpt_oss_required_array(
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        parser_name,
+        reasoning_parser,
+    ) == Some("gpt_oss")
+        && matches!(tool_choice, ToolChoice::Required)
+        && parallel_tool_calls != Some(false)
+}
+
+/// Whether a request uses a native tool-call structural tag, bundled with proof
+/// the parser registry can actually build one. Required GPT-OSS arrays keep their
+/// guided-JSON parser mode even when their JSON payload has a structural envelope.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering model-family/tool-choice intrinsic eligibility, the configured
@@ -183,7 +537,7 @@ impl StructuralTagDecision {
 /// this error rather than falling back to `NotApplicable`, or an invalid forced
 /// choice would silently install a structural tag anyway.
 pub(crate) fn structural_tag_decision(
-    parser_name: Option<&str>,
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
     tool_choice: &ToolChoice,
     tools: &[ToolDefinition],
     parallel_tool_calls: Option<bool>,
@@ -194,6 +548,17 @@ pub(crate) fn structural_tag_decision(
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
+    let parser_name = structural_tag_parser(parser_name, reasoning_parser);
+
+    // A native Harmony handoff stops vLLM after the first call. Required parallel
+    // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
+    if uses_gpt_oss_required_array(
+        (parser_name, reasoning_parser),
+        tool_choice,
+        parallel_tool_calls,
+    ) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
 
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
@@ -232,7 +597,8 @@ pub(crate) fn structural_tag_decision(
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
-    let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name) else {
+    let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name, reasoning_parser)
+    else {
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
@@ -262,6 +628,44 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
+    pub(super) fn apply_structured_output_tag(
+        &self,
+        parser_name: &str,
+        builder: SelectedStructuralTagBuilder,
+        schema: &serde_json::Value,
+        starts_in_reasoning: bool,
+        request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let config = self
+            .runtime_config
+            .structural_tag
+            .clone()
+            .unwrap_or_default();
+        let applied = apply_structural_tag(
+            parser_name,
+            builder.build(&StructuralTagBuildRequest {
+                tool_choice: &ToolChoice::None,
+                tools: &[],
+                parallel_tool_calls: None,
+                schema_mode: config.schema,
+                exclude_special_tokens: config.exclude_special_tokens,
+                reasoning_boundary: ResolvedReasoningBoundary::StructuralTag,
+                tool_arguments_any_order: false,
+                starts_in_reasoning,
+                structured_output_schema: Some(schema),
+            }),
+            request,
+        )?;
+        if applied {
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        Ok(applied)
+    }
+
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
@@ -272,23 +676,32 @@ impl OpenAIPreprocessor {
         response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        let parser_name = self.tool_call_parser.as_deref();
+        let parser_name = structural_tag_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
         let explicit_config = self.runtime_config.structural_tag.as_ref();
 
         let config = explicit_config.cloned().unwrap_or_default();
-        let reasoning_boundary = if config.reasoning_boundary
-            == StructuralTagReasoningBoundary::Auto
+        let reasoning_boundary = if is_muse_spark_parser(parser_name) {
+            // Muse's backend reasoner may not leave reasoning until a tool has
+            // already been selected. The native grammar must own the entire
+            // generation to enforce required/named choice. Setting require_reasoning
+            // false below disables SGLang's per-request reasoning gate.
+            ResolvedReasoningBoundary::StructuralTag
+        } else if config.reasoning_boundary == StructuralTagReasoningBoundary::Auto
             && preprocessed_request.require_reasoning
             && self.structural_tag_reasoning_metadata(
                 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
-            ) {
+            )
+        {
             // SGLang consumes the prefix only for requests that activate its gate.
             ResolvedReasoningBoundary::Backend
         } else {
             self.structural_tag_reasoning_boundary
         };
         let StructuralTagDecision::Required(builder) = structural_tag_decision(
-            parser_name,
+            (parser_name, self.runtime_config.reasoning_parser.as_deref()),
             tool_choice,
             tools,
             parallel_tool_calls,
@@ -317,9 +730,11 @@ impl OpenAIPreprocessor {
             None
         };
 
+        // After the decision: activation still follows the client's own `strict`.
+        let tools = adapt_unsupported_auto_schemas(parser_name, tools, config.schema);
         let request = StructuralTagBuildRequest {
             tool_choice,
-            tools,
+            tools: &tools,
             parallel_tool_calls,
             schema_mode: config.schema,
             exclude_special_tokens: config.exclude_special_tokens,
@@ -331,7 +746,18 @@ impl OpenAIPreprocessor {
 
         let built_tag = match builder.build(&request) {
             Err(error)
-                if !matches!(tool_choice, ToolChoice::None)
+                if is_muse_spark_parser(Some(parser_name))
+                    && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)) =>
+            {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::InvalidArgument)
+                    .message(format!("cannot constrain native Muse Spark tools: {error}"))
+                    .build());
+            }
+            Err(error)
+                if !(matches!(tool_choice, ToolChoice::None)
+                    || (is_muse_spark_parser(Some(parser_name))
+                        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))))
                     && structured_output_schema.is_none() =>
             {
                 tracing::warn!(
@@ -353,7 +779,9 @@ impl OpenAIPreprocessor {
                 .get_or_insert_default()
                 .json = None;
         }
-        if applied
+        if applied && is_muse_spark_parser(Some(parser_name)) {
+            preprocessed_request.require_reasoning = false;
+        } else if applied
             && prompt_injected_reasoning
             && config.reasoning_boundary != StructuralTagReasoningBoundary::Auto
         {
@@ -431,6 +859,15 @@ pub(super) fn validate_runtime_config(
     let backend_excludes_reasoning = match runtime_config
         .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
     {
+        // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
+        Ok(_)
+            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                runtime_config.tool_call_parser.as_deref(),
+                runtime_config.reasoning_parser.as_deref(),
+            ) == Some("gpt_oss") =>
+        {
+            false
+        }
         Ok(value) => value.unwrap_or(false),
         Err(error) if runtime_config.structural_tag.is_none() => {
             tracing::warn!(
@@ -448,6 +885,23 @@ pub(super) fn validate_runtime_config(
         .map_or(StructuralTagReasoningBoundary::default(), |config| {
             config.reasoning_boundary
         });
+    if is_muse_spark_parser(structural_tag_parser(
+        runtime_config.tool_call_parser.as_deref(),
+        runtime_config.reasoning_parser.as_deref(),
+    )) {
+        anyhow::ensure!(
+            !backend_excludes_reasoning
+                && configured_boundary != StructuralTagReasoningBoundary::Backend,
+            "Muse Spark structural tags require grammar-owned reasoning; enable vLLM structured_outputs_config.enable_in_reasoning and use reasoning_boundary=auto or structural_tag"
+        );
+        anyhow::ensure!(
+            !runtime_config
+                .structural_tag
+                .as_ref()
+                .is_some_and(|config| config.tool_arguments_any_order),
+            "Muse Spark does not support structural_tag.tool_arguments_any_order"
+        );
+    }
     let reasoning_boundary =
         resolve_reasoning_boundary(configured_boundary, backend_excludes_reasoning)
             .map_err(anyhow::Error::msg)?;
@@ -482,9 +936,12 @@ pub(super) fn validate_runtime_config(
     };
 
     anyhow::ensure!(
-        v2::enabled(),
-        "structural_tag.{v2_only_option} requires {}=2",
-        env_llm::DYN_PARSER_VERSION,
+        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            runtime_config.tool_call_parser.as_deref(),
+            runtime_config.reasoning_parser.as_deref(),
+        )
+        .is_some(),
+        "structural_tag.{v2_only_option} requires a compatible V2 parser route",
     );
     let parser_name = runtime_config.tool_call_parser.as_deref().ok_or_else(|| {
         anyhow::anyhow!("structural_tag.{v2_only_option} requires a tool-call parser")
@@ -508,6 +965,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn grammar_capability_inventory_is_sorted_and_selectable() {
+        let names = structural_tag_parser_names();
+        for family in ["hermes", "deepseek_v4", "deepseek_v41", "glm45", "kimi_k25"] {
+            assert!(names.contains(&family), "missing grammar: {family}");
+        }
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut selectable = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+        selectable.extend_from_slice(unified_family_names());
+        assert!(names.iter().all(|family| selectable.contains(family)));
+        assert!(selectable.contains(&"gemma4"));
+        assert!(!names.contains(&"gemma4"));
+        assert!(!names.contains(&"no_such_parser"));
+    }
 
     fn structural_tag_preprocessor(exclude_tools_when_none: bool) -> Arc<OpenAIPreprocessor> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -588,6 +1060,29 @@ mod tests {
             .clone()
     }
 
+    fn kimi_k2_call_section(format: &serde_json::Value) -> &serde_json::Value {
+        if format["type"] == "triggered_tags" {
+            assert_eq!(
+                format["triggers"],
+                serde_json::json!(["<|tool_calls_section_begin|>"])
+            );
+            assert_eq!(format["at_least_one"], true);
+            let section = &format["tags"][0];
+            assert_eq!(section["begin"], "<|tool_calls_section_begin|>");
+            assert_eq!(section["end"], "<|tool_calls_section_end|>");
+            &section["content"]
+        } else {
+            assert_eq!(format["type"], "sequence");
+            assert_eq!(format["elements"][0]["type"], "const_string");
+            assert_eq!(
+                format["elements"][0]["value"],
+                "<|tool_calls_section_begin|>"
+            );
+            assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
+            &format["elements"][1]
+        }
+    }
+
     #[test]
     fn reasoning_metadata_controls_whether_forced_tool_tag_models_reasoning() {
         for policy in [None, Some(false)] {
@@ -598,12 +1093,7 @@ mod tests {
         }
 
         let format = kimi_k2_required_format(Some(true));
-        assert_eq!(format["type"], "sequence");
-        assert_eq!(format["elements"][0]["type"], "const_string");
-        assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
+        assert_eq!(kimi_k2_call_section(&format)["type"], "tags_with_separator");
     }
 
     #[test]
@@ -663,6 +1153,188 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_only_spark_forced_choice_installs_native_grammar() {
+        for parser in ["muse_spark", "muse_spark_open"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = None;
+            mdc.runtime_config.reasoning_parser = Some(parser.into());
+            // Startup must protect the same family selected for forced-call guidance.
+            let mut late_config = mdc.runtime_config.clone();
+            late_config
+                .set_engine_specific(
+                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    true,
+                )
+                .unwrap();
+            assert!(
+                validate_runtime_config(&late_config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("grammar-owned reasoning")
+            );
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type":"function","function":{"name":"get_weather"}}),
+            ] {
+                let chat:crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest=serde_json::from_value(serde_json::json!({
+                    "model":"m","messages":[{"role":"user","content":"Weather"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}}],"tool_choice":choice,"parallel_tool_calls":false
+                })).unwrap();
+                let mut request = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&chat, &mut request, false)
+                    .unwrap();
+                assert!(
+                    matches!(
+                        constraint,
+                        crate::protocols::openai::GuidedToolConstraint::StructuralTag
+                    ),
+                    "{parser}: {constraint:?}"
+                );
+                let guidance = request.sampling_options.guided_decoding.unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_forced_choices_install_native_grammar_without_operator_opt_in() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object", "properties": {"city": {"type": "string"}},
+                "required": ["city"], "additionalProperties": false
+            })),
+            strict: Some(true),
+        }];
+        for parser in ["muse_spark_open", "muse_spark"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                ToolChoice::Required,
+                ToolChoice::Named("get_weather".into()),
+            ] {
+                let mut request = preprocessed_request();
+                assert!(
+                    preprocessor
+                        .apply_tool_choice_structural_tag(
+                            &choice,
+                            &tools,
+                            Some(false),
+                            false,
+                            None,
+                            &mut request
+                        )
+                        .unwrap(),
+                    "{parser} {choice:?} must be enforced by the native grammar"
+                );
+                let guidance = request.sampling_options.guided_decoding.as_ref().unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .as_ref()
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_grammar_disables_sglang_gate_and_rejects_late_vllm_gate() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        mdc.runtime_config
+            .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, true)
+            .unwrap();
+        let mut late_config = mdc.runtime_config.clone();
+        late_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                true,
+            )
+            .unwrap();
+        assert!(
+            validate_runtime_config(&late_config)
+                .unwrap_err()
+                .to_string()
+                .contains("grammar-owned reasoning")
+        );
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "ping".into(),
+            parameters: Some(serde_json::json!({"type":"object", "properties":{}})),
+            strict: Some(true),
+        }];
+        let mut request = preprocessed_request();
+        request.require_reasoning = true;
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Required,
+                    &tools,
+                    Some(false),
+                    false,
+                    None,
+                    &mut request
+                )
+                .unwrap()
+        );
+        assert!(
+            !request.require_reasoning,
+            "SGLang must apply the complete ATEM grammar from the first generated token"
+        );
+    }
+
+    #[test]
+    fn muse_spark_unsupported_constraints_do_not_silently_fall_back_to_prompting() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "lookup".into(),
+            parameters: Some(
+                serde_json::json!({"type":"object", "properties":{"q":{"type":"string", "pattern":"^A", "minLength":4, "contentMediaType":"text/plain"}}}),
+            ),
+            strict: Some(true),
+        }];
+        let error = preprocessor
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &tools,
+                None,
+                false,
+                None,
+                &mut preprocessed_request(),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot constrain native Muse Spark tools")
+        );
+    }
+
+    #[test]
     fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
         let named = ToolChoice::Named("get_weather".to_string());
         assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
@@ -696,6 +1368,13 @@ mod tests {
             ("kimi_k2", ToolChoice::Named("get_weather".to_string())),
             ("kimi_k3", ToolChoice::Named("get_weather".to_string())),
             ("kimi-k3", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark", ToolChoice::Required),
+            ("muse_spark", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark_open", ToolChoice::Required),
+            (
+                "muse_spark_open",
+                ToolChoice::Named("get_weather".to_string()),
+            ),
         ];
         for (parser, choice) in cases {
             assert!(
@@ -703,7 +1382,7 @@ mod tests {
                 "test fixture drifted: '{parser}' + {choice:?} is no longer intrinsic"
             );
             assert!(
-                SelectedStructuralTagBuilder::for_parser(parser).is_some(),
+                SelectedStructuralTagBuilder::for_parser(parser, None).is_some(),
                 "'{parser}' is intrinsic per the predicate but the parser registry has \
                  no structural-tag builder for it — the predicate and the registry have \
                  drifted apart"
@@ -741,7 +1420,7 @@ mod tests {
         };
 
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::Auto,
             &tools,
             None,
@@ -769,7 +1448,7 @@ mod tests {
                 ..Default::default()
             };
             let decision = structural_tag_decision(
-                Some("qwen3_coder"),
+                (Some("qwen3_coder"), None),
                 &ToolChoice::Auto,
                 &tools,
                 None,
@@ -788,7 +1467,7 @@ mod tests {
             ..Default::default()
         };
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::Auto,
             &tools,
             None,
@@ -811,7 +1490,7 @@ mod tests {
         let config = StructuralTagConfig::default();
 
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::None,
             &tools,
             None,
@@ -862,18 +1541,13 @@ mod tests {
             .structural_tag
             .as_ref()
             .unwrap()["format"];
-        assert_eq!(format["type"], "sequence");
+        let section = kimi_k2_call_section(format);
+        assert_eq!(section["type"], "tags_with_separator");
+        assert_eq!(section["at_least_one"], true);
         assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
-        assert_eq!(format["elements"][1]["type"], "tags_with_separator");
-        assert_eq!(format["elements"][1]["at_least_one"], true);
-        assert_eq!(
-            format["elements"][1]["tags"][0]["begin"],
+            section["tags"][0]["begin"],
             "<|tool_call_begin|>functions.get_weather:"
         );
-        assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
     }
 
     #[test]
@@ -1060,6 +1734,58 @@ mod tests {
     }
 
     #[test]
+    fn structural_tag_generation_follows_model_pair_in_isolated_processes() {
+        const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_PAIR_CHILD";
+        let Ok(version) = std::env::var(CHILD) else {
+            for version in ["auto", "1", "2"] {
+                let output = crate::test_utils::isolated_command(
+                    "preprocessor::structural_tag::tests::structural_tag_generation_follows_model_pair_in_isolated_processes",
+                ).env(CHILD, version).env(env_llm::DYN_PARSER_VERSION, version).output().unwrap();
+                crate::test_utils::assert_isolated_success(&output);
+            }
+            return;
+        };
+        for (tool, reasoning) in [
+            ("qwen3_coder", Some("qwen3")),
+            ("qwen3_coder", None),
+            ("glm47", Some("glm45")),
+            ("qwen3_coder", Some("deepseek_r1")),
+            ("harmony", Some("gpt_oss")),
+            ("gpt_oss", None),
+            ("harmony", Some("deepseek_r1")),
+        ] {
+            let compatible = reasoning != Some("deepseek_r1");
+            let uses_v2 = version != "1" && compatible;
+            assert_eq!(
+                uses_gpt_oss_required_array((Some(tool), reasoning), &ToolChoice::Required, None),
+                uses_v2 && matches!(tool, "harmony" | "gpt_oss")
+            );
+            assert!(!uses_gpt_oss_required_array(
+                (Some(tool), reasoning),
+                &ToolChoice::Required,
+                Some(false),
+            ));
+            assert_eq!(
+                matches!(
+                    SelectedStructuralTagBuilder::for_parser(tool, reasoning),
+                    Some(SelectedStructuralTagBuilder::V2(_))
+                ),
+                uses_v2
+            );
+            let config = ModelRuntimeConfig {
+                tool_call_parser: Some(tool.into()),
+                reasoning_parser: reasoning.map(str::to_string),
+                structural_tag: Some(StructuralTagConfig {
+                    tool_arguments_any_order: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(validate_runtime_config(&config).is_ok(), uses_v2);
+        }
+    }
+
+    #[test]
     fn tool_choice_none_skips_ban_only_when_prompt_excludes_tools() {
         const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_NONE_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -1128,7 +1854,10 @@ mod tests {
             .as_ref()
             .and_then(|guided| guided.structural_tag.as_ref())
             .expect("tool-call ban should be installed");
-        let expected_content = if v2::enabled() {
+        let expected_content = if matches!(
+            SelectedStructuralTagBuilder::for_parser("qwen3_coder", None),
+            Some(SelectedStructuralTagBuilder::V2(_))
+        ) {
             serde_json::json!({
                 "type": "any_text",
                 "excludes": ["<tool_call>", "<function="]
@@ -1140,6 +1869,126 @@ mod tests {
             })
         };
         assert_eq!(structural_tag["format"]["content"], expected_content);
+    }
+
+    #[test]
+    fn v2_qwen3_coder_tag_never_excludes_its_own_trigger() {
+        // ai-dynamo/dynamo#17663: dynamo-parsers-v2 0.8.0 built the qwen3_coder
+        // tag with the trigger `<tool_call>\n<function=` next to
+        // `excludes: ["<function="]`. XGrammar applies the excludes to the free
+        // text the trigger is matched in, so the model's own call opening was
+        // rejected and it retried inside the open thought until `max_tokens`.
+        // 0.8.7+ dispatches at `<tool_call>`; this pins that no trigger may ever
+        // contain an excluded string again.
+        const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_TRIGGER_EXCLUDE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "preprocessor::structural_tag::tests::v2_qwen3_coder_tag_never_excludes_its_own_trigger",
+            )
+            .env(CHILD, "2")
+            .env(env_llm::DYN_PARSER_VERSION, "2")
+            .output()
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        assert!(v2::enabled(), "child must run with parsers v2 selected");
+
+        let tools = [ToolDefinition {
+            name: "queue_label_print_job".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"label_count": {"type": "integer", "multipleOf": 24}},
+                "required": ["label_count"]
+            })),
+            strict: None,
+        }];
+        // `scope: always` so the auto choice installs the tag the way the
+        // affected deployments do; the default scope only tags forced choices.
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for tool_choice in [ToolChoice::Auto, ToolChoice::Required] {
+            let mut request = preprocessed_request();
+            let applied = preprocessor
+                .apply_tool_choice_structural_tag(
+                    &tool_choice,
+                    &tools,
+                    None,
+                    false,
+                    None,
+                    &mut request,
+                )
+                .unwrap();
+            assert!(applied, "{tool_choice:?} must install a structural tag");
+            let tag = request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .expect("tool-call structural tag should be installed")
+                .clone();
+
+            let triggers = json_strings_under_keys(&tag, &["triggers"]);
+            let excludes = json_strings_under_keys(&tag, &["excludes", "exclude_tokens"]);
+            assert!(
+                triggers.iter().any(|trigger| trigger == "<tool_call>"),
+                "{tool_choice:?}: expected a `<tool_call>` trigger in {tag}"
+            );
+            assert!(
+                excludes.iter().any(|exclude| exclude == "<function="),
+                "{tool_choice:?}: expected the bare `<function=` marker to stay excluded in {tag}"
+            );
+            for trigger in &triggers {
+                for exclude in &excludes {
+                    assert!(
+                        !trigger.contains(exclude.as_str()),
+                        "{tool_choice:?}: trigger {trigger:?} contains the excluded string \
+                         {exclude:?}, so the grammar can never dispatch the call: {tag}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every string found directly under one of `keys` (as a string or an array
+    /// of strings), anywhere in `value`.
+    fn json_strings_under_keys(value: &serde_json::Value, keys: &[&str]) -> Vec<String> {
+        fn walk(value: &serde_json::Value, keys: &[&str], out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if keys.contains(&key.as_str()) {
+                            match child {
+                                serde_json::Value::String(text) => out.push(text.clone()),
+                                serde_json::Value::Array(items) => out.extend(
+                                    items
+                                        .iter()
+                                        .filter_map(|item| item.as_str().map(str::to_string)),
+                                ),
+                                _ => {}
+                            }
+                        }
+                        walk(child, keys, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, keys, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(value, keys, &mut out);
+        out
     }
 
     #[test]
@@ -1236,6 +2085,24 @@ mod tests {
         assert!(!requires_native_tool_call_format(
             Some("kimi_k2"),
             &ToolChoice::Auto
+        ));
+    }
+
+    #[test]
+    fn beam_forced_choices_keep_the_harmony_wire_and_its_analysis_channel() {
+        let named = ToolChoice::Named("get_weather".to_string());
+        assert!(requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Required
+        ));
+        assert!(requires_native_tool_call_format(Some("beam"), &named));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Auto
+        ));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::None
         ));
     }
 
@@ -1352,5 +2219,266 @@ mod tests {
             &tools,
             None,
         ));
+    }
+
+    // The verdicts live in a file the Python frontend test checks against XGrammar
+    // itself, so this hand-written list cannot drift from the compiler unnoticed.
+    #[test]
+    fn unsupported_regex_constructs_match_the_grammar_compiler() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/structural_tag/unsupported_regex_constructs.json");
+        let table: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let cases: Vec<(String, Option<String>)> =
+            serde_json::from_value(table["cases"].clone()).unwrap();
+        assert!(!cases.is_empty(), "{}", path.display());
+        for (pattern, expected) in cases {
+            assert_eq!(
+                unsupported_regex_construct(&pattern),
+                expected.as_deref(),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_sized_repetition_counts_are_rejected_without_parsing() {
+        let pattern = format!("a{{1,{}}}", "9".repeat(5000));
+        assert_eq!(
+            unsupported_regex_construct(&pattern),
+            Some("malformed repetition")
+        );
+    }
+
+    #[test]
+    fn unsupported_schema_constructs_are_found_in_subschemas_only() {
+        let lookahead = r"^(?!\s*$).+";
+        for schema in [
+            serde_json::json!({"properties": {"a": {"items": {"pattern": lookahead}}}}),
+            serde_json::json!({"anyOf": [{"type": "integer"}, {"pattern": lookahead}]}),
+            serde_json::json!({"patternProperties": {lookahead: {"type": "string"}}}),
+            serde_json::json!({"$defs": {"name": {"pattern": lookahead}}}),
+            serde_json::json!({"properties": {"default": {"pattern": lookahead}}}),
+            serde_json::json!({"dependencies": {"enum": {"pattern": lookahead}}}),
+        ] {
+            assert_eq!(
+                unsupported_schema_construct(&schema),
+                Some("lookahead"),
+                "{schema}"
+            );
+        }
+        for schema in [
+            serde_json::json!({"properties": {"a": {"type": "string", "pattern": "^[a-z]+$"}}}),
+            serde_json::json!({"properties": {"pattern": {"type": "string"}}}),
+            serde_json::json!({"const": {"pattern": lookahead}}),
+            serde_json::json!({"default": {"pattern": lookahead}}),
+            serde_json::json!({"enum": [{"pattern": lookahead}]}),
+            serde_json::json!({"examples": [{"pattern": lookahead}]}),
+        ] {
+            assert_eq!(unsupported_schema_construct(&schema), None, "{schema}");
+        }
+    }
+
+    fn record_value_tool(pattern: &str, strict: Option<bool>) -> ToolDefinition {
+        ToolDefinition {
+            name: "record_value".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": "string", "pattern": pattern}},
+                "required": ["value"],
+                "additionalProperties": false
+            })),
+            strict,
+        }
+    }
+
+    fn record_value_tool_with_named_properties(pattern: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: "record_value".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "patternProperties": {pattern: {"type": "string"}},
+                "additionalProperties": false
+            })),
+            strict: None,
+        }
+    }
+
+    /// The named `record_value` call in a structural tag: the tag whose `begin`
+    /// names the tool.
+    fn record_value_call(
+        preprocessor: &OpenAIPreprocessor,
+        tool: ToolDefinition,
+    ) -> serde_json::Value {
+        fn call(value: &serde_json::Value) -> Option<&serde_json::Value> {
+            match value {
+                serde_json::Value::Object(map)
+                    if map
+                        .get("begin")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|begin| begin.contains("record_value")) =>
+                {
+                    Some(value)
+                }
+                serde_json::Value::Object(map) => map.values().find_map(call),
+                serde_json::Value::Array(items) => items.iter().find_map(call),
+                _ => None,
+            }
+        }
+
+        let mut request = preprocessed_request();
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Named("record_value".to_string()),
+                    &[tool],
+                    None,
+                    false,
+                    None,
+                    &mut request,
+                )
+                .unwrap()
+        );
+        let tag = request
+            .sampling_options
+            .guided_decoding
+            .unwrap()
+            .structural_tag
+            .unwrap();
+        call(&tag)
+            .unwrap_or_else(|| panic!("no tag begins with the tool name: {tag}"))
+            .clone()
+    }
+
+    /// The JSON-schema argument grammar of the named `record_value` call.
+    fn record_value_arguments(
+        preprocessor: &OpenAIPreprocessor,
+        tool: ToolDefinition,
+    ) -> serde_json::Value {
+        fn find<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+            match value {
+                serde_json::Value::Object(map) => map
+                    .get(key)
+                    .or_else(|| map.values().find_map(|value| find(value, key))),
+                serde_json::Value::Array(items) => items.iter().find_map(|value| find(value, key)),
+                _ => None,
+            }
+        }
+        let call = record_value_call(preprocessor, tool);
+        find(&call, "json_schema")
+            .unwrap_or_else(|| panic!("no argument grammar: {call}"))
+            .clone()
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Arguments {
+        /// The client's schema, pattern included.
+        Enforced,
+        /// The client's schema without the pattern.
+        PatternLeftOut,
+        /// Any arguments.
+        Unconstrained,
+    }
+
+    fn arguments_kind(arguments: &serde_json::Value) -> Arguments {
+        if arguments == &serde_json::Value::Bool(true) {
+            return Arguments::Unconstrained;
+        }
+        let value = &arguments["properties"]["value"];
+        assert_eq!(value["type"], "string", "{arguments}");
+        assert_eq!(
+            arguments["required"],
+            serde_json::json!(["value"]),
+            "{arguments}"
+        );
+        if value.get("pattern").is_some() {
+            Arguments::Enforced
+        } else {
+            Arguments::PatternLeftOut
+        }
+    }
+
+    fn qwen3_coder_preprocessor(schema: StructuralTagSchemaMode) -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            schema,
+            ..Default::default()
+        });
+        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[test]
+    fn automatic_argument_enforcement_leaves_out_patterns_the_backend_cannot_compile() {
+        let lookahead = r"^(?!\s*$).+";
+        let auto = qwen3_coder_preprocessor(StructuralTagSchemaMode::Auto);
+        let strict = qwen3_coder_preprocessor(StructuralTagSchemaMode::Strict);
+        for (case, preprocessor, tool, expected) in [
+            (
+                "omitted strict",
+                &auto,
+                record_value_tool(lookahead, None),
+                Arguments::PatternLeftOut,
+            ),
+            (
+                "explicit strict",
+                &auto,
+                record_value_tool(lookahead, Some(true)),
+                Arguments::Enforced,
+            ),
+            (
+                "explicit non-strict",
+                &auto,
+                record_value_tool(lookahead, Some(false)),
+                Arguments::Unconstrained,
+            ),
+            (
+                "global strict mode",
+                &strict,
+                record_value_tool(lookahead, None),
+                Arguments::Enforced,
+            ),
+            (
+                "supported pattern",
+                &auto,
+                record_value_tool("^[a-z]+$", None),
+                Arguments::Enforced,
+            ),
+        ] {
+            let arguments = record_value_arguments(preprocessor, tool);
+            assert_eq!(arguments_kind(&arguments), expected, "{case}: {arguments}");
+        }
+    }
+
+    #[test]
+    fn unsupported_property_name_patterns_leave_the_arguments_unconstrained() {
+        let arguments = record_value_arguments(
+            &qwen3_coder_preprocessor(StructuralTagSchemaMode::Auto),
+            record_value_tool_with_named_properties(r"^(?!x)"),
+        );
+        assert_eq!(arguments_kind(&arguments), Arguments::Unconstrained);
+    }
+
+    // The opt-out keeps K3 named tags, and K3 splices each pattern into its own
+    // grammar instead of a JSON schema.
+    #[test]
+    fn kimi_k3_named_tag_leaves_out_patterns_the_backend_cannot_compile_when_global_mode_is_off() {
+        // Without anchors, which K3 strips when it splices a pattern in.
+        for (pattern, kept) in [(r"(?<=a)b", false), ("[a-z]+", true)] {
+            let call = record_value_call(&kimi_k3_preprocessor(), record_value_tool(pattern, None))
+                .to_string();
+            assert!(
+                call.contains(r#"argument key=\"value\" type=\"string\""#),
+                "{call}"
+            );
+            let pattern = serde_json::to_string(pattern).unwrap();
+            assert_eq!(
+                call.contains(pattern.trim_matches('"')),
+                kept,
+                "{pattern}: {call}"
+            );
+        }
     }
 }

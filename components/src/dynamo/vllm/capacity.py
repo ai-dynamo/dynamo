@@ -11,6 +11,21 @@ from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 logger = logging.getLogger(__name__)
 
+# Must match `MAX_LOGPROBS_RUNTIME_KEY` in
+# `lib/llm/src/local_model/runtime_config.rs`.
+MAX_LOGPROBS_RUNTIME_KEY = "max_logprobs"
+
+
+def publish_vllm_max_logprobs(runtime_config: Any, model_config: Any) -> None:
+    """Publish the engine's ``max_logprobs`` so the frontend applies the same limit."""
+    max_logprobs = model_config.max_logprobs
+    if max_logprobs == -1:
+        # vLLM's "no cap": it checks requests against the vocabulary size.
+        max_logprobs = model_config.get_vocab_size()
+    runtime_config.set_engine_specific(
+        MAX_LOGPROBS_RUNTIME_KEY, json.dumps(max_logprobs)
+    )
+
 
 def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
     """Publish vLLM's request-overflow contract to the Dynamo frontend."""
@@ -21,7 +36,8 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
         TokenBudget(
             combined_limit=max_model_len,
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            # vLLM caps oversized output budgets instead of rejecting them.
+            reject_total_overflow=False,
         ),
     )
 

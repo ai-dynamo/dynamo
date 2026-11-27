@@ -23,17 +23,18 @@ import (
 	"sort"
 	"strings"
 
-	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,6 +71,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	oldEnv                  []corev1.EnvVar
+	orderedEnvironment      bool
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
@@ -92,12 +95,10 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: ratchetRuntimeVersion,
-		},
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -105,7 +106,16 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+
+	// Alpha source lists retain their complete ordered old values for ratcheting.
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if oldDeployment != nil && validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -122,14 +132,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: true,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: true,
+		userInfo:              userInfo,
+		operatorPrincipal:     operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
@@ -175,13 +183,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	// it, and the Disabled variant went away when runtime-version validation
 	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                  ctx,
-			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceV1Beta1,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		userInfo:             userInfo,
+		operatorPrincipal:    operatorPrincipal,
 	}
 
 	allErrs := validation.validateObjectMetaUpdate(
@@ -234,8 +240,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		orderedEnvironment:      compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
+	}
+	// Preserve the full old list; duplicate-name ratcheting is limited to legacy origins.
+	if oldDGD != nil {
+		specOpts.oldEnv = oldDGD.Spec.Env
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -262,15 +273,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-		if _, err := semver.NewVersion(value); err != nil {
-			allErrs = append(allErrs, field.Invalid(
-				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-				value,
-				"must be valid semver",
-			))
-		}
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
@@ -339,7 +342,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
-			if spec.Components[i].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) != nil {
+			if dynamolpx.ServesEndpoint(&spec.Components[i]) {
 				independentEngineCount++
 			}
 		}
@@ -394,7 +397,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
 			replicas := k8sptr.Deref(component.Replicas, 1)
-			if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+			if !dynamolpx.ServesEndpoint(component) {
 				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
 					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "draft replicas must be between 1 and 8"))
 				}
@@ -405,6 +408,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
 				}
 			} else if replicas != 1 {
+				// Draft replicas count models; the target stands for the one shared engine.
 				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
 			}
 		}
@@ -498,7 +502,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 	}
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
+		allErrs = append(allErrs, field.Forbidden(componentsPath, fmt.Sprintf(
+			"LPX components must each declare a conductor role or an agent %q sidecar, or form a shared draft and target pair", consts.RuntimeContainerName)))
+	}
+
+	// The source-alpha recursion owns its differently named root envs field.
+	if !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"), opts.orderedEnvironment)...)
 	}
 
 	if spec.Restart != nil {
@@ -826,23 +836,10 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
-	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 
-	// Keep creation provenance immutable, including whether it exists at all.
-	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
-		var invalidValue any
-		if newOriginExists {
-			invalidValue = newOrigin
-		}
-		allErrs = append(allErrs, field.Invalid(
-			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-			invalidValue,
-			apivalidation.FieldImmutableErrorMsg,
-		))
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMetaUpdate(newObjectMeta, oldObjectMeta, fldPath)...)
 
 	// Reserve the initial legacy-provider materialization for the configured operator identity.
 	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&

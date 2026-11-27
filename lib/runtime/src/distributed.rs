@@ -40,6 +40,35 @@ use tokio_util::sync::CancellationToken;
 
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
+/// A registered direct dispatch without its request and response types. A
+/// lookup downcasts it to its [`TypedDirectDispatch`]. The instance hooks need
+/// no types: an endpoint's one instance watcher runs through a router of one
+/// type pair and calls the dispatches of every pair. The registry holds each
+/// entry in an `Arc` so the hooks run after its lock is released.
+#[async_trait::async_trait]
+pub(crate) trait DirectDispatchEntry: std::any::Any + Send + Sync {
+    async fn on_instance_removed(&self, id: &discovery::EndpointInstanceId);
+    async fn on_instance_added(&self, id: &discovery::EndpointInstanceId);
+}
+
+struct TypedDirectDispatch<T, U>(Arc<dyn crate::pipeline::StreamingDispatch<T, U>>);
+
+#[async_trait::async_trait]
+impl<T, U> DirectDispatchEntry for TypedDirectDispatch<T, U>
+where
+    T: crate::engine::Data + serde::Serialize,
+    U: crate::engine::Data
+        + for<'de> serde::Deserialize<'de>
+        + crate::protocols::maybe_error::MaybeError,
+{
+    async fn on_instance_removed(&self, id: &discovery::EndpointInstanceId) {
+        self.0.on_instance_removed(id).await;
+    }
+
+    async fn on_instance_added(&self, id: &discovery::EndpointInstanceId) {
+        self.0.on_instance_added(id).await;
+    }
+}
 
 fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
     let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -157,6 +186,10 @@ pub struct DistributedRuntime {
     // Shared with system status server to expose via /metadata endpoint
     discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
 
+    // Discovery lives in this process's memory: nothing outside it reads or
+    // writes the records.
+    process_local_discovery: bool,
+
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.
     // take for example two instances of a client to the same remote component. The registry allows us to use
@@ -166,6 +199,10 @@ pub struct DistributedRuntime {
 
     endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
+    /// Final hops for `TransportType::Direct` instances, one per request and response
+    /// type; see [`Self::register_direct_dispatch`].
+    direct_dispatches:
+        Arc<parking_lot::Mutex<HashMap<std::any::TypeId, Arc<dyn DirectDispatchEntry>>>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -244,7 +281,8 @@ impl DistributedRuntime {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
-            Some(mode) => mode,
+            // An explicit Velo falls back to tcp under TLS, as the configured one does.
+            Some(mode) => mode.tcp_under_tls(),
             None => ResponsePlaneMode::configured()?,
         };
 
@@ -257,6 +295,10 @@ impl DistributedRuntime {
             None => None,
         };
 
+        let process_local_discovery = matches!(
+            discovery_backend,
+            DiscoveryBackend::KvStore(kv::Selector::Memory)
+        );
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
             DiscoveryBackend::Kubernetes => {
@@ -332,9 +374,11 @@ impl DistributedRuntime {
             discovery_client,
             endpoint_registrations,
             discovery_metadata,
+            process_local_discovery,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
+            direct_dispatches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
@@ -350,6 +394,16 @@ impl DistributedRuntime {
                 distributed_runtime.get_metrics_registry(),
             );
         }
+        if response_plane == ResponsePlaneMode::Velo {
+            distributed_runtime.velo_response_service().await?;
+            crate::pipeline::network::velo_response::register_metrics(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
+
+        crate::metrics::register_merge_conflicts_counter(
+            distributed_runtime.get_metrics_registry(),
+        );
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -555,6 +609,12 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
+    /// Whether discovery is held in this process's memory, so no other process
+    /// sees what this one registers.
+    pub fn discovery_is_process_local(&self) -> bool {
+        self.process_local_discovery
+    }
+
     /// Register an endpoint until the last runtime-wide owner drops its lease.
     pub async fn register_endpoint_lease(
         &self,
@@ -597,6 +657,12 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn velo_response_service(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::velo_response::VeloResponseService>> {
+        self.runtime.velo_response_service().service().await
     }
 
     pub async fn quic_response_server(
@@ -704,6 +770,77 @@ impl DistributedRuntime {
     /// the task has finished.
     pub fn register_graceful_task(&self) -> crate::utils::GracefulTaskGuard {
         self.runtime.graceful_shutdown_tracker().register_task()
+    }
+
+    /// Reach every `TransportType::Direct` instance of this runtime's routers with
+    /// request type `T` and response type `U` through `dispatch`.
+    ///
+    /// Engines this process dials itself, rather than reaching them over the
+    /// request plane, register as `Direct` instances. A router built without an
+    /// explicit dispatch sends their requests here and every other instance's
+    /// over the request plane. Fails if a dispatch for `T` and `U` is already
+    /// registered.
+    ///
+    /// The dispatch's `on_instance_added` and `on_instance_removed` hooks see the
+    /// instances of every endpoint whose first router was built without an
+    /// explicit dispatch: all of them, not only `Direct` ones, and whatever that
+    /// router's request and response types. An endpoint has one instance
+    /// watcher, which runs through the first router built for it, so an endpoint
+    /// whose first router has an explicit dispatch sends its events to that
+    /// dispatch only. So a dispatch should open per-instance connections on its
+    /// first request, not in those hooks, and key per-instance state on the
+    /// whole `EndpointInstanceId`: a worker's `instance_id` is the same under
+    /// each of its endpoints.
+    /// Register before publishing `Direct` workers: a router still finds a
+    /// dispatch registered later, but events from before then are not replayed.
+    pub fn register_direct_dispatch<T, U>(
+        &self,
+        dispatch: Arc<dyn crate::pipeline::StreamingDispatch<T, U>>,
+    ) -> Result<()>
+    where
+        T: crate::engine::Data + serde::Serialize,
+        U: crate::engine::Data
+            + for<'de> serde::Deserialize<'de>
+            + crate::protocols::maybe_error::MaybeError,
+    {
+        let mut dispatches = self.direct_dispatches.lock();
+        let key = std::any::TypeId::of::<(T, U)>();
+        anyhow::ensure!(
+            !dispatches.contains_key(&key),
+            "a direct dispatch for these request and response types is already registered"
+        );
+        dispatches.insert(key, Arc::new(TypedDirectDispatch(dispatch)));
+        Ok(())
+    }
+
+    /// The dispatch registered for `TransportType::Direct` instances with request
+    /// type `T` and response type `U`. A component that reads per-worker state
+    /// differently for engines this process dials itself, such as a router
+    /// choosing where KV events come from, checks this once when it is built,
+    /// so the dispatch must be registered before those workers are published.
+    pub fn direct_dispatch<T, U>(&self) -> Option<Arc<dyn crate::pipeline::StreamingDispatch<T, U>>>
+    where
+        T: crate::engine::Data + serde::Serialize,
+        U: crate::engine::Data
+            + for<'de> serde::Deserialize<'de>
+            + crate::protocols::maybe_error::MaybeError,
+    {
+        let dispatches = self.direct_dispatches.lock();
+        // Name the trait object before the upcast. The `Arc<_>` is itself `Any`,
+        // so a `&Arc<_>` would coerce to `&dyn Any` directly and the downcast
+        // would always miss.
+        let entry: &dyn DirectDispatchEntry =
+            dispatches.get(&std::any::TypeId::of::<(T, U)>())?.as_ref();
+        (entry as &dyn std::any::Any)
+            .downcast_ref::<TypedDirectDispatch<T, U>>()
+            .map(|typed| typed.0.clone())
+    }
+
+    /// Every registered direct dispatch, to deliver an instance event to: the
+    /// endpoint's watcher runs through a router of one request and response
+    /// type, and routers of other types reach the same endpoint.
+    pub(crate) fn direct_dispatch_entries(&self) -> Vec<Arc<dyn DirectDispatchEntry>> {
+        self.direct_dispatches.lock().values().cloned().collect()
     }
 
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
@@ -852,6 +989,89 @@ impl DistributedRuntime {
 #[cfg(test)]
 mod parser_env_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_validates_velo_at_startup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_validates_velo_at_startup"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy_port = busy.local_addr().unwrap().port().to_string();
+        // Each case sets one variable over a valid TCP configuration.
+        let mut cases = vec![
+            (
+                "DYN_VELO_RESPONSE_TRANSPORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_TRANSPORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_BATCH_MS",
+                "invalid",
+                "DYN_VELO_RESPONSE_BATCH_MS",
+            ),
+            (
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+                "0",
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_PORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                busy_port.as_str(),
+                "Failed to pre-bind TCP listener",
+            ),
+        ];
+        if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
+            cases.push(("DYN_VELO_RESPONSE_TRANSPORT", "ucx", "velo-ucx"));
+        }
+        for (name, value, message) in cases {
+            let mut vars = vec![
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+            ];
+            vars.retain(|(var, _)| *var != name);
+            vars.push((name, Some(value)));
+            temp_env::async_with_vars(vars, async {
+                let runtime = Runtime::from_current().unwrap();
+                let mut config = DistributedConfig::process_local();
+                config.response_plane = Some(ResponsePlaneMode::Velo);
+                let error = DistributedRuntime::new(runtime, config)
+                    .await
+                    .expect_err("Velo configuration must fail before serving endpoints");
+                assert!(error.to_string().contains(message), "{error:#}");
+            })
+            .await;
+        }
+    }
+
+    /// Velo has no TLS, so a runtime asked for Velo under TLS runs on tcp.
+    #[tokio::test]
+    async fn distributed_runtime_uses_tcp_for_velo_under_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_uses_tcp_for_velo_under_tls"
+            ),
+            &[("DYN_TCP_TLS_INSECURE", "true")],
+        ) {
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let mut config = DistributedConfig::process_local();
+        config.response_plane = Some(ResponsePlaneMode::Velo);
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        assert_eq!(drt.response_plane(), ResponsePlaneMode::Tcp);
+    }
 
     #[tokio::test]
     async fn distributed_runtime_rejects_invalid_parser_version() {
@@ -1012,16 +1232,9 @@ impl DistributedConfig {
             None => discovery_backend.resolve_event_transport_kind()?,
         };
 
-        // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (NATS core event plane)
-        // - inter-router replica sync (NATS core)
-        //
-        // Enable the NATS client when any of these hold:
-        // 1. Request plane is NATS
-        // 2. NATS_SERVER is explicitly configured by the user
-        // 3. The resolved event transport kind is NATS
+        // Connect to NATS only when a plane uses it. NATS_SERVER alone says where NATS is, not
+        // that this process needs it: the operator sets it in every pod when NATS is installed.
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
@@ -1054,7 +1267,6 @@ impl DistributedConfig {
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind()?;
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
@@ -1265,6 +1477,32 @@ mod event_plane_env_tests {
             err.to_string().contains("not valid Unicode"),
             "error should say the value was not valid Unicode, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod nats_enablement_tests {
+    use super::DistributedConfig;
+    use crate::config::environment_names::{event_plane::DYN_EVENT_PLANE, nats::NATS_SERVER};
+
+    #[test]
+    fn ambient_nats_server_does_not_enable_nats_on_tcp_and_zmq() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::ambient_nats_server_does_not_enable_nats_on_tcp_and_zmq"
+            ),
+            &[(NATS_SERVER, "nats://127.0.0.1:9")],
+        ) {
+            return;
+        }
+
+        temp_env::with_var_unset(DYN_EVENT_PLANE, || {
+            let config =
+                DistributedConfig::from_settings_with_overrides(Some("file"), Some("tcp"), None)
+                    .unwrap();
+            assert!(config.nats_config.is_none());
+        });
     }
 }
 

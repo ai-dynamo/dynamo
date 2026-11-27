@@ -48,6 +48,14 @@ type Options struct {
 	WebhookProxyImage      string
 	EventuallyTimeout      time.Duration
 	NamespaceDeleteTimeout time.Duration
+	// ManagerImpersonation distinguishes controller writes from fixture-user writes
+	// when production admission protects operator-owned metadata. The cluster's
+	// test credentials must be authorized to impersonate this identity.
+	ManagerImpersonation *rest.ImpersonationConfig
+	// BeforeWebhooks loads historical state before current admission starts.
+	// The returned cleanup runs even after partial preparation or webhook failure.
+	// Callers must exclusively own the cluster while changing cluster-scoped state.
+	BeforeWebhooks func(context.Context, client.Client) (func(context.Context) error, error)
 }
 
 // Env lazily connects to one externally managed Kubernetes cluster.
@@ -97,6 +105,26 @@ func (e *Env) RunM(m *testing.M) int {
 // RunT creates a namespace and returns a test environment backed by the
 // explicitly unlocked cluster context.
 func (e *Env) RunT(tb testing.TB) *TestEnv {
+	e.startForTest(tb)
+	testEnv := newTestEnv(tb, e.rt, e.opts)
+	tb.Cleanup(testEnv.stop)
+	return testEnv
+}
+
+// RunTInNamespace takes ownership of a namespace prepared by BeforeWebhooks.
+// Keeping its name preserves namespace-dependent historical worker identities.
+func (e *Env) RunTInNamespace(tb testing.TB, namespace string) *TestEnv {
+	e.startForTest(tb)
+	var ns corev1.Namespace
+	if err := e.rt.client.Get(tb.Context(), client.ObjectKey{Name: namespace}, &ns); err != nil {
+		tb.Fatalf("get prepared namespace %q: %v", namespace, err)
+	}
+	testEnv := &TestEnv{tb: tb, rt: e.rt, opts: e.opts, namespace: namespace}
+	tb.Cleanup(testEnv.stop)
+	return testEnv
+}
+
+func (e *Env) startForTest(tb testing.TB) {
 	tb.Helper()
 	e.mu.Lock()
 	runM := e.runM
@@ -111,9 +139,6 @@ func (e *Env) RunT(tb testing.TB) *TestEnv {
 		tb.Fatalf("start clusterenv: %v", e.err)
 	}
 
-	testEnv := newTestEnv(tb, e.rt, e.opts)
-	tb.Cleanup(testEnv.stop)
-	return testEnv
 }
 
 type runtimeEnv struct {
@@ -123,6 +148,7 @@ type runtimeEnv struct {
 	client     client.Client
 	kubeClient kubernetes.Interface
 	webhooks   *webhookRuntime
+	restore    func(context.Context) error
 }
 
 func startRuntime(opts Options) (*runtimeEnv, error) {
@@ -144,20 +170,34 @@ func startRuntime(opts Options) (*runtimeEnv, error) {
 	rt := &runtimeEnv{
 		opts: opts, config: config, scheme: opts.Scheme, client: k8sClient, kubeClient: kubeClient,
 	}
+	if opts.BeforeWebhooks != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), opts.EventuallyTimeout)
+		rt.restore, err = opts.BeforeWebhooks(ctx, k8sClient)
+		cancel()
+		if err != nil {
+			return nil, errors.Join(err, rt.stop())
+		}
+	}
 	if opts.SetupWebhooks != nil {
 		rt.webhooks, err = startWebhookRuntime(opts, config, kubeClient)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, rt.stop())
 		}
 	}
 	return rt, nil
 }
 
 func (e *runtimeEnv) stop() error {
-	if e.webhooks == nil {
-		return nil
+	var errs []error
+	if e.webhooks != nil {
+		errs = append(errs, e.webhooks.stop())
 	}
-	return e.webhooks.stop()
+	if e.restore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), e.opts.NamespaceDeleteTimeout)
+		defer cancel()
+		errs = append(errs, e.restore(ctx))
+	}
+	return errors.Join(errs...)
 }
 
 func loadRESTConfig() (*rest.Config, error) {
@@ -202,7 +242,7 @@ type TestEnv struct {
 
 func newTestEnv(tb testing.TB, rt *runtimeEnv, opts Options) *TestEnv {
 	tb.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "clusterenv-"}}
+	ns := &corev1.Namespace{GenerateName: "clusterenv-"}
 	if err := rt.client.Create(context.Background(), ns); err != nil {
 		tb.Fatalf("create cluster-test namespace: %v", err)
 	}
@@ -241,26 +281,36 @@ func (e *TestEnv) BlockReplicaSets() {
 
 func (e *TestEnv) blockQuota(quota *corev1.ResourceQuota) {
 	e.tb.Helper()
-	if err := e.rt.client.Create(context.Background(), quota); err != nil && !apierrors.IsAlreadyExists(err) {
-		e.tb.Fatalf("create cluster-test workload quota: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), e.opts.EventuallyTimeout)
 	defer cancel()
+	if err := blockQuota(ctx, e.rt.client, quota); err != nil {
+		e.tb.Fatalf("block cluster-test workloads: %v", err)
+	}
+}
+
+// blockQuota waits for quota admission to enforce every requested limit.
+func blockQuota(ctx context.Context, c client.Client, quota *corev1.ResourceQuota) error {
+	// Reuse an existing block when history preparation already installed it.
+	if err := c.Create(ctx, quota); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create cluster-test workload quota: %w", err)
+	}
+
+	// A stored quota is not effective until the quota controller initializes status.
 	if err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		current := &corev1.ResourceQuota{}
-		if err := e.rt.client.Get(ctx, client.ObjectKeyFromObject(quota), current); err != nil {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(quota), current); err != nil {
 			return false, err
 		}
 		return quotaInitialized(current, quota.Spec.Hard), nil
 	}); err != nil {
-		e.tb.Fatalf("wait for cluster-test workload quota: %v", err)
+		return fmt.Errorf("wait for cluster-test workload quota: %w", err)
 	}
+	return nil
 }
 
 func replicaSetBlockQuota(namespace string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Name: workloadBlockQuotaName, Namespace: namespace},
+		Name: workloadBlockQuotaName, Namespace: namespace,
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/replicasets.apps"): resource.MustParse("0"),
 		}},
@@ -295,7 +345,11 @@ func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	e.mu.Unlock()
 
 	skipNameValidation := true
-	mgr, err := ctrl.NewManager(e.rt.config, ctrl.Options{
+	managerConfig := rest.CopyConfig(e.rt.config)
+	if e.opts.ManagerImpersonation != nil {
+		managerConfig.Impersonate = *e.opts.ManagerImpersonation
+	}
+	mgr, err := ctrl.NewManager(managerConfig, ctrl.Options{
 		Scheme:                 e.rt.scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
@@ -392,7 +446,7 @@ func (e *TestEnv) logDiagnostics() {
 }
 
 func (e *TestEnv) deleteNamespace() error {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e.namespace}}
+	ns := &corev1.Namespace{Name: e.namespace}
 	if err := e.rt.client.Delete(context.Background(), ns); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}

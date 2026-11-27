@@ -3,10 +3,7 @@
 
 //! Load scorers for prefill and decode routing partitions.
 
-use dynamo_kv_router::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Scores prefill workers by active work and uncached request blocks.
 pub(crate) struct PrefillLoadScorer;
@@ -17,8 +14,8 @@ impl WorkerScorer for PrefillLoadScorer {
     }
 
     fn score(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
+        &self,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -30,9 +27,9 @@ impl WorkerScorer for PrefillLoadScorer {
                 .cache()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
             let active_prefill_blocks =
-                load.active_prefill_tokens() as f64 / context.block_size() as f64;
+                load.active_prefill_tokens() as f64 / request.block_size() as f64;
             let uncached_request_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
             *cost = active_prefill_blocks + uncached_request_blocks;
         }
         Ok(())
@@ -50,8 +47,8 @@ impl WorkerScorer for DecodeLoadScorer {
 
     /// Returns the projected decode cost as a lower-is-better cost.
     fn score(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
+        &self,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {

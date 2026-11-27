@@ -12,13 +12,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerFilter, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
-    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::RequestAwarePicker;
 use scorer::ActiveRequestsScorer;
@@ -47,20 +41,45 @@ fn provider(
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
-            let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
-                min_device_overlap_blocks,
-            })];
-            WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
-                worker_type.as_str(),
-                filters,
-                vec![Box::new(ActiveRequestsScorer)],
-                Box::new(RequestAwarePicker),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        let worker_type = context.worker_type();
+        let policy = build_policy(worker_type.as_str(), min_device_overlap_blocks);
+        policy.with_runtime_config(
+            [(
+                "min_device_overlap_blocks".into(),
+                min_device_overlap_blocks.into(),
+            )]
+            .into_iter()
+            .collect(),
+            Arc::new(move |values| {
+                let parameters: Parameters =
+                    serde_json::from_value(serde_json::Value::Object(values)).map_err(|error| {
+                        RuntimePolicyError::InvalidParameters(error.to_string())
+                    })?;
+                validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)
+                    .map_err(|error| RuntimePolicyError::InvalidParameters(error.to_string()))?;
+                Ok(build_policy(
+                    worker_type.as_str(),
+                    parameters.min_device_overlap_blocks,
+                ))
+            }),
+        )
+    }))
+}
+
+fn build_policy(
+    worker_label: &'static str,
+    min_device_overlap_blocks: f64,
+) -> WorkerSelectionPolicy {
+    let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
+        min_device_overlap_blocks,
+    })];
+    WorkerSelectionPolicy::new_with_filters(
+        worker_label,
+        filters,
+        vec![Box::new(ActiveRequestsScorer)],
+        Box::new(RequestAwarePicker),
+    )
 }
 
 /// Register the `simple-filter-score-pick` policy type.

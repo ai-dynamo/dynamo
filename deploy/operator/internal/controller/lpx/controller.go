@@ -21,7 +21,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -101,8 +100,18 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	// Persist the workload outcome before converting errors into deadline retries.
+	var cleanupErr error
+
+	// Persist the combined outcome before converting errors into bounded retries.
 	defer func(previous *v1alpha1.LPXGraphDeploymentStatus) {
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			// A later workload wakeup must not postpone failed release cleanup.
+			if result.RequeueAfter > 0 {
+				result.RequeueAfter = min(result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+			}
+		}
+
 		if err != nil {
 			setReadyCondition(deployment, v1beta1.DGDStateFailed, err.Error())
 		} else {
@@ -115,9 +124,9 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 
-		// Workload errors retain a retry delay only while a scheduling deadline is active.
+		// Preserve bounded wakeups after reporting the failure; otherwise use error backoff.
 		if err != nil && result.RequeueAfter > 0 {
-			log.FromContext(ctx).Error(err, "retrying reconciliation under the pipeline request scheduling deadline")
+			log.FromContext(ctx).Error(err, "retrying reconciliation after a bounded delay")
 			err = nil
 		}
 	}(deployment.Status.DeepCopy())
@@ -127,6 +136,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		component.Conditions = nil
 		deployment.Status.Components[name] = component
 	}
+
+	markBuildCheckpointAdoption(r.config.Infrastructure.ModelExpressURL, deployment)
 
 	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
 		setReadyCondition(deployment, v1beta1.DGDStateFailed, "Grove is disabled")
@@ -185,6 +196,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		}
 	}
 
+	// Cleanup follows DGD handoff and owned Grove observations, but precedes downloads
+	// and desired workload resolution. Before PCS synchronization, Grove may recreate
+	// Agents from the old template, requiring another release cycle.
+	cleanupErr = r.removeReleasedAgentPods(ctx, pcsgs, requests)
+
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
@@ -217,6 +233,12 @@ func (r *graphReconciler) reconcileWorkloads(
 	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Hold every write that replaces or updates the running PCS until Cyborg
+	// checkpoints are downloaded. Release cleanup has already run in Reconcile.
+	if result, err := r.reconcileCheckpointDownloads(ctx, deployment, workloads); err != nil || result.RequeueAfter > 0 {
+		return result, err
 	}
 
 	// Grove rolls compatible layouts; immutable structure changes replace the PCS.
@@ -283,12 +305,24 @@ func (r *graphReconciler) reconcileWorkloads(
 		readinessResult = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests, scalingDeferred)
 	}
 
+	// Let the API server refuse a new request before a PCS update rolls the running workload to it.
+	// PCS replacement is not covered: it deletes the workload before its requests are prepared.
+	if len(missingRequests) > 0 {
+		change, err := commoncontroller.GetSpecChangeResult(pcs, desiredPCS, commoncontroller.WithPreservedListOrder(true))
+		if err == nil && change.SpecNeedsUpdate {
+			err = r.validatePipelineRequests(ctx, pcs, missingRequests)
+		}
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Synchronize configuration before any scale-up, scale-down, or request retirement.
 	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
+	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder(true))
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
 			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
@@ -303,11 +337,6 @@ func (r *graphReconciler) reconcileWorkloads(
 		setScalingDeferredCondition(deployment, scalingRequired)
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
 		return ctrl.Result{}, nil
-	}
-
-	// The LPX scheduler waits for old Agent Pods to disappear before releasing the placement.
-	if err := r.removeReleasedAgentPods(ctx, pcsgs, desiredRequests); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.
@@ -366,9 +395,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, nil
 	}
 
-	result = readinessResult
-	// Old configmaps remain available until all workloads are Ready.
-	return result, r.deleteUnusedConfigMaps(ctx, deployment, resources)
+	return readinessResult, nil
 }
 
 // pipelineRequestDeadlineSeconds selects each model's source component policy.
@@ -591,56 +618,28 @@ func (r *graphReconciler) reconcileReadiness(
 
 	setReadyCondition(deployment, v1beta1.DGDStateSuccessful, readiness.Message)
 
-	if download := deployment.Status.ModelDownload; download != nil && download.LastCheckedAt != nil {
-		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))}
+	if refreshAt, found := downloadRefreshAt(&deployment.Status); found {
+		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(refreshAt))}
 	}
 
 	return ctrl.Result{}
 }
 
-// deleteUnusedConfigMaps runs only after readiness so existing pods keep their
-// immutable configuration during replacement. Maps belong to the non-nil LPXGD,
-// not the PCS, and therefore survive PCS garbage collection.
-func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
-	// Keep old runtime configuration until the replacement workload is Ready.
-	if !meta.IsStatusConditionTrue(deployment.Status.Conditions, v1alpha1.LPXReadyCondition) {
-		return nil
+// downloadRefreshAt returns when the earlier of the recorded build and
+// checkpoint download checks expires. found is false when neither check is
+// recorded. status is non-nil.
+func downloadRefreshAt(status *v1alpha1.LPXGraphDeploymentStatus) (refreshAt time.Time, found bool) {
+	var lastChecks []time.Time
+	if download := status.ModelDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
 	}
-
-	// Retain every ConfigMap rendered for the current workload.
-	desiredNames := make(map[string]struct{}, len(resources))
-	for _, resource := range resources {
-		if _, ok := resource.(*corev1.ConfigMap); ok {
-			desiredNames[resource.GetName()] = struct{}{}
-		}
+	if download := status.CheckpointDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
 	}
-
-	// Discover obsolete ConfigMaps rooted in this exact LPX child.
-	configMaps := &corev1.ConfigMapList{}
-	if err := r.List(ctx, configMaps,
-		client.InNamespace(deployment.Namespace),
-		client.MatchingLabels{deploymentUIDLabel: string(deployment.UID)},
-	); err != nil {
-		return err
+	if len(lastChecks) == 0 {
+		return time.Time{}, false
 	}
-
-	// Preconditions prevent stale observations from deleting replacements.
-	for index := range configMaps.Items {
-		configMap := &configMaps.Items[index]
-		if !metav1.IsControlledBy(configMap, deployment) || !configMap.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if _, desired := desiredNames[configMap.Name]; desired {
-			continue
-		}
-		uid, resourceVersion := configMap.GetUID(), configMap.GetResourceVersion()
-		if err := r.Delete(ctx, configMap, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
-			UID: &uid, ResourceVersion: &resourceVersion,
-		}}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
+	return slices.MinFunc(lastChecks, time.Time.Compare).Add(modelDownloadRefreshInterval), true
 }
 
 // podCliqueSetLayoutMatches compares the variable immutable fields emitted by LPX.

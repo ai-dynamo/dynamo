@@ -27,7 +27,7 @@ Busy thresholds are worker filters. They are configured separately from the queu
 - `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
-When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the `/busy_threshold` HTTP endpoint.
+When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the [`/busy_threshold` admin endpoint](../../../../reference/components/frontend-configuration.mdx#admin).
 
 Busy filtering preserves error classification:
 

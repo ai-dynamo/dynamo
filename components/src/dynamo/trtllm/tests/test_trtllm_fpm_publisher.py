@@ -20,6 +20,8 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
   * First-stat schema probe disables the publisher when the nested IBS dict
     is missing or any of the 11 required fields is absent — protecting
     against silent planner poison when running against pre-#13199 TRT-LLM.
+  * Under attention DP only rank 0 reaches the native metrics collector,
+    while Dynamo metrics still receive every rank.
 
 The handle_stat closure is defined inside Publisher._publish_stats_task,
 so we mirror its FPM branch via ``_invoke_handler`` below — kept in
@@ -333,6 +335,7 @@ def _build_publisher_stub(
     pub.publish_kv_cache_events_thread = None
     pub.publish_stats_thread = None
     pub.partial_block_hashes = set()
+    pub.suppressed_block_hashes = set()
     pub.error_queue = queue.Queue()
     pub._stop_event = threading.Event()
     pub._last_engine_event_id_by_rank = {}
@@ -511,6 +514,7 @@ def _publisher_for_kv_event_test():
     pub._last_engine_event_id_by_rank = {}
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
+    pub.suppressed_block_hashes = set()
     pub.kv_block_size = 4
     pub.max_window_size = None
     return pub
@@ -537,6 +541,55 @@ def _stored_kv_event(cache_salt="tenant-a"):
             ],
         },
     }
+
+
+def _kv_block(block_hash, token_ids):
+    return {"block_hash": block_hash, "tokens": [{"token_id": t} for t in token_ids]}
+
+
+def test_handle_kv_event_suppresses_digest_token_blocks_and_descendants():
+    # KV cache manager v2 emits a multimodal item's digest as a string token id.
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    digest = "d854e3211f299729f8e6e83012471d5cb867f5f66a104cce91950c9fe506e06f"
+    events = [
+        {
+            "event_id": 1,
+            "data": {
+                "type": "stored",
+                "parent_hash": None,
+                "blocks": [
+                    _kv_block(10, [1, 2, 3, 4]),
+                    _kv_block(11, [5, digest, 151937, 151938]),
+                    _kv_block(12, [151939, 151940, 151941, 151942]),
+                ],
+            },
+        },
+        {
+            "event_id": 2,
+            "data": {
+                "type": "stored",
+                "parent_hash": 12,
+                "blocks": [_kv_block(13, [6, 7, 8, 9])],
+            },
+        },
+        {
+            "event_id": 3,
+            "data": {"type": "removed", "block_hashes": [10, 11, 12, 13]},
+        },
+    ]
+
+    pub._handle_kv_event_batch(events)
+
+    published = publisher.publish_batch.call_args.args[0]
+    assert [(e["type"], e["block_hashes"]) for e in published] == [
+        ("stored", [10]),
+        ("removed", [10]),
+    ]
+    assert published[0]["token_ids"] == [1, 2, 3, 4]
+    assert pub.suppressed_block_hashes == set()
 
 
 def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
@@ -666,14 +719,17 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
     pub.engine = MagicMock()
     pub.metrics_publisher = MagicMock()
     pub.component_gauges = MagicMock()
-    pub.metrics_collector = None
+    pub.metrics_collector = MagicMock()
     pub.fpm_publisher = None
     pub._fpm_schema_checked = False
 
+    rank0 = _build_fake_stat(attentionDpRank=0)
+    rank1 = _build_fake_stat(attentionDpRank=1)
+
     async def fetch_stats(timeout):
         assert timeout == publisher_mod._STATS_TIMEOUT_SEC
-        yield _build_fake_stat(attentionDpRank=0)
-        yield _build_fake_stat(attentionDpRank=1)
+        yield rank0
+        yield rank1
 
     def publish_metric(*_args, **_kwargs):
         if pub.metrics_publisher.publish.call_count == 2:
@@ -688,6 +744,7 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
         0,
         1,
     ]
+    pub.metrics_collector.log_iteration_stats.assert_called_once_with(rank0)
 
 
 @pytest.mark.asyncio

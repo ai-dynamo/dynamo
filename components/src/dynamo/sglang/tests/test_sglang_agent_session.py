@@ -195,7 +195,11 @@ def _new_decode_handler(engine: Any, serving_mode: DisaggregationMode):
 def _new_prefill_handler(engine: Any):
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = engine
-    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.use_sglang_tokenizer = False
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(), dynamo_args=SimpleNamespace(enable_rl=False)
+    )
+    handler._default_sampling_params = {}
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 8998
     handler._generate_bootstrap_room = lambda: 42

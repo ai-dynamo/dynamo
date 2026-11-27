@@ -10,34 +10,10 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-struct TrackerFinishGuard {
-    tracker: Option<Arc<RequestTracker>>,
-}
-
-impl TrackerFinishGuard {
-    fn new(tracker: Option<Arc<RequestTracker>>) -> Self {
-        Self { tracker }
-    }
-
-    fn observe(&mut self) {
-        if let Some(tracker) = self.tracker.take() {
-            tracker.observe_finish_gauges();
-        }
-    }
-}
-
-impl Drop for TrackerFinishGuard {
-    fn drop(&mut self) {
-        self.observe();
-    }
-}
-
 struct KvDemandStream {
     stream: Option<rs::pipeline::EngineStream<RsAnnotated<LLMEngineOutput>>>,
     tracker: Option<Arc<RequestTracker>>,
-    finish_guard: TrackerFinishGuard,
     first_item: bool,
-    first_token_gauges_observed: bool,
     finished: bool,
 }
 
@@ -48,10 +24,8 @@ impl KvDemandStream {
     ) -> Self {
         Self {
             stream: Some(stream),
-            finish_guard: TrackerFinishGuard::new(tracker.clone()),
             tracker,
             first_item: true,
-            first_token_gauges_observed: false,
             finished: false,
         }
     }
@@ -59,25 +33,11 @@ impl KvDemandStream {
     fn process_response(
         &mut self,
         mut response: RsAnnotated<LLMEngineOutput>,
-    ) -> RsAnnotated<PyObject> {
+    ) -> RsAnnotated<Py<PyAny>> {
         if self.first_item {
             self.first_item = false;
             if let (Some(tracker), Some(data)) = (&self.tracker, &mut response.data) {
                 inject_worker_id_from_tracker(data, tracker);
-            }
-        }
-
-        if !self.first_token_gauges_observed {
-            let has_tokens = response
-                .data
-                .as_ref()
-                .map(|data| !data.token_ids.is_empty())
-                .unwrap_or(false);
-            if has_tokens {
-                if let Some(ref tracker) = self.tracker {
-                    tracker.observe_first_token_gauges();
-                }
-                self.first_token_gauges_observed = true;
             }
         }
 
@@ -90,7 +50,7 @@ impl KvDemandStream {
             inject_timing_from_tracker(data, tracker);
         }
         let response = response.map_data(|data| {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &data)
                     .map(|obj| obj.unbind())
                     .map_err(|error| error.to_string())
@@ -100,7 +60,6 @@ impl KvDemandStream {
         if terminal || response.is_error() {
             self.finished = true;
             self.stream.take();
-            self.finish_guard.observe();
         }
 
         response
@@ -108,7 +67,7 @@ impl KvDemandStream {
 }
 
 impl Stream for KvDemandStream {
-    type Item = RsAnnotated<PyObject>;
+    type Item = RsAnnotated<Py<PyAny>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.finished {
@@ -126,7 +85,6 @@ impl Stream for KvDemandStream {
             Poll::Ready(Some(response)) => Poll::Ready(Some(this.process_response(response))),
             Poll::Ready(None) => {
                 this.finished = true;
-                this.finish_guard.observe();
                 Poll::Ready(None)
             }
         }
@@ -197,11 +155,11 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
 #[pyclass]
 struct DemandDrivenResponseStream {
-    source: DemandDrivenOwner<RsAnnotated<PyObject>>,
+    source: DemandDrivenOwner<RsAnnotated<Py<PyAny>>>,
 }
 
 impl DemandDrivenResponseStream {
-    fn new(stream: Pin<Box<dyn Stream<Item = RsAnnotated<PyObject>> + Send>>) -> Self {
+    fn new(stream: Pin<Box<dyn Stream<Item = RsAnnotated<Py<PyAny>>> + Send>>) -> Self {
         Self {
             source: DemandDrivenOwner::new(stream),
         }
@@ -236,12 +194,16 @@ impl DemandDrivenResponseStream {
 pub(super) fn process_request_to_stream<'p>(
     py: Python<'p>,
     inner: Arc<RsRoutingHost>,
-    request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+    request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
     tracker: Option<Arc<RequestTracker>>,
+    dispatch_span: tracing::Span,
 ) -> PyResult<Bound<'p, PyAny>> {
     crate::future_into_py(py, async move {
-        let single_in = SingleIn::new(request);
-        let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+        let stream = inner
+            .generate(request)
+            .instrument(dispatch_span)
+            .await
+            .map_err(to_pyerr)?;
         // Zero capacity is genuinely demand-driven only for direct Python
         // consumption of this KvRouter iterator: each __anext__ polls the
         // upstream stream once. PythonServerStreamingEngine adds its own

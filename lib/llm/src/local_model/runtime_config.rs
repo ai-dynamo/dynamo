@@ -11,15 +11,12 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::{
-    kv_hints::{
-        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-    },
-    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
-    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
+use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHintTransferWorkerMetadata, KvTransferEnforcement,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
+use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -34,18 +31,52 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Runtime-data key for the largest number of per-token log-probability
+/// alternatives the engine returns, as a non-negative integer (vLLM's
+/// `max_logprobs`). The frontend applies it to chat and responses
+/// `top_logprobs` and to completions `logprobs`; an absent value means the
+/// OpenAI limit of 20.
+pub const MAX_LOGPROBS_RUNTIME_KEY: &str = "max_logprobs";
+
+/// `runtime_data` key under which an engine the frontend dials directly lists
+/// its ZMQ KV-event publishers by data-parallel rank, as
+/// `{"<dp_rank>": "tcp://host:port"}`. The frontend subscribes to them itself
+/// instead of receiving events over the Dynamo event plane.
+pub const DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY: &str = "direct_kv_events_endpoints";
+
+/// `runtime_data` key set to `true` when those publishers send one remove per
+/// block however many times they stored it (see `idempotent_stores` on
+/// `KvEventSourceConfig::Zmq`). Absent, the frontend counts a remove per store.
+pub const DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY: &str =
+    "direct_kv_events_idempotent_stores";
+
+/// Runtime-data key indicating speculative decoding is configured by a backend.
+pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
+
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
 ///
-/// Absence means `false` for compatibility with workers that expect the
-/// frontend's structural tag to model an already-opened reasoning block.
+/// For tool structural tags, Dynamo treats an absent value as `false` for
+/// compatibility with workers that expect the frontend's structural tag to
+/// model an already-opened reasoning block.
+///
+/// For bare JSON responses, this key supplies no grammar timing information
+/// when absent. Inferring immediate grammar from this key requires an
+/// explicit `false`.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
 /// A backend consumes the reasoning prefix only when `require_reasoning` is true
-/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+/// on the request. An explicit `false` means no engine-side reasoning gate.
+/// Missing metadata leaves reasoning in the frontend grammar and does not prove
+/// immediate activation for bare structured responses.
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
+
+/// Runtime-data key indicating that the backend compiles a lark
+/// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
+/// `%json` schemas are valid. Absence means `false`.
+pub const LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY: &str = "llguidance_lark_grammar";
 
 /// Describes which request-token overflows the frontend may reject early.
 ///
@@ -148,6 +179,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
+
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
 /// Absence disables exact video routing so a newer frontend remains safe with
@@ -178,6 +213,18 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// mixed-backend frontend never forwards one engine's opaque request envelope
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
+
+/// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
+pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
+
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
+
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
 
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -276,6 +323,11 @@ pub struct ModelRuntimeConfig {
     /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
 
@@ -441,6 +493,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -476,6 +529,14 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Whether the configured grammar can replay distinct Responses phases.
+    pub fn preserves_response_message_phases(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        ) == Some("muse_spark")
+    }
+
     /// Normalize older wire fields into the current policy and project it back for older readers
     pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
         if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
@@ -527,7 +588,7 @@ impl ModelRuntimeConfig {
     }
 }
 
-impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -566,19 +627,12 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -595,10 +649,6 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -746,7 +796,8 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
-    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+    /// Return the validated global DP ranks advertised by this worker.
+    pub fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
         if self.data_parallel_size == 0 {
             return Err("data_parallel_size must be at least 1".to_string());
         }
@@ -1246,23 +1297,8 @@ mod tests {
     }
 
     #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_kv_router::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
-    }
-
-    #[test]
     fn kv_hint_transfer_support_requires_explicit_true() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());

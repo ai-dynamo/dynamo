@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
-use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
+use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::TensorModelConfig;
@@ -83,7 +83,8 @@ pub mod inference {
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
 use inference::{
     ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest, ModelInferResponse,
-    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
+    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse, RepositoryIndexRequest,
+    RepositoryIndexResponse,
 };
 
 use prost::Message;
@@ -190,6 +191,16 @@ pub struct KserveServiceConfig {
     #[builder(default = "None")]
     http_cancel_token: Option<CancellationToken>,
 
+    /// Distributed runtime. Used to publish frontend load to the Pool Relay,
+    /// and to attach the metrics HTTP service's registry to the DRT tree, so
+    /// `/metrics` serves the whole tree and OTLP exports the frontend families.
+    #[builder(default = "None")]
+    runtime: Option<dynamo_runtime::DistributedRuntime>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    #[builder(default = "None")]
+    namespace: Option<String>,
+
     /// gRPC server tuning configuration.
     /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
     #[builder(default = "GrpcTuningConfig::from_env()")]
@@ -264,14 +275,28 @@ impl KserveService {
 impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
+        anyhow::ensure!(
+            !dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL"),
+            "RL worker discovery is not supported by the KServe gRPC frontend"
+        );
 
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
-        // This provides the metrics endpoint and shared metrics object
+        // This provides the metrics endpoint, the shared metrics object, and the
+        // frontend load publisher.
+        // With a runtime, attach the HTTP service's registry to the DRT tree,
+        // as the HTTP frontend does, so OTLP exports the frontend families
+        // that /metrics serves.
+        let drt_metrics = config.runtime.as_ref().map(|drt| {
+            dynamo_runtime::metrics::MetricsHierarchy::get_metrics_registry(drt).clone()
+        });
         let http_service = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
             .metrics_prefix(config.metrics_prefix)
             .cancel_token(config.http_cancel_token)
+            .drt_metrics(drt_metrics)
+            .runtime(config.runtime)
+            .namespace(config.namespace)
             // Disable all inference endpoints - only use for metrics/health
             .enable_chat_endpoints(false)
             .enable_cmpl_endpoints(false)
@@ -778,6 +803,15 @@ impl GrpcInferenceService for KserveService {
             "Model '{}' not found",
             request_model_name
         )))
+    }
+
+    async fn repository_index(
+        &self,
+        _request: Request<RepositoryIndexRequest>,
+    ) -> Result<Response<RepositoryIndexResponse>, Status> {
+        Err(Status::unimplemented(
+            "RepositoryIndex is a Triton extension and is not served by Dynamo",
+        ))
     }
 
     async fn model_config(

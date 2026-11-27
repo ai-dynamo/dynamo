@@ -14,7 +14,9 @@
 #   - Consistent UX: same startup output and exit behavior across all backends
 #   - Less per-script boilerplate (no manual PID tracking or custom cleanup traps)
 #   - wait_any_exit propagates the first failing child's exit code and lets the
-#     EXIT trap tear down the rest, so failures and Ctrl+C behave predictably
+#     EXIT trap tear down the rest, so failures and Ctrl+C behave predictably.
+#     DYN_LAUNCH_WAIT_ALL=1 waits for every child instead, for tests that
+#     fault one worker and expect the others to keep serving
 #
 # Usage:
 #   source "$(dirname "$(readlink -f "$0")")/../common/launch_utils.sh"
@@ -104,6 +106,33 @@ dyn_port() {
     printf '%s\n' "${selected}"
 }
 
+# Resolve one worker's indexed managed ports into <name>_<kind>_PORT variables,
+# using a value already set in that variable as the standalone fallback.
+# Usage: dyn_worker_ports VLLM_DECODE1 1 HTTP=8100 GRPC=30001 NIXL_SIDE_CHANNEL=20096 KV_EVENT=20080
+dyn_worker_ports() {
+    local name="$1"
+    local index="$2"
+    shift 2
+    local spec kind prefix variable port
+    for spec in "$@"; do
+        kind="${spec%%=*}"
+        case "${kind}" in
+            HTTP) prefix=DYN_ENGINE_HTTP_PORT ;;
+            GRPC) prefix=DYN_ENGINE_GRPC_PORT ;;
+            KV_EVENT) prefix=DYN_VLLM_KV_EVENT_PORT ;;
+            KV_REPLAY) prefix=DYN_VLLM_KV_REPLAY_PORT ;;
+            NIXL_SIDE_CHANNEL) prefix=DYN_VLLM_NIXL_SIDE_CHANNEL_PORT ;;
+            *)
+                echo "Unknown port kind for ${name}: ${spec}" >&2
+                return 1
+                ;;
+        esac
+        variable="${name}_${kind}_PORT"
+        port=$(dyn_port "${prefix}" "${index}" "${!variable:-${spec#*=}}") || return 1
+        printf -v "${variable}" '%s' "${port}"
+    done
+}
+
 # wait_any_exit
 #
 # Waits for ANY backgrounded process to exit and propagates its exit code.
@@ -158,6 +187,10 @@ wait_any_exit() {
     if ! jobs -p | grep -q .; then
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
+    fi
+    if [[ "${DYN_LAUNCH_WAIT_ALL:-}" == "1" ]]; then
+        wait
+        dynamo_reap_and_exit 0
     fi
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0

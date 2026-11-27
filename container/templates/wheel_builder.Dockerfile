@@ -39,6 +39,7 @@ WORKDIR /workspace
 # targets that build no wheels. runtime_wheel_builder populates it post-build.
 RUN mkdir -p /opt/dynamo/rust-licenses
 {% if device == "xpu" or device == "cpu" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim \
@@ -47,7 +48,8 @@ RUN apt clean && apt-get update -y && \
     libxext6 \
     libgl1 \
     libaio-dev \
-    linux-libc-dev
+    linux-libc-dev && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -103,37 +105,20 @@ RUN apt-get update && \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # NIXL build dependencies
-        autoconf \
-        automake \
-        cmake \
-        git-lfs \
-        libtool \
-        meson \
-        net-tools \
-        ninja-build \
-        pybind11-dev \
-        # Rust build dependencies
         clang \
+        cmake \
         libclang-dev \
         protobuf-compiler \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
-        libibverbs-dev \
-        rdma-core \
-        ibverbs-utils \
-        libibumad-dev \
-        libnuma-dev \
-        librdmacm-dev \
-        ibverbs-providers \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if device == "cuda" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
+# dnf fails when no package at or above the floor is available.
+RUN dnf -y --setopt=tsflags=nocontexts install 'ca-certificates >= 2026.2.92_v9.0.319-81.3.el8_10' && \
+    dnf clean all
+
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
@@ -143,15 +128,8 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
     dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y --setopt=tsflags=nocontexts \
-        # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
-        autoconf \
-        automake \
-        libtool \
-        make \
-        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
-        rpm-build \
-        rpm-sign \
         # Build tools
+        make \
         cmake \
         ninja-build \
         clang-devel \
@@ -161,38 +139,10 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         gcc-toolset-14-binutils \
         flex \
         wget \
-        # Kernel module build dependencies
-        dkms \
         # Protobuf support
         protobuf-compiler \
-        # RDMA/InfiniBand support (required for UCX build with --with-verbs)
-        libibverbs \
-        libibverbs-devel \
-        rdma-core \
-        rdma-core-devel \
-        libibumad \
-        libibumad-devel \
-        librdmacm-devel \
-        numactl-devel \
-        # Libfabric support
-        libcurl-devel \
         openssl-devel \
-        libuuid-devel \
         zlib-devel
-
-# Default comes from context.yaml; keep it in sync with upstream NIXL's
-# contrib/Dockerfile.manylinux. NIXL v1.0.x needs newer hwloc than RHEL8 ships.
-ARG HWLOC_VERSION
-RUN cd /tmp && \
-    HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1,2)" && \
-    wget -q "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
-    tar -xzf "hwloc-${HWLOC_VERSION}.tar.gz" && \
-    cd "hwloc-${HWLOC_VERSION}" && \
-    ./configure --prefix=/usr/local --disable-nvml && \
-    make -j"$(nproc)" && \
-    make install && \
-    ldconfig && \
-    rm -rf "/tmp/hwloc-${HWLOC_VERSION}" "/tmp/hwloc-${HWLOC_VERSION}.tar.gz"
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -246,21 +196,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     echo "/opt/venv/lib/python${PYTHON_VERSION}/site-packages" > \
         "${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/vllm-xpu-base.pth"{% endif %} && \
     uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
-
-ARG NIXL_UCX_REF
-
-{% if device == "cuda" %}
-ARG NIXL_GDRCOPY_REF
-
-# Build and install gdrcopy
-RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
-    cd gdrcopy/packages && \
-    CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
-    rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
-    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
-{% endif %}
 
 # sccache binary is pre-installed in dynamo_base; stage it off-PATH so
 # Meson doesn't auto-detect it as a CUDA compiler launcher
@@ -464,139 +399,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
-# Build and install UCX
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
-    cd /usr/local/src && \
-    : "${NIXL_UCX_REF:?}" && \
-    git init -q ucx && cd ucx && \
-    git remote add origin https://github.com/openucx/ucx.git && \
-    git fetch --depth 1 origin "${NIXL_UCX_REF}" && \
-    git checkout -q FETCH_HEAD && \
-    # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
-    # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
-    # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
-    ./autogen.sh &&      \
-    if [ "$DEVICE" = "xpu" ]; then \
-     ./contrib/configure-release     \
-        --prefix=/usr/local/ucx     \
-        --with-ze                   \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-verbs                \
-        --with-dm                   \
-        --with-efa                  \
-        --without-cuda              \
-        --enable-mt;                 \
-    elif [ "$DEVICE" = "cuda" ]; then \
-     ./contrib/configure-release     \
-        --prefix=/usr/local/ucx     \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs                \
-        --with-dm                   \
-        --with-gdrcopy=/usr/local   \
-        --with-efa                  \
-        --enable-mt;                 \
-    elif [ "$DEVICE" = "cpu" ]; then  \
-     ./contrib/configure-release     \
-        --prefix=/usr/local/ucx     \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-verbs                \
-        --without-cuda              \
-        --enable-mt;                 \
-     fi && \
-     make -j &&                      \
-     make -j install-strip &&        \
-     /tmp/use-sccache.sh show-stats "UCX" && \
-     echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
-     echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
-     ldconfig
-
-{% if device == "cuda" %}
-ARG NIXL_LIBFABRIC_REPO
-ARG NIXL_LIBFABRIC_REF
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
-    cd /usr/local/src && \
-    : "${NIXL_LIBFABRIC_REF:?}" && \
-    git init -q libfabric && cd libfabric && \
-    git remote add origin "${NIXL_LIBFABRIC_REPO}" && \
-    git fetch --depth 1 origin "${NIXL_LIBFABRIC_REF}" && \
-    git checkout -q FETCH_HEAD && \
-    ./autogen.sh && \
-    ./configure --prefix="/usr/local/libfabric" \
-                --disable-verbs \
-                --disable-psm3 \
-                --disable-opx \
-                --disable-usnic \
-                --disable-rstream \
-                --enable-efa \
-                --with-cuda=/usr/local/cuda \
-                --enable-cuda-dlopen \
-                --with-gdrcopy \
-                --enable-gdrcopy-dlopen && \
-    make -j$(nproc) && \
-    make install && \
-    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
-    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
-    ldconfig
-
-ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
-{% endif %}
-
-{% if framework == "vllm" and device == "cuda" %}
-# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
-ARG AWS_SDK_CPP_VERSION
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    git clone --recurse-submodules --shallow-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION}" \
-        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
-    mkdir -p /tmp/aws-sdk-cpp/build && \
-    cd /tmp/aws-sdk-cpp/build && \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_ONLY="s3" \
-        -DENABLE_TESTING=OFF \
-        -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DBUILD_SHARED_LIBS=ON && \
-    make -j$(nproc) && \
-    make install && \
-    cd / && \
-    rm -rf /tmp/aws-sdk-cpp && \
-    ldconfig && \
-    /tmp/use-sccache.sh show-stats "AWS SDK C++"
-{% endif %}
-
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
@@ -631,8 +433,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" and device == "xpu" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist && \
-{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
     # they stay external and resolve to the image's /usr/local/lib copies. This
@@ -667,7 +468,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist; \
     fi && \
-{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
 # wheel metadata and optional source archival both validate every member.
@@ -689,7 +490,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --only-binary=:all: \
         --no-deps \
         --no-index \
-        --find-links https://pypi.nvidia.com/aisimulate/ \
+        --find-links https://pypi.nvidia.com/aisim/ \
         --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
@@ -725,7 +526,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisimulate*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
@@ -755,7 +556,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
-#   cargo build --features dynamo-llm/block-manager
+#   cargo build
 #   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.
@@ -791,180 +592,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
-# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
-# consolidates all wheels.
-# Runtime templates COPY from this stage.
-# Note: XPU triggers this path even when the framework section lacks nixl_ref,
-# because no upstream XPU runtime image ships pre-built NIXL.
-# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
-# not install KVBM, so nothing in that image consumes a from-source NIXL build.
-
-FROM wheel_builder_base AS wheel_builder
-
-# Build and install nixl
-ARG TARGETARCH
-ARG DEVICE
-ARG NIXL_REF
-ARG USE_SCCACHE
-{% if device == "cuda" %}
-ARG CUDA_MAJOR
-{% endif %}
-
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    : "${NIXL_REF:?}" && \
-    git init -q nixl && cd nixl && \
-    git remote add origin https://github.com/ai-dynamo/nixl.git && \
-    git fetch --depth 1 origin "${NIXL_REF}" && \
-    git checkout -q FETCH_HEAD && \
-    if [ "$DEVICE" = "cuda" ]; then \
-        PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
-    else \
-        PKG_NAME="nixl-${DEVICE}"; \
-    fi && \
-    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
-    mkdir build && \
-    if [ "$DEVICE" = "cuda" ]; then \
-        meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
-            -Dcudapath_lib="/usr/local/cuda/lib64" \
-            -Dcudapath_inc="/usr/local/cuda/include" \
-            -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
-    elif [ "$DEVICE" = "xpu" ]; then \
-        meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
-            -Ducx_path="/usr/local/ucx"; \
-    elif [ "$DEVICE" = "cpu" ]; then \
-        meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
-            -Ducx_path="/usr/local/ucx"; \
-    fi && \
-    cd build && \
-    ninja && \
-    ninja install && \
-    /tmp/use-sccache.sh show-stats "NIXL"
-
-{% if device == "xpu" %}
-{# XPU only supports x86_64; no ARCH_ALT ARG needed #}
-ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
-    NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif device == "cpu" %}
-ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins \
-    NIXL_PREFIX=/opt/nvidia/nvda_nixl
-{% else %}
-ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
-    NIXL_PREFIX=/opt/nvidia/nvda_nixl
-{% endif %}
-
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
-
-RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
-    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
-    ldconfig
-
-{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
-# Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
-ARG PYTHON_VERSION
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
-    cd /workspace/nixl && \
-    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
-{% endif %}
-
-{% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
-COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
-
-# Build kvbm wheel (with nixl linkage via auditwheel repair)
-ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/bindings/kvbm && \
-        KVBM_FEATURES=""; \
-        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
-        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
-        if [ "$DEVICE" = "cuda" ]; then \
-            auditwheel repair \
-                --exclude libnixl.so \
-                --exclude libnixl_build.so \
-                --exclude libnixl_common.so \
-                --exclude 'lib*.so*' \
-                --plat manylinux_2_28_${ARCH_ALT} \
-                --wheel-dir /opt/dynamo/dist \
-                target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-            cp target/wheels/*.whl /opt/dynamo/dist/; \
-        fi; \
-    fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
-{% endif %}
-
-# Consolidate all wheels from the runtime wheel builder stage
-COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
-
-# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
-# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
-# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
-# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
-# Venv python required: compliance.overrides needs pyyaml, absent from the
-# system python3 (see the runtime_wheel_builder bundling step).
-COPY container/compliance /opt/compliance
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -u; \
-    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
-        [ -d "$src" ] || continue; \
-        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
-            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
-            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
-                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
-            done; \
-        done; \
-    done; \
-    for whl in /opt/dynamo/dist/kvbm*.whl; do \
-        [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
-            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
-            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
-    done; \
-    echo "kvbm wheel NOTICES step done"
-
-{% else %}
-# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and the
-# frontend installs it from PyPI; neither builds Dynamo KVBM. Keep this alias so
-# downstream stages can still COPY Dynamo wheels and build tools from a common
-# wheel_builder stage name.
-# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
-# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+# Runtime and helper templates COPY Dynamo wheels and build tools from here.
+# XPU and CPU NIXL is built separately in nixl_builder (nixl_source.Dockerfile).
 FROM runtime_wheel_builder AS wheel_builder
-{% endif %}

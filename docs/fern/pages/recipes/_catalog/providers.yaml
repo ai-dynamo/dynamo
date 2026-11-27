@@ -44,6 +44,9 @@ providers:
   moonshot:
     name: Moonshot AI
     chip: Moonshot
+  mistral:
+    name: Mistral AI
+    chip: Mistral
   motif:
     name: Motif Technologies
   nvidia:

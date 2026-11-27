@@ -10,11 +10,113 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 <ReferenceStyles />
 
-Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+
+<a id="v170"></a>
+
+## v1.7.0 — current release
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Multimodal-Aware KV Routing Falls Back to Text:** Multimodal-aware KV routing does not work with SGLang in v1.7.0. SGLang now owns multimodal item identity ([sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043)), so Dynamo routes SGLang image and video requests on their text prefix only. The upstream fix ([sgl-project/sglang#45737](https://github.com/sgl-project/sglang/pull/45737)) is merged but is not in SGLang v0.5.23, and a future Dynamo release picks it up with the next SGLang upgrade. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` contains an ID greater than or equal to the model's vocabulary size, sent with `min_tokens` greater than 0, crashes the SGLang worker with a CUDA scatter index assertion. The request and every later request to that worker return HTTP 503 until the worker restarts. In v1.7.0, Dynamo rejects such IDs with HTTP 400 before they reach the engine ([#18314](https://github.com/ai-dynamo/dynamo/pull/18314)), but only when the model config exposes a vocabulary size. When it does not, the crash still applies. The issue also affects v1.6.0 and is tracked upstream in [sgl-project/sglang#44535](https://github.com/sgl-project/sglang/issues/44535).
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **CUDA Graph Capture Crash at Low Concurrency:** SGLang workers crash at the end of model load with `AssertionError: capture_bs=[]` when `--max-running-requests` is below the attention tensor-parallel width, such as `--max-running-requests 1` for Kimi-K3 at TP16, and restart into the same crash. The root fix is upstream in [sgl-project/sglang#47391](https://github.com/sgl-project/sglang/issues/47391), and a fix is planned for v1.8.0. **Workaround:** set `--max-running-requests` to at least the attention tensor-parallel width, or pass `--cuda-graph-bs` explicitly.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Snapshot and GMS CUDA Graph Startup Failure:** SGLang workers started in Dynamo Snapshot mode or with GPU Memory Service V1 checkpointing can fail during prefill CUDA graph initialization with a `NotImplementedError` stating that the breakable CUDA graph is not compatible with the memory saver. The issue also affects v1.6.0. **Workaround:** pass `--disable-cuda-graph` to these workers.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Redundant Memory Resume Crash:** With GPU Memory Service on SGLang, a second `resume_memory_occupation` request sent without a `release_memory_occupation` in between crashes the scheduler with `KeyError: 'kv_cache'`, and the request returns HTTP 500. The issue also affects v1.6.0. **Workaround:** send `resume_memory_occupation` only after a matching `release_memory_occupation`.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **SDXL Text Encoder Precision Startup Failure:** SGLang v0.5.23 exits during SDXL startup with `ValueError: No configured precision for 'text_encoder_2'`, because its generic Diffusers configuration covers only one of SDXL's two text encoders. Dynamo v1.7.0 includes a workaround that sizes every Diffusers-fallback text encoder ([#18874](https://github.com/ai-dynamo/dynamo/pull/18874)), so SDXL starts through Dynamo, but launching SGLang directly still fails. The upstream fix comes with an SGLang upgrade planned for v1.8.0. **Workaround:** when launching SGLang directly, pass `component_precisions={"text_encoder_2": "fp16"}`.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Realtime ASR Repeats Opening Audio:** With Qwen3-ASR on vLLM in the realtime transcription topology, streaming transcription repeats the opening speech on every 5-second segment and drops audio from later segments, so the transcript is incomplete. The cause is an upstream vLLM defect in resumable decoding on the realtime path, and a fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **GMS Persisted KV Standby Wake Failure:** In vLLM deployments that use GPU Memory Service persisted KV failover (`DYN_GMS_PERSIST_KV`) with tensor parallelism and an explicit `--kv-cache-memory-bytes`, the standby engine fails to adopt the retained KV cache after the active engine dies, with `StaleMemoryLayoutError`. The issue also affects v1.6.0. **Workaround:** leave `DYN_GMS_PERSIST_KV` unset so the standby allocates a fresh KV cache on failover.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **CPU KV Offload Recomputes a Chunk on Aligned Prompts:** With CPU KV cache offloading on hybrid sliding-window and full-attention models, a prompt whose length is a multiple of the 64-token offload alignment reloads one chunk short of its prefix, so the request recomputes 64 prompt tokens instead of 1. Outputs are not affected. The cause is an upstream vLLM v0.33.0 defect, and a fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Migration Metrics Misreported:** The `dynamo_frontend_model_migration_limit` gauge reports a worker-sourced value instead of the Frontend's `--migration-limit`, and `dynamo_frontend_model_migration_total` increments even when no request moves to another worker. Request handling and failover are not affected. A fix is planned for v1.7.1. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Request Error Details Dropped:** When a backend worker rejects a request with a request-level error, the Frontend returns a generic error without the worker's message, so clients cannot see why the request failed. The issue also affects v1.6.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Batch Validation Errors Not Reported:** A batch job whose input line fails request validation, such as a chat completion line that sets `"stream": true`, ends in `failed` status with `errors` and `error_file_id` both null, so clients cannot see the reason, the failing line, or the model. The cause is upstream in llm-d, and a fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Queued Prefill Hidden From Scaling:** On TensorRT-LLM disaggregated deployments, prefill workers can report zero load while requests wait on KV cache capacity, so Dynamo Planner can miss queued prefill work when it decides whether to scale. The cause is upstream in TensorRT-LLM, and a fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Inflated Capacity Estimate Suppresses Scaling:** For aggregated vLLM deployments whose Dynamo Planner regression model is seeded from worker self-benchmark data, throughput-based scaling can estimate an implausible per-engine capacity and refuse to scale up while the worker queue grows. The issue also affects v1.6.0. **Workaround:** use a pre-published AISimulate performance model instead of the regression model the Planner builds from live forward-pass metrics.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **Gateway Disconnects Hold Stream Capacity:** When a client disconnects from a streaming request routed through the agentgateway example deployment, the aborted request keeps its stream slot and later requests stall until it is released. The pinned agentgateway `v1.0.0` does not pass the disconnect downstream; the upstream fix is not yet in a tagged release. A fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **GlobalRouter Pool Requests Find No Endpoints:** On Kubernetes with Grove, requests that the GlobalRouter sends to a pool can fail with no available endpoints even though the pool's worker is healthy. The issue also affects v1.6.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **Decode-Only Worker Pin Fails in Disaggregated Serving:** In disaggregated deployments, a request that pins only a decode worker with `x-dynamo-worker-instance-id` or `decode_worker_id`, and sets no prefill pin, fails instead of letting the Router select a prefill worker. The issue also affects v1.6.0. **Workaround:** pin both workers with `x-dynamo-worker-instance-id` and `x-dynamo-prefill-instance-id`, or pin neither.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **Rolling Update Returns HTTP 503:** During a Deployment-backed rolling update with Grove disabled, requests can fail with HTTP 503 when Dynamo Operator retires the old prefill worker before the replacement generation can serve, for example while a replacement decode pod is unschedulable. A fix is planned for v1.7.1. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **Brief 404 Errors During Rolling Updates:** During a rolling update of a disaggregated deployment annotated with `nvidia.com/deployment-rolling-update-max-surge: "1"` and `nvidia.com/deployment-rolling-update-max-unavailable: "0"`, inference requests can return HTTP 404 for up to about one second and then recover on their own. The issue also affects v1.6.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **DGDR Drops Null Overrides:** On a v1beta2 DynamoGraphDeploymentRequest, null entries in `spec.aisim.inputOverrides` are lost from the stored resource, and recommendation Jobs for aggregated mode still create prefill and decode workers. A fix is planned for v1.8.0. **Workaround:** apply the DGDR with `kubectl apply --server-side` so null overrides are kept.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **EFA Network Plugin Not Loaded:** On AWS EFA clusters, SGLang and TensorRT-LLM workers configured with the `LD_LIBRARY_PATH` from the EFA on AWS guide do not load the AWS OFI NCCL plugin, and NCCL silently falls back to socket transport. vLLM workers are not affected. The issue also affects v1.6.0. **Workaround:** use `/opt/amazon/ofi-nccl/lib` in `LD_LIBRARY_PATH` on SGLang and TensorRT-LLM workers.
+
+<span className="dynref-badge dynref-badge--blue">RL</span> **verl Recipe Startup Hang:** The verl integration never finishes startup: the verl-recipe adapter counts ready workers from `/health`, which omits the instance list by default, so it reports zero workers and waits forever. A fix is planned for v1.8.0. **Workaround:** change the recipe's health check in `dynamo/dynamo_async_server.py` to query `/health?instances=true`.
+
+<span className="dynref-badge dynref-badge--blue">RL</span> **Slime Weight Synchronization Failure:** With the experimental Slime integration, the first policy weight update from the Slime trainer to the SGLang engines fails with HTTP 400, so training cannot push updated weights to the serving engines. The issue also affects v1.6.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">RL</span> **verl Refit Can Reuse Stale KV Cache:** In the verl integration, a policy weight update completes even when the prefix cache reset that follows it fails or times out, so the next rollout can reuse KV cache computed with the previous weights. The cause is in verl-recipe, and a fix is planned for v1.8.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** Scripts that invoke `python -m dynamo.replay` fail because the module provides no CLI entry point; the replay CLI moved into the AISimulate wheel in v1.5.0. **Workaround:** use `aisimulate predict --stack dynamo --config <file>`.
+
+<a id="v162"></a>
+
+## v1.6.2
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply, except the TensorRT-LLM HTTP 500 on oversized non-streaming `/v1/messages` requests, which v1.6.2 fixes.
+
+<a id="v161"></a>
+
+## v1.6.1
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply.
+
+<a id="v160"></a>
+
+## v1.6.0
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` includes an ID at or above the model's vocabulary size can crash the SGLang scheduler when any request in the batch sets `min_tokens`, failing every request on that worker until it restarts. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Snapshot and GMS CUDA Graph Startup Failure:** SGLang workers in Dynamo Snapshot mode or with GPU Memory Service V1 checkpointing fail at startup with a `NotImplementedError` from prefill CUDA graph initialization. The issue also affects v1.5.0. **Workaround:** pass `--disable-cuda-graph` to these workers.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Redundant Memory Resume Crash:** With GPU Memory Service on SGLang, sending `resume_memory_occupation` twice without a `release_memory_occupation` in between crashes the scheduler. **Workaround:** send each resume only after a matching release.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Oversized Anthropic Messages Return 500:** On TensorRT-LLM, non-streaming `/v1/messages` requests whose prompt exceeds the engine's `max_num_tokens` return HTTP 500 instead of HTTP 400. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omitted Max Tokens Generates to the Context Limit:** On vLLM, a request without `max_tokens` can generate up to the full remaining context window when the model sets no default output length. **Workaround:** set `max_tokens` on every request.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **GMS Persisted KV Standby Wake Failure:** With GPU Memory Service persisted KV failover (`DYN_GMS_PERSIST_KV`), tensor parallelism, and an explicit `--kv-cache-memory-bytes`, the vLLM standby engine fails to adopt the retained KV cache with `StaleMemoryLayoutError`. The issue also affects v1.5.0. **Workaround:** leave `DYN_GMS_PERSIST_KV` unset.
+
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** `python -m dynamo.replay` fails because the replay CLI moved into the AISimulate wheel in v1.5.0. **Workaround:** use `aisimulate predict --stack dynamo --config <file>`. See [the replay guide](../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Logit Bias Ignored:** The Frontend accepts `logit_bias` on `/v1/chat/completions` and `/v1/completions` but drops it before the engine, so no bias is applied. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Request Error Details Dropped:** When a worker rejects a request, the Frontend returns a generic error without the worker's message. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Inflated Capacity Estimate Suppresses Scaling:** For aggregated vLLM deployments, a Dynamo Planner regression model seeded from worker self-benchmark data can overestimate per-engine capacity and refuse to scale up under load. **Workaround:** use a pre-published AISimulate performance model.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **GlobalRouter Pool Requests Find No Endpoints:** On Kubernetes with Grove, requests that the GlobalRouter sends to a pool can fail with no available endpoints even when the pool's worker is healthy. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **Decode-Only Worker Pin Fails in Disaggregated Serving:** A request that pins only a decode worker fails instead of letting the Router select a prefill worker. The issue also affects v1.5.0. **Workaround:** pin both workers with `x-dynamo-worker-instance-id` and `x-dynamo-prefill-instance-id`, or pin neither.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **Brief 404 Errors During Rolling Updates:** Rolling updates of disaggregated deployments with a max surge of 1 and max unavailable of 0 can return HTTP 404 for up to about one second while a worker is replaced. The rollout still completes. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **EFA Network Plugin Not Loaded:** On AWS EFA clusters, SGLang and TensorRT-LLM workers configured from the [EFA on AWS guide](../../../kubernetes/installation/rdma-setup/efa-on-aws.mdx) silently fall back to socket transport because the guide's `LD_LIBRARY_PATH` entry is wrong. The issue also affects v1.5.0. **Workaround:** use `/opt/amazon/ofi-nccl/lib` instead of `/opt/aws-ofi-nccl/lib`.
+
+<span className="dynref-badge dynref-badge--blue">RL</span> **Slime Weight Synchronization Failure:** With the experimental Slime integration, the first weight update from the Slime trainer to SGLang v0.5.21 engines fails with HTTP 400, and restarting the trainer against engines still running from an earlier job also fails. A fix is planned for a future release. No workaround is available yet.
+
+The other v1.5.0 and v1.5.1 known issues are fixed in v1.6.0 or were closed as intended behavior.
 
 <a id="v151"></a>
 
-## v1.5.1 — current release
+## v1.5.1
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
 
@@ -54,7 +156,7 @@ The other [v1.5.0 known issues](#v150) still apply.
 
 ## v1.4.0
 
-<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omni Cases Fail On GB200:** On ARM64 (GB200) hosts, every vLLM Omni case fails at startup with `ModuleNotFoundError: No module named vllm_omni`, covering the aggregated text, audio, image, video, and image-to-video paths as well as disaggregated GLM image serving. The cause is that the `vllm_omni` module is not shipped in the ARM64 container image; ARM is not a supported platform for vLLM Omni, as noted in the installation section of the [vLLM-Omni installation guidance](../../../use-cases/diffusion/overview.md). No workaround is available yet; Omni workloads must run on x86_64 images.
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omni Cases Fail On GB200:** On ARM64 (GB200) hosts, every vLLM Omni case fails at startup with `ModuleNotFoundError: No module named vllm_omni`, covering the aggregated text, audio, image, video, and image-to-video paths as well as disaggregated GLM image serving. The cause is that the `vllm_omni` module is not shipped in the ARM64 container image; ARM is not a supported platform for vLLM Omni, as noted in the installation section of the [vLLM-Omni installation guidance](../../../use-cases/diffusion/overview.md#install-the-backend). No workaround is available yet; Omni workloads must run on x86_64 images.
 
 <span className="dynref-badge dynref-badge--blue">vLLM</span> **Blocked vLLM Engine Reports Healthy:** On RL vLLM workers, when the engine execution loop is blocked (for example during a long weight transfer), the `/health` endpoint continues to report ready and the engine monitor emits no error, so requests stall and the worker never restarts or otherwise self-heals. This is the current intended behavior: weight transfer over IPC/ZMQ legitimately runs long on larger models such as GLM 5.2 and Kimi K3, and Dynamo does not interrupt an in-flight transfer; detection plus restart or resume responsibility is planned to move to the RL framework, with Dynamo providing only the signal. No workaround is available yet.
 

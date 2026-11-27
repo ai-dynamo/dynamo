@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: planner RBAC — Pod lifecycle observation
+suite: planner RBAC — Pod lifecycle observation and live retune
 templates:
   - charts/dynamo-operator/templates/planner.yaml
 
@@ -113,4 +113,113 @@ tests:
             verbs:
               - get
               - patch
+        documentIndex: 1
+
+  - it: grants live retune access in the default ClusterRole
+    asserts:
+      - lengthEqual:
+          path: rules
+          count: 10
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentruns
+            verbs:
+              - get
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentcandidates
+            verbs:
+              - list
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 0
+
+  - it: grants live retune access in the namespace-restricted Role
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - lengthEqual:
+          path: rules
+          count: 10
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentruns
+            verbs:
+              - get
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentcandidates
+            verbs:
+              - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
         documentIndex: 1

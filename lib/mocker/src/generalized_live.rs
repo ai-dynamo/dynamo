@@ -19,11 +19,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use aisimulate_core::engine::generalized::{
+use aisim_core::engine::generalized::{
     EngineEffects, EnginePassCompleted, EnginePassStarted, GeneralizedMockerEngine,
     SchedulerCommand,
 };
-use aisimulate_core::engine::{
+use aisim_core::engine::{
     Command, CommandEffects, PassCompletionEffects, PassStartEffects, SchedulerRank,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -789,8 +789,8 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::Arc;
 
-    use aisimulate_core::engine::generalized::EngineIdentity;
-    use aisimulate_core::engine::{
+    use aisim_core::engine::generalized::EngineIdentity;
+    use aisim_core::engine::{
         CommandResult, EngineConfig, EngineFactory, HandoffId, NativeHostOffloadConfig, Request,
         TimingModel, TimingModelConfig, WorkerType,
     };
@@ -803,6 +803,10 @@ mod tests {
             tokens: (0..prompt_len as u32).collect(),
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
+            cache_salt: None,
         }
     }
 
@@ -1617,7 +1621,7 @@ mod tests {
         };
         assert!(matches!(
             completed.effects.by_rank[0].effects.lifecycle_events.as_slice(),
-            [aisimulate_core::engine::LifecycleEvent::SourceHeld { handoff_id: observed, .. }]
+            [aisim_core::engine::LifecycleEvent::SourceHeld { handoff_id: observed, .. }]
                 if *observed == handoff_id
         ));
         boundary.finish().await.unwrap();
@@ -1942,6 +1946,10 @@ mod tests {
             tokens: (first_token..first_token + 4).collect(),
             max_output_tokens: 3,
             output_token_ids: Some(vec![10_000, 10_001, 10_002]),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
+            cache_salt: None,
         };
 
         // One pass stores both prompts; the FIFO D2H lane finishes the copies

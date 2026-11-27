@@ -27,20 +27,12 @@
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::worker_selection::*;
 
-/// Policy type selected by `worker_selection.instances[].type`.
+/// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 
 /// Keep these equal to `experimental/sgl-router`'s `cache_aware_zmq` defaults, so an instance
@@ -91,23 +83,29 @@ impl Parameters {
     }
 }
 
-fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> Option<usize> {
-    rows.min_by_key(|&row| load[row].active_requests())
+thread_local! {
+    /// Each row's active request count, read once per pick.
+    static ACTIVE_REQUEST_COUNTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
+fn least_loaded(load: &[u64], rows: impl Iterator<Item = usize>) -> Option<usize> {
+    rows.min_by_key(|&row| load[row])
+}
+
+/// `load` holds each row's active request count.
 fn select_row(
     parameters: &Parameters,
     cache: WorkerCacheInputs<'_>,
-    load: &[WorkerLoadInput],
+    load: &[u64],
     request_blocks: u64,
 ) -> Option<usize> {
     if cache.is_empty() || cache.len() != load.len() {
         return None;
     }
 
-    let min_load = load.iter().map(|item| item.active_requests()).min()?;
-    let max_load = load.iter().map(|item| item.active_requests()).max()?;
-    if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold
+    let min_load = load.iter().copied().min()?;
+    let max_load = load.iter().copied().max()?;
+    if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold as u64
         && (max_load as f64) > parameters.balance_rel_threshold * (min_load as f64)
     {
         return least_loaded(load, 0..load.len());
@@ -140,22 +138,29 @@ struct TwoTierCostFnPicker {
 
 impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        // Active request counts, not `LOAD` rows: the host projects `LOAD` rows' decode cost
+        // from every rank's overlap with active prompts, which this policy never reads.
+        WorkerInputs::CACHE | WorkerInputs::ACTIVE_REQUESTS
     }
 
     fn pick(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
+        &self,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let cache = input
             .cache()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = input
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        select_row(&self.parameters, cache, load, context.request_blocks())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
+            load.clear();
+            for row in 0..input.len() {
+                load.push(input.active_requests(row).ok_or_else(|| {
+                    WorkerSelectionPolicyError::failed("active request counts unavailable")
+                })?);
+            }
+            select_row(&self.parameters, cache, load, request.request_blocks())
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        })
     }
 }
 
@@ -165,16 +170,13 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
 
-    Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(TwoTierCostFnPicker { parameters }),
+        )
+    }))
 }
 
 pub fn register(
@@ -185,13 +187,7 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
 
     use super::*;
 
@@ -200,23 +196,6 @@ mod tests {
     const TEN_BLOCKS: usize = 160;
     const A: u64 = 29;
     const B: u64 = 41;
-
-    struct TestWorker;
-
-    impl WorkerConfigLike for TestWorker {
-        fn data_parallel_start_rank(&self) -> u32 {
-            0
-        }
-        fn data_parallel_size(&self) -> u32 {
-            1
-        }
-        fn max_num_batched_tokens(&self) -> Option<u64> {
-            None
-        }
-        fn total_kv_blocks(&self) -> Option<u64> {
-            Some(1024)
-        }
-    }
 
     fn worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::from_worker_id(id)
@@ -228,58 +207,22 @@ mod tests {
     }
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
-        let mut request = SchedulingRequest {
-            mode: ScheduleMode::QueryOnly { request_id: None },
-            token_seq: None,
-            isl_tokens: TEN_BLOCKS,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            router_config_override: None,
-            track_prefill_tokens: true,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
-            worker_loads: Default::default(),
-            resp_tx: None,
-        };
+        let mut case = SelectionCase::new(TEN_BLOCKS, BLOCK_SIZE);
         for (id, overlap_blocks, active_requests) in workers {
-            request
-                .overlap
-                .tier_overlap_blocks
-                .device
-                .insert(worker(id), overlap_blocks);
-            request.worker_loads.insert(
-                worker(id),
-                WorkerLoadProjection {
-                    active_requests,
-                    ..Default::default()
-                },
+            case.set_worker(
+                id,
+                CaseWorker::new()
+                    .device_overlap_blocks(overlap_blocks)
+                    .active_requests(active_requests)
+                    .total_kv_blocks(1024),
             );
         }
-        let configs = HashMap::from(workers.map(|(id, _, _)| (id, TestWorker)));
-        WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+        let policy = WorkerSelectionPolicy::new(
             "test",
             Vec::new(),
             Box::new(TwoTierCostFnPicker { parameters }),
-        )
-        .select_worker(WorkerSelectionInput::configured(
-            &configs,
-            &request,
-            request.eligibility(),
-            BLOCK_SIZE,
-        ))
-        .unwrap()
-        .worker
+        );
+        case.select(&policy).unwrap()
     }
 
     #[test]

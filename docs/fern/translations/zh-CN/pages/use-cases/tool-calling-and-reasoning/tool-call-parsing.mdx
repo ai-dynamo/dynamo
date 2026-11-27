@@ -30,7 +30,7 @@ python -m dynamo.<backend> --help
 > `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`。
 
 > [!TIP]
-> 如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../../../../../pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md) 了解支持的 `--dyn-reasoning-parser` 取值。
+> 如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../../../../../pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx) 了解支持的 `--dyn-reasoning-parser` 取值。
 
 ## 支持的工具调用解析器
 
@@ -59,7 +59,7 @@ python -m dynamo.<backend> --help
 | `default` | *(fallback)* | Dynamo-only | 空 JSON 配置（无 start/end token）。生产环境请优先使用模型专用解析器。 |
 
 > [!TIP]
-> 对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../../../../../pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
+> 对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../../../../../pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
 
 ## 示例
 

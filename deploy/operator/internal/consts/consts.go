@@ -7,9 +7,6 @@ import (
 )
 
 const (
-	DefaultUserId = "default"
-	DefaultOrgId  = "default"
-
 	DynamoServicePort       = 8000
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
@@ -133,11 +130,6 @@ const (
 	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
 
-	// CUDASharedMemorySupportAnnotation mirrors Snapshot's
-	// podcontract.CuInterposeAnnotation. SnapshotJob delivers and preloads the
-	// cuInterpose shim when it is "enabled".
-	CUDASharedMemorySupportAnnotation = "nvidia.com/cuda-shared-memory-support"
-
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.
 	SnapshotCandidateUIDAnnotation               = "nvidia.com/dynamo-restore-snapshot-uid"
@@ -252,7 +244,6 @@ const (
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
-	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
 	// Volcano scheduler related constants
@@ -287,6 +278,7 @@ const (
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentRun            = "DynamoGraphDeploymentRun"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
 
 	// Resource state constants - used in status reporting and metrics

@@ -20,26 +20,16 @@ package defaulting
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-const (
-	dgdDefaultingWebhookName = "dynamographdeployment-defaulting-webhook"
-	dgdDefaultingWebhookPath = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
-)
+const dgdDefaultingWebhookPath = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
 
 // DGDDefaulter is a mutating webhook handler that stamps DynamoGraphDeployments
 // with the operator version on CREATE. This provides a general-purpose mechanism
@@ -64,8 +54,6 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On CREATE: overwrites nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
-	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
-
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK); err != nil {
 		return err
 	}
@@ -77,106 +65,15 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping defaulting")
-		return nil
+		return fmt.Errorf("get admission request from context: %w", err)
 	}
 
-	// Resolve the authoritative or creation-time provider before applying component defaults.
-	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
-
-	// Stamp creation provenance independently from level-based provider defaulting.
-	if req.Operation == admissionv1.Create {
-		// Replace any user-supplied value with the authoritative creating operator version.
-		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-		logger.Info("stamped operator origin version on DGD",
-			"name", dgd.Name,
-			"namespace", dgd.Namespace,
-			"version", d.OperatorVersion)
-	}
-
-	// Persist the root target only when this provider context resolves unambiguously.
-	if dgd.Spec.ProviderOverride != nil {
-		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
-	}
-
-	// Preserve legacy minimum defaults; native form defaulting does not select a rollout strategy.
-	legacyMinimum := provideroverride.HasLegacyGroveMinAvailable(dgd)
-	providerMinimum := !legacyMinimum && (provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveNativeMinAvailable.Enabled(dgd.Annotations))
-
-	// Apply component defaults on every operation, including newly added components.
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-
-		// Preserve omitted LPX replicas so Grove can retain its native scale.
-		if !component.IsLPX() && component.Replicas == nil {
-			component.Replicas = ptr.To(int32(1))
-		}
-		defaultMultinodeRoleReplicas(component)
-
-		// Persist the component target only when this provider context resolves unambiguously.
-		if component.ProviderOverride != nil {
-			provideroverride.DefaultTarget(
-				component.ProviderOverride,
-				provider,
-				provideroverride.ScopeComponent,
-				component,
-			)
-		}
-
-		// Preserve legacy defaults; native availability is resolved during rendering without adding overrides.
-		if providerSelected && provider == consts.WorkloadProviderGrove && !providerMinimum && component.MinAvailable == nil {
-			component.MinAvailable = ptr.To(int32(1))
-		}
-
-		// Default each explicit role's provider context independently.
-		for roleIndex := range component.Roles {
-			role := &component.Roles[roleIndex]
-			if role.ProviderOverride == nil {
-				continue
-			}
-			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
-			if !ok {
-				continue
-			}
-			provideroverride.DefaultTarget(role.ProviderOverride, provider, scope, component)
-		}
-	}
-
+	defaultDynamoGraphDeployment(dgd, dynamoGraphDeploymentDefaultOptions{
+		operation:       req.Operation,
+		operatorVersion: d.OperatorVersion,
+		groveEnabled:    features.MustGateFrom(ctx).Enabled(features.Grove),
+	})
 	return nil
-}
-
-func defaultWorkloadProvider(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	operation admissionv1.Operation,
-) (string, bool) {
-	// Keep existing selections authoritative and leave legacy updates for controller adoption.
-	if operation != admissionv1.Create {
-		if provider, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
-			return provider, true
-		}
-		return "", false
-	}
-
-	// Derive every new DGD from user-facing routing intent, ignoring the controller-owned annotation.
-	provider := consts.WorkloadProviderComponent
-
-	// Select Grove when it is enabled and the DGD has not opted out.
-	if features.MustGateFrom(ctx).Enabled(features.Grove) &&
-		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse {
-		provider = consts.WorkloadProviderGrove
-	}
-	if provider == consts.WorkloadProviderComponent &&
-		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet]) == consts.KubeLabelValueTrue {
-		provider = consts.WorkloadProviderDisaggregatedSet
-	}
-
-	// Allocate annotation storage before materializing the selected provider.
-	if dgd.Annotations == nil {
-		dgd.Annotations = make(map[string]string)
-	}
-	dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = provider
-	return provider, true
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.

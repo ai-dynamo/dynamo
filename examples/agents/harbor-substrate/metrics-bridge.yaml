@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: substrate-metrics-bridge
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: substrate-metrics-bridge
+    app.kubernetes.io/part-of: harbor-substrate-demo
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 384
+        spike_limit_mib: 64
+      batch:
+        timeout: 1s
+        send_batch_size: 4096
+    exporters:
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        resource_to_telemetry_conversion:
+          enabled: true
+        const_labels:
+          substrate_telemetry: otlp
+        metric_expiration: 30s
+        translation_strategy: UnderscoreEscapingWithSuffixes
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    service:
+      extensions:
+      - health_check
+      pipelines:
+        metrics:
+          receivers:
+          - otlp
+          processors:
+          - memory_limiter
+          - batch
+          exporters:
+          - prometheus
+      telemetry:
+        metrics:
+          readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: 0.0.0.0
+                  port: 8888
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: substrate-metrics-bridge
+  namespace: ate-system
+  labels: &id001
+    app.kubernetes.io/name: substrate-metrics-bridge
+    app.kubernetes.io/part-of: harbor-substrate-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *id001
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: collector
+        image: otel/opentelemetry-collector-contrib:0.163.2@sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849
+        args:
+        - --config=/conf/collector.yaml
+        ports:
+        - name: otlp-grpc
+          containerPort: 4317
+        - name: otlp-http
+          containerPort: 4318
+        - name: prometheus
+          containerPort: 8889
+        - name: self-metrics
+          containerPort: 8888
+        - name: health
+          containerPort: 13133
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /
+            port: health
+          initialDelaySeconds: 10
+        volumeMounts:
+        - name: config
+          mountPath: /conf
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: substrate-metrics-bridge
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: substrate-metrics-bridge
+  namespace: ate-system
+  labels: &id001
+    app.kubernetes.io/name: substrate-metrics-bridge
+    app.kubernetes.io/part-of: harbor-substrate-demo
+spec:
+  selector: *id001
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+  - name: prometheus
+    port: 8889
+    targetPort: prometheus
+  - name: self-metrics
+    port: 8888
+    targetPort: self-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: substrate-metrics-bridge
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: substrate-metrics-bridge
+    app.kubernetes.io/part-of: harbor-substrate-demo
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: substrate-metrics-bridge
+      app.kubernetes.io/part-of: harbor-substrate-demo
+  namespaceSelector:
+    matchNames:
+    - ate-system
+  endpoints:
+  - port: prometheus
+    interval: 5s
+    scrapeTimeout: 4s
+    honorLabels: true
+  - port: self-metrics
+    interval: 15s
+    scrapeTimeout: 10s
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: substrate-metrics-bridge
+  namespace: ate-system
+  labels: &id001
+    app.kubernetes.io/name: substrate-metrics-bridge
+    app.kubernetes.io/part-of: harbor-substrate-demo
+spec:
+  podSelector:
+    matchLabels: *id001
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - ate-api-server
+          - ate-controller
+          - atelet
+          - atenet-router
+          - atenet-egress
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-env
+      podSelector:
+        matchExpressions:
+        - key: ate.dev/worker-pool
+          operator: Exists
+    ports:
+    - protocol: TCP
+      port: 4317
+    - protocol: TCP
+      port: 4318
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8889
+    - protocol: TCP
+      port: 8888
