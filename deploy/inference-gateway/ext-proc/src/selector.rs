@@ -290,7 +290,7 @@ mod tests {
             request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = request.expected_output_tokens();
+            *self.0.lock().unwrap() = request.info().expected_output_tokens();
             assert!(!input.candidates().is_empty());
             Ok(0)
         }

@@ -43,6 +43,7 @@ use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
 use dynamo_worker_selection::WorkerInputs;
+use dynamo_worker_selection::host::CallerHints;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -118,15 +119,19 @@ where
             isl_tokens,
             lora_name,
             accounting_attribution,
-            expected_output_tokens,
+            // Every hint is named, so one added to `CallerHints` fails to compile here until
+            // the request supplies it.
+            caller_hints: CallerHints {
+                expected_output_tokens,
+                priority_jump,
+                strict_priority,
+            },
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
             router_config_override,
             track_prefill_tokens,
-            priority_jump,
-            strict_priority,
             policy_class,
             session_context,
             overlap,
@@ -718,6 +723,16 @@ where
         self.slots.publish_prefill_completed_if_booking(booking)
     }
 
+    /// A sender that re-publishes the prefill-completion event for a booking this
+    /// router made and that is past prefill, so peer routers keep their copy of it
+    /// alive. It does nothing for any other booking.
+    pub fn prefill_keepalive(
+        &self,
+    ) -> impl Fn(&SchedulerBookingDescriptor) + Send + Sync + 'static {
+        let slots = Arc::clone(&self.slots);
+        move |booking| slots.publish_prefill_keepalive_if_booking(booking)
+    }
+
     /// Wait for an admission recheck when a class queues on capacity or a dispatch gate is
     /// installed, and the actor is running. This does not wait for blocked requests to finish
     /// or for the queue to empty. Otherwise return immediately without an admission barrier.
@@ -867,13 +882,14 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::overlap::OverlapSignals;
     use crate::selector::DefaultWorkerSelector;
-    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig, local_test_scheduler_with};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::{
-        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+        DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, RequestClassifierError,
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::host::ActiveSequenceEventOrigin;
     use dynamo_slot_tracker::host::BusyThresholdsHostExt;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
     use dynamo_worker_selection::WorkerCandidates;
@@ -1042,37 +1058,16 @@ mod tests {
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
     ) {
-        let dp_range = workers
-            .iter()
-            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
-            .collect();
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            64,
-            dp_range,
-            replica_sync,
-            0,
-            "test",
-        ));
-        let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
-            Arc::clone(&slots),
-            cfg_rx,
+        let (scheduler, slots, cfg_tx) = local_test_scheduler_with(
+            workers,
             PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             64,
-            DefaultWorkerSelector::new(None, "test"),
-            prefill_load_estimator,
-            None::<Arc<NoopOverlapScoresRefresh>>,
-            None,
-            None,
-            None,
-            Duration::from_secs(60),
-            true,
             cancel_token.clone(),
-            "test",
+            replica_sync,
+            prefill_load_estimator,
             monitor_worker_configs,
-        ));
+        );
         (scheduler, slots, cfg_tx, cancel_token)
     }
 
@@ -1105,26 +1100,8 @@ mod tests {
 
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
-            accounting_attribution: Default::default(),
-            mode,
             token_seq: Some(vec![1, 2, 3, 4]),
-            block_hashes: None,
-            isl_tokens: 64,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: crate::protocols::RoutingConstraints::default(),
-            router_config_override: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
+            ..crate::test_utils::test_schedule_request(mode, 64)
         }
     }
 
@@ -1366,7 +1343,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             Ok(key_by_session(request))
         }
     }
@@ -1378,7 +1355,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             Ok(key_by_session(request))
         }
 
@@ -1648,7 +1625,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(workers.is_empty());
             Ok(request)
@@ -1742,7 +1719,7 @@ mod tests {
                 &mut self,
                 mut request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 assert_eq!(request.ingress_at(), self.0);
                 request.set_due_at(self.0 + Duration::from_secs(1));
                 Ok(request)
@@ -1791,7 +1768,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
                 let thresholds =
                     BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5));
@@ -2033,13 +2010,14 @@ mod tests {
 
         wait_for_pending_count(&scheduler, 1).await;
 
+        // The worker's mark: a peer router's mark applies only to that router's mirror.
         event_tx
             .send(ActiveSequenceEvent {
                 request_id: "req-1".to_string(),
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: 1,
-                origin: Default::default(),
+                origin: ActiveSequenceEventOrigin::Worker,
                 lora_name: None,
             })
             .unwrap();

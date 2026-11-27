@@ -10035,7 +10035,11 @@ spec:
                         InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
                         the typed fields. It uses the upstream AISimulate JSON contract, including
                         snake_case names. Values here take precedence, and null deletes a lowered
-                        field. The dgdr_run member must remain an object, and its operator-owned
+                        field. The exact `{"$null":true}` alias is valid only as an object-field value
+                        outside arrays; all other uses of $null are rejected on every write.
+                        Use the alias with client-side kubectl apply, which removes native nulls;
+                        kubectl create and server-side apply preserve them. A null document supplies
+                        no overrides. The dgdr_run member must remain an object, and its operator-owned
                         transport, identity, and runtime fields name, max_candidates, snapshot_dir,
                         runtime_image, runtime_version_override, derive_runtime_images,
                         num_gpus_per_node, and namespace are operator-owned. Request and Run admission
@@ -10102,6 +10106,24 @@ spec:
                             nonempty hardware object, admission discovers the accelerator.
                           minLength: 1
                           type: string
+                      type: object
+                    interconnect:
+                      description: |-
+                        Interconnect describes the links between candidate workers. Like gpu, it makes the
+                        hardware object nonempty, so admission still discovers omitted GPU fields.
+                      properties:
+                        kvTransferBandwidthGBps:
+                          description: |-
+                            KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that
+                            one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU
+                            value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's
+                            engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation
+                            (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+                            describes how candidates use it, including link sharing. When omitted, no bandwidth is
+                            lowered and AISimulate's default applies, which models the transfer as instantaneous.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
                       type: object
                     numGpusPerNode:
                       description: |-

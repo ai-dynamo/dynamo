@@ -17,7 +17,7 @@ use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
+    ClassifyEvent, ClassifyRequest, RequestClassifier, RequestClassifierError,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::{
@@ -2819,7 +2819,7 @@ impl RequestClassifier for RecordingClassifier {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(request)
     }
@@ -2848,7 +2848,7 @@ impl RequestClassifier for BackendPriorityClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         request.set_backend_priority(self.0);
         Ok(request)
     }
@@ -2947,9 +2947,9 @@ impl RequestClassifier for RejectingClassifier {
         &mut self,
         _request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        Err(Box::new(ClassifierRejected) as Box<ClassifierError>)
+        Err(Box::new(ClassifierRejected) as Box<RequestClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -3021,14 +3021,14 @@ impl RequestClassifier for TypedRejectingClassifier {
         &mut self,
         _request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(
             DynamoError::builder()
                 .error_type(self.error_type)
                 .message("classifier shed load")
                 .build(),
-        ) as Box<ClassifierError>)
+        ) as Box<RequestClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -3264,7 +3264,7 @@ impl RequestClassifier for PausingClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // Held heads must wait in their own lanes, as ThunderAgent keys them.
         if let Some(session) = request
             .info()
@@ -3650,7 +3650,7 @@ impl RequestClassifier for TokenContractClassifier {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         self.classified
             .send((request.info().isl_tokens(), request.progress().clone()))
             .unwrap();

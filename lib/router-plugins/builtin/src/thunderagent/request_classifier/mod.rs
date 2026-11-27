@@ -187,13 +187,15 @@ impl RequestClassifier for ThunderAgentClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let info = request.info();
         let Some(session) = info.session_context() else {
             return Ok(request);
         };
         let Some(request_id) = info.request_id().map(str::to_owned) else {
-            return Err(Box::new(ThunderAgentError::MissingRequestId) as Box<ClassifierError>);
+            return Err(
+                Box::new(ThunderAgentError::MissingRequestId) as Box<RequestClassifierError>
+            );
         };
         let session_id = session.session_id().to_owned();
         let registration = RequestRegistration::new(
@@ -208,7 +210,7 @@ impl RequestClassifier for ThunderAgentClassifier {
             .state
             .lock()
             .register(registration, Instant::now())
-            .map_err(|error| Box::new(error) as Box<ClassifierError>)?;
+            .map_err(|error| Box::new(error) as Box<RequestClassifierError>)?;
         // A session's turns wait in their own lane, so a turn the gate holds, or a session
         // bound to a full worker, blocks only that session.
         request.set_lane_key(&session_id);

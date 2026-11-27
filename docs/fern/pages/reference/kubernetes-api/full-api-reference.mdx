@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 221 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">42 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -4765,7 +4765,7 @@ planner image.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="inputOverrides" type="RawExtension">
-InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request and Run admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. A typed spec.workload.trace is an underlay like the other typed fields: it supplies the default traffic.source (type trace, format dynamo and the mounted trace file in paths) and the recorded-arrival traffic.load. Overrides can replace those values, including traffic.source.type, format, and paths, and null deletes the named field or parent object; the Run controller does not restore it. The typed PersistentVolumeClaim source alone decides the Run Job's trace mount and its claim dependency, so overriding a native path adds no volume mount. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version. Request and Run creation validate the merged input against the bundled AISimulate input schema. Request spec changes require the same validation; Run specs are immutable. Unchanged specs remain metadata-updatable after a bundled schema change.
+InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The exact `{"$null":true}` alias is valid only as an object-field value outside arrays; all other uses of $null are rejected on every write. Use the alias with client-side kubectl apply, which removes native nulls; kubectl create and server-side apply preserve them. A null document supplies no overrides. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request and Run admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. A typed spec.workload.trace is an underlay like the other typed fields: it supplies the default traffic.source (type trace, format dynamo and the mounted trace file in paths) and the recorded-arrival traffic.load. Overrides can replace those values, including traffic.source.type, format, and paths, and null deletes the named field or parent object; the Run controller does not restore it. The typed PersistentVolumeClaim source alone decides the Run Job's trace mount and its claim dependency, so overriding a native path adds no volume mount. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version. Request and Run creation validate the merged input against the bundled AISimulate input schema. Request spec changes require the same validation; Run specs are immutable. Unchanged specs remain metadata-updatable after a bundled schema change.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -5396,6 +5396,25 @@ See [GPUHardwareSpec](#gpuhardwarespec).
 <ParamField path="numGpusPerNode" type="integer">
 NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers to AISimulate's num_gpus_per_node input. An explicit value is authoritative. In a nonempty hardware object, admission discovers an omitted value from the selected cluster node shape. The Run controller never discovers this value. An exactly empty hardware object opts out of all operator hardware discovery and typed hardware defaults, leaving AISimulate input and defaults authoritative.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="interconnect" type="InterconnectSpec">
+Interconnect describes the links between candidate workers. Like gpu, it makes the hardware object nonempty, so admission still discovers omitted GPU fields.
+See [InterconnectSpec](#interconnectspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="interconnectspec" title="InterconnectSpec">
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+**Kind:** `type`
+**Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
+
+<ParamField path="kvTransferBandwidthGBps" type="float">
+KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md) describes how candidates use it, including link sharing. When omitted, no bandwidth is lowered and AISimulate's default applies, which models the transfer as instantaneous.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
