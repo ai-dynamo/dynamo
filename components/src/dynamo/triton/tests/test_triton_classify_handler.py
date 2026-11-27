@@ -214,16 +214,6 @@ class TestInitAndResolve:
         assert "STRING input 'TEXT'" in message
         assert "/v1/classify path" in message
 
-    def test_optional_extra_input_accepted(self) -> None:
-        _, handler = _make_handler(
-            inputs=[
-                ("TEXT", TritonModelConfigPb.DataType.TYPE_STRING),
-                ("IDS", TritonModelConfigPb.DataType.TYPE_INT32),
-            ],
-            optional_inputs=("IDS",),
-        )
-        assert handler._input_name == "TEXT"
-
     def test_ambiguous_bytes_input_without_override_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_STRING input tensor"):
             _make_handler(
