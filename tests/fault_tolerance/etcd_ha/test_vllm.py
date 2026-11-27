@@ -569,11 +569,15 @@ def _freeze_vllm_engine_descendants(worker_pid: int) -> list:
 def _resume_kill(pids: list) -> None:
     """Resume, kill and wait for frozen engines so they can't hold a GPU.
 
-    The worker exits on lease loss and leaves its frozen engines orphaned,
-    outside ManagedProcess teardown. Without this wait the next test can start
-    a worker while a killed engine still holds the device. An orphan may never
-    be reaped, and a zombie has already released its memory, so a zombie
-    counts as exited.
+    On lease loss, vLLM's shutdown in the worker SIGKILLs the frozen EngineCore
+    without waiting for it to exit, so the worker can exit while its engine is
+    still dying. ManagedProcess teardown polls the worker's process group, which
+    holds the engine, for only 8 s. This waits up to
+    ZOMBIE_ENGINE_EXIT_TIMEOUT_SECS for each engine pid to be gone or a zombie,
+    and fails the owning test if one is not, so the next test does not start a
+    worker while a killed engine still holds the device. An orphan may never be
+    reaped, and a zombie has already released its memory, so a zombie counts
+    as exited.
     """
     procs = []
     for pid in pids:
@@ -583,7 +587,7 @@ def _resume_kill(pids: list) -> None:
             proc.kill()
             procs.append(proc)
         except psutil.NoSuchProcess:
-            pass
+            logger.info("vLLM engine pid=%s already exited before resume", pid)
 
     start = time.monotonic()
     while True:
@@ -607,9 +611,11 @@ def _resume_kill(pids: list) -> None:
         alive = []
         for proc in procs:
             try:
-                alive.append(f"pid={proc.pid} status={proc.status()}")
+                status = proc.status()
             except psutil.NoSuchProcess:
-                pass
+                continue
+            if status != psutil.STATUS_ZOMBIE:
+                alive.append(f"pid={proc.pid} status={status}")
         if not alive:
             return
         msg = (
