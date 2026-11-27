@@ -107,22 +107,23 @@ curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen3-0.6B",
        "messages": [{"role": "user", "content": "Hello!"}],
-       "max_tokens": 50}'
+       "chat_template_kwargs": {"enable_thinking": false},
+       "temperature": 0,
+       "max_tokens": 128}'
 ```
 
-```json title="Response"
+```json title="响应示例（节选）"
 {
-  "id": "chatcmpl-...",
-  "model": "Qwen/Qwen3-0.6B",
   "choices": [{
     "index": 0,
-    "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
+    "message": {"role": "assistant", "content": "Hello! How can I assist you today?"},
     "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
+  }]
 }
 ```
 </CodeBlocks>
+
+确认 `choices[0].message.content` 包含完整的问候语，并且 `finish_reason` 为 `stop`。
 
 <Info>
 连接被拒绝？前端需要几秒钟才能启动 — 请重试。有关生产环境的存活和就绪探针，请参阅 [Health Checks](/dynamo/dev/reference/observability/health-checks)。
