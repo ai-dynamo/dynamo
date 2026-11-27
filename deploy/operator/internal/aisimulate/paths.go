@@ -27,6 +27,8 @@ var (
 	engineBackendChoices = []string{"engine", "backend", "choices"}
 	engineHardware       = []string{"engine", "hardware"}
 	engineWorkers        = []string{"engine", "workers"}
+	engineKVTransfer     = []string{"engine", "kv_transfer"}
+	engineKVTransferBW   = []string{"engine", "kv_transfer", "bandwidth_gb_per_second"}
 
 	optimizationTarget         = []string{"optimization", "target"}
 	optimizationHardwareBudget = []string{"optimization", "constraints", "max_candidate_gpus"}

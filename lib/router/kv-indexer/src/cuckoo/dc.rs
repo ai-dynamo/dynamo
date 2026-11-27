@@ -1580,13 +1580,11 @@ mod tests {
         let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
         state.apply_event(stored(worker, 1, &[7]));
         let tag = KvCacheGroupTag {
-            group_idx: 0,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: Some(1),
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
             alignment_blocks: Some(1),
         };
 
-        // vLLM publishes a recurrent group at the attention block's positional hash.
+        // A recurrent checkpoint is published at the attention block's positional hash.
         let removal = state.apply_event(removed(worker, 2, &[7]).with_kv_cache_group(tag));
         assert!(removal.first_error().is_none());
         assert_eq!(removal.unknown_removals(), 0);

@@ -323,6 +323,14 @@ and Mocker runtime behavior.
 
 Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
 interpretation in `run_trace_replay(...)`. Omitting it preserves the `auto` heuristic.
+Set `weka_client="agentx"` to spawn and join subagents as the AgentX client does; the default
+`"recorded"` keeps the recorded timing. This client follows SemiAnalysisAI's AIPerf fork
+[`agentx-harness` at `754356e9`](https://github.com/SemiAnalysisAI/agentx-harness/tree/754356e9a39acc6cc6afb242d123bb57c3fb6f75),
+not the AIPerf `--scenario inferencex-agentx-mvp` that Dynamo's AgentX recipes run; parity with
+those recipes is not established. `weka_chat_template` adds a chat template's tokens to each
+prompt (`request_tokens`, `user_tokens`, `assistant_tokens`, `tail_tokens`, `append_tail_tokens`,
+all required, with `append_tail_tokens <= tail_tokens <= request_tokens`). In an AISimulate
+prediction config, they are `traffic.source.client` and `traffic.source.chat_template`.
 
 Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
 Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its
@@ -500,11 +508,59 @@ hardware offload recipe.
 - With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
   `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
   [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
-  chooses, so it pulls the prompt prefix it lacks from the named peer's G2 (see
+  chooses, so it pulls the prompt prefix it lacks from the named peer's host memory (see
   [KV Cache Runner (KVCR) peer fetch](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-cache.md#kvcr-peer-fetch)).
-  `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
-  index; the router then logs one warning. Replay treats all workers as one transfer island and
-  models no cache-owner sources.
+  As in production, the router sends that hint only when the role's hint policies include
+  `kv_fetch`. The default cost function with no `hints` sends none, and the workers then pull
+  nothing. To get hints, point
+  `router.policy_config` at a policy file that selects the `kvcr` worker-selection policy, which
+  runs `kv_fetch` by default:
+
+  ```yaml
+  worker_selection:
+    aggregated:
+      type: kvcr
+      parameters:
+        shared_cache_multiplier: 0.5
+  ```
+
+  Set the role's `hints: []` to turn the default `kv_fetch` of `kvcr` off. To keep the default
+  cost function, list `kv_fetch` under `worker_selection.<role>.hints` in that file (see
+  [Hint Policies](../../developer-guide/knowledge-base/modular-components/router/hint-policies.md)):
+
+  ```yaml
+  worker_selection:
+    aggregated:
+      type: dynamo-default-cost-fn
+      hints:
+        - type: kv_fetch
+  ```
+
+  Without a policy file, the environment variable `DYN_ROUTER_WORKER_SELECTION_POLICY=kvcr` selects
+  `kvcr` for every role, as it does for the frontend.
+  Replay models the built-in `kv_fetch` policy only: it sends a hint for every copy source the
+  router selects, does not apply the `min_additional_blocks` parameter, and does not run a custom
+  hint policy. Decode workers of a disaggregated deployment get no hints, because replay feeds the
+  router no KV events from the decode pool.
+  `round_robin` sends no hints. Replay checks the role as the production router does at startup
+  and fails with the same error: a role that lists `kv_fetch` needs an index that keeps the
+  request's block chain, which `router.use_kv_events: false` does not, and a `kvcr` selection needs
+  a hint policy that sends its copies. When the hint comes only from the default `kv_fetch` of
+  `kvcr` and the index cannot keep the chain, replay does not fail: it sends no hints and logs one
+  warning. Replay treats all workers as one transfer island.
+- With KVCR-owned memory (`engine.workers.<role>.kv_cache.kvcr.local_g2`), the router names a peer
+  as a production router with a KV state agent does: each worker has one cache owner per rank, and
+  a rank is named only for the prefix its KVCR-owned memory holds. A prefix that a peer holds only
+  on its GPU or in the engine's own host memory (`engine.workers.<role>.kv_cache.host_offload`)
+  gives no hint. Without `local_g2`, any worker that holds the prefix on its GPU or in the
+  engine's own host memory can be the named peer.
+- Blocks in KVCR-owned memory and on the KVCR disk tier (`engine.workers.<role>.kv_cache.kvcr.g3`)
+  reach the router as the cache owner's host and disk residency, and count toward the worker's
+  overlap with the router's `host_cache_hit_weight` (default `0.75`) and `disk_cache_hit_weight`
+  (default `0.25`). The `router` section has no key for these weights; set them as `parameters` of
+  the role's policy in the `router.policy_config` file (see
+  [Tuning Guidelines](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines)).
+  A disk block is never the source of a `kv.fetch` hint.
 - An aggregated or prefill worker that sets `engine.workers.<role>.kv_cache.prefix_match_unit`
   cannot replay behind a `kv_router` that reads engine KV events, even with
   `router.overlap_score_credit: 0`, because AISimulate does not yet export KV events with

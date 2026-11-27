@@ -13,7 +13,8 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
+use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyContext};
 use dynamo_router_policies::router_modes;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
@@ -40,7 +41,7 @@ use crate::{
 /// The transport a [`RoutingHost`] sends through.
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
-/// A caller-supplied final hop in place of the request plane.
+/// A caller-supplied final hop in place of the default one.
 pub type LlmDispatch = Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>;
 
 /// Multimodal embedding-cache state for [`RouterMode::DeviceAwareWeighted`].
@@ -120,7 +121,7 @@ impl RoutingHostBuilder {
         self
     }
 
-    /// Send through `dispatch` instead of the request plane. A host that does not
+    /// Send through `dispatch` instead of the default final hop. A host that does not
     /// send requests itself, such as a gateway endpoint picker, supplies the hop
     /// that records the selection and relays observed progress.
     pub fn dispatch(mut self, dispatch: impl Into<Option<LlmDispatch>>) -> Self {
@@ -272,11 +273,11 @@ pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPick
     };
     let factory = crate::kv_router::plugins::router_plugin_registry().resolve_type(policy_type)?;
     // Routing-mode policies read neither the role nor the partition.
-    let policy = factory(
+    let policy = factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         WorkerType::Aggregated,
         RoutingPartitionRef::new("", ""),
-    );
+    ));
     policy
         .into_hosted_picker()
         .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))

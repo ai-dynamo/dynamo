@@ -12,20 +12,11 @@ repository.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["block-manager"]
-# todo(ops): get this working in CI as a default.
-# default = ["block-manager", "testing-full"]
+default = []
 
-testing-full = ["testing-cuda", "testing-nixl"]
-testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
-testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
-testing-etcd = []
+testing-nixl = ["dynamo-memory/testing-nixl"]
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
-nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
-block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
-cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
@@ -45,11 +36,6 @@ harness = false
 [[bench]]
 name = "tokenizer_dataset"
 harness = false
-
-[[bench]]
-name = "transfer_context_v2"
-harness = false
-required-features = ["block-manager", "testing-cuda"]
 
 [[bench]]
 name = "kv_router_bench"
@@ -73,15 +59,17 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 dynamo-router-policies = { workspace = true }
 # repo
+dynamo-http-server = { workspace = true }
 dynamo-global-discovery-client = { workspace = true }
 dynamo-admission = { workspace = true }
 dynamo-global-common = { workspace = true, features = ["grpc"] }
 dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
+dynamo-error = { workspace = true, features = ["http"] }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-indexer = { workspace = true, features = ["export"] }
-dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-kv-router = { workspace = true, features = ["metrics", "ingest-zmq"] }
 dynamo-lora = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-scheduler = { workspace = true }
@@ -115,7 +103,6 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
-http-body = "1"
 http-body-util = "0.1"
 ipnet = { workspace = true }
 libc = { workspace = true }
@@ -152,10 +139,7 @@ modelexpress-common = { workspace = true }
 bitflags = { version = "2.4", features = ["serde"] }
 blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 bytemuck = "1.22"
-derive-getters = "0.5"
-offset-allocator = "0.2"
 rayon = "1"
-bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora
 object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }
@@ -166,23 +150,16 @@ dialoguer = { version = "0.11", default-features = false, features = [
   "history",
 ] }
 
-# block_manager
-aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=1.3.2", optional = true }
-cudarc = { workspace = true, optional = true }
-nix = { version = "0.26", optional = true }
-
 # media (zlib compression for NIXL metadata)
 flate2 = { version = "1" }
 
-# block_manager_bench
+# kv_router_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
 # http-service
 axum = { workspace = true, features = ["multipart"] }
 mime = "0.3"
-hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
@@ -226,9 +203,9 @@ base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
 libloading = "0.8"
 # Track the in-tree FFmpeg major (container/context.yaml ffmpeg_version): these
-# bind the system libraries, and video-rs 0.12 requires ffmpeg-next =9.0.0.
-video-rs = { version = "0.12.0", optional = true }
-ffmpeg-next = { version = "9.0.0", optional = true }
+# bind the system libraries, and video-rs 0.13 requires ffmpeg-next =9.1.0.
+video-rs = { version = "0.13.0", optional = true }
+ffmpeg-next = { version = "9.1.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
@@ -260,7 +237,6 @@ dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
-assert_matches = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
@@ -281,7 +257,6 @@ insta = { version = "1.41", features = [
 ] }
 proptest = "1.5"
 
-lazy_static = "1.4"
 mockito = "1.7.0"
 dynamo-bench = { path = "../bench", default-features = false, features = [
   "kv-router-stress-support",
@@ -294,8 +269,3 @@ path = "src/bin/generate_frontend_openapi.rs"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }
-
-[[bin]]
-name = "bench_local_transfer_v2"
-path = "bin/bench_local_transfer_v2.rs"
-required-features = ["block-manager-bench"]

@@ -19,7 +19,7 @@ fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> 
     config.validate_config().map_err(PyValueError::new_err)
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct RoutingConstraints {
     #[pyo3(get, set)]
@@ -61,7 +61,7 @@ impl From<RsRoutingConstraints> for RoutingConstraints {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
@@ -292,7 +292,7 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn structural_tag(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn structural_tag(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .structural_tag
             .as_ref()
@@ -305,7 +305,7 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn runtime_data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for (key, value) in self.inner.runtime_data.clone() {
             dict.set_item(key, value.to_string())?;
@@ -371,7 +371,7 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn topology_domains(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn topology_domains(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for (key, value) in &self.inner.topology_domains {
             dict.set_item(key, value)?;

@@ -233,6 +233,16 @@ fn usage_with_cached_tokens(
     }
 }
 
+/// Final-chunk `engine_data` in the shape of the router's `WorkerCacheHitReport`.
+fn kv_cache_hit_engine_data(prompt_tokens: usize, cached_tokens: usize) -> serde_json::Value {
+    serde_json::json!({
+        "kv_cache_hit": {
+            "prompt_tokens": prompt_tokens,
+            "reused_tokens": cached_tokens,
+        }
+    })
+}
+
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
     rng.random_range(1000..2000)
@@ -1013,6 +1023,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .and_then(|info| info.handoff_id);
         let has_handoff_session = handoff_id.is_some();
+        // A decode leg admits the prompt KV transferred from prefill (by handoff session, or
+        // sequentially with a prefill result) as cached, which is not local reuse, so it does
+        // not report a cache hit. A decode worker with neither prefilled locally and reports.
+        let is_local_prefill = !(self.engine_args.is_decode()
+            && (has_handoff_session || request.prefill_result.is_some()));
         if request.bootstrap_info.is_some()
             && (self.engine_args.is_prefill() || self.engine_args.is_decode())
             && handoff_id.is_none()
@@ -1364,37 +1379,33 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            if native_sglang_terminal {
+                            let mut final_output = if native_sglang_terminal {
                                 // Native SGLang carries terminal metadata on the final chunk.
                                 let mut output = terminal_output
                                     .take()
                                     .expect("native SGLang request has a terminal chunk");
                                 output.finish_reason = Some(FinishReason::Length);
-                                if let Some(cached) = cached_prefix_tokens {
-                                    output.completion_usage = Some(usage_with_cached_tokens(
-                                        prompt_tokens_count,
-                                        token_count,
-                                        cached,
-                                    ));
-                                }
-                                if !send_response(&stream_tx, output, &async_context) {
-                                    break;
-                                }
-                                if emitted_token_count > 0 {
-                                    native_timing.record_token();
-                                }
+                                output
                             } else {
-                                let mut final_output = LLMEngineOutput::length();
-                                if let Some(cached) = cached_prefix_tokens {
-                                    final_output.completion_usage = Some(usage_with_cached_tokens(
-                                        prompt_tokens_count,
-                                        token_count,
-                                        cached,
+                                LLMEngineOutput::length()
+                            };
+                            if let Some(cached) = cached_prefix_tokens {
+                                final_output.completion_usage = Some(usage_with_cached_tokens(
+                                    prompt_tokens_count,
+                                    token_count,
+                                    cached,
+                                ));
+                                if is_local_prefill {
+                                    final_output.engine_data = Some(Box::new(
+                                        kv_cache_hit_engine_data(prompt_tokens_count, cached),
                                     ));
                                 }
-                                if !send_response(&stream_tx, final_output, &async_context) {
-                                    break;
-                                }
+                            }
+                            if !send_response(&stream_tx, final_output, &async_context) {
+                                break;
+                            }
+                            if native_sglang_terminal && emitted_token_count > 0 {
+                                native_timing.record_token();
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;
@@ -1719,9 +1730,20 @@ mod tests {
         });
 
         let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
-        while stream.next().await.is_some() {}
+        let mut last = None;
+        while let Some(item) = stream.next().await {
+            last = item.data;
+        }
         // Recomputing the prompt would take 640 / 64 = 10 passes before the token.
         assert_eq!(*passes.0.lock().unwrap(), 1);
+        let last = last.unwrap();
+        assert!(last.finish_reason.is_some());
+        assert!(
+            last.engine_data
+                .as_ref()
+                .and_then(|data| data.get("kv_cache_hit"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1763,8 +1785,118 @@ mod tests {
         );
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
+        expected_finish.engine_data = Some(Box::new(kv_cache_hit_engine_data(3, 0)));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_prompt_reports_kv_cache_hit() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "enable_prefix_caching": true,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut last = None;
+        for _ in 0..2 {
+            let mut stream = engine
+                .generate(SingleIn::new(decode_request(12, 2)))
+                .await
+                .unwrap();
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+        }
+        let report = &last.unwrap().engine_data.unwrap()["kv_cache_hit"];
+        assert_eq!(report["prompt_tokens"], 12);
+        assert!(report["reused_tokens"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn disaggregated_decode_does_not_report_kv_cache_hit() {
+        use crate::protocols::common::preprocessor::BootstrapInfo;
+
+        let start = |worker_type: WorkerType| {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_batched_tokens": 64,
+                    "enable_prefix_caching": true,
+                    "speedup_ratio": 1000.0,
+                    "decode_speedup_ratio": 1000.0
+                },
+                "dynamo": { "bootstrap_port": Some(0) }
+            }))
+            .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live]).is_ok());
+            assert!(
+                engine
+                    .handoff_session_permits
+                    .set(vec![Arc::new(Semaphore::new(4))])
+                    .is_ok()
+            );
+            engine
+        };
+        let prefill = start(WorkerType::Prefill);
+        let prepared = prefill.prepare_bootstrap().await.unwrap().unwrap();
+        prefill.commit_bootstrap(prepared);
+        let decode = start(WorkerType::Decode);
+
+        let prompt_tokens = 12;
+        let mut request = decode_request(prompt_tokens, 2);
+        request.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: prefill.bootstrap_server.get().unwrap().port(),
+            bootstrap_room: 7,
+            handoff_id: Some(Uuid::from_u128(7)),
+        });
+        let request_id = Uuid::from_u128(77).to_string();
+        let input =
+            || SingleIn::with_id_and_metadata(request.clone(), request_id.clone(), BTreeMap::new());
+        async fn last_output(
+            stream: Result<ManyOut<Annotated<LLMEngineOutput>>, Error>,
+        ) -> LLMEngineOutput {
+            let mut stream = stream.unwrap();
+            let mut last = None;
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+            last.unwrap()
+        }
+        let (prefill_last, decode_last) = tokio::time::timeout(Duration::from_secs(10), async {
+            let (prefill_stream, decode_stream) =
+                futures::future::join(prefill.generate(input()), decode.generate(input())).await;
+            futures::future::join(last_output(prefill_stream), last_output(decode_stream)).await
+        })
+        .await
+        .expect("disaggregated request must finish");
+
+        assert!(prefill_last.finish_reason.is_some());
+        assert_eq!(
+            prefill_last.engine_data.unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": prompt_tokens, "reused_tokens": 0 })
+        );
+        assert!(decode_last.finish_reason.is_some());
+        assert!(
+            decode_last
+                .engine_data
+                .as_ref()
+                .and_then(|data| data.get("kv_cache_hit"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1846,6 +1978,10 @@ mod tests {
         assert_eq!(
             response["meta_info"]["finish_reason"],
             serde_json::json!({"type": "length"})
+        );
+        assert_eq!(
+            output.engine_data.as_ref().unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": 3, "reused_tokens": 0 })
         );
         assert!(stream.next().await.is_none());
     }

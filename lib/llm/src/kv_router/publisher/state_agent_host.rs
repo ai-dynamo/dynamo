@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use dynamo_kv_indexer::host::RouterHintSourceMetadata;
 use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
@@ -142,6 +143,9 @@ struct HostedSlot {
     indexer_domain_id: dynamo_router_protocol::identity::IndexerDomainId,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
+    process_local_inventory: bool,
+    /// The transfer endpoint the slot's source advertises.
+    router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 impl HostedSlot {
@@ -151,6 +155,17 @@ impl HostedSlot {
             && self.indexer_domain_id == intent.indexer_domain_id
             && self.kv_block_size == intent.kv_block_size
             && self.ingress_protocol == intent.ingress_protocol
+    }
+
+    /// The slot's source no longer describes the pool `intent` claims, so the
+    /// slot is rebuilt instead of reattached. The router treats a source
+    /// record as immutable; only a new agent can advertise a different one.
+    fn is_superseded_by(&self, intent: &KvStateAttachmentIntent) -> bool {
+        let process_local = intent.has_process_local_inventory();
+        self.matches(intent)
+            && (self.process_local_inventory != process_local
+                // An engine-local source names its own engine's transfer endpoint.
+                || (process_local && self.router_hint_source != intent.router_hint_source))
     }
 }
 
@@ -624,20 +639,13 @@ async fn reconcile_owner(
     let intent = match matching.map(HashMap::len).unwrap_or(0) {
         0 => {
             if let Some(slot) = slots.get_mut(&owner) {
-                if slot.ingress_protocol.has_process_local_inventory() {
-                    if let Err(error) = detach_slot(slot).await {
-                        tracing::warn!(%owner, %error, "Failed to detach engine-local KV state-agent slot");
-                    }
-                    if let Some(agent) = slot.agent.take()
-                        && let Err(error) = agent.shutdown().await
-                    {
-                        tracing::warn!(%owner, %error, "Failed to stop engine-local KV state agent");
-                    }
+                if slot.process_local_inventory {
+                    release_slot(owner, slots, sockets).await;
                 } else {
                     detach_slot(slot).await?;
-                }
-                if slot.agent.is_none() {
-                    sockets.remove_slot(owner, slots);
+                    if slot.agent.is_none() {
+                        sockets.remove_slot(owner, slots);
+                    }
                 }
             }
             return Ok(());
@@ -654,11 +662,20 @@ async fn reconcile_owner(
     };
     let intent = intent.expect("one intent was counted");
 
+    if slots
+        .get(&owner)
+        .is_some_and(|slot| slot.is_superseded_by(&intent))
+    {
+        tracing::info!(%owner, "Rebuilding KV state-agent slot for a changed inventory lifetime or transfer endpoint");
+        release_slot(owner, slots, sockets).await;
+    }
+
     if !slots.contains_key(&owner) {
         // NOTE: Detached persistent agents retain CacheOwner/index/recovery state
         // and count against max_slots. Engine-local slots release their capacity
-        // when their last intent disappears. Failed construction remains reserved
-        // only until its matching intent disappears.
+        // when their last intent disappears. A superseded slot was released just
+        // above and takes its capacity back here. Failed construction remains
+        // reserved only until its matching intent disappears.
         // TODO(#13044): require explicit decommission/migration authority
         // before reclaiming a durable owner from a long-lived host.
         if slots.len() >= max_slots {
@@ -678,6 +695,8 @@ async fn reconcile_owner(
             indexer_domain_id: intent.indexer_domain_id,
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            process_local_inventory: intent.has_process_local_inventory(),
+            router_hint_source: intent.router_hint_source.clone(),
         };
         slots.insert(owner, slot_shape);
         let (slot_sockets, publisher_index) = sockets.for_new_slot()?;
@@ -691,6 +710,7 @@ async fn reconcile_owner(
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            process_local_inventory: intent.has_process_local_inventory(),
             sockets: slot_sockets.clone(),
         })
         .await
@@ -745,6 +765,26 @@ async fn reconcile_owner(
     slot.producer_instance = Some(intent.producer_instance);
     slot.lifecycle = SlotLifecycle::Active;
     Ok(())
+}
+
+/// Stops a slot's agent, which withdraws its source, and frees the slot.
+async fn release_slot(
+    owner: CacheOwnerId,
+    slots: &mut HashMap<CacheOwnerId, HostedSlot>,
+    sockets: &mut HostSockets,
+) {
+    let Some(slot) = slots.get_mut(&owner) else {
+        return;
+    };
+    if let Err(error) = detach_slot(slot).await {
+        tracing::warn!(%owner, %error, "Failed to detach released KV state-agent slot");
+    }
+    if let Some(agent) = slot.agent.take()
+        && let Err(error) = agent.shutdown().await
+    {
+        tracing::warn!(%owner, %error, "Failed to stop released KV state agent");
+    }
+    sockets.remove_slot(owner, slots);
 }
 
 async fn detach_slot(slot: &mut HostedSlot) -> Result<()> {
@@ -812,7 +852,6 @@ fn host_discovery_id(instance_id: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_indexer::host::RouterHintSourceMetadata;
     use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
@@ -824,6 +863,7 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     use super::*;
+    use crate::discovery::kv_state_agent::{KV_STATE_SOURCE_TOPIC_V2, KvStateSourceAdvertisement};
 
     #[test]
     fn failed_slot_returns_its_shared_socket_share() {
@@ -867,6 +907,8 @@ mod tests {
                         indexer_domain_id: owner.pool().indexer_domain(),
                         kv_block_size: 64,
                         ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+                        process_local_inventory: true,
+                        router_hint_source: None,
                     },
                 );
             }
@@ -895,9 +937,10 @@ mod tests {
 
     #[test]
     fn missing_intent_releases_failed_engine_local_slot_but_retains_durable_slot() {
-        for (protocol, has_process_local_inventory) in [
-            (KvStateIngressProtocol::SglangHiCacheV1, true),
-            (KvStateIngressProtocol::VllmResidencyV1, false),
+        for (protocol, declared, has_process_local_inventory) in [
+            (KvStateIngressProtocol::SglangHiCacheV1, false, true),
+            (KvStateIngressProtocol::VllmResidencyV1, true, true),
+            (KvStateIngressProtocol::VllmResidencyV1, false, false),
         ] {
             let agent_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -914,6 +957,7 @@ mod tests {
                     101,
                 );
                 request.ingress_protocol = protocol;
+                request.process_local_inventory = declared;
                 request.raw_zmq_endpoint = raw.endpoint().to_string();
                 let mut slots = HashMap::new();
                 let mut sockets = HostSockets {
@@ -1082,6 +1126,7 @@ mod tests {
             image_token_id: None,
             video_token_id: None,
             engine_owned_mm_identity: false,
+            process_local_inventory: false,
             router_hint_source: None,
         }
     }
@@ -1097,7 +1142,7 @@ mod tests {
             WorkerWithDpRank::new(17, 3),
             71,
         );
-        let slot = HostedSlot {
+        let mut slot = HostedSlot {
             intent_incarnation: None,
             producer_instance: None,
             lifecycle: SlotLifecycle::Detached,
@@ -1108,6 +1153,8 @@ mod tests {
             indexer_domain_id: original.indexer_domain_id,
             kv_block_size: original.kv_block_size,
             ingress_protocol: original.ingress_protocol,
+            process_local_inventory: original.has_process_local_inventory(),
+            router_hint_source: original.router_hint_source.clone(),
         };
         let mut upgraded = original.clone();
         upgraded.router_hint_source = Some(RouterHintSourceMetadata {
@@ -1118,6 +1165,138 @@ mod tests {
 
         assert!(slot.matches(&original));
         assert!(slot.matches(&upgraded));
+        // A durable slot keeps its agent, and so its inventory, across a hint change.
+        assert!(!slot.is_superseded_by(&original));
+        assert!(!slot.is_superseded_by(&upgraded));
+
+        // A changed lifetime needs a new source, in either direction.
+        let mut engine_local = original.clone();
+        engine_local.process_local_inventory = true;
+        assert!(slot.matches(&engine_local));
+        assert!(slot.is_superseded_by(&engine_local));
+        slot.process_local_inventory = true;
+        assert!(!slot.is_superseded_by(&engine_local));
+        assert!(slot.is_superseded_by(&original));
+
+        // So does an engine-local slot whose engine moved.
+        engine_local.router_hint_source = upgraded.router_hint_source.clone();
+        assert!(slot.is_superseded_by(&engine_local));
+
+        // A changed identity still fails the slot instead of rebuilding it.
+        engine_local.kv_block_size += 1;
+        assert!(!slot.matches(&engine_local));
+        assert!(!slot.is_superseded_by(&engine_local));
+    }
+
+    #[tokio::test]
+    async fn superseded_slot_is_rebuilt_from_the_claiming_intent() {
+        let hint = |host: &str| {
+            Some(RouterHintSourceMetadata {
+                source_control_endpoint: format!("tcp://{host}:23280"),
+                worker_type: "aggregated".to_string(),
+                topology_domains: Default::default(),
+            })
+        };
+        // A worker upgraded under a running host declares a new lifetime after
+        // its old intent is gone; a replacement pod overlaps the pod it replaces.
+        for overlap in [false, true] {
+            let component = test_component().await;
+            let metrics = HostMetrics::new(&component).unwrap();
+            let raw = SharedZmqPublisherSocket::bind("raw-kv").unwrap();
+            let mut first = intent(
+                &instance("kv_state_agent", 1),
+                instance("producer", 11),
+                owner(4),
+                WorkerWithDpRank::new(17, 4),
+                101,
+            );
+            first.raw_zmq_endpoint = raw.endpoint().to_string();
+            first.process_local_inventory = overlap;
+            first.router_hint_source = hint("old-pod");
+            let mut second = first.clone();
+            second.producer_instance = instance("producer", 12);
+            second.worker = WorkerWithDpRank::new(18, 4);
+            second.intent_incarnation = 102;
+            second.process_local_inventory = true;
+            second.router_hint_source = hint("new-pod");
+            let owner = first.cache_owner_id;
+            let claims = |intents: &[&KvStateAttachmentIntent]| {
+                let claims: HashMap<_, _> = intents
+                    .iter()
+                    .map(|intent| (intent.intent_incarnation, (*intent).clone()))
+                    .collect();
+                if claims.is_empty() {
+                    HashMap::new()
+                } else {
+                    HashMap::from([(owner, claims)])
+                }
+            };
+
+            let mut slots = HashMap::new();
+            let mut sockets = HostSockets {
+                slots_per_socket: 2,
+                share_publishers: true,
+                publishers: Vec::new(),
+                raw_pool: None,
+            };
+            let mut rejected = 0;
+            let between: &[&KvStateAttachmentIntent] =
+                if overlap { &[&first, &second] } else { &[] };
+            let mut publishers = Vec::new();
+            for step in [&[&first][..], between, &[&second][..]] {
+                reconcile_owner(
+                    &component,
+                    owner,
+                    &claims(step),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut rejected,
+                    &metrics,
+                )
+                .await
+                .unwrap();
+                let agent = slots[&owner].agent.as_ref().unwrap();
+                publishers.push(agent.identity().publisher_id);
+            }
+
+            let slot = &slots[&owner];
+            assert_eq!(slot.lifecycle, SlotLifecycle::Active);
+            assert!(slot.process_local_inventory);
+            assert_eq!(rejected, 0);
+            assert_eq!(sockets.publishers[0].1, 1);
+            let agent = slot.agent.as_ref().unwrap();
+            // The slot keeps its agent until the claiming intent supersedes it.
+            assert_eq!(publishers[0], publishers[1]);
+            assert_ne!(publishers[0], publishers[2]);
+            let advertised: Vec<KvStateSourceAdvertisement> = component
+                .drt()
+                .discovery()
+                .list(DiscoveryQuery::EventSources(
+                    EventSourceQuery::endpoint_topic(
+                        first.kv_state_endpoint.clone(),
+                        KV_STATE_SOURCE_TOPIC_V2,
+                    ),
+                ))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|source| match source {
+                    DiscoveryInstance::EventSource { metadata, .. } => {
+                        serde_json::from_value(metadata).unwrap()
+                    }
+                    other => panic!("unexpected discovery record: {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                advertised.len(),
+                1,
+                "the superseded source must be withdrawn"
+            );
+            assert_eq!(advertised[0].publisher_id, agent.identity().publisher_id);
+            assert_eq!(advertised[0].router_hint_source, second.router_hint_source);
+            agent.shutdown().await.unwrap();
+        }
     }
 
     fn added(

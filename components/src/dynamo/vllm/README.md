@@ -12,6 +12,13 @@ publication through the direct KV event publisher. Enable it only after all
 routers, indexers, and event consumers have been upgraded to support
 `kv_cache_group` events. The default remains attention-only publication.
 
+vLLM reports each recurrent cache group on its own, at the same block hash. The
+worker joins them and publishes one event per checkpoint: a store when the last
+group's state arrives in a storage tier, and a removal when the first group's
+state leaves it. A router therefore sees only checkpoints the engine can
+resume from, and keeps no per-group state. A model with three recurrent groups
+publishes one store and one removal per checkpoint instead of three of each.
+
 This mode requires engine cache-group metadata and an enabled local indexer
 (`enable_local_indexer=True`, the default for Dynamo vLLM workers).
 The supported resume contract is deliberately limited to full-attention and
