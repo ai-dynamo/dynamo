@@ -36,7 +36,8 @@ Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/con
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [Slack](https://ai-dynamo.org/slack)
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
+- [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Tue 9:00 AM PT) development community meetings
+- [Community Calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com) ([iCal](https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com/public/full.ics)) -- Community meetings, office hours, and SIG syncs
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)
 
 Dynamo requires all contributions to be signed off with the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). This certifies that you have the right to submit your contribution under the project's [Apache 2.0 license](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE).
