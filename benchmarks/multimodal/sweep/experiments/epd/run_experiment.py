@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import functools
+import hashlib
 import http.server
+import io
 import itertools
 import json
 import math
@@ -25,7 +27,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from PIL import Image
 from transformers import AutoTokenizer
@@ -219,6 +221,78 @@ class Cell:
         return f"img{self.image_count}-isl{self.isl}-osl{self.osl}-qps{qps}"
 
 
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"nonfinite number {value}")
+    return number
+
+
+@dataclass(frozen=True)
+class ReplaySchedule:
+    data: bytes
+    request_count: int
+    sha256: str
+
+    @classmethod
+    def read(cls, path: Path, model: str) -> ReplaySchedule:
+        data = path.read_bytes()
+        count = 0
+        previous = 0
+        with io.TextIOWrapper(io.BytesIO(data), encoding="utf-8") as lines:
+            for count, line in enumerate(lines, 1):
+                location = f"{path}:{count}"
+                try:
+                    row = json.loads(
+                        line,
+                        parse_constant=_finite_json_float,
+                        parse_float=_finite_json_float,
+                    )
+                except ValueError as error:
+                    raise ValueError(f"{location}: invalid JSON: {error}") from error
+                if not isinstance(row, dict) or row.keys() != {"timestamp", "payload"}:
+                    raise ValueError(
+                        f"{location}: expected timestamp and payload fields"
+                    )
+                timestamp = row["timestamp"]
+                try:
+                    valid = type(timestamp) in (int, float) and math.isfinite(timestamp)
+                except OverflowError:
+                    valid = False
+                if not valid or timestamp < previous:
+                    raise ValueError(
+                        f"{location}: timestamps must be finite, nonnegative, and nondecreasing"
+                    )
+                previous = timestamp
+                payload = row["payload"]
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("model") != model
+                    or payload.get("stream") is not True
+                    or not isinstance(payload.get("messages"), list)
+                    or not payload["messages"]
+                ):
+                    raise ValueError(
+                        f"{location}: expected a streaming chat payload for {model!r}"
+                    )
+        if count == 0:
+            raise ValueError(f"{path}: schedule is empty")
+        return cls(data, count, hashlib.sha256(data).hexdigest())
+
+
+@dataclass(frozen=True)
+class ReplayCell:
+    backend: str
+    topology: str
+    schedule: ReplaySchedule
+    image_token_budget: ClassVar[None] = None
+    name: ClassVar[str] = "fixed-schedule"
+
+    @property
+    def service_key(self) -> tuple[str, str, int | None]:
+        return self.backend, self.topology, None
+
+
 def _tokens(raw: Sequence[str]) -> list[str]:
     values = [part.strip() for item in raw for part in item.split(",")]
     if not values or any(not value for value in values):
@@ -256,7 +330,9 @@ def _image_token_budgets(raw: Sequence[str]) -> list[int | None]:
     return normalized
 
 
-def build_cells(args: argparse.Namespace) -> list[Cell]:
+def build_cells(
+    args: argparse.Namespace, schedule: ReplaySchedule | None = None
+) -> list[Cell | ReplayCell]:
     backends = [value.lower() for value in _tokens(args.backend)]
     if any(value not in {"vllm", "sglang"} for value in backends):
         raise ValueError("backend must be vllm or sglang")
@@ -268,8 +344,14 @@ def build_cells(args: argparse.Namespace) -> list[Cell]:
     except KeyError as error:
         raise ValueError("topology must be aggregate/epd (alias: agg)") from error
     _reject_normalized_duplicates(topologies, "topology")
+    if schedule is not None:
+        return [
+            ReplayCell(backend, topology, schedule)
+            for backend, topology in itertools.product(backends, topologies)
+        ]
+    qps = args.qps if args.qps is not None else ["0.5"]
     try:
-        qps_values = [Decimal(value).normalize() for value in _tokens(args.qps)]
+        qps_values = [Decimal(value).normalize() for value in _tokens(qps)]
     except InvalidOperation as error:
         raise ValueError("QPS values must be decimal numbers") from error
     if any(not value.is_finite() or value <= 0 for value in qps_values):
@@ -277,8 +359,12 @@ def build_cells(args: argparse.Namespace) -> list[Cell]:
     _reject_normalized_duplicates(qps_values, "QPS")
 
     counts = _positive_ints(args.image_count, "image-count")
-    budgets = _image_token_budgets(args.image_token_budget)
-    isls = _positive_ints(args.isl, "isl")
+    budget_axis = (
+        args.image_token_budget if args.image_token_budget is not None else ["-1"]
+    )
+    isl_axis = args.isl if args.isl is not None else ["9000"]
+    budgets = _image_token_budgets(budget_axis)
+    isls = _positive_ints(isl_axis, "isl")
     osls = _positive_ints(args.osl, "osl")
     return [
         Cell(backend, topology, count, budget, isl, osl, qps)
@@ -293,30 +379,26 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         epilog="Every sweep axis accepts one value, comma lists, or space lists.",
     )
-    for option in (
-        "backend",
-        "topology",
-        "image-count",
-        "osl",
-    ):
+    for option in ("backend", "topology"):
         parser.add_argument(f"--{option}", nargs="+", required=True)
+    for option in ("image-count", "osl"):
+        parser.add_argument(
+            f"--{option}", nargs="+", help="required for generated workloads"
+        )
     parser.add_argument(
         "--isl",
         nargs="+",
-        default=["9000"],
-        help="input sequence lengths",
+        help="input sequence lengths (generated workload default: 9000)",
     )
     parser.add_argument(
         "--qps",
         nargs="+",
-        default=["0.5"],
-        help="request rates",
+        help="request rates (generated workload default: 0.5)",
     )
     parser.add_argument(
         "--image-token-budget",
         nargs="+",
-        default=["-1"],
-        help="per-image visual-token caps; -1 leaves processor limits unchanged",
+        help="per-image visual-token caps; -1 (default) leaves processor limits unchanged",
     )
     parser.add_argument("--model", required=True)
     parser.add_argument(
@@ -324,7 +406,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI model name",
     )
     parser.add_argument("--tokenizer", help="tokenizer path or Hugging Face ID")
-    parser.add_argument("--image-dir", type=Path, required=True)
+    parser.add_argument(
+        "--image-dir", type=Path, help="required for generated workloads"
+    )
+    parser.add_argument(
+        "--schedule-file",
+        type=Path,
+        help="replay a JSONL file of timestamped chat payloads",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--aiperf-bin", default=os.environ.get("AIPERF_BIN", "aiperf"))
     parser.add_argument(
@@ -447,11 +536,39 @@ def measured_requests(qps: Decimal) -> int:
 def aiperf_command(
     *,
     args: argparse.Namespace,
-    cell: Cell,
+    cell: Cell | ReplayCell,
     endpoint: str,
     dataset: Path,
     artifact_dir: Path,
 ) -> list[str]:
+    if isinstance(cell, ReplayCell):
+        timing_args = [
+            "--custom-dataset-type",
+            "mooncake_trace",
+            "--fixed-schedule",
+            # AIPerf otherwise rebases the schedule to the first request.
+            "--fixed-schedule-start-offset",
+            "0",
+            "--request-count",
+            str(cell.schedule.request_count),
+        ]
+    else:
+        timing_args = [
+            "--custom-dataset-type",
+            "raw_payload",
+            "--request-rate",
+            decimal_text(cell.qps),
+            "--request-count",
+            str(measured_requests(cell.qps)),
+            "--arrival-pattern",
+            "constant",
+            "--warmup-arrival-pattern",
+            "constant",
+            "--concurrency",
+            "64",
+            "--warmup-request-count",
+            "4",
+        ]
     return [
         args.aiperf_bin,
         "profile",
@@ -470,27 +587,14 @@ def aiperf_command(
         endpoint,
         "--input-file",
         str(dataset),
-        "--custom-dataset-type",
-        "raw_payload",
+        *timing_args,
         "--use-server-token-count",
         "--export-level",
         "raw",
-        "--request-rate",
-        decimal_text(cell.qps),
-        "--request-count",
-        str(measured_requests(cell.qps)),
-        "--arrival-pattern",
-        "constant",
-        "--warmup-arrival-pattern",
-        "constant",
-        "--concurrency",
-        "64",
         "--workers-max",
         "64",
         "--record-processors",
         "8",
-        "--warmup-request-count",
-        "4",
         "--request-timeout-seconds",
         "600",
         "--random-seed",
@@ -507,9 +611,20 @@ def _metric(report: Mapping[str, Any], name: str, field: str = "avg") -> Any:
     return value.get(field) if isinstance(value, Mapping) else value
 
 
-def validate_result(path: Path, cell: Cell) -> dict[str, Any]:
+def validate_result(path: Path, cell: Cell | ReplayCell) -> dict[str, Any]:
     report = json.loads(path.read_text(encoding="utf-8"))
-    expected = measured_requests(cell.qps)
+    if isinstance(cell, ReplayCell):
+        expected = cell.schedule.request_count
+        workload_summary = {
+            "backend": cell.backend,
+            "topology": cell.topology,
+            "timing_mode": "fixed_schedule",
+            "schedule_sha256": cell.schedule.sha256,
+            "schedule_lag_p99_ms": _metric(report, "replay_sched_lag_p99"),
+        }
+    else:
+        expected = measured_requests(cell.qps)
+        workload_summary = {**asdict(cell), "qps": decimal_text(cell.qps)}
     errors = sum(
         int(item.get("count", 0)) if isinstance(item, Mapping) else 1
         for item in (report.get("error_summary") or [])
@@ -525,16 +640,16 @@ def validate_result(path: Path, cell: Cell) -> dict[str, Any]:
         failures.append("was_cancelled=true")
     if report.get("aiperf_version") != EXPECTED_AIPERF_VERSION:
         failures.append(f"aiperf_version={report.get('aiperf_version')!r}")
-    for field in ("avg", "min", "max"):
-        if _metric(report, "output_sequence_length", field) != cell.osl:
-            failures.append(
-                f"osl_{field}={_metric(report, 'output_sequence_length', field)}"
-            )
+    if isinstance(cell, Cell):
+        for field in ("avg", "min", "max"):
+            if _metric(report, "output_sequence_length", field) != cell.osl:
+                failures.append(
+                    f"osl_{field}={_metric(report, 'output_sequence_length', field)}"
+                )
     if failures:
         raise RuntimeError("AIPerf result gate failed: " + "; ".join(failures))
     return {
-        **asdict(cell),
-        "qps": decimal_text(cell.qps),
+        **workload_summary,
         "request_count": expected,
         "achieved_qps": _metric(report, "request_throughput"),
         "ttft_ms": _metric(report, "time_to_first_token"),
@@ -545,7 +660,7 @@ def validate_result(path: Path, cell: Cell) -> dict[str, Any]:
 def run_cell(
     *,
     args: argparse.Namespace,
-    cell: Cell,
+    cell: Cell | ReplayCell,
     tokenizer: Any,
     image_url_root: str,
     endpoint: str,
@@ -555,19 +670,23 @@ def run_cell(
     report_path = cell_dir / "profile_export_aiperf.json"
     if cell_dir.exists():
         raise FileExistsError(f"cell output already exists: {cell_dir}")
-    payload = build_payload(
-        tokenizer=tokenizer,
-        backend=cell.backend,
-        model=args.served_model_name,
-        image_dir=args.image_dir,
-        image_url_root=image_url_root,
-        image_count=cell.image_count,
-        image_token_budget=cell.image_token_budget,
-        isl=cell.isl,
-        osl=cell.osl,
-    )
     dataset = cell_dir / "input.jsonl"
-    write_dataset(dataset, payload)
+    if isinstance(cell, ReplayCell):
+        cell_dir.mkdir(parents=True)
+        dataset.write_bytes(cell.schedule.data)
+    else:
+        payload = build_payload(
+            tokenizer=tokenizer,
+            backend=cell.backend,
+            model=args.served_model_name,
+            image_dir=args.image_dir,
+            image_url_root=image_url_root,
+            image_count=cell.image_count,
+            image_token_budget=cell.image_token_budget,
+            isl=cell.isl,
+            osl=cell.osl,
+        )
+        write_dataset(dataset, payload)
     command = aiperf_command(
         args=args,
         cell=cell,
@@ -587,12 +706,36 @@ def run_cell(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.served_model_name is None:
         args.served_model_name = Path(args.model.rstrip("/")).name
     if not args.served_model_name:
         raise ValueError("could not derive --served-model-name from --model")
-    cells = build_cells(args)
+    required = ("image_count", "osl", "image_dir")
+    options = vars(args)
+    schedule = None
+    if args.schedule_file is None:
+        missing = [
+            f"--{key.replace('_', '-')}" for key in required if options[key] is None
+        ]
+        if missing:
+            parser.error("generated workloads require " + ", ".join(missing))
+    else:
+        conflicts = [
+            f"--{key.replace('_', '-')}"
+            for key in (*required, "isl", "qps", "image_token_budget", "tokenizer")
+            if options[key] is not None
+        ]
+        if conflicts:
+            parser.error(
+                "--schedule-file cannot be combined with " + ", ".join(conflicts)
+            )
+        try:
+            schedule = ReplaySchedule.read(args.schedule_file, args.served_model_name)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+    cells = build_cells(args, schedule)
     groups = [
         (key, list(items))
         for key, items in itertools.groupby(cells, key=lambda cell: cell.service_key)
@@ -606,7 +749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         return 0
 
-    if not args.image_dir.is_dir():
+    if schedule is None and not args.image_dir.is_dir():
         raise FileNotFoundError(args.image_dir)
     if not 1 <= args.port <= 65_535:
         raise ValueError("port must be in 1..65535")
@@ -619,10 +762,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError(
             f"AIPerf version must be {EXPECTED_AIPERF_VERSION}, got {version!r}"
         )
-    tokenizer = load_tokenizer(args.tokenizer or args.model)
+    tokenizer = (
+        load_tokenizer(args.tokenizer or args.model) if schedule is None else None
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    with image_origin(args.image_dir) as root:
+    origin = (
+        image_origin(args.image_dir) if schedule is None else contextlib.nullcontext("")
+    )
+    with origin as root:
         for key, group_cells in groups:
             backend, topology, budget = key
             group_dir = args.output_dir / (
