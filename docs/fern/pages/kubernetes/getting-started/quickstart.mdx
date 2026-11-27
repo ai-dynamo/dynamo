@@ -124,7 +124,8 @@ EOF
 
 ```bash
 export IMAGE_REGISTRY='registry.example.com/my-team'
-export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"
+export XPU_RUNTIME_VERSION="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml)"
+export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:${XPU_RUNTIME_VERSION}"
 
 python3 container/render.py \
   --framework=vllm \
@@ -134,6 +135,11 @@ python3 container/render.py \
 docker build --tag "$XPU_IMAGE" --file container/rendered.Dockerfile .
 docker push "$XPU_IMAGE"
 ```
+
+        The image tag is the Dynamo version of your clone, read from `pyproject.toml`. The operator
+        reads the Dynamo runtime version from the image tag. If the tag has no semantic version, such
+        as `latest` or a custom name, the admission webhook rejects a new DGD unless the component sets
+        `runtimeVersionOverride` to the Dynamo version in the image, in `X.Y.Z` form.
 
         Apply the aggregated XPU `DynamoGraphDeployment` (DGD), replacing the template image tags
         with the images for this quickstart:
