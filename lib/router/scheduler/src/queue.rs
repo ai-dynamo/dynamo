@@ -391,37 +391,22 @@ struct SelectedWorkerForRequest {
 }
 
 impl SelectedWorkerForRequest {
-    /// The response for this selection, which takes the request's fetch candidates with
-    /// it, then the selected worker's load and the non-max-overlap observation.
-    fn into_response(
-        self,
-        request: &mut SchedulingRequest,
-    ) -> (
-        SchedulingResponse,
-        AdvisoryWorkerLoad,
-        Option<NonMaxOverlapSelection>,
-    ) {
-        let Self {
-            selection,
-            selection_trace,
-            selected_worker_tiers,
-            selected_worker_load,
-            non_max_overlap_selection,
-        } = self;
-        let response = SchedulingResponse {
+    /// The response for this selection, which takes the request's fetch candidates with it.
+    fn into_response(self, request: &mut SchedulingRequest) -> SchedulingResponse {
+        let selection = self.selection;
+        SchedulingResponse {
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             max_raw_cached_tokens: selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selection.selected_raw_cached_tokens,
-            selected_worker_tiers,
+            selected_worker_tiers: self.selected_worker_tiers,
             kv_copy_source: request.kv_copy_source(selection.worker, selection.kv_transfer_source),
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selection.potential_decode_blocks,
-            selection_trace,
+            selection_trace: self.selection_trace,
             log_fields: selection.log_fields,
-        };
-        (response, selected_worker_load, non_max_overlap_selection)
+        }
     }
 }
 
@@ -3108,10 +3093,9 @@ impl<
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, None, |actor, request, _| {
             let selected = actor.select_worker_for_request(request, false, None)?;
-            let (response, selected_worker_load, _) = selected.into_response(request);
             Ok(AdvisorySchedulingResponse {
-                selected_worker_load,
-                response,
+                selected_worker_load: selected.selected_worker_load,
+                response: selected.into_response(request),
             })
         })
     }
@@ -3159,7 +3143,7 @@ impl<
             self.reject_due_time_passed(context.class_index, request);
             return Admission::Refused;
         }
-        let selected = match self.select_worker_for_request(request, true, prepared) {
+        let mut selected = match self.select_worker_for_request(request, true, prepared) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -3168,7 +3152,8 @@ impl<
             }
         };
 
-        let (response, _, non_max_overlap_selection) = selected.into_response(request);
+        let non_max_overlap_selection = selected.non_max_overlap_selection.take();
+        let response = selected.into_response(request);
 
         if !request.mode.is_tracked() {
             if context
