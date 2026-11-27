@@ -3,6 +3,7 @@
 
 //! Dispatching queued requests: which lane heads may go now, and the drain that admits them.
 
+use super::refresh::RefreshEnd;
 use super::*;
 
 /// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, required
