@@ -45,7 +45,9 @@ fn gate_allows(
 /// One pass over the ready lane heads, asking whether each may dispatch now: the gate
 /// first, then capacity for a class that queues on it. Load is read per head, so a head
 /// sees the bookings made earlier in the drain. The ranks past the host's reject
-/// thresholds are recorded at most once per pass, when a head first needs them.
+/// thresholds are recorded at most once per pass, when the first head with an exclusive
+/// affinity target needs them: `QueueEligibility::with` judges only those heads against
+/// them, whichever lane they wait in.
 struct DispatchPass<'a, P: SequencePublisher, C> {
     slots: &'a ActorSlots<P>,
     eligibility: &'a QueueEligibility,
@@ -53,7 +55,6 @@ struct DispatchPass<'a, P: SequencePublisher, C> {
     gate: Option<&'a dyn DispatchGate>,
     /// The earliest recheck a held head asked for.
     gate_recheck_at: &'a Cell<Option<Instant>>,
-    /// The host's reject thresholds, judged only while an affinity lane waits.
     reject: Option<&'a RejectThresholdsProvider>,
     full_ranks: &'a mut FullRankCounts,
     /// Whether this pass has recorded `full_ranks` yet.
@@ -86,7 +87,9 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> DispatchPass<'_, P, C>
                 LaneCheck::Blocked(BlockReason::SharedCapacity)
             };
         }
-        if !self.full_ranks_fresh {
+        let exclusive_target =
+            self.eligibility.exclusive && queued.request.affinity_target.is_some();
+        if exclusive_target && !self.full_ranks_fresh {
             let rejecting = reset_full_ranks(self.full_ranks, reject_limits(self.reject));
             if let Some(full_ranks) = rejecting {
                 self.slots
@@ -169,11 +172,7 @@ impl<
             workers: &self.workers_with_configs,
             gate,
             gate_recheck_at: &gate_recheck_at,
-            reject: self
-                .pending
-                .has_affinity_backlog()
-                .then_some(self.reject_thresholds.as_ref())
-                .flatten(),
+            reject: self.reject_thresholds.as_ref(),
             full_ranks: &mut self.gate_full_ranks,
             full_ranks_fresh: false,
             class_room: &mut self.class_room,
@@ -328,6 +327,7 @@ impl<
             let mut queued = candidate.into_payload();
             // The gate's `Go` target replaces the soft affinity target unless the caller
             // pinned a worker; the gate learns the head left the queue once, here.
+            let mut retargeted = false;
             if let Some(gate) = &gate
                 && !released
             {
@@ -335,7 +335,12 @@ impl<
                 if queued.request.pinned_worker.is_none()
                     && let Some(target) = target
                 {
-                    queued.request.affinity_target = Some(target.into());
+                    let target = Some(target.into());
+                    // Under an exclusive selector the caller's rows hold its own target's
+                    // ranks alone.
+                    retargeted =
+                        self.eligibility.exclusive && queued.request.affinity_target != target;
+                    queued.request.affinity_target = target;
                 }
                 let policy_class = &self.profile.class(class_index).name;
                 gate.dispatched(
@@ -343,7 +348,9 @@ impl<
                     queued.request.pinned_worker.or(target),
                 );
             }
-            let prepared = self.turn_prepared.take_for(queued.enqueue_turn, refreshed);
+            let prepared = self
+                .turn_prepared
+                .take_for(queued.enqueue_turn, refreshed || retargeted);
             // The due time can pass during the refresh. Admission checks it again before
             // selection and before booking or delivery.
             let admission = if released {

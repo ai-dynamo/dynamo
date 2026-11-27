@@ -3275,6 +3275,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn keyed_exclusive_affinity_head_falls_back_from_a_target_past_reject_thresholds() {
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        // A rank past 32 tokens, half its prefill budget, is over the class limit and over
+        // the host's reject threshold.
+        let (queue, _slots, _configs) = make_queue_with_profile_sender_and_reject(
+            2,
+            16,
+            64,
+            PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Fcfs),
+            Some(Arc::new(half_budget_reject)),
+        );
+        let (mut held, held_rx) = make_request("held-a", 48);
+        held.pinned_worker = Some(a);
+        queue.enqueue(held).await;
+        assert_eq!(held_rx.await.unwrap().unwrap().best_worker, a);
+
+        // The classifier's lane key takes the head out of the affinity lanes. Its target
+        // is host-full, so it may go to the idle worker.
+        let (mut keyed, mut keyed_rx) = make_request("keyed", 16);
+        keyed.affinity_target = Some(a.into());
+        in_session(&mut keyed, "session");
+        queue.enqueue_keyed_by_session_for_test(keyed).await;
+        assert_eq!(keyed_rx.try_recv().unwrap().unwrap().best_worker, b);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
     /// A gate that holds every head without a deadline and counts how often it is asked.
     struct CountingHoldGate {
         checks: AtomicUsize,
@@ -3862,6 +3890,35 @@ mod tests {
             rx.await.unwrap().unwrap().best_worker,
             WorkerWithDpRank::new(1, 0)
         );
+        assert_eq!(prepared_queue.prepared_selections(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_are_rebuilt_when_the_gate_changes_an_exclusive_affinity_target() {
+        /// A gate that sends every head to one worker.
+        struct TargetGate(WorkerWithDpRank);
+
+        impl DispatchGate for TargetGate {
+            fn check(&self, _head: &DispatchHead<'_>) -> DispatchDecision {
+                DispatchDecision::Go {
+                    target: Some(self.0),
+                }
+            }
+        }
+
+        let prepared_queue = make_prepared_queue_with(2, 1, true, Box::new(LeastLoaded));
+        let queue = &prepared_queue.queue;
+        let gate_target = WorkerWithDpRank::new(1, 0);
+        assert!(queue.install_dispatch_gate(Arc::new(TargetGate(gate_target))));
+
+        // Preparation held only worker 0's rows. Both workers are idle, and the gate sends
+        // the request to worker 1 in the turn it arrives.
+        let (mut request, rx) = make_request("request", 16);
+        request.affinity_target = Some(dynamo_session_affinity::WorkerAffinityTarget::new(0, None));
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        enqueue_prepared(queue, request, prepared).await;
+        assert_eq!(rx.await.unwrap().unwrap().best_worker, gate_target);
         assert_eq!(prepared_queue.prepared_selections(), 0);
     }
 
