@@ -11,10 +11,12 @@ For hybrid models (attention plus Mamba, Gated DeltaNet, KDA or short-conv layer
 `DYN_SGLANG_RECURRENT_KV_EVENTS=1` makes the worker ask SGLang to publish one
 tagged `BlockStored` per cached recurrent state and a tagged `BlockRemoved` when
 the state is evicted (`KVEventsConfig.publish_recurrent_checkpoints`,
-sgl-project/sglang#51647). The router then credits the worker only up to its
-deepest checkpoint instead of every cached attention page. The default remains
-attention-only publication; enable the option only after every router and event
-consumer understands `kv_cache_group` events.
+sgl-project/sglang#51647). SGLang keeps one recurrent group, so the worker's
+join of group events publishes each state as one `recurrent_checkpoint` event,
+exactly as it does for vLLM's three groups. The router then credits the worker
+only up to its deepest checkpoint instead of every cached attention page. The
+default remains attention-only publication; enable the option only after every
+router and event consumer understands `kv_cache_group` events.
 
 The option needs `--kv-events-config` with a ZMQ publisher, the radix cache, the
 local indexer, a model SGLang serves with its Mamba radix-cache component, and a

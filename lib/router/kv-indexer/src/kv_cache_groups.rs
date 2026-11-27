@@ -1425,8 +1425,10 @@ mod tests {
     }
 
     /// SGLang publishes `format=dynamo` map events: untagged attention pages with
-    /// token ids, and (sgl-project/sglang#51647) one tagged Mamba store per cached
-    /// state at the node's last page hash, plus a tagged removal on tombstone.
+    /// token ids, and (sgl-project/sglang#51647) one `kind=mamba` store per cached
+    /// state at the node's last page hash, plus a removal on tombstone. SGLang has
+    /// a single recurrent group, so the worker-side join publishes each of them
+    /// as one `recurrent_checkpoint` event without waiting for other groups.
     fn sglang_stream() -> Vec<dynamo_kv_events::zmq_wire::RawKvEvent> {
         use dynamo_kv_events::zmq_wire::decode_event_batch;
 
@@ -1486,7 +1488,7 @@ mod tests {
         assert_eq!(pages.blocks[3].block_hash, ExternalSequenceBlockHash(14));
 
         let presence = KvCacheGroupResidency::new();
-        presence.declare_layout(owner, &[1], 1);
+        presence.declare_layout(owner, true, 1);
         let store = normalizer
             .normalize(store, 2, worker)
             .unwrap()
@@ -1494,6 +1496,17 @@ mod tests {
             .unwrap();
         assert!(!store.targets_primary().unwrap());
         assert_eq!(store.residency_owner().unwrap(), owner);
+        let tag = store.kv_cache_group.expect("joined checkpoint is tagged");
+        assert_eq!(tag.kind, KvCacheGroupKind::RecurrentCheckpoint);
+        assert_eq!(tag.alignment_blocks, Some(1));
+        let KvCacheEventData::Stored(checkpoint) = &store.event.data else {
+            panic!("checkpoint store");
+        };
+        assert_eq!(checkpoint.blocks.len(), 1);
+        assert_eq!(
+            checkpoint.blocks[0].block_hash,
+            ExternalSequenceBlockHash(14)
+        );
         presence.apply(&store);
         let checkpoint_at = |hash: u64| {
             let mut view = presence.read_view();
@@ -1534,7 +1547,7 @@ mod tests {
             .with_recurrent_groups(Some(vec![1]))
             .with_recurrent_alignment_blocks(4);
         let presence = KvCacheGroupResidency::new();
-        presence.declare_layout(owner, &[1], 4);
+        presence.declare_layout(owner, true, 4);
         let store = normalizer
             .normalize(store, 1, worker)
             .unwrap()

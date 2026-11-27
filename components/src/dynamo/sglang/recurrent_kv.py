@@ -8,8 +8,11 @@ can resume a cached prefix only where SGLang's radix cache kept a recurrent
 state. With ``KVEventsConfig.publish_recurrent_checkpoints`` (sgl-project/sglang#51647)
 SGLang publishes one tagged ``BlockStored`` per cached state, keyed by the hash
 of the node's last page, and a tagged ``BlockRemoved`` when the state is evicted.
-The router records those checkpoints per worker and credits a hybrid worker only
-up to its deepest checkpoint.
+The worker's event normalizer joins the engine's recurrent groups and publishes
+one ``recurrent_checkpoint`` event per complete checkpoint; SGLang has a single
+group, so every state event becomes one checkpoint event. The router records
+those checkpoints per worker and credits a hybrid worker only up to its deepest
+checkpoint.
 
 This module decides whether a worker may enable that publication and describes
 the resulting layout to the router. The contract mirrors vLLM's
