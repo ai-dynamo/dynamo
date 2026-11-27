@@ -376,8 +376,12 @@ mod tests {
             };
             release_tx.send(()).unwrap();
             let context = Arc::new(Controller::default());
-            let decode: ManyOut<Annotated<LLMEngineOutput>> =
-                ResponseStream::new(Box::pin(stream::pending()), context.clone());
+            // Like the routing host's stream, decode ends once it is stopped.
+            let stopped = context.clone();
+            let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+                Box::pin(stream::pending().take_until(async move { stopped.stopped().await })),
+                context.clone(),
+            );
             match completion
                 .forward_decode(
                     async { Ok(decode) },

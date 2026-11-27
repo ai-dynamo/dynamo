@@ -3,7 +3,7 @@
 
 //! Keep consuming prefill while decode runs, and return failures to the caller.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass},
@@ -24,6 +24,10 @@ use dynamo_http_server::metrics::request_deadline_exceeded;
 
 /// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;
+
+/// Bounds the wait for stopped decode to end after a prefill failure. The
+/// routing host's stream ends as soon as it sees the stop.
+const DECODE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
@@ -105,6 +109,7 @@ impl PrefillTask {
     }
 
     /// Observe prefill failures both during decode dispatch and while streaming.
+    /// A failure while decode streams stops decode and waits for it to end first.
     /// Successful decode terminals wait only for required prefill metadata.
     /// After success, drain decode and await prefill cleanup; late failures are logged.
     /// `output` sends prefill's output into the stream as soon as prefill
@@ -174,6 +179,10 @@ impl PrefillTask {
                     Err(error) => {
                         request_context.stop_generating();
                         stream_context.stop_generating();
+                        // An ended stream must not be polled again.
+                        if !decode_ended {
+                            drain_stopped_decode(&mut response).await;
+                        }
                         yield Annotated::from_err(error);
                         return;
                     }
@@ -202,6 +211,7 @@ impl PrefillTask {
                             Err(error) => {
                                 request_context.stop_generating();
                                 stream_context.stop_generating();
+                                drain_stopped_decode(&mut response).await;
                                 yield Annotated::from_err(error);
                                 return;
                             }
@@ -236,6 +246,10 @@ impl PrefillTask {
                                 Err(error) => {
                                     request_context.stop_generating();
                                     stream_context.stop_generating();
+                                    // Bare EOF means decode already ended.
+                                    if output.is_some() {
+                                        drain_stopped_decode(&mut response).await;
+                                    }
                                     yield Annotated::from_err(error);
                                     return;
                                 }
@@ -261,6 +275,26 @@ impl PrefillTask {
             }
         };
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+/// Wait for stopped decode to end before a prefill failure reaches the caller.
+///
+/// Decode's routing host releases decode's booking and classifier lifecycle,
+/// both keyed by the request ID, only when its stream ends. Migration retries a
+/// prefill failure under the same request ID and keeps this stream until that
+/// retry dispatches, so decode must end first or the retry collides with it.
+async fn drain_stopped_decode(response: &mut ManyOut<Annotated<LLMEngineOutput>>) {
+    let drained = tokio::time::timeout(DECODE_DRAIN_TIMEOUT, async {
+        while response.next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            request_id = %response.context().id(),
+            timeout_secs = DECODE_DRAIN_TIMEOUT.as_secs(),
+            "Stopped decode did not end after a prefill failure; a retry may find its booking"
+        );
     }
 }
 
@@ -333,6 +367,28 @@ mod tests {
         ))
     }
 
+    /// Decode as its routing host returns it: the stream yields `items`, then
+    /// ends only once stopped, releasing decode's booking (the returned flag).
+    fn decode_until_stopped(
+        context: Arc<Controller>,
+        items: Vec<Annotated<LLMEngineOutput>>,
+    ) -> (
+        ManyOut<Annotated<LLMEngineOutput>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream_released = released.clone();
+        let stream_context = context.clone();
+        let decode = async_stream::stream! {
+            for item in items {
+                yield item;
+            }
+            stream_context.stopped().await;
+            stream_released.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        (ResponseStream::new(Box::pin(decode), context), released)
+    }
+
     #[tokio::test]
     async fn failure_interrupts_pending_decode_dispatch() {
         let (tx, task) = pending_prefill();
@@ -357,8 +413,7 @@ mod tests {
     async fn failure_interrupts_wait_for_decode_tokens() {
         let (tx, task) = pending_prefill();
         let context = Arc::new(Controller::default());
-        let decode: ManyOut<Annotated<LLMEngineOutput>> =
-            ResponseStream::new(Box::pin(stream::pending()), context.clone());
+        let (decode, _) = decode_until_stopped(context.clone(), Vec::new());
         let mut response = task
             .forward_decode(
                 async { Ok(decode) },
@@ -382,6 +437,80 @@ mod tests {
         );
         assert!(context.is_stopped());
         assert!(response.next().await.is_none());
+    }
+
+    /// A prefill failure surfaces only after stopped decode has ended, so decode's
+    /// booking under the request ID is gone before Migration retries under that ID.
+    #[tokio::test]
+    async fn prefill_failure_ends_decode_before_surfacing() {
+        let token = || {
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            })
+        };
+        for (output, items) in [
+            (PrefillNeed::None, vec![token()]),
+            (PrefillNeed::BeforeFirst, vec![token()]),
+            (
+                PrefillNeed::BeforeLast,
+                vec![token(), Annotated::from_data(LLMEngineOutput::length())],
+            ),
+        ] {
+            let (tx, task) = pending_prefill();
+            let context = Arc::new(Controller::default());
+            let (decode, released) = decode_until_stopped(context.clone(), items);
+            let mut response = task
+                .forward_decode(
+                    async { Ok(decode) },
+                    context.clone(),
+                    output,
+                    Arc::new(Controller::default()),
+                )
+                .await
+                .unwrap();
+            // Take what decode has streamed, until only prefill is awaited.
+            while let Some(item) = response.next().now_or_never() {
+                assert!(item.is_some_and(|item| item.err().is_none()), "{output:?}");
+            }
+            tx.send(failure()).unwrap();
+            let item = tokio::time::timeout(Duration::from_secs(1), response.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(item.err().is_some(), "{output:?}");
+            assert!(
+                released.load(std::sync::atomic::Ordering::SeqCst),
+                "{output:?}: decode must end before the prefill failure surfaces"
+            );
+            assert!(response.next().await.is_none());
+        }
+    }
+
+    /// A decode stream that ignores the stop delays a prefill failure by at most
+    /// the drain bound; it never hides the failure.
+    #[tokio::test(start_paused = true)]
+    async fn prefill_failure_surfaces_when_decode_ignores_stop() {
+        let (tx, task) = pending_prefill();
+        let context = Arc::new(Controller::default());
+        let decode: ManyOut<Annotated<LLMEngineOutput>> =
+            ResponseStream::new(Box::pin(stream::pending()), context.clone());
+        let mut response = task
+            .forward_decode(
+                async { Ok(decode) },
+                context.clone(),
+                PrefillNeed::None,
+                Arc::new(Controller::default()),
+            )
+            .await
+            .unwrap();
+        assert!(response.next().now_or_never().is_none());
+        tx.send(failure()).unwrap();
+        let started = tokio::time::Instant::now();
+        let item = response.next().await.unwrap();
+        assert!(item.err().is_some());
+        assert_eq!(started.elapsed(), DECODE_DRAIN_TIMEOUT);
+        assert!(context.is_stopped());
     }
 
     #[tokio::test]
@@ -605,8 +734,7 @@ mod tests {
 
         let (tx, task) = pending_prefill();
         let context = Arc::new(Controller::default());
-        let decode: ManyOut<Annotated<LLMEngineOutput>> =
-            ResponseStream::new(Box::pin(stream::pending()), context.clone());
+        let (decode, _) = decode_until_stopped(context.clone(), Vec::new());
         let response = task.forward_decode(
             async { Ok(decode) },
             context.clone(),
