@@ -710,6 +710,7 @@ fn build_llm_metric_annotation(
     mm_counts: MultimodalCounts,
     image_tokens: Option<usize>,
 ) -> LLMMetricAnnotation {
+    let workers = tracker.map(RequestTracker::workers).unwrap_or_default();
     LLMMetricAnnotation {
         input_tokens,
         output_tokens,
@@ -719,16 +720,12 @@ fn build_llm_metric_annotation(
         video_count: mm_counts.video,
         audio_count: mm_counts.audio,
         image_tokens,
-        prefill_worker_id: tracker.and_then(|t| t.prefill_worker_id()),
-        prefill_dp_rank: tracker.and_then(|t| t.prefill_dp_rank()),
-        prefill_worker_type: tracker
-            .and_then(|t| t.prefill_worker_type())
-            .map(String::from),
-        decode_worker_id: tracker.and_then(|t| t.decode_worker_id()),
-        decode_dp_rank: tracker.and_then(|t| t.decode_dp_rank()),
-        decode_worker_type: tracker
-            .and_then(|t| t.decode_worker_type())
-            .map(String::from),
+        prefill_worker_id: workers.prefill.id,
+        prefill_dp_rank: workers.prefill.dp_rank,
+        prefill_worker_type: workers.prefill.worker_type.map(String::from),
+        decode_worker_id: workers.decode.id,
+        decode_dp_rank: workers.decode.dp_rank,
+        decode_worker_type: workers.decode.worker_type.map(String::from),
         tokenize_latency: tracker.and_then(|t| t.tokenize_latency()),
         detokenize_total_latency: tracker.and_then(|t| t.detokenize_total_latency()),
         detokenize_count: tracker.map(|t| t.detokenize_count()),
