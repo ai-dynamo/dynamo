@@ -605,7 +605,7 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
 }
 
 #[test]
-fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
+fn unseeded_minimum_picker_shares_selections_across_all_cheapest_ranks() {
     let (workers, mut request) = fixture(8, 17);
     let policy = default_policy(
         SelectionConfig::from(&KvRouterConfig {
@@ -616,7 +616,7 @@ fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
         }),
         "prefill",
     );
-    for best in [[0, 1], [2, 5], [6, 7]] {
+    for best in [&[0, 1][..], &[2, 5], &[6, 7], &[0, 1, 2, 3, 4, 5, 6, 7]] {
         for (worker, load) in &mut request.worker_loads {
             load.active_requests = if best.contains(&worker.worker_id) {
                 0
@@ -626,12 +626,23 @@ fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
             load.active_decode_blocks = 0;
             load.additional_active_blocks = 0;
         }
-        for _ in 0..32 {
+        let mut counts = HashMap::new();
+        fastrand::seed(72365);
+        for _ in 0..8192 {
             let selected = policy
                 .select_worker(support::selection_input(&workers, &request, 16))
                 .unwrap();
             assert!(best.contains(&selected.worker.worker_id));
+            *counts.entry(selected.worker).or_insert(0usize) += 1;
         }
+        let rank_count = best.len() * 2;
+        let expected = 8192 / rank_count;
+        assert_eq!(counts.len(), rank_count);
+        assert!(
+            counts
+                .values()
+                .all(|&count| count.abs_diff(expected) < expected / 4)
+        );
     }
 }
 

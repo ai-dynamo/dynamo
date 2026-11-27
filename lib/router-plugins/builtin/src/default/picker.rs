@@ -103,10 +103,21 @@ impl WorkerPicker for DefaultPicker {
             return Ok(0);
         }
         if self.temperature == 0.0 && self.rng.is_none() {
-            let mut best_row = 0;
-            let mut best_cost = f64::INFINITY;
-            let mut ties = 0;
-            for (row, candidate) in candidates.iter().enumerate() {
+            // Sample an initial group of equally loaded ranks with one draw. A cold pool
+            // can have every rank tied. Later ties use ordinary reservoir sampling.
+            let mut best_cost = candidates[0].cost();
+            let mut prefix = 1;
+            while prefix < candidates.len() && candidates[prefix].cost() == best_cost {
+                prefix += 1;
+            }
+            let mut ties = prefix;
+            let mut best_row = if prefix == 1 {
+                0
+            } else {
+                fastrand::usize(..prefix)
+            };
+            for (i, candidate) in candidates[prefix..].iter().enumerate() {
+                let row = prefix + i;
                 let cost = candidate.cost();
                 if cost < best_cost {
                     best_row = row;
