@@ -14,7 +14,7 @@ and Mockers do not depend on testkit. Backend fixtures live in `tests/support/`
 and are local to the integration suite, rather than a public fixture API.
 
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
-The two CPU files separate direct engine calls from child-process startup,
+The CPU files separate direct engine calls from child-process startup,
 discovery and shutdown, making each setup easier to follow and run independently.
 
 ## Integration tests
