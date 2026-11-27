@@ -9299,10 +9299,9 @@ impl
         )?;
 
         // Check if embeddings are provided - skip tokenization path
-        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+        let annotations = if request.inner.prompt_embeds.is_some() {
             // Skip tokenization for embeddings
             builder.token_ids(vec![]); // Empty token IDs
-            builder.prompt_embeds(Some(prompt_embeds.clone()));
             // No token annotations
             HashMap::new()
         } else {
@@ -9323,6 +9322,8 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        // The builder clones its fields. Move the encoded tensor directly to the worker request.
+        common_request.prompt_embeds = request.inner.prompt_embeds.take();
         // Backends can distinguish legacy completion defaults from chat defaults.
         let extra_args = common_request
             .extra_args
