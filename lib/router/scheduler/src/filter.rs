@@ -105,7 +105,6 @@ impl<'a> RoutingEligibility<'a> {
         self
     }
 
-    /// Whether eligibility is narrowed to an affinity target.
     #[inline]
     pub(crate) fn has_affinity_target(&self) -> bool {
         self.affinity_target.is_some()

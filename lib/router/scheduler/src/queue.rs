@@ -93,7 +93,6 @@ struct ClassQueueCounters {
 }
 
 impl ClassQueueCounters {
-    /// Counts an entry that entered the class's queue.
     fn add(&self, snapshot: QueueSnapshot) {
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
@@ -102,7 +101,6 @@ impl ClassQueueCounters {
             .fetch_add(snapshot.cached_tokens, AtomicOrdering::Relaxed);
     }
 
-    /// Uncounts an entry that left the class's queue.
     fn sub(&self, snapshot: QueueSnapshot) {
         debug_assert!(self.pending_count.load(AtomicOrdering::Relaxed) > 0);
         debug_assert!(
@@ -231,7 +229,7 @@ const AFFINITY_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// | `TurnPrepared::drop_judged_load` | reject limits | no await since | builds load |
 /// | `TurnPrepared::take_for` | | same turn, no refreshed overlap | builds rows and load |
 /// | `adopt_prepared_load` | limits, overlap, writes, table version | see there | builds load |
-/// | `adopt_prepared_rows` | generation, availability, overload | see there | builds rows |
+/// | `adopt_prepared_rows` | generation, availability, overload | those and the configuration unchanged; no full rank that needs fresh rows | builds rows |
 /// | `select_with_policy` | the policy's inputs | same inputs, no filters | builds rows |
 ///
 /// "Builds load" is the actor projecting every rank itself. When preparation starts to read
@@ -2469,7 +2467,8 @@ impl<
                             continue;
                         }
                         AdmissionLifecycleState::Booking(booking) => (booking, false),
-                        _ => continue,
+                        AdmissionLifecycleState::Unarmed { .. }
+                        | AdmissionLifecycleState::Disarmed => continue,
                     }
                 }
                 SchedulerCleanupTarget::Booking(booking) => (booking, false),
@@ -2496,7 +2495,7 @@ impl<
                     %attempt_id,
                     expired,
                     %error,
-                    "Failed to release scheduler booking"
+                    "Failed to release scheduler booking from the cleanup queue"
                 ),
             }
         }
@@ -7224,6 +7223,10 @@ mod tests {
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
             })
+        );
+        assert_eq!(
+            (queue.pending_count(), queue.pending_isl_tokens()),
+            (5, 320)
         );
     }
 

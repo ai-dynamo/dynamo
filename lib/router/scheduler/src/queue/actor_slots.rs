@@ -40,7 +40,6 @@ impl<P: SequencePublisher + 'static> ActorSlots<P> {
         }
     }
 
-    /// Book `request` on its rank.
     pub(super) fn add_request_admitted(
         &self,
         request: SequenceRequest,
