@@ -24,7 +24,7 @@ use dynamo_scheduler::host::{
     CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
     HostReplicaChannels, HostReplicaSyncFactory, HostReplication, HostTelemetry, KvEventIngress,
     KvIndexSource, RejectThresholdsProvider, SchedulerLoadSink, SelectionHost, SelectionPartition,
-    WorkerRequest,
+    WorkerRequest, WorkerSelectionPolicyFactory,
 };
 use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, BusyThresholds, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy,
@@ -129,6 +129,15 @@ impl BenchHost {
         busy: BusyThresholds,
         params: &WorkloadParams,
     ) -> Result<Self> {
+        Self::start_with_picker(router, busy, params, None).await
+    }
+
+    pub async fn start_with_picker(
+        router: &KvRouterConfig,
+        busy: BusyThresholds,
+        params: &WorkloadParams,
+        picker: Option<WorkerSelectionPolicyFactory>,
+    ) -> Result<Self> {
         check_modeled(router)?;
         let workers = workers(params);
         let threads = router.router_event_threads as usize;
@@ -187,9 +196,8 @@ impl BenchHost {
         let channels: HostReplicaSyncFactory =
             Arc::new(move |_| slot.lock().ok().and_then(|mut channels| channels.take()));
 
-        // No factory is set, so the builder resolves the worker-selection and hint
-        // policies the config names from the registry, as the frontend's catalog does.
-        let service = SelectionServiceBuilder::new(
+        // Resolve policies through the registry unless the benchmark supplies a picker factory.
+        let builder = SelectionServiceBuilder::new(
             router.clone(),
             WorkerType::Aggregated,
             plugin_registry()?,
@@ -212,10 +220,12 @@ impl BenchHost {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             },
             hints: HostHints::default(),
-        })
-        .build()
-        .await
-        .context("build selection service")?;
+        });
+        let builder = match picker {
+            Some(picker) => builder.worker_selection_policy_factory(picker),
+            None => builder,
+        };
+        let service = builder.build().await.context("build selection service")?;
         let service = Arc::new(service);
         let partition = service
             .core()

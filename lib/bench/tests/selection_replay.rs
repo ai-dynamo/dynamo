@@ -5,6 +5,9 @@
 #[path = "../kv_router/selection_replay/corpus.rs"]
 mod corpus;
 #[allow(dead_code)]
+#[path = "../kv_router/selection_replay/decode_progress.rs"]
+mod decode_progress;
+#[allow(dead_code)]
 #[path = "../kv_router/selection_replay/engine.rs"]
 mod engine;
 #[allow(dead_code)]
@@ -18,6 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use corpus::{Corpus, TraceFormat, WorkloadParams};
+use decode_progress::ProgressMode;
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use dynamo_kv_router::config::KvRouterConfig;
 use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
@@ -52,6 +56,15 @@ fn params(trace_block_size: usize, lanes: usize) -> WorkloadParams {
 }
 
 fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> engine::RunResult {
+    replay_with_progress(corpus, mode, queue_threshold, None)
+}
+
+fn replay_with_progress(
+    corpus: &Arc<Corpus>,
+    mode: Mode,
+    queue_threshold: Option<f64>,
+    decode_progress: Option<ProgressMode>,
+) -> engine::RunResult {
     let config = RunConfig {
         mode,
         // Also the slack saturation gives engine actions; keep it small.
@@ -69,10 +82,34 @@ fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> eng
         issuer_cpus: Vec::new(),
         engine_issuers: 2,
         prep_threads: 1,
+        decode_progress,
         perf_ctl_fifo: None,
         perf_ack_fifo: None,
     };
     engine::run(corpus, &config).unwrap()
+}
+
+#[test]
+fn decode_progress_probe_updates_and_reads_without_changing_placements() {
+    let corpus =
+        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, 32), 4).unwrap());
+    let [off, collect, read] =
+        [ProgressMode::Off, ProgressMode::Collect, ProgressMode::Read].map(|mode| {
+            let result =
+                replay_with_progress(&corpus, Mode::Fixed { scale: 20.0 }, None, Some(mode));
+            assert_eq!(result.failed, 0, "{mode:?}: {:?}", result.failure_samples);
+            assert_eq!(result.admitted, result.window_requests);
+            let progress = result.decode_progress.unwrap();
+            if mode.collects() {
+                assert_eq!(progress.updates, result.cache.decode_blocks);
+            }
+            progress
+        });
+    assert_eq!(off.placement_digest, collect.placement_digest);
+    assert_eq!(off.placement_digest, read.placement_digest);
+    assert_eq!((off.updates, off.reads, collect.reads), (0, 0, 0));
+    assert!(collect.updates > 0 && read.updates > 0);
+    assert!(read.available_reads > 0 && read.reads >= read.available_reads);
 }
 
 #[test]

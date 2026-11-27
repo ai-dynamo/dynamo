@@ -6,6 +6,8 @@
 
 #[path = "selection_replay/corpus.rs"]
 mod corpus;
+#[path = "selection_replay/decode_progress.rs"]
+mod decode_progress;
 #[path = "selection_replay/engine.rs"]
 mod engine;
 #[path = "selection_replay/host.rs"]
@@ -26,6 +28,7 @@ use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt};
 use serde::Serialize;
 
 use corpus::{Corpus, Omitted, WorkloadParams};
+use decode_progress::ProgressMode;
 use engine::{Limits, Mode, RunConfig, RunResult};
 use host::router_config;
 
@@ -110,6 +113,10 @@ struct Args {
     engine_issuers: usize,
     #[arg(long, default_value_t = 2)]
     prep_threads: usize,
+
+    /// Use the fixed-placement decode-progress probe in one of three modes.
+    #[arg(long, value_enum)]
+    decode_progress: Option<ProgressMode>,
 
     #[arg(long, default_value = "selection_replay_result.json")]
     result_json: PathBuf,
@@ -236,6 +243,7 @@ fn main() -> Result<()> {
             issuer_cpus,
             engine_issuers: args.engine_issuers,
             prep_threads: args.prep_threads,
+            decode_progress: args.decode_progress,
             perf_ctl_fifo: args.perf_ctl_fifo.clone(),
             perf_ack_fifo: args.perf_ack_fifo.clone(),
         };

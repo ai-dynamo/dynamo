@@ -85,6 +85,42 @@ sha256sum traces.jsonl  # 954157040cbae47fef3bec70532bdb3406c75ed894e207e502461d
 
 Mooncake JSONL traces also work (`--trace-format mooncake --trace-block-size N`).
 
+## Decode Progress Overhead
+
+Use `--decode-progress off`, `collect`, or `read` to measure runtime costs on
+the same saved corpus. All three modes use a probe picker that selects each
+conversation lane's fixed rank, as the corpus's mock engines do. The probe
+expects the built-in worker-selection configuration and no busy thresholds.
+Omit the flag to replay using the configured picker.
+
+| Mode | Booking update at each output block | Complete progress reads per pick |
+|---|---|---|
+| `off` | Disabled | 0 |
+| `collect` | Enabled | 0 |
+| `read` | Enabled | 1, for the rank the picker selects |
+
+The engine issuers complete the prefill mark before submitting progress through
+the native booking update. The cadence is one update per `block_size` output
+tokens. A synthetic output cap shared by all requests covers the corpus. All
+three modes do the same coverage bookkeeping. The read mode checks whether a
+complete summary is available for the selected rank.
+
+Compare admission P99 and admitted requests per second. Fixed mode on Linux
+also reports `run.window.process_cpu_ns` across replay and router threads, and
+`run.window.process_cpu_wall_ns` for the sampler interval. Use their ratio for
+whole-process CPU utilization. Use runs that kept up and booked the same
+requests and ranks. Check the corpus and placement digests, the replay's
+decode-block counts, and `run.decode_progress` for update and read coverage.
+The placement digest covers window bookings. The progress counters include
+warmup. Report the offered rate and worker count alongside the results.
+
+```bash
+for progress in off collect read; do
+  selection_replay_bench --load-corpus corpus.rmp --target-rate 1000 \
+    --decode-progress "$progress" --result-json "progress-$progress.json"
+done
+```
+
 ## Modes
 
 **Fixed** (`--mode fixed`): wall time is trace time divided by `--time-scale`, or
