@@ -1112,6 +1112,43 @@ mod tests {
     #[case("all_groups")]
     #[case("last_rank")]
     #[tokio::test]
+    async fn dropped_removal_of_the_last_worker_releases_the_indexer(#[case] removal: &str) {
+        let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        register_worker(&registry, 1, 15557).await.unwrap();
+        let Indexer::Single { primary, .. } = registry.index().indexer(&key).unwrap() else {
+            unreachable!();
+        };
+        let permits = primary.saturate_mutation_queue_for_test().await;
+
+        {
+            let dropped = remove_worker_1(&registry, removal);
+            tokio::pin!(dropped);
+            assert!(matches!(
+                dropped
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            ));
+        }
+        assert!(registry.index().contains(&key));
+        drop(permits);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while registry.index().contains(&key) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a dropped removal of the last worker must still release its indexer");
+        registry.root_cancel_token.cancel();
+    }
+
+    #[rstest::rstest]
+    #[case("worker")]
+    #[case("all_groups")]
+    #[case("last_rank")]
+    #[tokio::test]
     async fn retry_waits_for_a_dropped_removal(#[case] removal: &str) {
         let registry = test_registry();
         let key = RoutingPartitionId::new("test-model", "default");
