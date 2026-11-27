@@ -25,6 +25,18 @@ from dynamo._core import log_message
 _DEFAULT_DYNAMO_LOGGING_CONFIG_PATH = "/opt/dynamo/etc/logging.toml"
 
 
+def _rust_level_name(levelno: int) -> str:
+    # Rust's log_message logs any name other than debug, info, warn and error
+    # at INFO, which would hide CRITICAL records below DYN_LOG=warn.
+    if levelno >= logging.ERROR:
+        return "error"
+    if levelno >= logging.WARNING:
+        return "warn"
+    if levelno >= logging.INFO:
+        return "info"
+    return "debug"
+
+
 class LogHandler(logging.Handler):
     """
     Custom logging handler that sends log messages to the Rust env_logger
@@ -40,7 +52,7 @@ class LogHandler(logging.Handler):
         else:
             module_path = f"{record.module}.{record.funcName}"
         log_message(
-            record.levelname.lower(),
+            _rust_level_name(record.levelno),
             log_entry,
             module_path,
             record.pathname,
