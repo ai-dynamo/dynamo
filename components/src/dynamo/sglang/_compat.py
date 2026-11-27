@@ -565,6 +565,41 @@ def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | N
     return json.dumps(config)
 
 
+@lru_cache(maxsize=1)
+def _kv_events_config_has_recurrent_checkpoints() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "publish_recurrent_checkpoints" in KVEventsConfig.model_fields
+
+
+def kv_events_config_with_recurrent_checkpoints(
+    kv_events_config: str | None, *, enabled: bool
+) -> str | None:
+    """Ask SGLang to publish recurrent-state checkpoint events when opted in.
+
+    sgl-project/sglang#51647 adds ``KVEventsConfig.publish_recurrent_checkpoints``.
+    SGLang 0.5.23 and older reject the unknown field, so the opt-in fails with
+    a clear message there instead of at engine start. Remove the probe when
+    the minimum supported SGLang carries the field.
+    """
+    if not enabled or not kv_events_config:
+        return kv_events_config
+    try:
+        config = json.loads(kv_events_config)
+    except json.JSONDecodeError:
+        return kv_events_config
+    if not isinstance(config, dict) or config.get("publisher", "null") == "null":
+        return kv_events_config
+    if not _kv_events_config_has_recurrent_checkpoints():
+        raise InvalidArgument(
+            "DYN_SGLANG_RECURRENT_KV_EVENTS is set but the installed SGLang "
+            "cannot publish recurrent checkpoints (KVEventsConfig has no "
+            "publish_recurrent_checkpoints; needs sgl-project/sglang#51647)"
+        )
+    config["publish_recurrent_checkpoints"] = True
+    return json.dumps(config)
+
+
 @lru_cache(maxsize=32)
 def _dp_rank_keyword(async_generate: Any) -> str:
     try:
