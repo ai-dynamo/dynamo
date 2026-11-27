@@ -27,21 +27,21 @@ export interface NightlyBuild {
 }
 
 export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [
-  { backend: "sglang", backendVersion: "0.5.23", dynamo: "1.8.0.dev20261125", date: "Nov 25, 2026", tag: "20261125-edd7641", latest: true },
+  { backend: "sglang", backendVersion: "0.5.23", dynamo: "1.8.0.dev20261127", date: "Nov 26, 2026", tag: "20261126-c2dba18", latest: true },
   { backend: "sglang", backendVersion: "0.5.22", dynamo: "1.7.0.dev20261103", date: "Nov 3, 2026", tag: "20261103-e37f0b9" },
   { backend: "sglang", backendVersion: "0.5.21", dynamo: "1.6.0.dev20261018", date: "Oct 18, 2026", tag: "20261018-3763cee" },
-  { backend: "trtllm", backendVersion: "1.4.0rc4", dynamo: "1.8.0.dev20261125", date: "Nov 25, 2026", tag: "20261125-edd7641", latest: true },
+  { backend: "trtllm", backendVersion: "1.4.0rc4", dynamo: "1.8.0.dev20261127", date: "Nov 26, 2026", tag: "20261126-c2dba18", latest: true },
   { backend: "trtllm", backendVersion: "1.4.0rc3", dynamo: "1.8.0.dev20261123", date: "Nov 23, 2026", tag: "20261123-d8a5fba" },
   { backend: "trtllm", backendVersion: "1.4.0rc2", dynamo: "1.7.0.dev20261116", date: "Nov 16, 2026", tag: "20261116-b20cd50" },
-  { backend: "vllm", backendVersion: "0.34.0", dynamo: "1.8.0.dev20261125", date: "Nov 25, 2026", tag: "20261125-edd7641", latest: true },
+  { backend: "vllm", backendVersion: "0.34.0", dynamo: "1.8.0.dev20261127", date: "Nov 26, 2026", tag: "20261126-c2dba18", latest: true },
   { backend: "vllm", backendVersion: "0.33.0", dynamo: "1.8.0.dev20261123", date: "Nov 23, 2026", tag: "20261123-d8a5fba" },
   { backend: "vllm", backendVersion: "0.32.0", dynamo: "1.7.0.dev20261105", date: "Nov 5, 2026", tag: "20261105-2fb3b13" },
 ];
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
+  { version: "1.8.0.dev20261127", date: "Nov 27, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime"] },
   { version: "1.8.0.dev20261126", date: "Nov 26, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime"] },
   { version: "1.8.0.dev20261125", date: "Nov 25, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime"] },
-  { version: "1.8.0.dev20261123", date: "Nov 23, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime"] },
 ];
 
 export default NIGHTLY_BACKEND_BUILDS;
