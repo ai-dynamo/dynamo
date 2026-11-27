@@ -242,7 +242,9 @@ curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen3-0.6B",
        "messages": [{"role": "user", "content": "Hello!"}],
-       "max_tokens": 50}'
+       "chat_template_kwargs": {"enable_thinking": false},
+       "temperature": 0,
+       "max_tokens": 128}'
 ```
 
 ## 故障排除
