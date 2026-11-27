@@ -685,15 +685,39 @@ mod race_tests {
 
             barrier.wait();
             cleanup.join().unwrap();
-            let _lookup = store.join().unwrap();
+            let mut lookup = store.join().unwrap();
 
-            let edge_lengths = index.edge_lengths_for_test();
+            // Cleanup is best effort: a busy gate or a live reference can leave the dead
+            // [6, 7] for a later sweep. [1, 2, 3] stays internal, so [4, 5] stays its child.
+            let reclaimed = vec![edge_topology(
+                &[1, 2, 3],
+                vec![edge_topology(&[4, 5], vec![])],
+            )];
+            let deferred = vec![edge_topology(
+                &[1, 2, 3],
+                vec![
+                    edge_topology(&[4, 5], vec![]),
+                    edge_topology(&[6, 7], vec![]),
+                ],
+            )];
+            let topology = index.edge_topology_for_test();
             assert!(
-                edge_lengths == vec![5] || edge_lengths == vec![2, 3],
-                "unexpected edge lengths: {edge_lengths:?}"
+                topology == reclaimed || topology == deferred,
+                "unexpected topology: {topology:?}"
             );
-            assert_eq!(index.raw_child_edge_count(), edge_lengths.len());
             assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 5);
+            assert_direct_score(&index, &[1, 2, 3, 6, 7], worker, 3);
+
+            index.run_cleanup_for_test();
+            assert_eq!(index.edge_topology_for_test(), reclaimed);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 5);
+
+            apply_direct(
+                &index,
+                &mut lookup,
+                make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]),
+            );
+            assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 3);
         }
     }
 
@@ -1906,7 +1930,7 @@ mod reclamation_tests {
         let mut lookup = direct_lookup();
         apply(&index, &mut lookup, make_store_event(0, &[1, 2, 3]));
         apply(&index, &mut lookup, make_store_event(1, &[1, 9]));
-        // A reader mid-walk holds the leaf, so the drain must leave it linked.
+        // A reader mid-walk holds the leaf, so the drain and the sweep must leave it linked.
         let prefix = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
         let leaf = prefix.child_snapshot(LocalBlockHash(9)).unwrap();
         apply(
@@ -1915,6 +1939,8 @@ mod reclamation_tests {
             make_remove_event_with_parent(1, &[1], &[9]),
         );
         index.drain_pending_unlinks(&mut lookup, None);
+        assert_eq!(dead_node_count(&index), 1);
+        assert_eq!(index.run_cleanup_for_test(), 0);
         assert_eq!(dead_node_count(&index), 1);
 
         drop(leaf);
