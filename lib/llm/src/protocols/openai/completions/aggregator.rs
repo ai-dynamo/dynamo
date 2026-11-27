@@ -512,22 +512,38 @@ mod tests {
     async fn echo_is_prepended_to_the_aggregated_choice() {
         // The text rides the first chunk, the prompt logprobs the final one.
         let mut first = create_test_delta(0, "Hi", None, Some(-0.3));
-        first.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
-            choice_index: 0,
-            text: "Prompt".to_string(),
-            logprobs: None,
-        });
+        {
+            let data = first.data.as_mut().expect("delta data");
+            data.echo = Some(CompletionEcho {
+                choice_index: 0,
+                text: "Prompt".to_string(),
+                logprobs: None,
+            });
+            let logprobs = data.inner.choices[0]
+                .logprobs
+                .as_mut()
+                .expect("chunk logprobs");
+            logprobs.text_offset = vec![6];
+        }
         let mut last = create_test_delta(0, "!", Some("stop".to_string()), Some(-0.7));
-        last.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
-            choice_index: 0,
-            text: String::new(),
-            logprobs: Some(dynamo_protocols::types::Logprobs {
-                tokens: vec!["Prompt".to_string()],
-                token_logprobs: vec![None],
-                top_logprobs: vec![serde_json::Value::Null],
-                text_offset: vec![],
-            }),
-        });
+        {
+            let data = last.data.as_mut().expect("delta data");
+            data.echo = Some(CompletionEcho {
+                choice_index: 0,
+                text: String::new(),
+                logprobs: Some(dynamo_protocols::types::Logprobs {
+                    tokens: vec!["Prompt".to_string()],
+                    token_logprobs: vec![None],
+                    top_logprobs: vec![serde_json::Value::Null],
+                    text_offset: vec![0],
+                }),
+            });
+            let logprobs = data.inner.choices[0]
+                .logprobs
+                .as_mut()
+                .expect("chunk logprobs");
+            logprobs.text_offset = vec![7];
+        }
 
         let response = DeltaAggregator::apply(
             futures::stream::iter(vec![first, last]),
@@ -543,7 +559,6 @@ mod tests {
         assert_eq!(logprobs.tokens, vec!["Prompt", "Hi", "!"]);
         assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.3), Some(-0.7)]);
         assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
-        // Generated offsets (0 in `create_test_delta`) move past the echoed text.
-        assert_eq!(logprobs.text_offset, vec![6, 6]);
+        assert_eq!(logprobs.text_offset, vec![0, 6, 7]);
     }
 }

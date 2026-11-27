@@ -46,6 +46,7 @@ impl NvCreateCompletionRequest {
 pub struct DeltaGenerator {
     state: DeltaGeneratorState,
     echo: Option<EchoState>,
+    text_offsets: HashMap<u32, u32>,
 }
 
 /// What `echo: true` needs to rebuild the prompt side of a choice: the prompt the
@@ -63,6 +64,8 @@ struct EchoState {
     /// Generated text and logprobs held back per choice while its prompt logprobs are
     /// still to come, so the prompt positions precede the generated ones on the wire.
     held: HashMap<u32, (String, Option<dynamo_protocols::types::Logprobs>)>,
+    /// Character length of the prompt's per-token texts
+    generated_base: Option<u32>,
 }
 
 fn append_logprobs(
@@ -103,6 +106,20 @@ impl EchoState {
             .unwrap_or_default()
     }
 
+    fn generated_offset_base(&mut self, return_as_ids: bool) -> u32 {
+        if self.generated_base.is_none() {
+            self.generated_base = Some(
+                self.prompt_token_ids
+                    .iter()
+                    .map(|&token_id| {
+                        self.token_text(token_id, return_as_ids).chars().count() as u32
+                    })
+                    .sum(),
+            );
+        }
+        self.generated_base.unwrap_or_default()
+    }
+
     /// One `logprobs` entry per prompt token from the engine's per-position maps,
     /// in the completions layout: the token's own logprob (none at position 0) and a
     /// token-to-logprob object of the alternatives the engine reported.
@@ -122,8 +139,12 @@ impl EchoState {
         let mut tokens = Vec::with_capacity(n);
         let mut token_logprobs = Vec::with_capacity(n);
         let mut top_logprobs = Vec::with_capacity(n);
+        let mut text_offset = Vec::with_capacity(n);
+        let mut next_offset: u32 = 0;
         for (position, &token_id) in self.prompt_token_ids.iter().enumerate() {
             let text = self.token_text(token_id, return_as_ids);
+            text_offset.push(next_offset);
+            next_offset += text.chars().count() as u32;
             let entries = prompt_logprobs.get(position).and_then(Option::as_ref);
             let selected = entries
                 .and_then(|entries| entries.get(&token_id))
@@ -158,7 +179,7 @@ impl EchoState {
             tokens,
             token_logprobs,
             top_logprobs,
-            text_offset: vec![],
+            text_offset,
         }
     }
 }
@@ -173,6 +194,7 @@ impl DeltaGenerator {
                 options,
             ),
             echo: None,
+            text_offsets: HashMap::new(),
         }
     }
 
@@ -198,6 +220,7 @@ impl DeltaGenerator {
             text_emitted: HashSet::new(),
             logprobs_emitted: HashSet::new(),
             held: HashMap::new(),
+            generated_base: None,
         });
     }
 
@@ -211,13 +234,14 @@ impl DeltaGenerator {
     }
 
     pub fn create_logprobs(
-        &self,
+        &mut self,
+        index: u32,
         tokens: Vec<common::llm_backend::TokenType>,
         token_ids: Vec<TokenIdType>,
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_protocols::types::Logprobs> {
-        if !self.state.options().enable_logprobs || logprobs.is_none() {
+        if !self.state.options().enable_logprobs {
             return None;
         }
 
@@ -226,13 +250,39 @@ impl DeltaGenerator {
             .zip(token_ids)
             .map(|(token, token_id)| (token.unwrap_or_default(), token_id))
             .collect::<Vec<(String, TokenIdType)>>();
-        let tok_lps = toks
-            .iter()
-            .zip(logprobs.unwrap())
-            .map(|(_, lp)| lp as f32)
-            .collect::<Vec<f32>>();
 
         let return_as_ids = self.state.options().return_tokens_as_token_ids;
+        let tokens_out: Vec<String> = toks
+            .iter()
+            .map(|(t, tid)| {
+                if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+
+        let base = match self.echo.as_mut() {
+            Some(echo) => echo.generated_offset_base(return_as_ids),
+            None => 0,
+        };
+        let next_offset = self.text_offsets.entry(index).or_insert(base);
+        let text_offset = tokens_out
+            .iter()
+            .map(|token| {
+                let offset = *next_offset;
+                *next_offset += token.chars().count() as u32;
+                offset
+            })
+            .collect::<Vec<u32>>();
+
+        let logprobs = logprobs?;
+        let tok_lps = toks
+            .iter()
+            .zip(logprobs)
+            .map(|(_, lp)| lp as f32)
+            .collect::<Vec<f32>>();
         let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
             toks.iter()
                 .zip(tok_lps.iter())
@@ -260,21 +310,10 @@ impl DeltaGenerator {
                 .collect()
         });
 
-        let tokens_out: Vec<String> = toks
-            .iter()
-            .map(|(t, tid)| {
-                if return_as_ids {
-                    format!("token_id:{}", tid)
-                } else {
-                    t.clone()
-                }
-            })
-            .collect();
-
         Some(dynamo_protocols::types::Logprobs {
             tokens: tokens_out,
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
-            text_offset: vec![],
+            text_offset,
             top_logprobs: top_lps,
         })
     }
@@ -383,7 +422,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             } else {
                 None
             };
+        let index = delta.index.unwrap_or(0);
         let logprobs = self.create_logprobs(
+            index,
             delta.tokens,
             delta.token_ids,
             delta.log_probs,
@@ -403,7 +444,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let stop_reason = delta.stop_reason.clone();
 
         // create choice
-        let index = delta.index.unwrap_or(0);
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
@@ -853,10 +893,11 @@ mod tests {
         let mut request = create_test_request();
         request.inner.logprobs = Some(1);
         request.return_tokens_as_token_ids = Some(true);
-        let generator = request.response_generator("req-token-id-logprobs".to_string());
+        let mut generator = request.response_generator("req-token-id-logprobs".to_string());
 
         let logprobs = generator
             .create_logprobs(
+                0,
                 vec![Some("hello".to_string())],
                 vec![123],
                 Some(vec![-0.5]),
@@ -880,12 +921,54 @@ mod tests {
     }
 
     #[test]
+    fn text_offsets_advance_by_the_displayed_token_text() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(1);
+        request.return_tokens_as_token_ids = Some(true);
+        let mut generator = request.response_generator("req-offset-ids".to_string());
+
+        let first = generator
+            .create_logprobs(
+                0,
+                vec![Some("he".to_string()), Some("llo".to_string())],
+                vec![1, 2],
+                Some(vec![-0.1, -0.2]),
+                None,
+            )
+            .expect("logprobs");
+        assert_eq!(first.tokens, vec!["token_id:1", "token_id:2"]);
+        assert_eq!(first.text_offset, vec![0, 10]);
+
+        let second = generator
+            .create_logprobs(
+                0,
+                vec![Some("!".to_string())],
+                vec![3],
+                Some(vec![-0.3]),
+                None,
+            )
+            .expect("logprobs");
+        assert_eq!(second.text_offset, vec![20]);
+        let other_choice = generator
+            .create_logprobs(
+                1,
+                vec![Some("!".to_string())],
+                vec![3],
+                Some(vec![-0.3]),
+                None,
+            )
+            .expect("logprobs");
+        assert_eq!(other_choice.text_offset, vec![0]);
+    }
+
+    #[test]
     fn test_completion_top_logprobs_map_preserves_selected_utf8_collision() {
         let mut request = create_test_request();
         request.inner.logprobs = Some(2);
-        let generator = request.response_generator("req-utf8-map".to_string());
+        let mut generator = request.response_generator("req-utf8-map".to_string());
         let logprobs = generator
             .create_logprobs(
+                0,
                 vec![Some("é".to_string())],
                 vec![123],
                 Some(vec![-0.5]),
@@ -943,6 +1026,10 @@ mod tests {
                 wire["choices"][0]["logprobs"]["top_logprobs"],
                 json!([{text: -0.5, "other": -0.25}])
             );
+            assert_eq!(
+                wire["choices"][0]["logprobs"]["text_offset"],
+                json!([i as u64])
+            );
             chunks.push(Annotated::from_data(chunk));
         }
 
@@ -956,6 +1043,7 @@ mod tests {
         assert_eq!(choice["finish_reason"], "stop");
         assert_eq!(choice["logprobs"]["tokens"], json!(["A", "é"]));
         assert_eq!(choice["logprobs"]["token_logprobs"], json!([-0.5, -0.5]));
+        assert_eq!(choice["logprobs"]["text_offset"], json!([0, 1]));
         assert_eq!(
             choice["logprobs"]["top_logprobs"],
             json!([{"A": -0.5, "other": -0.25}, {"é": -0.5, "other": -0.25}])
@@ -1221,6 +1309,7 @@ mod tests {
         let logprobs = echo.logprobs.expect("logprobs were requested");
         assert_eq!(logprobs.tokens, vec!["<s>", "Hello", " world"]);
         assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.25), Some(-0.5)]);
+        assert_eq!(logprobs.text_offset, vec![0, 3, 8]);
         assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
         assert_eq!(
             logprobs.top_logprobs[1],
@@ -1251,6 +1340,7 @@ mod tests {
             folded.token_logprobs,
             vec![None, Some(-0.25), Some(-0.5), Some(-0.1)]
         );
+        assert_eq!(folded.text_offset, vec![0, 3, 8, 14]);
 
         let next = generator
             .choice_from_postprocessor(prompt_logprobs_output(true))
@@ -1336,6 +1426,7 @@ mod tests {
         let folded = choice.logprobs.as_ref().expect("prompt positions first");
         assert_eq!(folded.tokens, vec!["<s>", "Hello", " world", "hello"]);
         assert_eq!(folded.token_logprobs.last(), Some(&Some(-0.1)));
+        assert_eq!(folded.text_offset, vec![0, 3, 8, 19]);
     }
 
     #[test]
