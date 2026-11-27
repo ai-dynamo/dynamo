@@ -15,10 +15,10 @@ pub(super) const MAX_TOKENS: f64 = 16_777_216.0;
 const PRIOR_TOKENS: f64 = 400.0;
 const MAX_SESSIONS: usize = 50_000;
 const MEDIAN_WINDOW: usize = 10_000;
-const RIDGE_REFIT: Duration = Duration::from_secs(120);
+pub(super) const RIDGE_REFIT: Duration = Duration::from_secs(120);
 const RIDGE_MIN_ROWS: usize = 200;
 const RIDGE_ALPHA: f64 = 1.0;
-const TREES_REFIT: Duration = Duration::from_secs(300);
+pub(super) const TREES_REFIT: Duration = Duration::from_secs(300);
 const TREES_MIN_ROWS: usize = 1_000;
 // The trees are fitted on the last this many learned replies (32 bytes each).
 const TREES_MAX_ROWS: usize = 250_000;
@@ -35,6 +35,10 @@ const RIDGE_DIM: usize = 2 * FEATURES;
 /// Turn count, prompt tokens, last / smoothed / mean / max output tokens, and tokens appended
 /// since the last reply, each on a log scale. History features are NaN for a new session.
 pub(super) type Features = [f64; FEATURES];
+
+pub(super) fn backend_priority(predicted_tokens: f64) -> i32 {
+    -(predicted_tokens.clamp(0.0, MAX_TOKENS).round() as i32)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Source {
@@ -433,7 +437,7 @@ impl Predictor {
     }
 
     // Waits for the fit thread if it is still running.
-    fn install_tree_fit(&mut self) {
+    pub(super) fn install_tree_fit(&mut self) {
         let Some(fit) = self.tree_fit.take() else {
             return;
         };
