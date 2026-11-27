@@ -608,6 +608,40 @@ def _glm_prompt_reasoning_open(
 _REASONING_START_TAIL_TOKENS = 16
 
 
+def _reasoning_parser_for_open_prompt(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> ReasoningParser | None:
+    """Return the active parser if the prompt ends with its reasoning opener.
+
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
+    """
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return None
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return None
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return parser if tail.rstrip().endswith(start) else None
+
+
 def _prompt_leaves_reasoning_open(
     prompt_token_ids: Sequence[int],
     *,
@@ -617,13 +651,7 @@ def _prompt_leaves_reasoning_open(
     model_config: ModelConfig | None,
     request_for_sampling: ChatCompletionRequest,
 ) -> bool:
-    """Whether the rendered prompt ends with an opened reasoning block.
-
-    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
-    prompt (trailing whitespace ignored) must end with the reasoning parser's
-    opening marker. A prompt without that marker, e.g. for models that emit
-    their own opener, does not start in reasoning.
-    """
+    """Whether tool guidance starts in reasoning, including GLM prompt state."""
     glm_open = _glm_prompt_reasoning_open(
         prompt_token_ids,
         tokenizer=tokenizer,
@@ -632,23 +660,14 @@ def _prompt_leaves_reasoning_open(
     )
     if glm_open is not None:
         return glm_open
-    if not prompt_token_ids or not _reasoning_parser_enabled(
-        reasoning_parser_class, chat_template_kwargs
-    ):
-        return False
-    parser = reasoning_parser_class(
-        tokenizer,
+    parser = _reasoning_parser_for_open_prompt(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
         chat_template_kwargs=chat_template_kwargs,
         model_config=model_config,
     )
-    start = getattr(parser, "reasoning_start_str", None)
-    if not isinstance(start, str) or not start:
-        return False
-    tail = tokenizer.decode(
-        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
-        skip_special_tokens=False,
-    )
-    return tail.rstrip().endswith(start)
+    return parser is not None
 
 
 def _reasoning_block_until(
@@ -703,25 +722,14 @@ def _response_format_after_reasoning(
     # would drop them silently.
     if has_xgrammar_unsupported_json_features(schema):
         return None
-    # Same gate as the parser that will read the output: without it, the
-    # reasoning block would be returned as content.
-    if not prompt_token_ids or not _reasoning_parser_enabled(
-        reasoning_parser_class, chat_template_kwargs
-    ):
-        return None
-    parser = reasoning_parser_class(
-        tokenizer,
+    parser = _reasoning_parser_for_open_prompt(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
         chat_template_kwargs=chat_template_kwargs,
         model_config=model_config,
     )
-    start = parser.reasoning_start_str
-    if not isinstance(start, str) or not start:
-        return None
-    tail = tokenizer.decode(
-        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
-        skip_special_tokens=False,
-    )
-    if not tail.rstrip().endswith(start):
+    if parser is None:
         return None
     end = parser.reasoning_end_str
     if not isinstance(end, str) or not end:
@@ -731,7 +739,7 @@ def _response_format_after_reasoning(
             "reasoning block. Give the worker's engine the same reasoning parser "
             "(--reasoning-parser).",
             request_id,
-            reasoning_parser_class.__name__,
+            type(parser).__name__,
         )
         return None
     # The worker rejects these schemas only in ``guided_decoding.json``.

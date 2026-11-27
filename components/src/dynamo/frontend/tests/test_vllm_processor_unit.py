@@ -438,6 +438,8 @@ def tokenizer():
 _GLM_PROMPT_PREFIX = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
 _GLM_OPEN_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n"
 _GLM_CLOSED_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n\n</think>\n\n"
+# The opener is outside the generic tail window but inside GLM's expanding one.
+_GLM_PADDED_OPEN_PROMPT = _GLM_OPEN_PROMPT + "\t \n" * 24
 
 
 # ---------------------------------------------------------------------------
@@ -6500,10 +6502,11 @@ class TestToolCallGrammarReasoningStart:
         ("prompt_text", "parser_name", "expected"),
         [
             (_GLM_OPEN_PROMPT, "glm45", True),
+            (_GLM_PADDED_OPEN_PROMPT, "glm45", True),
             (_GLM_CLOSED_PROMPT, "glm47", False),
             (_GLM_OPEN_PROMPT, "qwen3", False),
         ],
-        ids=["glm-open", "glm-closed", "non-glm-open"],
+        ids=["glm-open", "glm-open-padded", "glm-closed", "non-glm-open"],
     )
     @pytest.mark.asyncio
     async def test_glm_prompt_state_overrides_false_thinking_flag(
@@ -6811,6 +6814,35 @@ class TestResponseFormatReasoningStart:
         assert guided == (
             self._after_reasoning(plain["json"], end) if wrapped else plain
         )
+
+    @pytest.mark.parametrize(
+        ("prompt_text", "wrapped"),
+        [
+            (_GLM_OPEN_PROMPT, True),
+            (_GLM_CLOSED_PROMPT, False),
+            (_GLM_PADDED_OPEN_PROMPT, False),
+        ],
+        ids=["glm-open", "glm-closed", "glm-open-padded"],
+    )
+    @pytest.mark.asyncio
+    async def test_glm_json_object(self, tokenizer, prompt_text, wrapped):
+        """JSON guidance uses the generic opener check even for GLM."""
+        guided = await self._guided(
+            tokenizer,
+            prompt_text=prompt_text,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
+        )
+        schema = {"type": "object"}
+        if not wrapped:
+            assert guided == {"json": schema}
+            return
+
+        reasoning, answer = guided["structural_tag"]["format"]["elements"]
+        assert reasoning["end"] == {
+            "type": "token",
+            "token": tokenizer.convert_tokens_to_ids("</think>"),
+        }
+        assert answer == {"type": "json_schema", "json_schema": schema}
 
     @pytest.mark.asyncio
     async def test_json_schema_keeps_the_schema(self, tokenizer):
