@@ -191,6 +191,11 @@ it is generated (a chunked HTTP response) when all of these hold:
 - `speed` is omitted or `1.0`.
 - The audio is returned in the response body rather than as a URL.
 
+These conditions apply to Qwen3-TTS and other audio models. Nemotron Audex
+models, both speech and text-to-audio, are not streamed incrementally: the
+worker buffers the generated audio and returns one complete waveform after
+generation finishes, even when all three conditions hold.
+
 Other formats, speed adjustment, and URL delivery return one complete file
 after generation finishes.
 

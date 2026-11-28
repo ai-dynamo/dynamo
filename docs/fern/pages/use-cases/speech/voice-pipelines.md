@@ -18,7 +18,7 @@ out.
 | --- | --- | --- | --- |
 | Streaming ASR | `/v1/realtime` WebSocket, `session.type="transcription"` | Transcript events | [Speech to Text](speech-to-text.md) |
 | LLM | `/v1/chat/completions` with `stream: true` | Text deltas | [Local Guide](../../cli/getting-started/quickstart.mdx) |
-| TTS | `/v1/audio/speech` | Audio, streamed for `wav` and `pcm` | [Text-to-Speech](text-to-speech.md) |
+| TTS | `/v1/audio/speech` | Audio; `wav` and `pcm` can stream at speed `1.0` with inline delivery (not for Nemotron Audex) | [Text-to-Speech](text-to-speech.md) |
 | Audio-in, audio-out model | `/v1/realtime` WebSocket, `session.type="realtime"` | Text and audio events | [Speech-to-Speech](speech-to-speech.md) |
 
 For a cascaded voice agent, connect an application such as Pipecat to the three
