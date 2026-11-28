@@ -6562,27 +6562,316 @@ async fn video_stream(
         })
 }
 
+// CMAF binary streaming.
+//
+// The response body is a sequence of `[kind: u8][len: u32 big-endian][payload]`
+// frames. The worker tags each payload; this route maps the tag to a kind byte
+// and appends the two terminal frames the worker cannot produce itself. See
+// DEP 0017 and components/src/dynamo/common/utils/cmaf_video.py.
+
+/// JSON describing the stream: MSE mime type, geometry, segment duration.
+const CMAF_KIND_METADATA: u8 = 0x01;
+/// The fragmented-MP4 init segment (`ftyp` + `moov`), sent once.
+const CMAF_KIND_INIT: u8 = 0x02;
+/// One media fragment (`moof` + `mdat`).
+const CMAF_KIND_SEGMENT: u8 = 0x03;
+/// Terminal: the stream failed after frames had already been committed.
+const CMAF_KIND_ERROR: u8 = 0x04;
+/// Terminal: end of stream.
+const CMAF_KIND_DONE: u8 = 0x05;
+
+const CMAF_METADATA_TAG: &str = "cmaf:metadata";
+const CMAF_INIT_TAG: &str = "cmaf:init";
+const CMAF_SEGMENT_TAG_PREFIX: &str = "cmaf:segment:";
+
+/// Map a worker frame tag to its wire kind, or `None` if the tag is unknown.
+fn cmaf_frame_kind(tag: &str) -> Option<u8> {
+    match tag {
+        CMAF_METADATA_TAG => Some(CMAF_KIND_METADATA),
+        CMAF_INIT_TAG => Some(CMAF_KIND_INIT),
+        _ if tag.starts_with(CMAF_SEGMENT_TAG_PREFIX) => Some(CMAF_KIND_SEGMENT),
+        _ => None,
+    }
+}
+
+/// Encode one framed CMAF message.
+fn cmaf_frame(kind: u8, payload: &[u8]) -> Bytes {
+    let mut buf = Vec::with_capacity(5 + payload.len());
+    buf.push(kind);
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+    Bytes::from(buf)
+}
+
+/// What one worker response contributes to the CMAF body.
+#[derive(Debug, PartialEq)]
+enum CmafItem {
+    /// A framed message to write.
+    Frame(Bytes),
+    /// Nothing: an annotation, or a response this route does not frame.
+    Skip,
+    /// The stream failed; the message goes out in the terminal `error` frame.
+    Fail(String),
+}
+
+/// Client-safe text for a backend error on the CMAF stream: the error's own
+/// public message, else the frontend's catalog text for its class. The
+/// diagnostic is operator-only and stays in the logs.
+fn cmaf_public_error_message(error: &DynamoError) -> String {
+    let catalog = match http_action_for_error(error) {
+        ClientErrorAction::Respond { public_message, .. } => public_message,
+        ClientErrorAction::NoDelivery => "Request cancelled",
+    };
+    public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| catalog.to_string())
+}
+
+/// Turn one worker response into its CMAF frame.
+fn cmaf_item(annotated: Annotated<NvVideosResponse>) -> CmafItem {
+    let response = match annotated.into_data() {
+        Ok(Some(response)) => response,
+        Ok(None) => return CmafItem::Skip,
+        Err(error) => {
+            tracing::error!(
+                class = %error.class(),
+                reason = %error.reason(),
+                diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
+                "CMAF stream: backend error"
+            );
+            return CmafItem::Fail(cmaf_public_error_message(&error));
+        }
+    };
+    // A failed response is the worker's own answer, and its text is what the
+    // batch route returns to the client in the same field.
+    if let Some(message) = response.error {
+        return CmafItem::Fail(message);
+    }
+    if response.status == "failed" {
+        return CmafItem::Fail("Backend reported a failed video generation".to_string());
+    }
+    // An untagged response is what a worker without CMAF support returns. It is
+    // not a frame; `cmaf_tail` reports the stream if nothing else arrives.
+    let Some(tag) = response.cmaf else {
+        return CmafItem::Skip;
+    };
+    let Some(kind) = cmaf_frame_kind(&tag) else {
+        // A worker from another release may tag frames this route does not know;
+        // dropping them is safer than guessing a kind the client would mis-append.
+        tracing::warn!("Unknown CMAF frame tag {tag}; dropping");
+        return CmafItem::Skip;
+    };
+    let Some(b64) = response
+        .data
+        .into_iter()
+        .next()
+        .and_then(|frame| frame.b64_json)
+    else {
+        return CmafItem::Fail(format!("CMAF frame {tag} carried no payload"));
+    };
+    match base64::prelude::BASE64_STANDARD.decode(b64) {
+        Ok(payload) => CmafItem::Frame(cmaf_frame(kind, &payload)),
+        Err(e) => CmafItem::Fail(format!("CMAF frame {tag} was not valid base64: {e}")),
+    }
+}
+
+/// The frames that close a CMAF body: an `error` frame when the stream failed,
+/// then `done`. A bare end of stream after a failure would be indistinguishable
+/// from success, so the tail is written on every stream that reached the body.
+///
+/// Returns the frames and whether the stream succeeded.
+fn cmaf_tail(failure: Option<String>, frames_out: usize) -> (Vec<Bytes>, bool) {
+    // A worker that does not implement CMAF ignores the route flag and answers
+    // with an ordinary untagged video response, which would otherwise leave the
+    // client holding an empty stream that looks successful.
+    let failure = failure.or_else(|| {
+        (frames_out == 0).then(|| {
+            "Backend produced no CMAF frames; this worker may not support CMAF streaming"
+                .to_string()
+        })
+    });
+    match failure {
+        Some(message) => (
+            vec![
+                cmaf_frame(CMAF_KIND_ERROR, message.as_bytes()),
+                cmaf_frame(CMAF_KIND_DONE, b""),
+            ],
+            false,
+        ),
+        None => (vec![cmaf_frame(CMAF_KIND_DONE, b"")], true),
+    }
+}
+
+/// [EXPERIMENTAL] CMAF streaming handler for `/v1/videos/stream/cmaf`.
+///
+/// Streams a generated video as fragmented MP4 over binary frames. The client
+/// feeds the init segment and each media segment to an MSE `SourceBuffer` and
+/// starts playing before the whole clip has been encoded and delivered.
+///
+/// Requesting this route is the only thing that selects CMAF output: it marks
+/// the request through [`NvCreateVideoRequest::mark_cmaf_stream`], which no
+/// client input can do.
+async fn video_stream_cmaf(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("video cmaf stream", &body)?;
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
+
+    request.nest_passthrough();
+    request.mark_cmaf_stream();
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let model = request.model.clone();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Videos,
+        true,
+        request.id(),
+    );
+
+    let mut response_collector = inflight.response_collector();
+
+    // Everything up to here fails as an ordinary HTTP error: nothing has been
+    // committed to the wire yet.
+    let stream = engine.generate(request).await.map_err(|e| {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start CMAF video stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Capture the context to cancel the stream if the client disconnects.
+    let ctx = stream.context();
+
+    // As in `video_stream`: the handler returns the streaming body directly, so
+    // the connection handle is disarmed and the stream handle, armed below and
+    // owned by the body, is what signals a client disconnect to the engine.
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Videos.to_string(),
+            request_type: "cmaf".to_string(),
+        },
+    )
+    .await;
+    connection_handle.disarm();
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    stream_handle.arm();
+    let cmaf_stream = async_stream::stream! {
+        tokio::pin!(stream);
+
+        let mut failure: Option<String> = None;
+        let mut frames_out: usize = 0;
+
+        loop {
+            tokio::select! {
+                item = stream.next() => {
+                    let Some(annotated) = item else { break };
+                    match cmaf_item(annotated) {
+                        CmafItem::Frame(frame) => {
+                            frames_out += 1;
+                            yield Ok::<Bytes, std::convert::Infallible>(frame);
+                        }
+                        CmafItem::Skip => {}
+                        CmafItem::Fail(message) => {
+                            failure = Some(message);
+                            break;
+                        }
+                    }
+                }
+                _ = ctx.stopped() => {
+                    tracing::trace!("Context stopped; breaking CMAF stream");
+                    inflight.mark_error(ErrorType::Cancelled);
+                    return;
+                }
+            }
+        }
+
+        // The request is over either way, so stop treating the body drop below
+        // as a client disconnect.
+        stream_handle.disarm();
+
+        if let Some(message) = &failure {
+            tracing::error!("CMAF stream failed: {message}");
+        }
+        let (tail, succeeded) = cmaf_tail(failure, frames_out);
+        if succeeded {
+            inflight.mark_ok();
+        } else {
+            inflight.mark_error(ErrorType::Internal);
+        }
+        for frame in tail {
+            yield Ok(frame);
+        }
+    };
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(cmaf_stream))
+        .map(|r| r.into_response())
+        .map_err(|e| {
+            ErrorMessage::internal_server_error_with_details(
+                "Failed to build CMAF response",
+                format!("{e}"),
+            )
+        })
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint
 /// If no path is provided, the default path is `/v1/videos`
 ///
-/// Two routes are registered:
-/// - `POST /v1/videos`        — non-streaming, returns a single JSON response
-/// - `POST /v1/videos/stream` — MJPEG streaming via `multipart/x-mixed-replace`
+/// Three routes are registered:
+/// - `POST /v1/videos`             — non-streaming, returns a single JSON response
+/// - `POST /v1/videos/stream`      — MJPEG streaming via `multipart/x-mixed-replace`
+/// - `POST /v1/videos/stream/cmaf` — CMAF fragmented MP4 over binary frames
 pub fn videos_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/videos".to_string());
     let stream_path = format!("{}/stream", path);
+    let cmaf_path = format!("{}/stream/cmaf", path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
+    let cmaf_doc = RouteDoc::new(axum::http::Method::POST, &cmaf_path);
     let router = Router::new()
         .route(&path, post(videos))
         .route(&stream_path, post(video_stream))
+        .route(&cmaf_path, post(video_stream_cmaf))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc, stream_doc], router)
+    (vec![doc, stream_doc, cmaf_doc], router)
 }
 
 fn audio_content_type(format: &str) -> &'static str {
@@ -13349,5 +13638,213 @@ mod tests {
         assert_eq!(response.inner.id, "test");
         assert_eq!(response.inner.choices[0].text, "content");
         assert!(response.inner.usage.is_none());
+    }
+
+    // CMAF framing. The tag vocabulary is shared with
+    // components/src/dynamo/common/utils/cmaf_video.py; these tests pin the
+    // frontend's half of it.
+
+    fn cmaf_response(tag: Option<&str>, payload: Option<&[u8]>) -> NvVideosResponse {
+        let mut response = NvVideosResponse::empty();
+        response.cmaf = tag.map(str::to_string);
+        if let Some(payload) = payload {
+            response
+                .data
+                .push(crate::protocols::openai::videos::VideoData {
+                    output_format: "mp4".to_string(),
+                    url: None,
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(payload)),
+                    fps: None,
+                    audio_sample_rate: None,
+                });
+        }
+        response
+    }
+
+    #[test]
+    fn cmaf_frame_kind_maps_every_worker_tag() {
+        assert_eq!(cmaf_frame_kind(CMAF_METADATA_TAG), Some(CMAF_KIND_METADATA));
+        assert_eq!(cmaf_frame_kind(CMAF_INIT_TAG), Some(CMAF_KIND_INIT));
+        assert_eq!(cmaf_frame_kind("cmaf:segment:1"), Some(CMAF_KIND_SEGMENT));
+        assert_eq!(cmaf_frame_kind("cmaf:segment:42"), Some(CMAF_KIND_SEGMENT));
+    }
+
+    #[test]
+    fn cmaf_frame_kind_rejects_an_unknown_tag() {
+        assert_eq!(cmaf_frame_kind("cmaf:audio"), None);
+        assert_eq!(cmaf_frame_kind("cmaf"), None);
+        assert_eq!(cmaf_frame_kind(""), None);
+    }
+
+    #[test]
+    fn cmaf_frame_prefixes_a_big_endian_length() {
+        let frame = cmaf_frame(CMAF_KIND_SEGMENT, b"moof");
+        let mut expected = vec![CMAF_KIND_SEGMENT, 0x00, 0x00, 0x00, 0x04];
+        expected.extend_from_slice(b"moof");
+        assert_eq!(&frame[..], &expected[..]);
+    }
+
+    #[test]
+    fn cmaf_frame_allows_an_empty_payload() {
+        // The terminal `done` frame carries nothing but still needs its header.
+        assert_eq!(
+            &cmaf_frame(CMAF_KIND_DONE, b"")[..],
+            &[CMAF_KIND_DONE, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn cmaf_frame_length_survives_a_large_payload() {
+        let payload = vec![0xABu8; 300_000];
+        let frame = cmaf_frame(CMAF_KIND_INIT, &payload);
+        assert_eq!(&frame[..5], &[CMAF_KIND_INIT, 0x00, 0x04, 0x93, 0xE0]);
+        assert_eq!(frame.len(), 5 + payload.len());
+    }
+
+    #[test]
+    fn cmaf_item_frames_a_tagged_response() {
+        let item = cmaf_item(Annotated::from_data(cmaf_response(
+            Some("cmaf:segment:2"),
+            Some(b"moofmdat"),
+        )));
+        assert_eq!(
+            item,
+            CmafItem::Frame(cmaf_frame(CMAF_KIND_SEGMENT, b"moofmdat"))
+        );
+    }
+
+    #[test]
+    fn cmaf_item_skips_what_is_not_a_frame() {
+        // An untagged response is what a worker without CMAF support sends: a
+        // complete video. It must not be framed as a segment.
+        let untagged = cmaf_response(None, Some(b"a complete mp4"));
+        assert_eq!(cmaf_item(Annotated::from_data(untagged)), CmafItem::Skip);
+        // A tag from another release is dropped, not guessed.
+        let unknown = cmaf_response(Some("cmaf:audio"), Some(b"x"));
+        assert_eq!(cmaf_item(Annotated::from_data(unknown)), CmafItem::Skip);
+    }
+
+    #[test]
+    fn cmaf_item_fails_on_a_worker_error() {
+        let mut failed = cmaf_response(None, None);
+        failed.status = "failed".to_string();
+        failed.error = Some("ffmpeg libvpx-vp9 CMAF encode failed (exit 1)".to_string());
+        assert_eq!(
+            cmaf_item(Annotated::from_data(failed)),
+            CmafItem::Fail("ffmpeg libvpx-vp9 CMAF encode failed (exit 1)".to_string())
+        );
+
+        let mut failed_without_text = cmaf_response(None, None);
+        failed_without_text.status = "failed".to_string();
+        assert!(matches!(
+            cmaf_item(Annotated::from_data(failed_without_text)),
+            CmafItem::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn cmaf_item_reports_a_backend_error_without_its_diagnostic() {
+        // A backend error carries an operator-only diagnostic. The client gets
+        // the frontend's text for the error's class, never the diagnostic.
+        assert_eq!(
+            cmaf_item(Annotated::from_error("PRIVATE ffmpeg stderr")),
+            CmafItem::Fail("Internal server error".to_string())
+        );
+
+        // A public message the backend attached is client-safe and is used.
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(dynamo_runtime::error::ErrorReason::new("request.invalid_argument").unwrap())
+            .diagnostic("PRIVATE_DIAGNOSTIC")
+            .public_message("num_frames must be 4n + 1")
+            .build();
+        let annotated = Annotated::<NvVideosResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        assert_eq!(
+            cmaf_item(annotated),
+            CmafItem::Fail("num_frames must be 4n + 1".to_string())
+        );
+    }
+
+    #[test]
+    fn cmaf_item_fails_on_a_frame_it_cannot_decode() {
+        let no_payload = cmaf_response(Some("cmaf:init"), None);
+        assert!(matches!(
+            cmaf_item(Annotated::from_data(no_payload)),
+            CmafItem::Fail(message) if message.contains("carried no payload")
+        ));
+
+        let mut bad_base64 = cmaf_response(Some("cmaf:init"), Some(b"x"));
+        bad_base64.data[0].b64_json = Some("not base64!".to_string());
+        assert!(matches!(
+            cmaf_item(Annotated::from_data(bad_base64)),
+            CmafItem::Fail(message) if message.contains("not valid base64")
+        ));
+    }
+
+    #[test]
+    fn cmaf_tail_is_a_bare_done_after_a_successful_stream() {
+        let (tail, succeeded) = cmaf_tail(None, 5);
+        assert!(succeeded);
+        assert_eq!(tail, vec![cmaf_frame(CMAF_KIND_DONE, b"")]);
+    }
+
+    #[test]
+    fn cmaf_tail_reports_a_failure_before_done() {
+        // `done` follows `error` so the last frame of a stream is unconditional.
+        let (tail, succeeded) = cmaf_tail(Some("encoder died".to_string()), 3);
+        assert!(!succeeded);
+        assert_eq!(
+            tail,
+            vec![
+                cmaf_frame(CMAF_KIND_ERROR, b"encoder died"),
+                cmaf_frame(CMAF_KIND_DONE, b""),
+            ]
+        );
+    }
+
+    #[test]
+    fn cmaf_tail_reports_a_worker_that_does_not_support_cmaf() {
+        // New frontend, older worker: it ignores the route flag and returns an
+        // ordinary video, so nothing was framed. An empty 200 would look like
+        // success.
+        let (tail, succeeded) = cmaf_tail(None, 0);
+        assert!(!succeeded);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0][0], CMAF_KIND_ERROR);
+        assert!(String::from_utf8_lossy(&tail[0][5..]).contains("may not support CMAF streaming"));
+        assert_eq!(tail[1], cmaf_frame(CMAF_KIND_DONE, b""));
+    }
+
+    #[test]
+    fn an_unsupported_worker_stream_ends_in_error_then_done() {
+        // The route's loop over a whole stream, without the HTTP plumbing.
+        let stream = vec![Annotated::from_data(cmaf_response(
+            None,
+            Some(b"a complete mp4"),
+        ))];
+        let mut frames_out = 0;
+        let mut failure = None;
+        for annotated in stream {
+            match cmaf_item(annotated) {
+                CmafItem::Frame(_) => frames_out += 1,
+                CmafItem::Skip => {}
+                CmafItem::Fail(message) => {
+                    failure = Some(message);
+                    break;
+                }
+            }
+        }
+        let (tail, succeeded) = cmaf_tail(failure, frames_out);
+        assert!(!succeeded);
+        assert_eq!(
+            tail.iter().map(|frame| frame[0]).collect::<Vec<_>>(),
+            vec![CMAF_KIND_ERROR, CMAF_KIND_DONE]
+        );
     }
 }
