@@ -6,8 +6,12 @@ subtitle: Configure the backend admission gate in a Kubernetes deployment.
 ---
 
 Backend admission control limits requests inside each engine and queues excess work outside it.
-Configure the gate on the worker containers in your DynamoGraphDeployment (DGD). It supports both
-Dynamo Python and Dynamo Sidecar backends.
+Configure the gate on the worker containers in your DynamoGraphDeployment (DGD). It covers Dynamo
+Python workers that register a model, including unified backend `LLMEngine` workers and the
+TensorRT-LLM and SGLang diffusion workers, and the vLLM, SGLang, TensorRT-LLM, and LPX sidecars.
+Workers built on a unified backend `RawEngine`, such as Python workers whose engine subclasses the
+unified backend `DiffusionEngine` (for example, `SampleDiffusionEngine`) and the Triton sidecar,
+have no gate, so these settings have no effect on them. See [Backend](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
 
 For behavior and tuning guidance, see
 [Admission Control Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md).
@@ -23,9 +27,9 @@ These three settings apply **per data-parallel (DP) rank**:
 | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Admitted requests awaiting their first generated token or completion. | Unset: unlimited |
 | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. A positive queue limit requires at least one engine limit; otherwise, worker startup fails. | `0`: no queue |
 
-Setting either engine limit enables admission control; an engine limit left unset stays unlimited.
-When either engine limit is reached, new requests wait in the gate queue. If the queue is full, the
-worker rejects them; overload reaches the client as HTTP 529 by default.
+On a gated worker, setting either engine limit enables admission control; an engine limit left unset
+stays unlimited. When either engine limit is reached, new requests wait in the gate queue. If the
+queue is full, the worker rejects them; overload reaches the client as HTTP 529 by default.
 
 The following `nvidia.com/v1beta1` fragment enables admission control with the recommended starting
 limits for an engine whose `max_num_seqs` is 256: each engine limit at `max_num_seqs`, and a queue of
