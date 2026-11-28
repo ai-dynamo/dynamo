@@ -523,12 +523,27 @@ def _materialize_assistant_tool_calls(
     return normalized
 
 
+def _integer_stop_as_stop_token_ids(request: dict[str, Any]) -> dict[str, Any]:
+    """Clients may send token IDs in ``stop``; vLLM takes only strings there."""
+    stop = request.get("stop")
+    if not (
+        isinstance(stop, list)
+        and stop
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in stop)
+    ):
+        return request
+    request = {key: value for key, value in request.items() if key != "stop"}
+    request["stop_token_ids"] = [*(request.get("stop_token_ids") or []), *stop]
+    return request
+
+
 # Fully validate nested fields only when the fast path leaves raw dictionaries.
 def _validate_chat_completion_request(
     request: dict[str, Any] | ChatCompletionRequest,
 ) -> ChatCompletionRequest:
     if isinstance(request, ChatCompletionRequest):
         return request
+    request = _integer_stop_as_stop_token_ids(request)
     if not SKIP_REQUEST_VALIDATION:
         return ChatCompletionRequest.model_validate(request)
 
