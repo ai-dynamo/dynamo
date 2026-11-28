@@ -39,7 +39,7 @@ pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
 
 mod endpoint_card;
-pub use endpoint_card::wait_for_endpoint_model_card;
+pub use endpoint_card::{list_endpoint_model_cards, wait_for_endpoint_model_card};
 
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};

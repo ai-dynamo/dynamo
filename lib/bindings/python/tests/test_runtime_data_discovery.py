@@ -242,6 +242,92 @@ async def test_wait_for_instance_by_runtime_data_links_two_late_subscribers(
         nonleader_b.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_runtime_configs_key_each_instance_config_by_instance_id(
+    temp_file_store,
+):
+    leader_a = _runtime()
+    leader_b = _runtime()
+    other = _runtime()
+    reader = _runtime()
+    try:
+        a_id = await _register_leader(leader_a, "group-a")
+        b_id = await _register_leader(leader_b, "group-b")
+        # A config on another endpoint of the same component is not listed.
+        await _register_leader(other, "group-c", endpoint_path="test.sglang.other")
+
+        configs = await reader.endpoint(ENDPOINT_PATH).runtime_configs()
+
+        assert set(configs) == {a_id, b_id}
+        assert all(
+            isinstance(config, ModelRuntimeConfig) for config in configs.values()
+        )
+        assert all(config.data_parallel_size == 2 for config in configs.values())
+        groups = {
+            instance_id: json.loads(config.runtime_data[SGLANG_WORKER_GROUP_ID_KEY])
+            for instance_id, config in configs.items()
+        }
+        assert groups == {a_id: "group-a", b_id: "group-b"}
+    finally:
+        leader_a.shutdown()
+        leader_b.shutdown()
+        other.shutdown()
+        reader.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_configs_empty_until_a_model_registers(temp_file_store):
+    worker = _runtime()
+    reader = _runtime()
+    try:
+        # An instance that serves the endpoint but has no model is not listed.
+        await worker.endpoint(ENDPOINT_PATH).register_endpoint_instance()
+
+        assert await reader.endpoint(ENDPOINT_PATH).runtime_configs() == {}
+    finally:
+        worker.shutdown()
+        reader.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_configs_return_copies(temp_file_store):
+    leader = _runtime()
+    reader = _runtime()
+    try:
+        leader_id = await _register_leader(leader, "group-a")
+        endpoint = reader.endpoint(ENDPOINT_PATH)
+
+        copy = (await endpoint.runtime_configs())[leader_id]
+        copy.set_engine_specific(SGLANG_WORKER_GROUP_ID_KEY, json.dumps("changed"))
+
+        config = (await endpoint.runtime_configs())[leader_id]
+        assert json.loads(config.runtime_data[SGLANG_WORKER_GROUP_ID_KEY]) == "group-a"
+    finally:
+        leader.shutdown()
+        reader.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_configs_drop_instance_that_leaves(temp_file_store):
+    leader = _runtime()
+    reader = _runtime()
+    try:
+        leader_id = await _register_leader(leader, "group-a")
+        endpoint = reader.endpoint(ENDPOINT_PATH)
+        assert list(await endpoint.runtime_configs()) == [leader_id]
+
+        leader.shutdown()
+
+        async def wait_until_empty():
+            while await endpoint.runtime_configs():
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(wait_until_empty(), 5.0)
+    finally:
+        leader.shutdown()
+        reader.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Cross-version compat: prefill registers the legacy ModelType.Prefill
 # marker bit (dual-emit). register_model must accept it while still rejecting a
@@ -349,6 +435,11 @@ async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_st
         assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}
         # model_suffix is the slugified LoRA name
         assert lora_cards[0]["model_suffix"] == "adaptera"
+
+        # The LoRA card does not break Endpoint.runtime_configs(). The base and
+        # LoRA cards share an instance ID; the Rust tests of
+        # list_endpoint_model_cards check which one is kept.
+        assert list(await ep.runtime_configs()) == [ep.connection_id()]
     finally:
         rt.shutdown()
 

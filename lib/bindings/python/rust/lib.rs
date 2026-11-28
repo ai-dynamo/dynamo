@@ -2016,6 +2016,33 @@ impl Endpoint {
         self.inner.drt().connection_id()
     }
 
+    /// The runtime config that each instance of this endpoint registered with
+    /// its model, keyed by instance ID, as discovery lists them now. LoRA
+    /// adapter registrations are left out. Each config is a copy: changing it
+    /// does not change what the instance published.
+    fn runtime_configs<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.inner.clone();
+        crate::future_into_py(py, async move {
+            let cards = llm_rs::discovery::list_endpoint_model_cards(
+                endpoint.drt().discovery().as_ref(),
+                &endpoint.id(),
+            )
+            .await
+            .map_err(to_pyerr)?;
+            Ok(cards
+                .into_iter()
+                .map(|(instance_id, card)| {
+                    (
+                        instance_id,
+                        ModelRuntimeConfig {
+                            inner: card.runtime_config,
+                        },
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>())
+        })
+    }
+
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
