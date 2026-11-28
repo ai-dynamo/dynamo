@@ -1755,6 +1755,120 @@ class StreamingPostProcessor:
             delta = {}
         return self._build_choice(output, delta)
 
+    def _token_texts(
+        self, delta_text: str, delta_token_ids: list[int]
+    ) -> tuple[str, list[str]]:
+        """Split delta_text into one piece per token of the chunk.
+
+        Returns the text the worker held back from earlier tokens (it leads
+        delta_text and belongs to none of this chunk's tokens) and the pieces.
+        """
+        skip_special_tokens = self.sampling_params.skip_special_tokens
+        # A few previous tokens keep the decoding of the first token in context.
+        # A character they leave incomplete is text of this chunk.
+        context = self.previous_token_ids[-5:]
+        decoded = self.tokenizer.decode(
+            context, skip_special_tokens=skip_special_tokens
+        ).rstrip("�")
+        fulls = [
+            self.tokenizer.decode(
+                context + delta_token_ids[: i + 1],
+                skip_special_tokens=skip_special_tokens,
+            )
+            for i in range(len(delta_token_ids))
+        ]
+        texts = []
+        for i, full in enumerate(fulls):
+            # A trailing U+FFFD is an incomplete UTF-8 sequence unless the
+            # chunk's full decoding keeps it: then it is a literal character.
+            # One still incomplete at the end of the chunk is trimmed below,
+            # as the worker holds it back.
+            incomplete = (
+                full.endswith("�")
+                and i + 1 < len(fulls)
+                and not fulls[-1].startswith(full)
+            )
+            if incomplete or not full.startswith(decoded):
+                # The next token carries the text.
+                texts.append("")
+                continue
+            texts.append(full[len(decoded) :])
+            decoded = full
+
+        joined = "".join(texts)
+        # The worker can hold back text of earlier tokens (a partial stop
+        # string) and trim text of this chunk (a matched stop string), so its
+        # text is the held-back text and then a prefix of the pieces.
+        for held_len in range(len(delta_text)):
+            if joined.startswith(delta_text[held_len:]):
+                break
+        else:
+            # A large stop buffer can release text of earlier tokens a part at
+            # a time, so the chunk may carry none of its own tokens' text. The
+            # held-back text is what the earlier tokens decode to beyond the
+            # text already sent.
+            history = self.tokenizer.decode(
+                self.previous_token_ids, skip_special_tokens=skip_special_tokens
+            )
+            pending = (
+                history[len(self.previous_text) :]
+                if history.startswith(self.previous_text)
+                else ""
+            )
+            held_len = 0
+            limit = min(len(pending), len(delta_text))
+            while held_len < limit and pending[held_len] == delta_text[held_len]:
+                held_len += 1
+            if not held_len or not joined.startswith(delta_text[held_len:]):
+                # The pieces do not match the worker's text: keep it whole.
+                return "", [""] * (len(delta_token_ids) - 1) + [delta_text]
+        budget = len(delta_text) - held_len
+        for i, text in enumerate(texts):
+            texts[i] = text[:budget]
+            budget -= len(texts[i])
+        return delta_text[:held_len], texts
+
+    def _extract_reasoning_token_by_token(
+        self, parser: Any, delta_text: str, delta_token_ids: list[int]
+    ) -> DeltaMessage | None:
+        """Feed a multi-token chunk to the reasoning parser one token at a time.
+
+        A parser that is not engine-based is written for one token per
+        streaming call (vLLM's hunyuan_a13b asserts it), but a step can carry
+        several tokens (e.g. MTP). Once reasoning ends, the rest of the chunk
+        is content.
+        """
+        held, texts = self._token_texts(delta_text, delta_token_ids)
+        # Held-back text comes from tokens the parser saw before this chunk,
+        # while reasoning was not done: it is reasoning. Fed with the first
+        # token, a parser that drops a lone end token would drop it too.
+        previous_text = self.previous_text + held
+        previous_token_ids = list(self.previous_token_ids)
+        message: DeltaMessage | None = DeltaMessage(reasoning=held) if held else None
+        for i, (token_id, text) in enumerate(zip(delta_token_ids, texts)):
+            current_text = previous_text + text
+            current_token_ids = previous_token_ids + [token_id]
+            message = self._merge_delta_messages(
+                message,
+                parser.extract_reasoning_streaming(
+                    previous_text,
+                    current_text,
+                    text,
+                    previous_token_ids,
+                    current_token_ids,
+                    [token_id],
+                ),
+            )
+            previous_text, previous_token_ids = current_text, current_token_ids
+            if parser.is_reasoning_end_streaming(current_token_ids, [token_id]):
+                rest = "".join(texts[i + 1 :])
+                if rest:
+                    message = self._merge_delta_messages(
+                        message, DeltaMessage(content=rest)
+                    )
+                break
+        return message
+
     def process_output(self, output: Any) -> dict[str, Any] | None:
         # BEFORE any branch below: every path must feed the ledger, including
         # the ones that emit nothing for this chunk.
@@ -1836,14 +1950,22 @@ class StreamingPostProcessor:
 
         elif not self.reasoning_is_done and self.reasoning_parser:
             self._reasoning_parser_streaming_started = True
-            delta_message = self.reasoning_parser.extract_reasoning_streaming(
-                self.previous_text,
-                current_text,
-                delta_text,
-                self.previous_token_ids,
-                current_token_ids,
-                delta_token_ids,
-            )
+            if (
+                not self.reasoning_parser.engine_based_streaming
+                and len(delta_token_ids) > 1
+            ):
+                delta_message = self._extract_reasoning_token_by_token(
+                    self.reasoning_parser, delta_text, delta_token_ids
+                )
+            else:
+                delta_message = self.reasoning_parser.extract_reasoning_streaming(
+                    self.previous_text,
+                    current_text,
+                    delta_text,
+                    self.previous_token_ids,
+                    current_token_ids,
+                    delta_token_ids,
+                )
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
