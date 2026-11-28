@@ -426,6 +426,8 @@ spec:
           - ${MODEL_NAME}
           - --tensor-parallel-size
           - "1"
+          - --disaggregation-mode
+          - decode
           - --block-size
           - "64"
           - --kv-transfer-config
