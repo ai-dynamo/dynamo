@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  activeDeadlineSeconds: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      priorityClassName: ci-nightly-high-priority
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: user-workload
+        effect: NoExecute
+      containers:
+      - name: model-download
+        args:
+        - |
+          set -eu
+          python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          def cached_checkpoint(model, needs_tokenizer):
+              cache = Path(os.environ["HF_HOME"]) / "hub" / ("models--" + model.replace("/", "--"))
+              ref = cache / "refs" / "main"
+              if not ref.is_file():
+                  return False
+              snapshot = cache / "snapshots" / ref.read_text().strip()
+              if not (snapshot / "config.json").is_file():
+                  return False
+              if needs_tokenizer and not any(
+                  (snapshot / name).is_file() for name in ("tokenizer.json", "tokenizer.model", "tiktoken.model")
+              ):
+                  return False
+              # A snapshot directory can exist while a download is incomplete.
+              indexes = list(snapshot.glob("*.index.json"))
+              weights = []
+              for index in indexes:
+                  try:
+                      weights.extend(json.loads(index.read_text())["weight_map"].values())
+                  except (OSError, ValueError, KeyError):
+                      return False
+              if not indexes:
+                  weights = [name for name in ("model.safetensors", "pytorch_model.bin")
+                             if (snapshot / name).is_file()]
+              return bool(weights) and all((snapshot / name).is_file() for name in weights)
+
+          missing = []
+          for model, needs_tokenizer in ((os.environ["MODEL_NAME"], True),
+                                         (os.environ["EAGLE_MODEL_NAME"], False)):
+              if cached_checkpoint(model, needs_tokenizer):
+                  print(f"Using cached checkpoint: {model}", flush=True)
+              else:
+                  missing.append(model)
+          if missing:
+              subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir",
+                              "huggingface_hub==1.16.4"], check=True)
+              for model in missing:
+                  subprocess.run(["hf", "download", model], check=True)
+          PYTHON
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache
