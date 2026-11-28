@@ -202,10 +202,27 @@ curl --silent --show-error http://localhost:8000/v1/chat/completions \
   --data '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [
-      {"role": "user", "content": "What is NVIDIA Dynamo?"}
+      {"role": "user", "content": "Restate this definition in one sentence. NVIDIA Dynamo is an open-source framework for serving generative AI models at scale."}
     ],
+    "chat_template_kwargs": {"enable_thinking": false},
+    "temperature": 0,
     "max_tokens": 200
   }' | python3 -m json.tool
+```
+
+    Look for a one-sentence definition in `choices[0].message.content` and a `finish_reason` of `stop`.
+
+```json title="Example response (excerpt)"
+{
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "NVIDIA Dynamo is an open-source framework designed to serve generative AI models at scale."
+    },
+    "finish_reason": "stop"
+  }]
+}
 ```
   </Step>
 </Steps>
