@@ -10,7 +10,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	poddiagnostics "github.com/ai-dynamo/dynamo/deploy/operator/internal/pods"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -22,15 +21,6 @@ import (
 // OwnerName returns the name, in the Pod's namespace, of the object that a Pod
 // belongs to, and whether it has one.
 type OwnerName func(client.Object) (string, bool)
-
-// DCDName returns the DCD whose Deployment selects obj. A DCD's Deployment
-// shares its name and selects Pods by that name. Grove Pods carry the same label
-// but belong to no DCD.
-func DCDName(obj client.Object) (string, bool) {
-	labels := obj.GetLabels()
-	name := labels[commonconsts.KubeLabelDynamoSelector]
-	return name, name != "" && labels[grovecommon.LabelPodClique] == ""
-}
 
 // DGDName returns the graph whose component obj is labeled for.
 func DGDName(obj client.Object) (string, bool) {

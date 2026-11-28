@@ -905,6 +905,9 @@ func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1bet
 	return dynamo.GenerateDefaultIngressSpec(parentDGD, r.Config.Ingress), true, nil
 }
 
+// generateDeployment renders a Deployment whose selector matches its Pod template.
+// opt.dynamoComponentDeployment must be non-nil.
+//
 //nolint:nakedret
 func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Context, opt generateResourceOption) (kubeDeployment *appsv1.Deployment, toDelete bool, err error) {
 	annotations := dynamo.GetDCDKubeAnnotations(opt.dynamoComponentDeployment)
@@ -933,7 +936,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
-	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy)
+	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy, dynamo.DCDSelectorLabelValue(opt.dynamoComponentDeployment.Name))
 
 	return
 }
@@ -1026,8 +1029,8 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 		})).
 		Watches(
 			&corev1.Pod{},
-			podcontroller.EnqueueOwners(podcontroller.DCDName),
-			builder.WithPredicates(podcontroller.CrashLoopPredicate(podcontroller.DCDName)),
+			podcontroller.EnqueueOwners(dynamo.DCDName),
+			builder.WithPredicates(podcontroller.CrashLoopPredicate(dynamo.DCDName)),
 		).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
