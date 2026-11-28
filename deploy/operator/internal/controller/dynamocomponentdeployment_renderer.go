@@ -192,6 +192,17 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
 		}
+		// Rewrite after rendering so authored and injected volumes follow the same Secret.
+		if dynamo.RepointMPISSHSecret(&template.Spec, dgd.UID, dgd.Annotations, r.config.MPI.SSHSecretName) {
+			marker, err := dynamo.ResolveMPISSHKeyMarker(ctx, r.reader, dgd.Namespace, dgd.UID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if template.Annotations == nil {
+				template.Annotations = make(map[string]string)
+			}
+			template.Annotations[dynamo.MPISSHKeyAnnotation] = marker
+		}
 		templates[role] = template
 	}
 	return templates[dynamo.RoleLeader], templates[dynamo.RoleWorker], nil
@@ -364,7 +375,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 		}
 	}
-	return r.generateComponentPodTemplateSpec(
+	template, err := r.generateComponentPodTemplateSpec(
 		ctx,
 		componentForRendering,
 		podLabels,
@@ -382,6 +393,24 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
 			KVTransferPolicy: dynamo.DCDKVTransferPolicyEnvironment(dcd, component)},
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Standalone DCDs have no parent UID and retain the shared Secret.
+	if uid, managed := managedDGDUIDForDCD(dcd); managed {
+		if dynamo.RepointMPISSHSecret(&template.Spec, uid, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName) {
+			marker, err := dynamo.ResolveMPISSHKeyMarker(ctx, r.reader, dcd.Namespace, uid)
+			if err != nil {
+				return nil, err
+			}
+			if template.Annotations == nil {
+				template.Annotations = make(map[string]string)
+			}
+			template.Annotations[dynamo.MPISSHKeyAnnotation] = marker
+		}
+	}
+	return template, nil
 }
 
 func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(

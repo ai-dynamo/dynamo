@@ -302,6 +302,36 @@ key and certificate. Node-side software should accept the certificate only for t
 hardware the DGD currently holds, so a leaked key stops working when the DGD ends,
 whatever the certificate's validity period.
 
+## TensorRT-LLM Multinode MPI SSH Key
+
+For DGDs recorded as created by operator 1.8.0 or newer, rendered serving Pods that reference the
+configured shared MPI SSH Secret instead use `mpi-ssh-<DGD UID>` in the DGD's
+namespace. This includes the TensorRT-LLM leader and worker volumes that the
+operator adds, and plain or projected Secret volumes authored in native sidecar
+templates. Other Secret references, volume mounts, file modes and selected keys
+stay as written. SnapshotJob Pods retain their authored Secret references.
+
+The recorded version comes from the operator chart's `appVersion`. While that
+value is `1.7.0`, DGDs created by builds from `main` or `release/1.8.0` are
+recorded as `1.7.0` and keep the shared key.
+
+The DGD owns the immutable Secret, which holds its own `private.key` and
+`private.key.pub`. The operator creates it only when a component uses MPI SSH.
+TensorRT-LLM's generated volumes keep mode `0644`; the launch script copies the
+keys into `$HOME/.ssh` and sets their permissions before SSH uses them.
+
+- The key is not rotated during the DGD's life. To rotate it, delete and recreate
+  the DGD. The new DGD has a new UID and Secret name; garbage collection removes
+  the old Secret through its owner reference. If the Secret is deleted during
+  the DGD's life, the next reconcile creates a new key. Serving templates record
+  the Secret name and public-key hash so both roles roll to the replacement key.
+- DGDs created by an operator older than 1.8.0 keep their shared MPI SSH Secret,
+  so an operator upgrade does not restart their Pods. Standalone DCDs also keep
+  the shared Secret and their authored volumes.
+- The operator copies the shared Secret into a namespace only when a workload
+  still references it, including authored SnapshotJob volumes.
+- In workload namespaces, do not grant tenants Secret read, Pod exec or Pod update.
+
 ## Reporting a Vulnerability
 
 To report a potential security vulnerability in Dynamo, follow the process in

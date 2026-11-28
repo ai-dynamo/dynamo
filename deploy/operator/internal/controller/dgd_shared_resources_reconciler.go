@@ -47,6 +47,7 @@ type dgdSharedResourcesReconciler struct {
 
 func newDGDSharedResourcesReconciler(
 	kubeClient client.Client,
+	apiReader client.Reader,
 	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
@@ -55,6 +56,11 @@ func newDGDSharedResourcesReconciler(
 	sshKeyManager *secret.SSHKeyManager,
 ) *dgdSharedResourcesReconciler {
 	syncer := newDGDResourceSyncer(kubeClient, recorder)
+	// Without an SSH manager, key reconciliation is disabled and needs no MPI configuration.
+	sharedName := ""
+	if sshKeyManager != nil {
+		sharedName = config.MPI.SSHSecretName
+	}
 	return &dgdSharedResourcesReconciler{
 		rbac:          newDGDRBACReconciler(config, kubeClient),
 		pvcs:          newDGDPVCReconciler(syncer),
@@ -63,7 +69,7 @@ func newDGDSharedResourcesReconciler(
 		checkpoints:   newDGDCheckpointsReconciler(syncer, config, runtimeConfig, dockerSecretRetriever),
 		epp:           newDGDEPPReconciler(syncer, config, runtimeConfig, restConfig),
 		waitForLeader: newDGDWaitForLeaderReconciler(syncer),
-		sshKeys:       newDGDSSHKeysReconciler(sshKeyManager),
+		sshKeys:       newDGDSSHKeysReconciler(kubeClient, apiReader, sharedName, sshKeyManager),
 	}
 }
 

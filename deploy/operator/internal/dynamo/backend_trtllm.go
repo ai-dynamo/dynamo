@@ -1,6 +1,8 @@
 package dynamo
 
 import (
+	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,14 +11,67 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const MPISSHKeyAnnotation = "nvidia.com/mpi-ssh-key"
+
+// ResolveMPISSHKeyMarker reads the public key so recreating a Secret changes every serving template.
+// reader must be non-nil and observe the DGD's namespace.
+func ResolveMPISSHKeyMarker(ctx context.Context, reader client.Reader, namespace string, dgdUID types.UID) (string, error) {
+	name := MPISSHSecretName(dgdUID)
+	identity := &corev1.Secret{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, identity); err != nil {
+		return "", fmt.Errorf("read MPI SSH Secret %s/%s: %w", namespace, name, err)
+	}
+
+	// Only a public key controlled by this graph may identify its rendered workloads.
+	owner := metav1.GetControllerOf(identity)
+	if owner == nil || owner.Kind != "DynamoGraphDeployment" || owner.UID != dgdUID || len(identity.Data["private.key.pub"]) == 0 {
+		return "", fmt.Errorf("MPI SSH Secret %s/%s has no DGD-owned public key", namespace, name)
+	}
+	return fmt.Sprintf("%s/%x", name, sha256.Sum256(identity.Data["private.key.pub"])), nil
+}
 
 type TRTLLMBackend struct {
 	MpiRunSecretName    string
 	roleLaunchOwnership roleLaunchOwnership
 	environment         *podEnvironment
+}
+
+// MPISSHSecretName names the Secret holding one DGD's MPI SSH key pair.
+func MPISSHSecretName(dgdUID types.UID) string {
+	return "mpi-ssh-" + string(dgdUID)
+}
+
+// RepointMPISSHSecret changes shared MPI Secret references in a rendered Pod.
+// The caller owns podSpec. Authored items, modes, mounts and unrelated Secrets stay intact.
+func RepointMPISSHSecret(podSpec *corev1.PodSpec, dgdUID types.UID, annotations map[string]string, sharedName string) bool {
+	if dgdUID == "" || !compatibility.TRTLLMPerDGDMPISSHKey.Enabled(annotations) {
+		return false
+	}
+	changed := false
+	for i := range podSpec.Volumes {
+		volume := &podSpec.Volumes[i]
+		if volume.Secret != nil && volume.Secret.SecretName == sharedName {
+			volume.Secret.SecretName = MPISSHSecretName(dgdUID)
+			changed = true
+		}
+		if volume.Projected != nil {
+			for j := range volume.Projected.Sources {
+				source := volume.Projected.Sources[j].Secret
+				if source != nil && source.Name == sharedName {
+					source.Name = MPISSHSecretName(dgdUID)
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
 }
 
 // UpdateContainer configures the container for TRT-LLM multinode deployments.
@@ -95,7 +150,7 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 			Name: b.MpiRunSecretName,
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  b.MpiRunSecretName,
-				DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
+				DefaultMode: new(int32(0644)),
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, sshVolume)

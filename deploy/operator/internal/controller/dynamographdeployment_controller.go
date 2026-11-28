@@ -71,6 +71,7 @@ const (
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	APIReader             client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -277,6 +278,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 // controllerBuilder shares production watches and indexes with instrumented reconcilers.
 func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*builder.Builder, error) {
+	// Use the API server only to verify ownership after a competing Secret create.
+	r.APIReader = mgr.GetAPIReader()
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&corev1.Pod{},

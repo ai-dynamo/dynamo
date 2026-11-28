@@ -67,6 +67,7 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 	t.Log("Reconcile shared resources through their explicit dependencies")
 	sharedResources := newDGDSharedResourcesReconciler(
 		kubeClient,
+		kubeClient,
 		recorder,
 		config,
 		runtimeConfig,
@@ -126,6 +127,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 		Gate: features.Gates{Checkpoint: true},
 	}
 	reconciler := newDGDSharedResourcesReconciler(
+		kubeClient,
 		kubeClient,
 		events.NewFakeRecorder(10),
 		config,
