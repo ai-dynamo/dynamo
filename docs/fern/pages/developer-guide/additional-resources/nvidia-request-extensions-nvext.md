@@ -34,7 +34,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
 | `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
-| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
+| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the default chat processor uses these IDs and skips tokenization. `/v1/completions` uses them only for a single string `prompt`: a token-array `prompt` takes precedence, and `prompt_embeds` replaces both. With `--dyn-chat-processor vllm` or `sglang`, `/v1/chat/completions` ignores this field and tokenizes the rendered messages. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
