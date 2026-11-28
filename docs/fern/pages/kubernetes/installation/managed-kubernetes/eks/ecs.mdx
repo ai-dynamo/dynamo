@@ -105,7 +105,7 @@ Add `sh,-c` in **Entry point** and `cd examples/backends/vllm && python -m dynam
 Create the PrefillWorker task same as the frontend worker, except for following changes
 - Set container name as `dynamo-prefill`
 - No container port mapping
-- Docker configuration with command `cd examples/backends/vllm && python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --disaggregation-mode prefill`
+- Docker configuration with command `cd examples/backends/vllm && python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --disaggregation-mode prefill --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'`
 
 </Step>
 <Step title="Task Deployment" id="5-task-deployment">
@@ -123,6 +123,7 @@ You can create a service or directly run the task from the task definition
 - After the deployment, an aggregated serving endpoint is created and you can test it with scripts in step 6.
 3. Dynamo PrefillWorker Task
 - For disaggregated serving, you can deploy a separate prefill worker on another GPU. Choose the EC2 cluster (`dynamo-GPU`) for **Existing cluster** created in step 1 with at least 2 GPUs ( `g6e.12xlarge` for example)
+- The prefill worker hands its KV cache to a decode worker that uses the `kv_consumer` role. Before you deploy it, change the worker command in the frontend task to `python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --disaggregation-mode decode --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'`. Keep the original command when you do not deploy a prefill worker.
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
 
 </Step>

@@ -222,6 +222,8 @@ spec:
           - "1"
           - --disaggregation-mode
           - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           command:
           - python3
           - -m
@@ -304,6 +306,8 @@ spec:
           - "2"
           - --disaggregation-mode
           - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           command:
           - python3
           - -m
@@ -385,6 +389,8 @@ spec:
           - ${MODEL_NAME}
           - --tensor-parallel-size
           - "1"
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           command:
           - python3
           - -m

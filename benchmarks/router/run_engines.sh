@@ -115,6 +115,27 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
     fi
 fi
 
+# Disaggregated vLLM needs a connector unless the caller supplied one.
+if [ "$USE_MOCKERS" = false ] && [ "$USE_TRTLLM" = false ] && [ "$MODE" != "agg" ]; then
+    HAS_KV_TRANSFER_CONFIG=false
+    for arg in "${EXTRA_ARGS[@]}"; do
+        OPTION_NAME="${arg%%=*}"
+        case "${OPTION_NAME//_/-}" in
+            --kv-transfer-config|--kv-transfer-config.*)
+                HAS_KV_TRANSFER_CONFIG=true
+                break
+                ;;
+        esac
+    done
+    if [ "$HAS_KV_TRANSFER_CONFIG" = false ]; then
+        if [ "$MODE" = "prefill" ]; then
+            EXTRA_ARGS+=("--kv-transfer-config" '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}')
+        else
+            EXTRA_ARGS+=("--kv-transfer-config" '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}')
+        fi
+    fi
+fi
+
 # Validate arguments
 if ! [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || [ "$NUM_WORKERS" -lt 1 ]; then
     echo "Error: NUM_WORKERS must be a positive integer"
@@ -261,7 +282,8 @@ else
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
                 VLLM_ARGS+=("--kv-events-config" "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}")
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
+                # GPU ranges also reserve space for each worker's data-parallel NIXL ports.
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20097 + START_GPU)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
