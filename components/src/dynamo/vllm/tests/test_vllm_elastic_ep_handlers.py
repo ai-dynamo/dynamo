@@ -8,13 +8,9 @@ handling of a failed grow. vLLM does no rollback on a failed scale, so the
 handler restarts the worker instead of recovering in process; the fail-fast
 tests assert the restart is actually triggered (via ``_WorkerShutdown``), not
 just that a value was returned.
-
-``ray`` is stubbed via the ``stub_ray`` fixture (the scale path imports it
-lazily and CI lacks it).
 """
 
 import asyncio
-import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -64,19 +60,6 @@ def _make_handler(
     return handler
 
 
-@pytest.fixture
-def stub_ray(monkeypatch):
-    """Stand in for ray, which the scale path imports lazily and CI lacks."""
-    state = SimpleNamespace(list_nodes=lambda **kwargs: [])
-    util = SimpleNamespace(state=state)
-    monkeypatch.setitem(
-        sys.modules, "ray", SimpleNamespace(nodes=lambda: [], util=util)
-    )
-    monkeypatch.setitem(sys.modules, "ray.util", util)
-    monkeypatch.setitem(sys.modules, "ray.util.state", state)
-    return state
-
-
 # --------------------------------------------------------------------------- #
 # Input validation and the TP-derived EP-size floor.
 # --------------------------------------------------------------------------- #
@@ -120,7 +103,7 @@ async def test_non_integer_sizes_are_rejected(size):
 
 @pytest.mark.parametrize("size", [2.0, "2"])
 @pytest.mark.asyncio
-async def test_integer_valued_sizes_are_accepted(size, stub_ray):
+async def test_integer_valued_sizes_are_accepted(size):
     """Integer-valued floats and decimal-free strings coerce to the exact int."""
     handler = _make_handler(tensor_parallel_size=1)
 
@@ -143,7 +126,7 @@ async def test_single_rank_expert_group_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_dp_one_allowed_when_tensor_parallelism_widens_the_group(stub_ray):
+async def test_dp_one_allowed_when_tensor_parallelism_widens_the_group():
     """One pod per DP rank: TP=4 still leaves four EP ranks at dp=1."""
     handler = _make_handler(tensor_parallel_size=4)
 
@@ -155,7 +138,7 @@ async def test_dp_one_allowed_when_tensor_parallelism_widens_the_group(stub_ray)
 
 
 @pytest.mark.asyncio
-async def test_dp_two_allowed_at_tp_one(stub_ray):
+async def test_dp_two_allowed_at_tp_one():
     handler = _make_handler(tensor_parallel_size=1)
 
     result = await handler.scale_elastic_ep({"new_data_parallel_size": 2})
@@ -266,7 +249,7 @@ def _run(engine: _FakeVllmEngine, body: dict):
     return result, shutdown_log
 
 
-def test_scale_success(stub_ray):
+def test_scale_success():
     engine = _FakeVllmEngine(prev_dp=2)
 
     result, shutdown = _run(engine, {"new_data_parallel_size": 3})
@@ -277,7 +260,7 @@ def test_scale_success(stub_ray):
     assert engine.calls == [3]
 
 
-def test_validation_error_does_not_restart_the_worker(stub_ray):
+def test_validation_error_does_not_restart_the_worker():
     # Fail-fast is scoped to real scale failures: a request rejected up front
     # (dp=1 at TP=1 collapses the EP world) returns an error and must NOT restart
     # the worker or touch the engine.
@@ -290,7 +273,7 @@ def test_validation_error_does_not_restart_the_worker(stub_ray):
     assert engine.calls == []  # never reached the engine
 
 
-def test_unsupported_config_is_rejected_without_restart(stub_ray):
+def test_unsupported_config_is_rejected_without_restart():
     # control/scale_elastic_ep is registered on every worker, but a worker
     # without elastic EP / the Ray DP backend must get a nonfatal error, not a
     # fail-fast restart -- vLLM would raise NotImplementedError before any scale
@@ -307,7 +290,7 @@ def test_unsupported_config_is_rejected_without_restart(stub_ray):
     assert engine.calls == []  # never reached the engine
 
 
-def test_failed_grow_restarts_the_worker(stub_ray):
+def test_failed_grow_restarts_the_worker():
     # vLLM does not roll back a failed scale, so a failed grow must fail fast:
     # restart the worker rather than report a recovery that no caller acts on.
     engine = _FakeVllmEngine(prev_dp=2, fail_sizes=[3])
@@ -319,7 +302,7 @@ def test_failed_grow_restarts_the_worker(stub_ray):
     assert engine.calls == [3]  # grow attempted once; no rollback call
 
 
-def test_engine_dead_restarts_the_worker(stub_ray):
+def test_engine_dead_restarts_the_worker():
     # A dead engine routes through the same _shutdown_on_engine_dead path the rest
     # of the handler uses for engine death.
     engine = _FakeVllmEngine(prev_dp=2, dead_sizes=[3])
