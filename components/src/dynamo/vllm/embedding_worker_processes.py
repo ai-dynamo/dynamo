@@ -208,6 +208,9 @@ def _child_environment(
     env[_ENGINE_ADDRESSES_ENV] = addresses_json
     env[_LISTENER_FDS_ENV] = json.dumps(listener_fds)
     env["PYTHONUNBUFFERED"] = "1"
+    # An inherited multiprocess dir makes a child serve its vllm:* series twice and
+    # the parent re-export them; setup_vllm_engine gives the child its own dir.
+    env.pop("PROMETHEUS_MULTIPROC_DIR", None)
 
     # Each Dynamo runtime process needs its own system-status listener, but the
     # port must stay predictable: Prometheus scrapes a fixed containerPort and
