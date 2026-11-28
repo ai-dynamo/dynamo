@@ -103,7 +103,7 @@ test-support = [
   "dep:tracing",
   "dep:uuid",
 ]
-profile = ["offline-replay", "dynamo-mocker/profile"]
+profile = ["offline-replay"]
 replay-bench = ["offline-replay", "dynamo-mocker/replay-bench"]
 
 [[bench]]
