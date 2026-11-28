@@ -1,0 +1,202 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Benchmark GPU Fractions
+subtitle: Measure what sharing a GPU costs in throughput and latency, with every model loaded at once
+---
+
+Sharing a GPU always costs something: each model runs on part of the GPU, and the models compete for memory bandwidth. This guide runs a concurrency sweep that loads every model at the same time, so each model is measured next to busy neighbors, and shows how to read the results against a dedicated-GPU baseline. It uses the published A100 benchmark as the worked example.
+
+<Note>
+These results are experimental and purely illustrative. They are not indicative of optimal performance, and your deployment or configuration may vary.
+</Note>
+
+## The Benchmark
+
+The published run served Qwen3-4B on one 8× A100 40GB node, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens. The results are pessimistic: they assume no KV caching between requests, so the whole 2048-token input is computed on every request.
+
+| Configuration | Models | Placement | Isolation |
+|---|---|---|---|
+| Baseline | 8 | One model per GPU | Dedicated GPU |
+| KAI + HAMi | 16 | Two models per GPU | Memory limits only; the CUDA driver time-slices the two models |
+| GPU fractions | 16 | Two models per GPU | Memory limit and an MPS compute cap of half the SMs; the two models run at the same time |
+
+In both shared configurations, each model gets half of the GPU's memory. Under HAMi, both models share all of the GPU's SMs, and the driver switches between them, so one model's work waits while the other's runs. Under GPU fractions, each model is capped at half the SMs, and both run at once. The cap limits a model's share; it does not reserve specific SMs.
+
+## Run the Sweep
+
+These steps reproduce the GPU fractions row. The baseline and KAI + HAMi rows have their own guides: [Deploy the Baseline Experiment](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/deploy-baseline.md) and [Deploy the KAI + HAMi Experiment](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/deploy-kai-hami.md).
+
+You need the cluster from [Deploy Models on GPU Fractions](deploy-models-on-gpu-fractions.mdx), with one node of eight A100 40GB GPUs and no other GPU work on it, and a second node with 16 free CPUs and 32 GiB of memory for the load generator. Run the commands from `examples/gpu-sharing`, with `GPU_NODE` set.
+
+<Steps toc={true}>
+<Step title="Deploy all sixteen models" id="deploy-all-sixteen-models">
+
+```bash
+NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl apply -f -
+kubectl get dgd -n default      # wait until all 16 DGDs are Ready
+```
+
+Confirm that each GPU hosts exactly two workers:
+
+```bash
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
+  kubectl exec -n default "${p#pod/}" -- env | grep NVIDIA_VISIBLE
+done | sort | uniq -c
+```
+
+Expect eight lines, each with a count of `2`.
+
+</Step>
+<Step title="Start the load generator" id="start-the-load-generator">
+
+The frontends are reachable only from inside the cluster, so the sweep runs in a pod. Its node affinity keeps it off `$GPU_NODE`, so load generation doesn't compete with the workers for CPU:
+
+```bash
+sed "s/<gpu-node>/$GPU_NODE/" common/aiperf-client-pod.yaml | kubectl apply -f -
+kubectl wait --for=condition=Ready pod/aiperf-client --timeout=300s
+kubectl cp common aiperf-client:/work/common
+kubectl exec aiperf-client -- bash /work/common/setup-aiperf.sh
+```
+
+</Step>
+<Step title="Run the sweep" id="run-the-sweep">
+
+Start the sweep as a detached process, so it keeps running if your `kubectl exec` session drops, then follow its log:
+
+```bash
+kubectl exec aiperf-client -- bash -c \
+  'cd /work && setsid bash -c "ENDPOINT_MODE=dns NUM_MODELS=16 RESULTS_DIR=/work/results \
+     bash common/run-sweep.sh kai-fractions-16x-sweep > sweep.log 2>&1; echo \$? > sweep.exit" \
+   < /dev/null > /dev/null 2>&1 &'
+kubectl exec aiperf-client -- tail -f /work/sweep.log
+```
+
+For each concurrency in `1 2 4 8 16 32`, the sweep drives all 16 models at once with AIPerf, using streaming chat requests. The sweep takes several hours.
+
+</Step>
+<Step title="Collect the results" id="collect-the-results">
+
+The sweep is done when `/work/sweep.exit` exists, and `0` means every run succeeded:
+
+```bash
+kubectl exec aiperf-client -- cat /work/sweep.exit
+kubectl cp aiperf-client:/work/results ./results
+```
+
+Results land in `results/kai-fractions-16x-sweep/c<N>/worker-NN/`, one directory per model and concurrency.
+
+</Step>
+</Steps>
+
+To benchmark your own models, deploy them with their own shares and run the same sweep with `NUM_MODELS` and `NAME_PREFIX` set to match your DGDs. The sweep loads every model at once, which is how each model's share should be measured.
+
+## Results
+
+### Throughput
+
+Concurrency, `c`, is the number of requests each model has in flight. A shared GPU hosts two models, so HAMi and GPU fractions at `c=1` place the same two requests on each GPU as the baseline at `c=2`. The first column, **Requests resident/GPU**, is that shared quantity, so each row compares the three configurations under the same load on the hardware.
+
+| Requests resident/GPU | Baseline concurrency | HAMi and Fractions concurrency | tok/s per GPU Baseline | tok/s per GPU HAMi | tok/s per GPU Fractions | HAMi % of Baseline | Fractions % of Baseline |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 1 | 227.5 | 101.1 | 144.4 | 44.5% | 63.5% |
+| 4 | 4 | 2 | 429.1 | 193.0 | 259.2 | 45.0% | 60.4% |
+| 8 | 8 | 4 | 671.2 | 343.9 | 456.1 | 51.2% | 68.0% |
+| 16 | 16 | 8 | 929.2 | 572.0 | 722.8 | 61.6% | 77.8% |
+| 32 | 32 | 16 | 1,141.8 | 831.4 | 1,003.4 | 72.8% | 87.9% |
+
+Sharing a GPU between two distinct models always costs throughput. Capping each model's share of the SMs and memory with GPU fractions costs less than capping only memory and time-slicing the compute, as KAI + HAMi does.
+
+<details>
+<summary>TTFT p50 (ms)</summary>
+
+| Requests resident/GPU | Baseline concurrency | HAMi and Fractions concurrency | TTFT p50 Baseline (ms) | TTFT p50 HAMi (ms) | TTFT p50 Fractions (ms) | HAMi % of Baseline | Fractions % of Baseline |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 1 | 48.6 | 216 | 185 | 444.4% | 380.7% |
+| 4 | 4 | 2 | 49.0 | 374 | 347 | 763.3% | 708.2% |
+| 8 | 8 | 4 | 331.5 | 571 | 549 | 172.2% | 165.6% |
+| 16 | 16 | 8 | 431.0 | 731 | 739 | 169.6% | 171.5% |
+| 32 | 32 | 16 | 481.8 | 777 | 786 | 161.3% | 163.1% |
+
+</details>
+
+<details>
+<summary>ITL p50 (ms)</summary>
+
+| Requests resident/GPU | Baseline concurrency | HAMi and Fractions concurrency | ITL p50 Baseline (ms) | ITL p50 HAMi (ms) | ITL p50 Fractions (ms) | HAMi % of Baseline | Fractions % of Baseline |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 1 | 8.61 | 19.0 | 13.2 | 220.7% | 153.3% |
+| 4 | 4 | 2 | 9.13 | 19.3 | 14.1 | 211.4% | 154.4% |
+| 8 | 8 | 4 | 11.00 | 21.1 | 15.4 | 191.8% | 140.0% |
+| 16 | 16 | 8 | 15.56 | 25.2 | 19.3 | 162.0% | 124.0% |
+| 32 | 32 | 16 | 26.20 | 35.6 | 28.9 | 135.9% | 110.3% |
+
+</details>
+
+### Cost per 1M Output Tokens
+
+This table compares the cost of serving 16 models when each model receives the same traffic. Serving 16 models with one model per GPU requires leasing two 8× A100 nodes, while GPU fractions serves all 16 on one node. The baseline is extrapolated from the 8-model run by doubling its throughput. Both configurations are priced at a normalized \$1.00 per node-hour; multiply the \$/1M columns by your node-hour price to get your cost. The percentage column does not depend on the price.
+
+Unlike the tables above, rows here are matched on concurrency per model, not requests per GPU.
+
+| Concurrency per model | Baseline tok/s (2 nodes) | Baseline $/1M | Fractions tok/s (1 node) | Fractions $/1M | Fractions cost vs Baseline |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1,782 | $0.3118 | 1,155 | $0.2405 | -22.9% |
+| 2 | 3,640 | $0.1526 | 2,074 | $0.1339 | -12.2% |
+| 4 | 6,866 | $0.0809 | 3,649 | $0.0761 | -5.9% |
+| 8 | 10,740 | $0.0517 | 5,782 | $0.0480 | -7.1% |
+| 16 | 14,868 | $0.0374 | 8,027 | $0.0346 | -7.4% |
+| 32 | 18,268 | $0.0304 | 9,059 | $0.0307 | +0.8% |
+
+$/1M is the hourly node cost divided by output tokens per hour, scaled to one million tokens. Only output tokens are counted. At light per-model load, a dedicated GPU sits mostly idle, and packing two models onto it recovers that idle capacity. At 32 concurrent requests per model, the dedicated GPUs are busy enough that the cost advantage disappears.
+
+## How to Read the Benchmark
+
+Read across a row to confirm that latency meets your requirements, then use **Fractions % of Baseline** to decide whether giving up that share of throughput is worth one GPU saved per pair of models.
+
+<AccordionGroup>
+  <Accordion title="Rows are matched on load per GPU">
+  Each row compares the configurations at the same number of requests resident on each GPU. A shared GPU hosts two models, so HAMi and GPU fractions at concurrency `c` match the baseline at concurrency `2c`.
+
+  Comparing rows at equal `c` instead would give the shared configurations twice the load of the baseline and make them look better than they are.
+  </Accordion>
+  <Accordion title="Latency columns">
+  **TTFT p50** (time to first token) and **ITL p50** (inter-token latency) are per-request medians. Sharing always costs latency, because each model runs on only part of the GPU. Treat these columns as a check that latency is still acceptable for your service. GPU fractions matches or beats HAMi on ITL in every row, and ITL stays under 30 ms throughout.
+  </Accordion>
+  <Accordion title="Throughput columns">
+  **tok/s per GPU** is output tokens per second per GPU, summed across all models on that GPU. The absolute values depend on this model, GPU, and prompt shape, so they do not carry over to your workload.
+  </Accordion>
+  <Accordion title="Percentage columns">
+  **Fractions % of Baseline** answers the deployment question directly: when you put two models on one GPU instead of giving each its own, how much of that GPU's throughput do you keep?
+
+  Base decisions on the percentage columns for three reasons:
+
+  1. **They cancel out the setup.** Model size, GPU type, and sequence lengths shift all three configurations together. A ratio against a dedicated baseline at the same load isolates the cost of sharing, which makes it the number most likely to transfer to your workload.
+  2. **They map to a GPU-count decision.** At one request per model, GPU fractions keeps 63.5%: one GPU serves two distinct models at about 63% of the throughput a dedicated GPU would deliver, rising to 87.9% at 16 requests per model. For every pair of models that can tolerate that, you free a whole GPU. In this benchmark, 16 models run on 8 GPUs instead of 16.
+  3. **They separate how the GPU is shared from the fact that it is shared.** HAMi and GPU fractions both pay the cost of splitting a GPU. The 15 to 20 point gap between them is the gain from limiting each model's share of compute with MPS instead of time-slicing it. Under time-slicing, one model's kernels wait behind the other's. With MPS limits, both models' kernels can run at the same time. The limit caps a model's share of SMs but does not guarantee that its kernels start immediately when its neighbor is busy.
+  </Accordion>
+  <Accordion title="Why sharing costs throughput">
+  Each decode step reads the model's full weights from GPU memory, and at low load that read dominates the step time. One model serving two requests reads its weights once per step for both. Two models serving one request each read two sets of weights, which roughly doubles the memory traffic for the same output. At low load this duplication dominates, and GPU fractions keeps about 63% of dedicated throughput.
+
+  As load rises, each step does more compute per weight read, so the duplicated reads matter less. GPU fractions climbs to about 88% of dedicated throughput at 32 requests per GPU.
+  </Accordion>
+</AccordionGroup>
+
+## Appendix: Node Throughput at Equal Per-Model Concurrency
+
+This table compares total node output throughput (tok/s) with every configuration at the same per-model concurrency. The shared configurations run 16 models on 8 GPUs, so each GPU carries twice as many in-flight requests as the baseline at the same `c/model`.
+
+| c/model | Baseline (8 models) | HAMi (16 models) | HAMi % of baseline | Fractions (16 models) | Fractions % of baseline |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 891 | 809 | 90.8% | 1,155 | 129.6% |
+| 2 | 1,820 | 1,544 | 84.8% | 2,074 | 114.0% |
+| 4 | 3,433 | 2,751 | 80.1% | 3,649 | 106.3% |
+| 8 | 5,370 | 4,576 | 85.2% | 5,782 | 107.7% |
+| 16 | 7,434 | 6,651 | 89.5% | 8,027 | 108.0% |
+| 32 | 9,134 | 7,544 | 82.6% | 9,059 | 99.2% |
+
+## Next Steps
+
+- [Size Each Model's Share](size-each-models-share.mdx): adjust each model's share from what the sweep shows.
+- [Benchmark Sized Shares](benchmark-sized-shares.mdx): size each share from its targets instead of splitting the GPU evenly, and fit more models per GPU.
+- [Operate Shared GPUs](operate-shared-gpus.md): run the shared GPUs in production.

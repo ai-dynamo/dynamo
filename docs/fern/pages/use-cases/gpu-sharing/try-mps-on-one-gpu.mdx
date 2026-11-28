@@ -1,0 +1,244 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Try MPS on One GPU
+subtitle: Run two processes on one GPU, each capped at its own share of the SMs and memory, with MPS v3 and no Kubernetes
+---
+
+On Kubernetes, the GPU fractioning agents drive CUDA Multi-Process Service (MPS) for you. This page drives it by hand on a single machine, so you can see what those agents set up: one MPS server for a GPU, and one namespace per model, each with its own compute and memory limit. It takes about ten minutes, and you can use the same setup to measure the share each model needs, as [Size Each Model's Share](size-each-models-share.mdx) describes.
+
+## Prerequisites
+
+| Requirement | Check |
+|---|---|
+| A Linux machine with one NVIDIA GPU, Ampere or newer, with no other workloads on it | `nvidia-smi` |
+| NVIDIA driver r615 or newer (CUDA 13.4), for MPS v3 servers and namespaces | `nvidia-smi --query-gpu=driver_version --format=csv,noheader` prints `615.x` or newer |
+| MIG disabled | `nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader` prints `Disabled` or `[N/A]` |
+| Python with PyTorch, for the check in step 6 | `python3 -c "import torch; print(torch.cuda.is_available())"` |
+
+You don't need root. A single-user MPS daemon, its servers, its namespaces, and its clients all run as your own user.
+
+<Steps toc={true}>
+<Step title="Check the MPS v3 interface" id="check-the-mps-v3-interface">
+
+```bash
+nvidia-cuda-mps-control -p 3 -h
+```
+
+The help lists the `server` and `namespace` commands. If it doesn't, the driver is older than r615.
+
+</Step>
+<Step title="Find the GPU's UUID" id="find-the-gpus-uuid">
+
+MPS v3 names GPUs by UUID. Ordinals change meaning when `CUDA_VISIBLE_DEVICES` is set, so use the UUID everywhere:
+
+```bash
+nvidia-smi --query-gpu=index,uuid,memory.total --format=csv,noheader
+```
+
+```text
+0, GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d, 97887 MiB
+```
+
+</Step>
+<Step title="Write the server configuration" id="write-the-server-configuration">
+
+Create `mps.toml` with one server for the GPU and two namespaces, one per model. MPS can cap each model's compute in two ways. Choose one:
+
+- **3a. Active thread percentage:** a ceiling on the share of the SMs. It is the simplest to set up, and it is what GPU fractions uses on Kubernetes.
+- **3b. Static SM partitions:** each model runs on its own set of SMs. It is more work to set up, but a memory fault in one model no longer stops the other.
+
+### 3a. Cap compute with an active thread percentage
+
+Replace the UUID with yours:
+
+```toml
+schema_version = "1.0"
+
+[servers.gpu0]
+allowed_devices          = "GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d"
+pinned_memory_limit      = "8G"
+active_thread_percentage = "10"
+
+[servers.gpu0.namespaces.model_a]
+pinned_memory_limit      = "16G"
+active_thread_percentage = "50"
+
+[servers.gpu0.namespaces.model_b]
+pinned_memory_limit      = "8G"
+active_thread_percentage = "25"
+```
+
+- `active_thread_percentage` caps the share of the SMs a namespace's clients can use. It is a ceiling, not a reservation: two namespaces whose percentages add up to more than 100 compete for the same SMs.
+- `pinned_memory_limit` caps the GPU memory a client can allocate. Sizes use binary units, so `16G` is 16 GiB.
+- The `[servers.gpu0]` limits apply **only** to the server's `default` namespace, which a client gets when it connects to the server instead of a namespace. A named namespace doesn't inherit them, and isn't capped by them. Set both limits on every namespace you create. GPU fractions uses the same pattern, with a low default as a safety net.
+
+### 3b. Pin each model to its own SMs for fault isolation
+
+By default, every client on an MPS server shares one fault domain: an illegal memory access in one model stops every model on the GPU. A static SM partition gives a model its own SMs, and a memory fault then stops only the clients in the faulting partition. [MPS Fault Isolation](../../developer-guide/knowledge-base/concepts/gpu-sharing/mps-fault-isolation.md) has the measurements.
+
+The namespaces keep their memory limits. The partitions, not the namespaces, set the compute, so give each namespace an active thread percentage of 100:
+
+```toml
+schema_version = "1.0"
+
+[servers.gpu0]
+allowed_devices          = "GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d"
+pinned_memory_limit      = "8G"
+active_thread_percentage = "10"
+
+[servers.gpu0.namespaces.model_a]
+pinned_memory_limit      = "16G"
+active_thread_percentage = "100"
+
+[servers.gpu0.namespaces.model_b]
+pinned_memory_limit      = "8G"
+active_thread_percentage = "100"
+```
+
+You create the partitions after the daemon starts, in [step 4](#start-the-mps-control-daemon).
+
+Partitions contain memory faults, but not every fault:
+
+- **Traps and breakpoints still reach every model.** A kernel that executes `__trap()` or a breakpoint makes the MPS server reset the GPU, partitions or not.
+- **Bandwidth, the L2 cache, and power are still shared,** as they are under 3a.
+- **SMs come in fixed chunks,** 8 SMs each on Hopper and newer, and a partition can't lend idle SMs to a busy neighbor. A percentage is only a ceiling, so idle SMs are not wasted.
+
+For isolation from every kind of fault, use MIG or separate GPUs.
+
+</Step>
+<Step title="Start the MPS control daemon" id="start-the-mps-control-daemon">
+
+Use a node-local pipe directory, such as one on the `/dev/shm` tmpfs:
+
+```bash
+export CUDA_MPS_PIPE_DIRECTORY=/dev/shm/mps/pipe CUDA_MPS_LOG_DIRECTORY=/dev/shm/mps/log
+mkdir -p "$CUDA_MPS_PIPE_DIRECTORY" "$CUDA_MPS_LOG_DIRECTORY"
+nvidia-cuda-mps-control -d -p 3 -a mps.toml
+```
+
+`-d` starts the daemon in the background, `-p 3` selects the v3 interface, and `-a` applies the configuration file. The file is read once at startup.
+
+**If you chose 3b**, create one partition per model. A partition belongs to the server and the GPU, and its size is a number of chunks:
+
+```bash
+GPU=GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d
+nvidia-cuda-mps-control -p 3 sm-partition create model_a --server=gpu0 --device=$GPU --chunks=12 | tee model_a.part
+nvidia-cuda-mps-control -p 3 sm-partition create model_b --server=gpu0 --device=$GPU --chunks=6 | tee model_b.part
+nvidia-cuda-mps-control -p 3 sm-partition list --all
+```
+
+```text
+SM partition 'model_a' created on device GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d (sm-count=96)
+CUDA_MPS_SM_PARTITION=GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d/00C80000007lHthS3UnmkXHMG3HxA1Ka
+SM partition 'model_b' created on device GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d (sm-count=48)
+CUDA_MPS_SM_PARTITION=GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d/00C800000001lgVgSakOSmAd6O7Z1qKG
+SERVER  DEVICE                                    NAME     CHUNKS  SM COUNT  INCLUDE REMAINDER  STATUS       VISIBLE UUID
+gpu0    GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d  model_a  12      96        false              created      00C80000007lHthS3UnmkXHMG3HxA1Ka
+gpu0    GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d  model_b  6       48        false              created      00C800000001lgVgSakOSmAd6O7Z1qKG
+gpu0    GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d  -        4       44        -                  unallocated  -
+```
+
+Each `create` prints a `CUDA_MPS_SM_PARTITION` setting, which a client uses in step 6. The `unallocated` row shows the chunks left. On this 188-SM GPU there are 22 chunks, and a request for more than are free fails with `Not enough free chunks`.
+
+</Step>
+<Step title="Confirm the server and namespaces" id="confirm-the-server-and-namespaces">
+
+```bash
+nvidia-cuda-mps-control -p 3 server list
+nvidia-cuda-mps-control -p 3 namespace list --server=gpu0
+```
+
+```text
+NAME             UID         PID       STATUS   PIPE DIRECTORY                            ALLOWED DEVICES                           CONTEXT IDS
+gpu0             1000        1785096   Ready    /dev/shm/mps/pipe/gpu0                    GPU-cc97390c-c189-71f5-1bb7-5b0af481fa0d  1
+
+NAME             SERVER        SERVER STATUS  PINNED MEMORY LIMIT   ACTIVE THREAD PERCENTAGE   CLIENT PRIORITY  PIPE DIRECTORY
+model_b          gpu0          Ready          8G                    25.00                      0                /dev/shm/mps/pipe/gpu0/model_b
+model_a          gpu0          Ready          16G                   50.00                      0                /dev/shm/mps/pipe/gpu0/model_a
+default          gpu0          Ready          8G                    10.00                      0                /dev/shm/mps/pipe/gpu0/default
+```
+
+Each namespace has its own pipe directory. A client picks its namespace by connecting to that directory.
+
+<Warning>
+Check both lists after every start. Two configuration mistakes leave no MPS running, while the start command still succeeds:
+
+- **An invalid namespace name.** Use letters, digits, and underscores. A name with a hyphen, such as `model-a`, fails to parse, and the daemon logs `Invalid namespace parameters` to `$CUDA_MPS_LOG_DIRECTORY/control.log` and exits.
+- **A GPU that isn't on the machine.** A server whose `allowed_devices` names a missing GPU starts, then exits and disappears from `server list`.
+
+Clients pointed at a daemon or server that isn't running run without MPS and without limits.
+</Warning>
+
+</Step>
+<Step title="Run a client in each namespace" id="run-a-client-in-each-namespace">
+
+Save this script as `check_limits.py`. It reports the SMs the process can use, and allocates memory until the cap stops it:
+
+```python
+import torch
+
+p = torch.cuda.get_device_properties(0)
+free, total = torch.cuda.mem_get_info(0)
+held = []
+try:
+    while True:
+        held.append(torch.empty(256 << 20, dtype=torch.uint8, device=0))
+except torch.OutOfMemoryError:
+    pass
+print(f"SMs={p.multi_processor_count} reported total={total >> 20} MiB "
+      f"allocatable={256 * len(held)} MiB")
+```
+
+Run it in each namespace by pointing `CUDA_MPS_PIPE_DIRECTORY` at the namespace's directory:
+
+```bash
+CUDA_MPS_PIPE_DIRECTORY=/dev/shm/mps/pipe/gpu0/model_a python3 check_limits.py
+CUDA_MPS_PIPE_DIRECTORY=/dev/shm/mps/pipe/gpu0/model_b python3 check_limits.py
+```
+
+**With 3a**, expect each client's SM count to be its namespace's percentage of the GPU's SMs, rounded down to a supported count: on a 188-SM GPU, 50% gives 94 and 25% gives 46. A client pointed at the server's own directory, `/dev/shm/mps/pipe/gpu0`, lands in the `default` namespace and gets 10%, or 18 SMs. Expect the allocatable memory to stop within a few hundred MiB of the namespace's limit, which is the client's own context.
+
+**With 3b**, also give each client its partition's setting:
+
+```bash
+env CUDA_MPS_PIPE_DIRECTORY=/dev/shm/mps/pipe/gpu0/model_a \
+  $(grep -o 'CUDA_MPS_SM_PARTITION=.*' model_a.part) python3 check_limits.py
+env CUDA_MPS_PIPE_DIRECTORY=/dev/shm/mps/pipe/gpu0/model_b \
+  $(grep -o 'CUDA_MPS_SM_PARTITION=.*' model_b.part) python3 check_limits.py
+```
+
+Expect each client's SM count to be its partition's size, 96 and 48 here, and its memory to stop at its namespace's limit. Once a server has partitions, a client started without `CUDA_MPS_SM_PARTITION` doesn't fall back to the whole GPU: it fails to start with `CUDA-capable device(s) is/are busy or unavailable`.
+
+The reported total is the whole GPU, not the cap. That is why a framework that sizes memory as a fraction of the total, such as vLLM with `--gpu-memory-utilization`, needs a fraction worked out from the cap.
+
+Start both clients at once, in two terminals, to see them run side by side on the GPU, each within its own limits.
+
+<Warning>
+A client whose pipe directory is missing or misspelled runs as an ordinary CUDA process with the whole GPU, and nothing reports an error. The GPU fractioning agents prevent this on Kubernetes by mounting only the pod's own namespace directory into its container.
+</Warning>
+
+</Step>
+<Step title="Stop the daemon" id="stop-the-daemon">
+
+```bash
+nvidia-cuda-mps-control -p 3 --quit
+rm -rf /dev/shm/mps
+```
+
+`--quit` stops the servers and the control daemon. Run it with the same `CUDA_MPS_PIPE_DIRECTORY` you started the daemon with.
+
+</Step>
+</Steps>
+
+## What You Did
+
+- Started an MPS v3 control daemon with one server for a GPU.
+- Gave two namespaces their own compute and memory limits.
+- Confirmed that a client in each namespace gets only its share of the SMs and memory.
+
+## Next Steps
+
+- [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx): let KAI-Scheduler and the node agents create a namespace for every pod.
+- [Per-GPU Compute and Memory Limits with MPS](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/mps-per-gpu-limits.md): servers that span several GPUs, and a different memory limit on each GPU with cgroups.
+- [MPS v2 and v3](../../developer-guide/knowledge-base/concepts/gpu-sharing/mps-v2-and-v3.md): how servers, namespaces, and limits fit together.

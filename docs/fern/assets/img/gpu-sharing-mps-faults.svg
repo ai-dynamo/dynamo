@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="422" viewBox="0 0 1100 422" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Which MPS configurations contain a GPU fault</title>
+  <desc id="desc">What a fault in model B reaches. Namespace per model, the GPU fractions layout: concurrent; a memory fault, trap, or breakpoint reaches every model; a device-side assert stays with B. SM partition per model: concurrent; a memory fault stays with B's partition; a trap or breakpoint reaches every model; an assert stays with B. MPS server per model: the models take turns; every fault stays with B. MIG, for comparison and not measured: concurrent; every fault stays with B.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1100.0" height="422.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Which MPS configurations contain a GPU fault</text>
+  <text x="518.0" y="72.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">A fault in model B reaches</text>
+  <line x1="518.0" y1="78.0" x2="1076.0" y2="78.0" stroke="#D1D5DB" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="16.0" y="82.0" width="1068.0" height="44.0" fill="#F3F4F6" rx="8"/>
+  <text x="32.0" y="110.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Configuration</text>
+  <text x="340.0" y="110.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Concurrent</text>
+  <text x="518.0" y="110.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Memory fault</text>
+  <text x="716.0" y="110.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Trap or breakpoint</text>
+  <text x="914.0" y="110.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Device-side assert</text>
+  <rect x="32.0" y="138.0" width="80.0" height="46.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="37.0" y="143.0" width="70.0" height="36.0" fill="#F3F4F6" rx="4" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <rect x="41.0" y="148.0" width="28.0" height="26.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="55.0" y="165.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="75.0" y="148.0" width="28.0" height="26.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="89.0" y="165.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="128.0" y="166.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Namespace per model</text>
+  <rect x="336.0" y="139.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="354.0" y="167.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="370.0" y="166.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="514.0" y="139.0" width="182.0" height="44.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="532.0" y="167.0" font-size="17" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="548.0" y="166.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <rect x="712.0" y="139.0" width="182.0" height="44.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="730.0" y="167.0" font-size="17" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="746.0" y="166.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <rect x="910.0" y="139.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="928.0" y="167.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="944.0" y="166.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <line x1="24.0" y1="196.0" x2="1076.0" y2="196.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <rect x="32.0" y="208.0" width="80.0" height="46.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="38.0" y="215.0" width="30.0" height="32.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="53.0" y="235.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <line x1="72.0" y1="212.0" x2="72.0" y2="250.0" stroke="#1A1A1A" stroke-width="3" stroke-linecap="round"/>
+  <rect x="76.0" y="215.0" width="30.0" height="32.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="91.0" y="235.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="128.0" y="236.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">SM partition per model</text>
+  <rect x="336.0" y="209.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="354.0" y="237.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="370.0" y="236.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="514.0" y="209.0" width="182.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="532.0" y="237.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="548.0" y="236.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <rect x="712.0" y="209.0" width="182.0" height="44.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="730.0" y="237.0" font-size="17" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="746.0" y="236.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <rect x="910.0" y="209.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="928.0" y="237.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="944.0" y="236.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <line x1="24.0" y1="266.0" x2="1076.0" y2="266.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <rect x="32.0" y="278.0" width="80.0" height="46.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="38.0" y="285.0" width="30.0" height="32.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="53.0" y="305.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="76.0" y="285.0" width="30.0" height="32.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="91.0" y="305.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="128.0" y="306.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS server per model</text>
+  <rect x="336.0" y="279.0" width="162.0" height="44.0" fill="#FDEBD3" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="354.0" y="307.0" font-size="17" font-weight="700" fill="#9A4F00" text-anchor="middle">⟳</text>
+  <text x="370.0" y="306.0" font-size="14" font-weight="700" fill="#9A4F00" text-anchor="start">Take turns</text>
+  <rect x="514.0" y="279.0" width="182.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="532.0" y="307.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="548.0" y="306.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <rect x="712.0" y="279.0" width="182.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="730.0" y="307.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="746.0" y="306.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <rect x="910.0" y="279.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="928.0" y="307.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="944.0" y="306.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <line x1="24.0" y1="336.0" x2="1076.0" y2="336.0" stroke="#9CA3AF" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="6 5"/>
+  <rect x="32.0" y="348.0" width="80.0" height="46.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="37.0" y="353.0" width="33.0" height="36.0" fill="#EAF5D3" rx="3" stroke="#1A1A1A" stroke-width="2.5"/>
+  <text x="53.5" y="375.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="74.0" y="353.0" width="33.0" height="36.0" fill="#DDEBFD" rx="3" stroke="#1A1A1A" stroke-width="2.5"/>
+  <text x="90.5" y="375.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="128.0" y="376.0" font-size="15" font-weight="700" fill="#5A6270" text-anchor="start">MIG (not measured)</text>
+  <rect x="336.0" y="349.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="354.0" y="377.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="370.0" y="376.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="514.0" y="349.0" width="182.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="532.0" y="377.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="548.0" y="376.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <rect x="712.0" y="349.0" width="182.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="730.0" y="377.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="746.0" y="376.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+  <rect x="910.0" y="349.0" width="162.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="928.0" y="377.0" font-size="17" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="944.0" y="376.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only B</text>
+</svg>

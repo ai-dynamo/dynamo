@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1096" height="396" viewBox="0 0 1096 396" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Four ways to share one GPU between two models</title>
+  <desc id="desc">Time-slicing: A and B take turns on the SMs, memory is not capped, bandwidth and L2 are shared, faults are separate. HAMi: the same turn-taking with memory caps. MPS: A and B run at the same time under SM and memory caps; bandwidth, L2, and faults are shared. MIG: hardware walls around SMs, memory, bandwidth, L2, and faults.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1096.0" height="396.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Four ways to share one GPU</text>
+  <rect x="872.0" y="25.0" width="18.0" height="18.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="2"/>
+  <text x="898.0" y="40.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Model A</text>
+  <rect x="977.0" y="25.0" width="18.0" height="18.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="2"/>
+  <text x="1003.0" y="40.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Model B</text>
+  <rect x="24.0" y="62.0" width="250.0" height="318.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="40.0" y="94.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">Time-slicing</text>
+  <text x="40.0" y="124.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="258.0" y="124.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="40.0" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="56.7" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="76.3" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="93.0" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="112.7" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="129.3" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="149.0" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="165.7" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="185.3" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="202.0" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="221.7" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="238.3" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="40.0" y="236.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="40.0" y="244.0" width="218.0" height="28.0" fill="#F3F4F6" rx="3" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="40.0" y="244.0" width="157.0" height="28.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="197.0" y="244.0" width="43.6" height="28.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="118.5" y="263.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <text x="218.8" y="263.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="40.0" y="294.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Bandwidth and L2</text>
+  <rect x="40.0" y="302.0" width="218.0" height="28.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="149.0" y="321.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="middle">shared</text>
+  <text x="40.0" y="364.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Faults</text>
+  <text x="258.0" y="364.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="end">Separate</text>
+  <rect x="290.0" y="62.0" width="250.0" height="318.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="306.0" y="94.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">HAMi</text>
+  <text x="306.0" y="124.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="524.0" y="124.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="306.0" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="322.7" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="342.3" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="359.0" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="378.7" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="395.3" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="415.0" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="431.7" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="451.3" y="132.0" width="33.3" height="80.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="468.0" y="177.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="487.7" y="132.0" width="33.3" height="80.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="504.3" y="177.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="306.0" y="236.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="306.0" y="244.0" width="107.0" height="28.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="417.0" y="244.0" width="107.0" height="28.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="360.5" y="263.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">A cap</text>
+  <text x="469.5" y="263.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">B cap</text>
+  <line x1="415.0" y1="240.0" x2="415.0" y2="276.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="306.0" y="294.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Bandwidth and L2</text>
+  <rect x="306.0" y="302.0" width="218.0" height="28.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="415.0" y="321.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="middle">shared</text>
+  <text x="306.0" y="364.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Faults</text>
+  <text x="524.0" y="364.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="end">Separate</text>
+  <rect x="556.0" y="62.0" width="250.0" height="318.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="572.0" y="94.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS</text>
+  <text x="572.0" y="124.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="790.0" y="124.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="572.0" y="132.0" width="218.0" height="46.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="572.0" y="182.0" width="218.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="681.0" y="161.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A: ≤ 60%</text>
+  <text x="681.0" y="202.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B: ≤ 40%</text>
+  <line x1="568.0" y1="180.0" x2="794.0" y2="180.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="572.0" y="236.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="572.0" y="244.0" width="107.0" height="28.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="683.0" y="244.0" width="107.0" height="28.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="626.5" y="263.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">A cap</text>
+  <text x="735.5" y="263.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">B cap</text>
+  <line x1="681.0" y1="240.0" x2="681.0" y2="276.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="572.0" y="294.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Bandwidth and L2</text>
+  <rect x="572.0" y="302.0" width="218.0" height="28.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="681.0" y="321.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="middle">shared</text>
+  <text x="572.0" y="364.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Faults</text>
+  <text x="790.0" y="364.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="end">Shared</text>
+  <rect x="822.0" y="62.0" width="250.0" height="318.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="838.0" y="94.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG</text>
+  <text x="838.0" y="124.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="1056.0" y="124.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="838.0" y="132.0" width="218.0" height="46.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="838.0" y="182.0" width="218.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="947.0" y="161.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A: 4/7</text>
+  <text x="947.0" y="202.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B: 3/7</text>
+  <line x1="834.0" y1="180.0" x2="1060.0" y2="180.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="838.0" y="236.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="838.0" y="244.0" width="107.0" height="28.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="949.0" y="244.0" width="107.0" height="28.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="892.5" y="263.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">A cap</text>
+  <text x="1001.5" y="263.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">B cap</text>
+  <line x1="947.0" y1="240.0" x2="947.0" y2="276.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="838.0" y="294.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Bandwidth and L2</text>
+  <rect x="838.0" y="302.0" width="107.0" height="28.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="949.0" y="302.0" width="107.0" height="28.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <line x1="947.0" y1="298.0" x2="947.0" y2="334.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="892.5" y="321.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <text x="1001.5" y="321.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="838.0" y="364.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Faults</text>
+  <text x="1056.0" y="364.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="end">Separate</text>
+</svg>

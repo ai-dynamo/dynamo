@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Example: two MPS-enabled GPU nodes in one Kubernetes cluster</title>
+  <desc id="desc">Cluster services: KAI-Scheduler, Dynamo operator, Dynamo frontends, GPU Operator. Two GPU nodes, each with four H100 80GB GPUs, mpsd, and fractiond. gpu-node-1: GPU 0 holds chat-8b 0.5, code-7b 0.3, guard-1b 0.2; GPU 1 holds tenant-a-8b 0.4, tenant-b-8b 0.4, embed 0.2; GPU 2 holds sql-7b 0.3, summarize-3b 0.3, rerank 0.2, with 0.2 free; GPU 3 is free. gpu-node-2: GPUs 0 and 1 run chat-70b on whole GPUs without MPS; GPU 2 holds four tenant models at 0.25 each; GPU 3 holds vision-7b 0.6 and ocr-2b 0.2, with 0.2 free.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1200.0" height="700.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Two MPS-enabled GPU nodes in one cluster</text>
+  <rect x="24.0" y="60.0" width="1152.0" height="64.0" fill="#F3F4F6" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="40.0" y="72.0" width="271.0" height="40.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="175.5" y="97.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">KAI-Scheduler</text>
+  <rect x="323.0" y="72.0" width="271.0" height="40.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="458.5" y="97.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dynamo operator</text>
+  <rect x="606.0" y="72.0" width="271.0" height="40.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="741.5" y="97.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dynamo frontends</text>
+  <rect x="889.0" y="72.0" width="271.0" height="40.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="1024.5" y="97.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU Operator</text>
+  <line x1="308.0" y1="126.0" x2="308.0" y2="146.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="24.0" y="150.0" width="568.0" height="534.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="40.0" y="178.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">gpu-node-1</text>
+  <text x="576.0" y="178.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="end">4× H100 80GB</text>
+  <rect x="40.0" y="192.0" width="262.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="171.0" y="214.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">mpsd</text>
+  <rect x="314.0" y="192.0" width="262.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="445.0" y="214.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">fractiond</text>
+  <rect x="40.0" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="103.2" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 0</text>
+  <rect x="46.0" y="274.0" width="114.5" height="190.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="103.2" y="366.0" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">chat-8b</text>
+  <text x="103.2" y="384.0" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.5</text>
+  <rect x="46.0" y="468.0" width="114.5" height="112.4" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="103.2" y="521.2" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">code-7b</text>
+  <text x="103.2" y="539.2" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.3</text>
+  <rect x="46.0" y="584.4" width="114.5" height="73.6" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="103.2" y="618.2" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">guard-1b</text>
+  <text x="103.2" y="636.2" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.2</text>
+  <rect x="176.5" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="239.8" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 1</text>
+  <rect x="182.5" y="274.0" width="114.5" height="151.2" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="239.8" y="346.6" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-a-8b</text>
+  <text x="239.8" y="364.6" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.4</text>
+  <rect x="182.5" y="429.2" width="114.5" height="151.2" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="239.8" y="501.8" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-b-8b</text>
+  <text x="239.8" y="519.8" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.4</text>
+  <rect x="182.5" y="584.4" width="114.5" height="73.6" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="239.8" y="618.2" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">embed</text>
+  <text x="239.8" y="636.2" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.2</text>
+  <rect x="313.0" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="376.2" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 2</text>
+  <rect x="319.0" y="274.0" width="114.5" height="112.4" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="376.2" y="327.2" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">sql-7b</text>
+  <text x="376.2" y="345.2" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.3</text>
+  <rect x="319.0" y="390.4" width="114.5" height="112.4" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="376.2" y="443.6" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">summarize-3b</text>
+  <text x="376.2" y="461.6" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.3</text>
+  <rect x="319.0" y="506.8" width="114.5" height="73.6" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="376.2" y="540.6" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">rerank</text>
+  <text x="376.2" y="558.6" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.2</text>
+  <rect x="319.0" y="584.4" width="114.5" height="73.6" fill="#FFFFFF" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="376.2" y="626.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free</text>
+  <rect x="449.5" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="512.8" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 3</text>
+  <rect x="455.5" y="274.0" width="114.5" height="384.0" fill="#FFFFFF" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="512.8" y="471.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free</text>
+  <line x1="892.0" y1="126.0" x2="892.0" y2="146.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="608.0" y="150.0" width="568.0" height="534.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="624.0" y="178.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">gpu-node-2</text>
+  <text x="1160.0" y="178.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="end">4× H100 80GB</text>
+  <rect x="624.0" y="192.0" width="262.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="755.0" y="214.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">mpsd</text>
+  <rect x="898.0" y="192.0" width="262.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="1029.0" y="214.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">fractiond</text>
+  <rect x="624.0" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="687.2" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 0</text>
+  <rect x="630.0" y="272.0" width="114.5" height="388.0" fill="#E5E7EB" rx="5" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="687.2" y="462.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-70b</text>
+  <text x="687.2" y="481.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">whole GPU</text>
+  <rect x="760.5" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="823.8" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 1</text>
+  <rect x="766.5" y="272.0" width="114.5" height="388.0" fill="#E5E7EB" rx="5" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="823.8" y="462.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-70b</text>
+  <text x="823.8" y="481.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">whole GPU</text>
+  <rect x="897.0" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="960.2" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 2</text>
+  <rect x="903.0" y="274.0" width="114.5" height="93.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="960.2" y="317.5" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-c-3b</text>
+  <text x="960.2" y="335.5" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.25</text>
+  <rect x="903.0" y="371.0" width="114.5" height="93.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="960.2" y="414.5" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-d-3b</text>
+  <text x="960.2" y="432.5" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.25</text>
+  <rect x="903.0" y="468.0" width="114.5" height="93.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="960.2" y="511.5" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-e-3b</text>
+  <text x="960.2" y="529.5" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.25</text>
+  <rect x="903.0" y="565.0" width="114.5" height="93.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="960.2" y="608.5" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">tenant-f-3b</text>
+  <text x="960.2" y="626.5" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.25</text>
+  <rect x="1033.5" y="242.0" width="126.5" height="426.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1096.8" y="263.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 3</text>
+  <rect x="1039.5" y="274.0" width="114.5" height="228.8" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1096.8" y="385.4" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">vision-7b</text>
+  <text x="1096.8" y="403.4" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.6</text>
+  <rect x="1039.5" y="506.8" width="114.5" height="73.6" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1096.8" y="540.6" font-size="13.5" font-weight="700" fill="#3B6B00" text-anchor="middle">ocr-2b</text>
+  <text x="1096.8" y="558.6" font-size="12.5" font-weight="400" fill="#1A1A1A" text-anchor="middle">0.2</text>
+  <rect x="1039.5" y="584.4" width="114.5" height="73.6" fill="#FFFFFF" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1096.8" y="626.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free</text>
+</svg>

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="494" viewBox="0 0 900 494" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Choosing how to share GPUs</title>
+  <desc id="desc">Four questions in order. Keeps a whole GPU busy: dedicated GPUs. Copies or LoRA adapters of one model: one engine per base model. Needs hard isolation: MIG. Needs per-model caps while running concurrently: MPS v3 GPU fractions. Otherwise: time-slicing or HAMi.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="900.0" height="494.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Choosing how to share GPUs</text>
+  <rect x="24.0" y="66.0" width="420.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <circle cx="48" cy="94.0" r="11" fill="#3B6B00"/>
+  <text x="48.0" y="99.0" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
+  <text x="70.0" y="100.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Keeps a whole GPU busy?</text>
+  <line x1="446.0" y1="94.0" x2="596.0" y2="94.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="522.0" y="85.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">yes</text>
+  <rect x="600.0" y="66.0" width="276.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="738.0" y="99.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dedicated GPUs</text>
+  <line x1="48.0" y1="122.0" x2="48.0" y2="152.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="58.0" y="144.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="24.0" y="154.0" width="420.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <circle cx="48" cy="182.0" r="11" fill="#3B6B00"/>
+  <text x="48.0" y="187.0" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
+  <text x="70.0" y="188.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Copies or LoRA adapters of one model?</text>
+  <line x1="446.0" y1="182.0" x2="596.0" y2="182.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="522.0" y="173.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">yes</text>
+  <rect x="600.0" y="154.0" width="276.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="738.0" y="187.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">One engine per base model</text>
+  <line x1="48.0" y1="210.0" x2="48.0" y2="240.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="58.0" y="232.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="24.0" y="242.0" width="420.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <circle cx="48" cy="270.0" r="11" fill="#3B6B00"/>
+  <text x="48.0" y="275.0" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
+  <text x="70.0" y="276.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Needs hard isolation?</text>
+  <line x1="446.0" y1="270.0" x2="596.0" y2="270.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="522.0" y="261.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">yes</text>
+  <rect x="600.0" y="242.0" width="276.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="738.0" y="275.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">MIG</text>
+  <line x1="48.0" y1="298.0" x2="48.0" y2="328.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="58.0" y="320.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="24.0" y="330.0" width="420.0" height="56.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <circle cx="48" cy="358.0" r="11" fill="#3B6B00"/>
+  <text x="48.0" y="363.0" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">4</text>
+  <text x="70.0" y="364.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Needs per-model caps, running concurrently?</text>
+  <line x1="446.0" y1="358.0" x2="596.0" y2="358.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="522.0" y="349.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">yes</text>
+  <rect x="600.0" y="330.0" width="276.0" height="56.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="2.5"/>
+  <text x="738.0" y="363.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">MPS v3 (GPU fractions)</text>
+  <line x1="48.0" y1="386.0" x2="48.0" y2="416.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="58.0" y="408.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="600.0" y="418.0" width="276.0" height="56.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="738.0" y="451.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">Time-slicing or HAMi</text>
+  <path d="M48,418 L48,446.0 L596,446.0" stroke="#9CA3AF" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#a-gray)"/>
+</svg>

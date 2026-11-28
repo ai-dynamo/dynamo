@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="340" viewBox="0 0 1100 340" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">MPS v2 compared with MPS v3</title>
+  <desc id="desc">MPS v2: one control daemon runs one MPS server; client A sets 60% of SMs and 30 GB, client B 40% and 20 GB. MPS v3: one control daemon runs a server per GPU; server gpu-0 holds namespaces chat-8b at 50% and 32 GB, code-7b at 30% and 24 GB, and guard-1b at 20% and 8 GB, each with one pod; server gpu-1 holds more namespaces.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1100.0" height="340.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v2 compared with MPS v3</text>
+  <rect x="24.0" y="60.0" width="380.0" height="264.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="42.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v2</text>
+  <rect x="114.0" y="104.0" width="200.0" height="42.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="214.0" y="130.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Control daemon</text>
+  <line x1="214.0" y1="146.0" x2="214.0" y2="164.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="114.0" y="166.0" width="200.0" height="42.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="214.0" y="192.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">MPS server</text>
+  <line x1="174.0" y1="208.0" x2="124.0" y2="240.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="254.0" y1="208.0" x2="304.0" y2="240.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="46.0" y="242.0" width="156.0" height="54.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="124.0" y="266.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client A</text>
+  <text x="124.0" y="284.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">60% · 30 GB</text>
+  <rect x="226.0" y="242.0" width="156.0" height="54.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.8"/>
+  <text x="304.0" y="266.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client B</text>
+  <text x="304.0" y="284.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">40% · 20 GB</text>
+  <rect x="420.0" y="60.0" width="656.0" height="264.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="438.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v3</text>
+  <rect x="648.0" y="70.0" width="200.0" height="42.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="748.0" y="96.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Control daemon</text>
+  <line x1="708.0" y1="112.0" x2="660.0" y2="134.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="788.0" y1="112.0" x2="981.0" y2="134.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="438.0" y="136.0" width="444.0" height="42.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="660.0" y="162.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Server gpu-0</text>
+  <rect x="904.0" y="136.0" width="154.0" height="42.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="981.0" y="162.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Server gpu-1</text>
+  <line x1="508.0" y1="178.0" x2="508.0" y2="196.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="438.0" y="198.0" width="140.0" height="54.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="508.0" y="222.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-8b</text>
+  <text x="508.0" y="240.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">50% · 32 GB</text>
+  <line x1="508.0" y1="252.0" x2="508.0" y2="268.0" stroke="#76B900" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="468.0" y="268.0" width="80.0" height="34.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="508.0" y="289.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="660.0" y1="178.0" x2="660.0" y2="196.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="590.0" y="198.0" width="140.0" height="54.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="660.0" y="222.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">code-7b</text>
+  <text x="660.0" y="240.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">30% · 24 GB</text>
+  <line x1="660.0" y1="252.0" x2="660.0" y2="268.0" stroke="#76B900" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="620.0" y="268.0" width="80.0" height="34.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="660.0" y="289.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="812.0" y1="178.0" x2="812.0" y2="196.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="742.0" y="198.0" width="140.0" height="54.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="812.0" y="222.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">guard-1b</text>
+  <text x="812.0" y="240.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">20% · 8 GB</text>
+  <line x1="812.0" y1="252.0" x2="812.0" y2="268.0" stroke="#76B900" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="772.0" y="268.0" width="80.0" height="34.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="812.0" y="289.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="981.0" y1="178.0" x2="981.0" y2="196.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="904.0" y="198.0" width="154.0" height="54.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8" stroke-dasharray="5 4"/>
+  <text x="981.0" y="229.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">namespaces</text>
+</svg>
