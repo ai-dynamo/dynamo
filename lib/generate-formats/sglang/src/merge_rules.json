@@ -23,20 +23,20 @@
     "/meta_info/routed_experts": "sequence_final",
     "/meta_info/indexer_topk": "sequence_final",
 
-    "/prompt_token_ids": "attempt",
-    "/meta_info/prompt_tokens": "attempt",
-    "/meta_info/cached_tokens": "attempt",
-    "/meta_info/cached_tokens_details": "attempt",
-    "/meta_info/image_tokens": "attempt",
-    "/meta_info/audio_tokens": "attempt",
-    "/meta_info/video_tokens": "attempt",
+    "/prompt_token_ids": "first_attempt",
+    "/meta_info/prompt_tokens": "first_attempt",
+    "/meta_info/cached_tokens": "first_attempt",
+    "/meta_info/cached_tokens_details": "first_attempt",
+    "/meta_info/image_tokens": "first_attempt",
+    "/meta_info/audio_tokens": "first_attempt",
+    "/meta_info/video_tokens": "first_attempt",
 
-    "/meta_info/reasoning_tokens": "attempt",
+    "/meta_info/reasoning_tokens": "cumulative",
 
-    "/meta_info/completion_tokens": "attempt",
-    "/meta_info/output_token_logprobs_length": "attempt",
-    "/meta_info/output_token_sampling_mask_length": "attempt",
-    "/meta_info/finish_reason/length": "attempt",
+    "/meta_info/completion_tokens": "output_offset",
+    "/meta_info/output_token_logprobs_length": "output_offset",
+    "/meta_info/output_token_sampling_mask_length": "output_offset",
+    "/meta_info/finish_reason/length": "output_offset",
 
     "/embedding": "attempt",
     "/pooled_hidden_state": "attempt",
@@ -92,5 +92,29 @@
     "return_prompt_token_ids",
     "return_sampling_mask",
     "return_text_in_logprobs"
-  ]
+  ],
+  "migration": {
+    "block_unless_default": {
+      "/sampling_params/frequency_penalty": 0.0,
+      "/sampling_params/presence_penalty": 0.0,
+      "/sampling_params/repetition_penalty": 1.0,
+      "/sampling_params/sampling_seed": null,
+      "/sampling_params/json_schema": null,
+      "/sampling_params/regex": null,
+      "/sampling_params/ebnf": null,
+      "/sampling_params/structural_tag": null,
+      "/sampling_params/custom_params": null,
+      "/sampling_params/stop": null,
+      "/sampling_params/stop_regex": null,
+      "/custom_logit_processor": null,
+      "/session_params": null,
+      "/max_thinking_tokens": null,
+      "/return_flat_raw_output_top_logprobs": false,
+      "/return_hidden_states": false,
+      "/return_entropy": false
+    },
+    "retry_without_prompt_outputs": {
+      "logprob_start_len": -1
+    }
+  }
 }

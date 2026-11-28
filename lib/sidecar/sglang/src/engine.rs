@@ -369,6 +369,16 @@ impl LLMEngine for SglangSidecarEngine {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
+            // What the frontend's format needs to continue migrated requests.
+            let engine = started.first().map(|(_, info)| info);
+            config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY.into(),
+                serde_json::json!({
+                    "preferred_sampling_params":
+                        engine.and_then(|info| info.preferred_sampling_params.clone()),
+                    "skip_tokenizer_init": engine.map(|info| info.skip_tokenizer_init),
+                }),
+            );
         }
         let mut native_http = native_http.map(Vec::into_iter);
         let listeners = started
