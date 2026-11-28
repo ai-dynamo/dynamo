@@ -237,13 +237,23 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
     assert replay_spec.runtime_hooks[0].config["ais_perf_config"] is None
 
 
+@_old_router_section
 def test_public_router_search_without_policy_matches_recommendation() -> None:
     adapter = create_provider()
-    plan = adapter.generate_search_space(
-        {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}},
-        _sweep_context(),
+    spec = {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}}
+    plan = adapter.generate_search_space(deepcopy(spec), _sweep_context())
+    recommendation = adapter.compile_recommendation(
+        deepcopy(spec),
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+            optimization={},
+            sweep=_sweep_context(),
+        ),
     )
 
+    assert plan == recommendation
     assert plan.state["public_schema"] is True
     assert plan.fragment.choices_by_branch["agg"] == {
         "mode": ["round_robin", "kv_router"]
@@ -261,7 +271,7 @@ def test_public_router_search_without_policy_matches_recommendation() -> None:
 
 
 def test_public_router_search_without_policy_rejects_unknown_fields() -> None:
-    with pytest.raises(ValueError, match="types"):
+    with pytest.raises(ValueError, match=r"prefill_load_model\.types"):
         create_provider().generate_search_space(
             {"prefill_load_model": {"types": "ais"}},
             _sweep_context(),
