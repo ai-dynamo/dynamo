@@ -661,6 +661,30 @@ def test_vllm_publishes_llguidance_lark_grammar(backend: str, expected: bool) ->
     )
 
 
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("auto", True),
+        ("xgrammar", True),
+        ("guidance", False),
+        ("outlines", False),
+        ("lm-format-enforcer", False),
+    ],
+)
+def test_vllm_publishes_structural_tag_support(backend: str, expected: bool) -> None:
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(backend=backend)
+    )
+
+    vllm_main.publish_vllm_structural_tag_support(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, json.dumps(expected)
+    )
+
+
 _MOCK_TEKKEN_DIR = (
     Path(__file__).resolve().parents[5]
     / "lib/llm/tests/data/sample-models/mock-mistral-tekken"

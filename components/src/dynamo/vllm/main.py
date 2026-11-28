@@ -120,6 +120,7 @@ TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
 LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY = "llguidance_lark_grammar"
+TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY = "tool_call_structural_tag_supported"
 
 
 async def close_configured_artifact_runtime() -> None:
@@ -232,6 +233,23 @@ def publish_vllm_llguidance_lark_grammar(
     runtime_config.set_engine_specific(
         LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
         json.dumps(backend == "guidance"),
+    )
+
+
+def publish_vllm_structural_tag_support(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether vLLM enforces Dynamo's `structural_tag` format.
+
+    Only xgrammar compiles it; vLLM's `guidance` backend reads only the legacy
+    `structures`/`triggers` form, and `outlines` and `lm-format-enforcer` reject
+    structural tags. The frontend refuses a forced tool choice whose parser
+    requires its tag when this is false.
+    """
+    backend = vllm_config.structured_outputs_config.backend
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
+        json.dumps(backend in ("auto", "xgrammar")),
     )
 
 
@@ -979,6 +997,7 @@ async def register_vllm_model(
     )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
+    publish_vllm_structural_tag_support(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)

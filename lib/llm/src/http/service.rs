@@ -245,7 +245,7 @@ mod tests {
         ) {
             return;
         }
-        for selector in unified_parser::FAMILY_NAMES.iter() {
+        for selector in unified_parser::family_names().iter() {
             let family = unified_parser::canonical_family(selector).unwrap();
             for (tool, reasoning) in [
                 (Some(*selector), None),

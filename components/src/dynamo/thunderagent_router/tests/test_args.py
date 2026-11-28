@@ -16,6 +16,21 @@ from dynamo.thunderagent_router.args import parse_args
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
+def test_parser_plugins_load_before_the_model_is_registered() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args(
+            [
+                "--endpoint",
+                "dynamo.sglang.generate",
+                "--tool-parser-plugin",
+                "/nonexistent/lib.so",
+            ]
+        )
+    assert "error: --tool-parser-plugin: parser plugin /nonexistent/lib.so" in str(
+        exc_info.value
+    )
+
+
 def test_sglang_generate_capability_is_opt_in() -> None:
     base = [
         "--endpoint",
