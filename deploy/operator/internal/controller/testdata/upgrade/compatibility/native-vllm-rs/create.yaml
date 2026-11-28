@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: workers
+  namespace: upgrade-compatibility-native-vllm-rs
+  annotations:
+    nvidia.com/enable-grove: 'true'
+spec:
+  components:
+  - name: frontend
+    type: frontend
+    replicas: 1
+    minAvailable: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+  - name: worker
+    type: worker
+    replicas: 1
+    minAvailable: 1
+    podTemplate:
+      spec:
+        initContainers:
+        - name: runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          restartPolicy: Always
+        containers:
+        - name: main
+          image: vllm/vllm-rs:0.3.0
+          command:
+          - /usr/local/bin/vllm-rs
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --port
+          - '8000'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'

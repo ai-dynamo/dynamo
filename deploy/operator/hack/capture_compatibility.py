@@ -494,6 +494,111 @@ def observe_sidecar_probes(objects):
     return {"sidecarProbes": rendered}
 
 
+NATIVE_ENGINE_COMMAND = ["/usr/local/bin/vllm-rs"]
+
+
+def native_vllm_rs_dgd():
+    """A Grove native-sidecar worker that launches vllm-rs and omits backendFramework.
+
+    The worker mirrors hash_test.go's native-engine worker. 1.6.0 resolved it as
+    noop; detecting vllm-rs as vLLM would move the worker hash (#17543).
+    """
+    return {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {
+            "name": "workers",
+            "namespace": "upgrade-compatibility-native-vllm-rs",
+            "annotations": {"nvidia.com/enable-grove": "true"},
+        },
+        "spec": {
+            "components": [
+                {
+                    "name": "frontend",
+                    "type": "frontend",
+                    "replicas": 1,
+                    "minAvailable": 1,
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0",
+                                    "command": ["python3"],
+                                    "args": ["-m", "dynamo.frontend"],
+                                }
+                            ]
+                        }
+                    },
+                },
+                {
+                    "name": "worker",
+                    "type": "worker",
+                    "replicas": 1,
+                    "minAvailable": 1,
+                    "podTemplate": {
+                        "spec": {
+                            "initContainers": [
+                                {
+                                    "name": "runtime",
+                                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0",
+                                    "restartPolicy": "Always",
+                                }
+                            ],
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "vllm/vllm-rs:0.3.0",
+                                    "command": NATIVE_ENGINE_COMMAND,
+                                    "args": [
+                                        "--model",
+                                        "Qwen/Qwen3-0.6B",
+                                        "--port",
+                                        "8000",
+                                    ],
+                                    "resources": {"limits": {"nvidia.com/gpu": "1"}},
+                                }
+                            ],
+                        }
+                    },
+                },
+            ],
+        },
+    }
+
+
+def observe_native_vllm_rs(objects):
+    """Record the noop resolution that 1.6.0 persisted for the native worker.
+
+    On a single-node Grove clique the vLLM and noop backends render the same pod,
+    so the resolved backend is visible only through the worker hash. Check that
+    the DGD still omits backendFramework, that the worker clique carries the DGD
+    worker hash, and that main keeps its authored vllm-rs command.
+    """
+    dgd = dgd_of(objects)
+    if "backendFramework" in dgd["spec"]:
+        raise ValueError(
+            f"1.6.0 persisted backendFramework {dgd['spec']['backendFramework']!r}"
+        )
+    worker_hash = dgd["metadata"]["annotations"][WORKER_HASH_ANNOTATION]
+    pcs = next(o for o in objects if o["kind"] == "PodCliqueSet")
+    for clique in pcs["spec"]["template"]["cliques"]:
+        labels = clique.get("labels", {})
+        if labels.get("nvidia.com/dynamo-component") != "worker":
+            continue
+        if labels.get("nvidia.com/dynamo-worker-hash") != worker_hash:
+            raise ValueError(
+                "worker clique hash label differs from the DGD worker hash"
+            )
+        main = next(
+            c for c in clique["spec"]["podSpec"]["containers"] if c["name"] == "main"
+        )
+        if main.get("command") != NATIVE_ENGINE_COMMAND:
+            raise ValueError(f"1.6.0 rewrote the native command: {main.get('command')}")
+        return {"backendFramework": None, "workerCliqueHash": worker_hash}
+    raise ValueError("PodCliqueSet has no worker clique")
+
+
 SCENARIOS = {
     "missing-origin": Scenario(
         name="missing-origin",
@@ -512,6 +617,15 @@ SCENARIOS = {
         create=frontend_sidecar_probes_dgd,
         origin="1.6.0",
         observe=observe_sidecar_probes,
+    ),
+    "native-vllm-rs": Scenario(
+        name="native-vllm-rs",
+        releases={"1.6.0": RELEASE_1_6_0},
+        creation="1.6.0 CREATE with mutating admission; origin stamped by the released operator",
+        scope="native-sidecar worker launching vllm-rs without backendFramework, resolved as noop by 1.6.0",
+        create=native_vllm_rs_dgd,
+        origin="1.6.0",
+        observe=observe_native_vllm_rs,
     ),
 }
 
