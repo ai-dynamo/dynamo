@@ -2678,6 +2678,29 @@ class TestRealtimeWorkerFlag:
             parse_args()
 
 
+@pytest.mark.parametrize(
+    ("stop", "expected_stop", "expected_stop_token_ids"),
+    [
+        pytest.param([576], [], [576], id="token-id"),
+        pytest.param("END", ["END"], [], id="string"),
+        pytest.param(["END", "576"], ["END", "576"], [], id="strings"),
+    ],
+)
+def test_build_sampling_params_openai_stop(
+    stop, expected_stop, expected_stop_token_ids
+):
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stop": stop,
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.stop == expected_stop
+    assert sp.stop_token_ids == expected_stop_token_ids
+
+
 def test_build_sampling_params_openai_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params_openai
 
