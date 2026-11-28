@@ -381,6 +381,29 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         [Thinking Token Budgets](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md#thinking-token-budgets)
         for the supported configuration.
 
+        Model-provided GLM templates that use only the legacy role mapping receive
+        Chat Completions `developer` messages as `system` messages, preserving their
+        content and position. Templates with developer-role handling and templates
+        supplied with `--custom-jinja-template` receive the original Chat Completions
+        roles. Dynamo converts Responses developer input to system messages.
+
+        For this GLM profile on the TensorRT-LLM OpenEngine sidecar, a new assistant
+        generation with thinking disabled requires a rendered prompt ending in
+        `</think>`. A template that leaves reasoning open triggers HTTP 400 before
+        generation.
+
+        ```text
+        The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.
+        ```
+
+        This check covers `thinking: {"type":"disabled"}` and
+        `reasoning_effort: "none"`, plus the normalized `thinking`, `enable_thinking`, and
+        `thinking_mode` template controls. Continuations, requests without a new
+        generation prompt, and token-ID inputs without a rendered prompt are
+        exempt. Deployments without the capability keep their existing admission
+        behavior. Reasoning parsing remains active when thinking is disabled;
+        emitted reasoning is not relabeled as answer text.
+
         TensorRT-LLM also supports Dynamo's reasoning/content separation. The
         native grammar-gate behavior described here is specific to SGLang and
         vLLM; it does not configure TensorRT-LLM guided decoding.

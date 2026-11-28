@@ -2392,7 +2392,7 @@ dependencies = [
  "dynamo-http-server",
  "dynamo-kv-hints",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-rl",
  "dynamo-runtime",
  "futures",
@@ -2590,7 +2590,7 @@ dependencies = [
  "dynamo-kv-events",
  "dynamo-kv-router",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-router-policies",
  "dynamo-router-protocol",
  "dynamo-runtime",
@@ -2980,7 +2980,7 @@ dependencies = [
  "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-router-policies",
@@ -3237,14 +3237,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "11.0.11"
+version = "11.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8816a88cab33166978daa5090cea8f50e23519ddcdfd01bfd8463ee32e1032f"
+checksum = "6111f8c6afba5802aa88578d11dd7dd11ec13faff45b13f8f6631780a82cdd2a"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-structural-tag",
  "futures",
  "num-traits",
@@ -3300,9 +3300,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "10.0.1"
+version = "10.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f53c5d0072e9d22fd046ff157d1ac14aa36534491d6fad07e314c8255d37873b"
+checksum = "b5b09675775fb8bcc5a4dc03ae5cd44724693ec00121309351000eb72d66668a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -3325,7 +3325,7 @@ checksum = "4966b8af6e83e8a320406a394fdb14cbb7450d3c76d4a3fd723bf804fb4351a9"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -3537,7 +3537,7 @@ dependencies = [
  "dynamo-error",
  "dynamo-http-server",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "proptest",
  "serde",
@@ -3749,7 +3749,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
@@ -3842,7 +3842,7 @@ dependencies = [
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "serde",
  "serde_json",

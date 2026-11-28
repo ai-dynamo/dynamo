@@ -111,9 +111,9 @@ dynamo-scheduler = { path = "lib/router/scheduler", version = "1.8.0" }
 dynamo-session-affinity = { path = "lib/router/session-affinity", version = "1.8.0" }
 dynamo-slot-tracker = { path = "lib/router/slot-tracker", version = "1.8.0" }
 dynamo-worker-selection = { path = "lib/router/worker-selection", version = "1.8.0" }
-dynamo-protocols = { version = "=10.0.1" }
+dynamo-protocols = { version = "=10.0.2" }
 dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
-dynamo-parsers = { version = "=11.0.11" }
+dynamo-parsers = { version = "=11.0.12" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions

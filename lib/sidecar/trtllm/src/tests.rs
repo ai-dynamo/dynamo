@@ -885,7 +885,14 @@ async fn unsupported_features_fail_before_rpc_submission() {
 async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
+    let config = engine.start(0).await.expect("start");
+    for capability in [
+        dynamo_llm::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+        dynamo_llm::local_model::runtime_config::REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
+        dynamo_llm::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,
+    ] {
+        assert_eq!(config.runtime_data[capability], serde_json::json!(true));
+    }
     let token_ids = |outputs: &[dynamo_backend_common::LLMEngineOutput]| {
         outputs
             .iter()

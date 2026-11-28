@@ -60,6 +60,114 @@ async fn responses_sse_requires_terminal_event_without_trailers() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn context_overflow_events_require_the_selected_deployment_capability() {
+    use std::sync::Arc;
+
+    use dynamo_llm::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::config::environment_names::llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS;
+
+    temp_env::async_with_vars(
+        [ENV[0], (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("1000"))],
+        async {
+            let mut partial = load_agent_fixture("text.sse").await.unwrap();
+            let terminal = partial
+                .iter()
+                .position(|chunk| {
+                    chunk.data.as_ref().is_some_and(|data| {
+                        data.inner
+                            .choices
+                            .iter()
+                            .any(|choice| choice.finish_reason.is_some())
+                    })
+                })
+                .unwrap();
+            partial.truncate(terminal);
+            for enabled in [false, true] {
+                for (phase, stream) in [
+                    ("generate", true),
+                    ("preflight", true),
+                    ("streaming", true),
+                    ("generate", false),
+                ] {
+                    const DIAGNOSTIC: &str = "private backend diagnostic";
+                    let error = DynamoError::builder()
+                        .error_type(DynamoErrorType::InvalidRequest)
+                        .diagnostic(DIAGNOSTIC)
+                        .build()
+                        .with_context_length_exceeded();
+                    let engine = if phase == "generate" {
+                        scripted_chat_engine::ScriptedChatEngine::with_generate_error(error)
+                    } else {
+                        scripted_chat_engine::ScriptedChatEngine::with_backend_error(
+                            if phase == "streaming" {
+                                partial.clone()
+                            } else {
+                                vec![]
+                            },
+                            error,
+                        )
+                    };
+                    let mut card = ModelDeploymentCard::with_name_only(MODEL);
+                    if enabled {
+                        card.runtime_config
+                            .set_engine_specific(RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY, true)
+                            .unwrap();
+                    }
+                    let svc =
+                        HarnessService::start_with_engine_and_card(Arc::new(engine), card).await;
+                    let response = post_responses(
+                        &svc,
+                        &json!({
+                            "model": MODEL, "input": "ping", "stream": stream
+                        }),
+                    )
+                    .await;
+                    if !stream || (!enabled && phase != "streaming") {
+                        assert_eq!(
+                            response.status(),
+                            reqwest::StatusCode::BAD_REQUEST,
+                            "{enabled}/{phase}/{stream}"
+                        );
+                        let body = response.text().await.unwrap();
+                        assert!(!body.contains(DIAGNOSTIC), "{enabled}/{phase}/{stream}");
+                    } else {
+                        assert_eq!(
+                            response.status(),
+                            reqwest::StatusCode::OK,
+                            "{enabled}/{phase}"
+                        );
+                        let body = response.text().await.unwrap();
+                        assert!(!body.contains(DIAGNOSTIC), "{enabled}/{phase}");
+                        let events = parse_responses_sse(&body).await.unwrap();
+                        let failed = &events[event_position(&events, "response.failed")];
+                        assert_eq!(
+                            failed.data["response"]["error"]["code"],
+                            if enabled {
+                                "context_length_exceeded"
+                            } else {
+                                "invalid_prompt"
+                            },
+                            "{enabled}/{phase}"
+                        );
+                        assert!(!events.iter().any(|event| event.event == "error"));
+                        assert!(
+                            events
+                                .iter()
+                                .all(|event| event.event != "response.completed")
+                        );
+                    }
+                    assert_eq!(svc.engine.take_requests().await.len(), 1);
+                    svc.shutdown().await;
+                }
+            }
+        },
+    )
+    .await;
+}
+
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
 /// unary and streaming requests, including mixed function/hosted tool lists.
 #[tokio::test]
@@ -1078,7 +1186,7 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
 #[serial]
 async fn finish_signal_publishes_function_call_before_usage_tail() {
     temp_env::async_with_vars(ENV, async {
-        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
         let split_at = script
             .iter()
             .position(|chunk| {
@@ -1088,6 +1196,16 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
                     .is_some_and(|data| data.inner.usage.is_some())
             })
             .expect("fragmented-tool fixture has no usage chunk");
+        let usage = script[split_at]
+            .data
+            .as_mut()
+            .unwrap()
+            .inner
+            .usage
+            .as_mut()
+            .unwrap();
+        usage.prompt_tokens_details =
+            Some(serde_json::from_value(json!({"cached_tokens": 12})).unwrap());
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_responses(
             &svc,
@@ -1095,6 +1213,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
                 "model": MODEL,
                 "input": "List /tmp",
                 "stream": true,
+                "parallel_tool_calls": false,
                 "max_output_tokens": 128,
                 "tools": [tool("list_directory")]
             }),
@@ -1154,6 +1273,14 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
                 .any(|event| event.event == "response.completed")
         );
 
+        let completed = events
+            .iter()
+            .find(|event| event.event == "response.completed")
+            .unwrap();
+        assert_eq!(
+            completed.data["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+            12
+        );
         svc.shutdown().await;
     })
     .await;

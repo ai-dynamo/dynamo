@@ -618,7 +618,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::stream_status_to_dynamo("Generate", status));
+                                yield Err(client::generate_status_to_dynamo(status));
                                 break;
                             }
                         }
