@@ -268,7 +268,7 @@ fn build_system_status_router(
                 &live_path,
                 get({
                     let state = Arc::clone(&server_state);
-                    move || health_handler(state)
+                    move || live_handler(state)
                 }),
             ),
         SystemProbePolicy::RuntimeOnly => Router::new()
@@ -490,9 +490,21 @@ fn is_resource_exhaustion_error(error: &io::Error) -> bool {
     false
 }
 
-/// Health handler with optional active health checking
+/// Readiness handler (`/health`) with optional active health checking.
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    worker_health_response(&state)
+}
+
+/// Liveness handler (`/live`). Reports the same engine health as `/health`
+/// today; it has its own handler so readiness-only conditions can be added to
+/// `/health` without changing liveness.
+#[tracing::instrument(skip_all, level = "trace")]
+async fn live_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    worker_health_response(&state)
+}
+
+fn worker_health_response(state: &SystemStatusState) -> (StatusCode, String) {
     // Get basic health status
     let system_health = state.drt().system_health();
     let system_health_lock = system_health.lock();
@@ -1724,6 +1736,47 @@ mod integration_tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_live_and_health_agree() {
+        for starting_status in ["ready", "notready"] {
+            temp_env::async_with_vars(
+                [
+                    (env_system::DYN_SYSTEM_PORT, Some("0")),
+                    (
+                        env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                        Some(starting_status),
+                    ),
+                ],
+                async {
+                    let drt = Arc::new(create_test_drt_async().await);
+                    let addr = drt
+                        .system_status_server_info()
+                        .expect("System status server should be started by DRT")
+                        .socket_addr;
+                    let client = reqwest::Client::new();
+
+                    let mut responses = Vec::new();
+                    for path in ["/health", "/live"] {
+                        let response = client
+                            .get(format!("http://{addr}{path}"))
+                            .send()
+                            .await
+                            .unwrap();
+                        let status = response.status();
+                        let mut body: serde_json::Value = response.json().await.unwrap();
+                        // Uptime differs between the two requests.
+                        body.as_object_mut().unwrap().remove("uptime");
+                        responses.push((status, body));
+                    }
+
+                    assert_eq!(responses[0], responses[1], "starting={starting_status}");
+                    assert_eq!(responses[0].1["status"], starting_status);
+                },
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
