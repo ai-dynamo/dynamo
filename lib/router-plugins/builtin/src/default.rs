@@ -6,11 +6,14 @@
 mod kvcr;
 mod parameters;
 mod picker;
+mod power_of_two;
 mod scorer;
 
 pub use parameters::KVCR_POLICY_TYPE;
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
+pub(super) use power_of_two::register as register_power_of_two;
+pub use power_of_two::{POWER_OF_TWO_POLICY_TYPE, power_of_two_policy_with_rng};
 
 use dynamo_kv_router::plugins::worker_selection::*;
 use parking_lot::Mutex;
