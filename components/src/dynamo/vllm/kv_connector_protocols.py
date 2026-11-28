@@ -6,12 +6,12 @@
 vLLM's KV connectors disagree on the shape of ``kv_transfer_params``:
 NIXL is pull-based (decode reads block locations from the prefill
 response), Mooncake is push-based (prefill pushes blocks under a
-pre-allocated ``transfer_id``), and LMCache MP is cache-mediated (KV
+pre-allocated ``transfer_id``), LMCache MP is cache-mediated (KV
 moves through a shared cache pool keyed by token hash, so no
-per-request params cross the PD boundary at all). This module isolates
-each protocol behind :class:`KvConnectorProtocol` so the handler stays
-connector-agnostic and new connectors are one class + one registry
-entry.
+per-request params cross the PD boundary at all), and PureKVA is
+storage-backed with token-derived cache identity. This module isolates each
+protocol behind :class:`KvConnectorProtocol` so the handler stays
+connector-agnostic and new connectors are one class + one registry entry.
 """
 
 from __future__ import annotations
@@ -131,12 +131,48 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
         return {}
 
 
+class PureKVAConnectorProtocol(KvConnectorProtocol):
+    """Storage-backed handoff: PureKVA derives cache identity from tokens.
+
+    The PureKVA connector does not need a prefill-produced transport address or
+    block table. Both sides talk to their local KVA server, and all KVA servers
+    see the same shared storage backend. These params are intentionally just a
+    per-request handoff marker that the connector can use for bounded decode
+    lookup deferral without coupling Dynamo to PureKVA internals.
+    """
+
+    def __init__(self, vllm_config: Any) -> None:
+        super().__init__(vllm_config)
+        self._handoff_id: str = str(uuid.uuid4())
+
+    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+        return {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "purekva_handoff": True,
+            "purekva_handoff_id": self._handoff_id,
+        }
+
+    def decode_request_kv_transfer_params(
+        self, prefill_response: Any
+    ) -> Optional[Dict[str, Any]]:
+        return {
+            "do_remote_decode": False,
+            "do_remote_prefill": True,
+            "purekva_handoff": True,
+            "purekva_handoff_id": self._handoff_id,
+            "expected_remote_kv": True,
+        }
+
+
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     "NeuronNixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
     "LMCacheMPConnector": LMCacheMPConnectorProtocol,
+    "PureKVConnector_V1": PureKVAConnectorProtocol,
+    "PureKVAPlugin": PureKVAConnectorProtocol,
 }
 
 # Wrapper connectors that compose sub-connectors under
