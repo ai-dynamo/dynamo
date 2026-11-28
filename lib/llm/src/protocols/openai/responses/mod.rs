@@ -2084,8 +2084,8 @@ pub fn chat_completion_to_response(
 }
 
 #[cfg(test)]
-mod tests {
-    mod native_tools;
+pub(crate) mod tests {
+    pub(crate) mod native_tools;
     mod phases_and_tool_search;
     mod tool_adaptation;
 
@@ -3845,7 +3845,7 @@ mod tests {
                 }
                 let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
                 let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
-                let error = crate::engines::ValidateRequest::validate(&chat).unwrap_err();
+                let error = crate::protocols::ValidateRequest::validate(&chat).unwrap_err();
                 assert!(error.to_string().contains("tool_choice"));
                 assert!(error.to_string().contains("tools"));
             }

@@ -18,9 +18,9 @@ use crate::{
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
         },
     },
-    tokenizers::traits::Tokenizer,
     types::TokenIdType,
 };
+use dynamo_tokenizers::traits::Tokenizer;
 
 impl NvCreateCompletionRequest {
     pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
@@ -1142,25 +1142,25 @@ mod tests {
 
     struct MapTokenizer;
 
-    impl crate::tokenizers::traits::Encoder for MapTokenizer {
-        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+    impl dynamo_tokenizers::traits::Encoder for MapTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<dynamo_tokenizers::Encoding> {
             anyhow::bail!("echo tests never encode")
         }
 
         fn encode_batch(
             &self,
             _inputs: &[&str],
-        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+        ) -> anyhow::Result<Vec<dynamo_tokenizers::Encoding>> {
             anyhow::bail!("echo tests never encode")
         }
     }
 
-    impl crate::tokenizers::traits::Decoder for MapTokenizer {
+    impl dynamo_tokenizers::traits::Decoder for MapTokenizer {
         fn decode(
             &self,
             token_ids: &[TokenIdType],
             skip_special_tokens: bool,
-        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+        ) -> anyhow::Result<dynamo_tokenizers::traits::DecodeResult> {
             let text: String = token_ids
                 .iter()
                 .map(|id| match id {
@@ -1172,11 +1172,11 @@ mod tests {
                 })
                 .filter(|piece| !(skip_special_tokens && *piece == "<s>"))
                 .collect();
-            Ok(crate::tokenizers::traits::DecodeResult::Complete(text))
+            Ok(dynamo_tokenizers::traits::DecodeResult::Complete(text))
         }
     }
 
-    impl crate::tokenizers::traits::Tokenizer for MapTokenizer {}
+    impl dynamo_tokenizers::traits::Tokenizer for MapTokenizer {}
 
     fn echo_request(logprobs: Option<u8>) -> NvCreateCompletionRequest {
         let mut request = create_test_request();

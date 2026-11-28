@@ -84,7 +84,7 @@ fn apply_request_tool_call_parsing_options(
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
     let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
-    let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
+    let converted_tools = crate::protocols::openai::tools::convert_tools(effective_tools.as_ref());
     let structural_tag_config = parsing_options.structural_tag.as_ref();
     let has_structured_output = request
         .inner

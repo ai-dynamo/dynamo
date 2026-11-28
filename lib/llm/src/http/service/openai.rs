@@ -55,11 +55,11 @@ use super::{
     response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
-use crate::engines::ValidateRequest;
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
     decode_base64_to_floats,
 };
+use crate::protocols::ValidateRequest;
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
@@ -7253,8 +7253,8 @@ mod tests {
             payload["prompt"] = serde_json::json!("hello");
             let completion: NvCreateCompletionRequest =
                 parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
-            crate::engines::ValidateRequest::validate(&chat).unwrap();
-            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            crate::protocols::ValidateRequest::validate(&chat).unwrap();
+            crate::protocols::ValidateRequest::validate(&completion).unwrap();
             for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
                 assert_eq!(
                     parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),

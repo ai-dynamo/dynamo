@@ -47,7 +47,7 @@ use utoipa::{OpenApi, ToSchema};
 use super::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
 use super::images::{NvCreateImageRequest, NvImagesResponse};
 use super::videos::{NvCreateVideoRequest, NvVideosResponse};
-use crate::engines::ValidateRequest;
+use crate::protocols::ValidateRequest;
 
 /// Set to rewrite the committed schemas instead of checking them.
 const UPDATE_VAR: &str = "DYNAMO_UPDATE_MEDIA_SCHEMAS";

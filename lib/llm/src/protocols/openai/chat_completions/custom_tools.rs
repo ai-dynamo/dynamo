@@ -251,7 +251,7 @@ impl ChatCustomToolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engines::ValidateRequest;
+    use crate::protocols::ValidateRequest;
     use serde_json::{Value, json};
 
     fn request() -> NvCreateChatCompletionRequest {

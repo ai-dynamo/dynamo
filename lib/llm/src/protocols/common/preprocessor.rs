@@ -11,6 +11,7 @@ use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
+use dynamo_lora::runtime::RuntimeLoraSourceUri;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
@@ -22,8 +23,6 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RequestAttemptRelease;
-use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -137,6 +136,14 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// One attempt's remote prefill booking, releasable before the attempt that
+/// made it completes. The router that made the booking implements this;
+/// [`MigrationState`] only parks the handle for a committed retry to run.
+pub(crate) trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
+    /// Release the booking. The booking is gone when the future resolves.
+    fn release(&self) -> futures::future::BoxFuture<'_, ()>;
+}
+
 /// Frontend-local state shared by every attempt from one migration manager.
 /// The selected router records a failed worker before the error is exposed;
 /// later attempts use the accumulated set as an attempt-local exclusion.
@@ -150,7 +157,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
-    prefill_release: Option<RequestAttemptRelease>,
+    prefill_release: Option<Box<dyn PrefillBookingRelease>>,
 }
 
 impl MigrationState {
@@ -244,7 +251,7 @@ impl MigrationState {
     /// Park the latest attempt's remote prefill booking. Its prefill can
     /// outlive a failed decode to serve an in-flight KV transfer, so only a
     /// committed retry, which re-books the same request ID, releases it early.
-    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+    pub(crate) fn store_prefill_release(&self, release: Box<dyn PrefillBookingRelease>) {
         self.inner
             .get_or_init(Default::default)
             .lock()
@@ -252,7 +259,7 @@ impl MigrationState {
             .prefill_release = Some(release);
     }
 
-    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+    pub(crate) fn take_prefill_release(&self) -> Option<Box<dyn PrefillBookingRelease>> {
         self.inner
             .get()?
             .lock()
@@ -860,14 +867,6 @@ impl PreprocessedRequest {
     }
 }
 
-/// The worker's backend admission gate admits a request under `routing.dp_rank`:
-/// the rank routing selected for this dispatch, which the backend serves it on.
-impl crate::admission_gate::AdmissionRequest for PreprocessedRequest {
-    fn dp_rank(&self) -> Option<u32> {
-        self.routing.as_ref().and_then(|routing| routing.dp_rank)
-    }
-}
-
 /// [`PreprocessedEmbeddingRequest`] is the internal representation of an embedding request
 /// after preprocessing. Contains tokenized input ready for embedding engines.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
@@ -1084,54 +1083,6 @@ mod tests {
 
     fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
-    }
-
-    /// A native worker's ingress reads the rank from the body as sent, under
-    /// either request-plane codec: `routing.dp_rank` when it is set, and no rank
-    /// when it, or `routing`, is missing or null.
-    #[tokio::test]
-    async fn worker_ingress_reads_routing_dp_rank_from_the_body() {
-        use crate::admission_gate::AdmissionRequest;
-        use dynamo_runtime::pipeline::network::{
-            IngressRequestDecoder, RequestPlanePayloadCodec, SerdeIngressPayloadAdapter,
-        };
-        use serde_json::{Value, json};
-
-        let body = |routing: Option<Value>| {
-            let mut body = json!({
-                "model": "m",
-                "token_ids": [1, 2, 3],
-                "stop_conditions": {},
-                "sampling_options": {},
-                "output_options": {},
-            });
-            if let Some(routing) = routing {
-                body["routing"] = routing;
-            }
-            body
-        };
-        let cases = [
-            (
-                body(Some(json!({"dp_rank": 5, "prefill_dp_rank": 3}))),
-                Some(5),
-            ),
-            (body(Some(json!({"dp_rank": null}))), None),
-            (body(Some(json!({"backend_instance_id": 7}))), None),
-            (body(Some(Value::Null)), None),
-            (body(None), None),
-        ];
-        for (body, expected) in cases {
-            for codec in [
-                RequestPlanePayloadCodec::Json,
-                RequestPlanePayloadCodec::Msgpack,
-            ] {
-                let request: PreprocessedRequest = SerdeIngressPayloadAdapter
-                    .decode_request(codec, codec.encode(&body).unwrap().into())
-                    .await
-                    .unwrap();
-                assert_eq!(request.dp_rank(), expected, "{body}");
-            }
-        }
     }
 
     #[test]

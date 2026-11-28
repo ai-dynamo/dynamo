@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
-use crate::engines::ValidateRequest;
+use crate::protocols::ValidateRequest;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -887,7 +887,7 @@ impl NvCreateChatCompletionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engines::ValidateRequest;
+    use crate::protocols::ValidateRequest;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptionsProvider, SamplingOptionsProvider,
         StopConditionsProvider,

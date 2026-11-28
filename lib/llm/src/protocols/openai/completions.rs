@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
-use crate::engines::ValidateRequest;
+use crate::protocols::ValidateRequest;
 
 use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
@@ -728,7 +728,7 @@ mod conversion_error_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engines::ValidateRequest;
+    use crate::protocols::ValidateRequest;
     use crate::protocols::common::OutputOptionsProvider;
     use base64::Engine;
     use serde_json::json;

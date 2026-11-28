@@ -510,12 +510,6 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 }
 
-impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
-    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
-        self.inner.media_io_kwargs.as_ref()
-    }
-}
-
 impl UnifiedRequest {
     /// Returns the Anthropic context if this request originated from the
     /// Anthropic Messages API.
