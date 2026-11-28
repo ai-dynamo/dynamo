@@ -9,6 +9,7 @@ Usage:
                               [--router-mode MODE] [--discovery-backend BACKEND]
                               [--request-plane PLANE]
                               [--initial-taint TAINT]...
+                              [--model-path PATH] [--completions]
 
     count_file:    path to file where the request count is written after each request
     device_type:   "cpu" sets CUDA_VISIBLE_DEVICES=""; "gpu" sets CUDA_VISIBLE_DEVICES="0"
@@ -54,6 +55,8 @@ class CounterWorkerConfig(RouterConfigBase, KvRouterConfigBase):
     discovery_backend: str
     request_plane: str
     initial_taint: list[str]
+    model_path: str
+    completions: bool
 
 
 class CounterWorkerArgGroup(ArgGroup):
@@ -63,6 +66,8 @@ class CounterWorkerArgGroup(ArgGroup):
         parser.add_argument("count_file")
         parser.add_argument("device_type")
         parser.add_argument("endpoint_path")
+        parser.add_argument("--model-path", default=HF_MODEL_NAME)
+        parser.add_argument("--completions", action="store_true")
         parser.add_argument(
             "--initial-taint",
             action="append",
@@ -148,11 +153,15 @@ async def main():
     runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
     endpoint = runtime.endpoint(config.endpoint_path)
 
+    model_type = ModelType.Chat
+    if config.completions:
+        model_type = model_type | ModelType.Completions
+
     await register_model(
         ModelInput.Tokens,
-        ModelType.Chat,
+        model_type,
         endpoint,
-        HF_MODEL_NAME,
+        config.model_path,
         "counter",
         router_config=router_config,
         runtime_config=runtime_config,
