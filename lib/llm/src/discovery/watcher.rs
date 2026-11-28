@@ -605,6 +605,7 @@ impl ModelWatcher {
             } else {
                 None
             };
+            worker_set.tokenizer = tokenizer.clone();
 
             let chat_runtime_configs = if tokenizer.is_some() && needs_local_chat_pipeline {
                 Some(chat_runtime_configs_or_unknown(
