@@ -14,13 +14,11 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 WORKER_MODULE="dynamo.vllm"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    echo "Usage: $0"
+    echo "Usage: $0 [vLLM worker options]"
+    echo "Additional options are passed to both prefill and decode workers."
     exit 0
 fi
-if [[ $# -gt 0 ]]; then
-    echo "Unknown option: $1"
-    exit 1
-fi
+EXTRA_ARGS=("$@")
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -38,7 +36,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -m "$WORKER_MODULE" \
     --model "$MODEL" \
     --enforce-eager \
     --disaggregation-mode decode \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
+    "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
@@ -48,7 +47,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m "$WORKER_MODULE" \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
+    "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

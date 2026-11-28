@@ -1713,6 +1713,47 @@ async def test_generator_vllm_validation_error_keeps_reason_for_client(
 
 
 @pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("diagnostic", "expected_message"),
+    [
+        pytest.param(
+            "Unrecognized grammar diagnostic: "
+            "[18:15:10] /private/compiler.cc:123: private schema details",
+            "Invalid structured-output constraint",
+            id="unknown_compiler_diagnostic",
+        ),
+    ],
+)
+async def test_generator_vllm_unknown_validation_error_preserves_scoped_policy(
+    vllm_processor_module, diagnostic, expected_message
+):
+    from vllm.exceptions import VLLMValidationError
+
+    error = VLLMValidationError(diagnostic)
+
+    async def _inner(request, context=None):
+        raise error
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+    request = {
+        "model": "test",
+        "response_format": {"type": "json_object"},
+    }
+
+    with pytest.raises(InvalidArgument) as rejected:
+        await anext(processor.generator(request))
+
+    assert str(rejected.value) == expected_message
+    assert rejected.value.__cause__ is error
+    assert str(rejected.value.__cause__) == diagnostic
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error_type", "expected_status"),
     [("VLLMNotFoundError", 404), ("VLLMUnprocessableEntityError", 422)],

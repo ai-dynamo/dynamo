@@ -14,6 +14,9 @@ from dynamo.common.backend.health_check import build_raw_health_check_payload
 from dynamo.common.lora.manager import LoRAInfo
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.vllm.omni.image_edit import ImageEditLimits
+from dynamo.vllm.tests.test_structured_output_validation import (
+    native_validation_config as native_validation_config,
+)
 
 try:
     from PIL import Image
@@ -63,6 +66,39 @@ def _live_context() -> MagicMock:
     context = MagicMock()
     context.async_killed_or_stopped = asyncio.Event().wait
     return context
+
+
+def _json_schema_request(*, valid=True, streaming=False):
+    return {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "enum": ["ok"] if valid else []}
+                    },
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+
+
+def _text_stage_config(**overrides):
+    fields = dict(
+        stage_id=0,
+        stage_type="llm",
+        is_comprehension=True,
+        final_output=True,
+        final_output_type="text",
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 def _make_handler(stage_types=("diffusion",)):
@@ -477,6 +513,207 @@ def test_streaming_sampling_params_preserves_empty_engine_defaults():
 
 class TestBuildEngineInputs:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("enum_values", [("ok",), ()], ids=["valid", "invalid"])
+    async def test_json_schema_without_stage_metadata_rejected_before_engine_dispatch(
+        self, streaming, enum_values
+    ):
+        handler = _make_handler(stage_types=("llm",))
+        handler.engine_client.stage_configs = []
+        context = _live_context()
+        context.id.return_value = "json-schema-request"
+        request = {
+            "messages": [{"role": "user", "content": "Respond with JSON"}],
+            "stream": streaming,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "string", "enum": list(enum_values)},
+                },
+            },
+        }
+
+        with pytest.raises(InvalidArgument) as caught:
+            _ = [chunk async for chunk in handler.generate(request, context)]
+
+        assert str(caught.value) == (
+            "response_format.type=json_schema is not supported by this "
+            "Dynamo vLLM-Omni configuration"
+        )
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_json_schema_rejects_image_output_even_with_text_stage(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        handler.engine_client.stage_configs = [
+            _text_stage_config(),
+            _text_stage_config(
+                stage_id=1,
+                stage_type="diffusion",
+                is_comprehension=False,
+                final_output_type="image",
+            ),
+        ]
+        context = _live_context()
+        context.id.return_value = "schema-image"
+
+        with pytest.raises(InvalidArgument, match="not supported"):
+            _ = [
+                chunk
+                async for chunk in handler.generate(_json_schema_request(), context)
+            ]
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_json_schema_rejects_additional_public_text_stage(self):
+        handler = _make_handler(stage_types=("llm", "llm"))
+        handler.engine_client.stage_configs = [
+            _text_stage_config(),
+            _text_stage_config(stage_id=1, is_comprehension=False),
+        ]
+
+        with pytest.raises(InvalidArgument, match="not supported"):
+            await handler.build_engine_inputs(
+                _json_schema_request(), RequestType.CHAT_COMPLETION
+            )
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure,reason",
+        [
+            ("wrapper", "Invalid response_format"),
+            ("conflict", "Invalid structured-output constraint"),
+        ],
+    )
+    async def test_json_schema_admission_errors_are_client_errors(
+        self, failure, reason
+    ):
+        from vllm.sampling_params import StructuredOutputsParams
+
+        handler = _make_handler(stage_types=("llm",))
+        handler.engine_client.stage_configs = [_text_stage_config()]
+        handler.engine_client.default_sampling_params_list = [SamplingParams()]
+        context = _live_context()
+        context.id.return_value = "schema-wrapper"
+        request = _json_schema_request()
+        if failure == "wrapper":
+            request["response_format"] = {"type": "json_schema"}
+        else:
+            handler.engine_client.default_sampling_params_list = [
+                SamplingParams(structured_outputs=StructuredOutputsParams(regex="ok"))
+            ]
+
+        with pytest.raises(InvalidArgument, match=f"^{reason}$"):
+            _ = [chunk async for chunk in handler.generate(request, context)]
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("skip_clone", [False, True])
+    async def test_json_schema_preserves_defaults_and_other_stages(self, skip_clone):
+        from vllm.sampling_params import StructuredOutputsParams
+        from vllm_omni.config.stage_config import StageType
+
+        handler = _make_handler(stage_types=("llm", "llm", "diffusion"))
+        default_outputs = StructuredOutputsParams(json={"type": "integer"})
+        text_default = SamplingParams(
+            temperature=0.7,
+            max_tokens=64,
+            structured_outputs=default_outputs,
+            skip_clone=skip_clone,
+        )
+        audio_default = SamplingParams(temperature=0.4, max_tokens=32)
+        diffusion_default = OmniDiffusionSamplingParams(num_inference_steps=4)
+        defaults = [text_default, audio_default, diffusion_default]
+        handler.engine_client.default_sampling_params_list = defaults
+        handler.engine_client.stage_configs = [
+            _text_stage_config(stage_type=StageType.LLM),
+            _text_stage_config(
+                stage_id=1, is_comprehension=False, final_output_type="audio"
+            ),
+            _text_stage_config(
+                stage_id=2,
+                stage_type="diffusion",
+                is_comprehension=False,
+                final_output_type="image",
+            ),
+        ]
+        request = _json_schema_request()
+        first = await handler.build_engine_inputs(request, RequestType.CHAT_COMPLETION)
+        second = await handler.build_engine_inputs(request, RequestType.CHAT_COMPLETION)
+        ordinary = await handler.build_engine_inputs(
+            {"messages": request["messages"]}, RequestType.CHAT_COMPLETION
+        )
+
+        first_params, first_audio, first_diffusion = first.sampling_params_list
+        second_params = second.sampling_params_list[0]
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert first_params.structured_outputs.json == schema
+        assert second_params.structured_outputs.json == schema
+        assert first_params.structured_outputs is not second_params.structured_outputs
+        assert first_params.structured_outputs is not default_outputs
+        assert first_params.temperature == 0.7
+        assert first_params.max_tokens == 64
+        first_params.structured_outputs._backend = "xgrammar"
+        assert second_params.structured_outputs._backend is None
+        assert default_outputs._backend is None
+        assert default_outputs.json == {"type": "integer"}
+        assert first_audio is not audio_default
+        assert first_audio.temperature == 0.4
+        assert first_audio.structured_outputs is None
+        assert first_diffusion is not diffusion_default
+        assert first_diffusion.num_inference_steps == 4
+        assert ordinary.sampling_params_list is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("valid", [False, True], ids=["invalid", "valid"])
+    async def test_json_schema_native_validation_at_engine_boundary(
+        self, native_validation_config, streaming, valid
+    ):
+        from vllm.config import StructuredOutputsConfig
+
+        model, tokenizer = native_validation_config
+        handler = _make_handler(stage_types=("llm",))
+        handler.config.output_modalities = ["text", "image"]
+        handler.engine_client.stage_configs = [_text_stage_config()]
+        handler.engine_client.default_sampling_params_list = [SamplingParams()]
+        handler._abort_monitor = lambda *args: nullcontext()
+        received = []
+
+        async def generate(**kwargs):
+            assert kwargs["output_modalities"] == ["text"]
+            params = kwargs["sampling_params_list"][0]
+            received.append(params)
+            params.verify(
+                model, None, StructuredOutputsConfig(backend="xgrammar"), tokenizer
+            )
+            if False:
+                yield None
+
+        handler.engine_client.generate = generate
+        context = _live_context()
+        context.id.return_value = "json-schema-native"
+        response = handler.generate(
+            _json_schema_request(valid=valid, streaming=streaming), context
+        )
+        if valid:
+            assert [chunk async for chunk in response] == []
+        else:
+            with pytest.raises(
+                InvalidArgument,
+                match="^Invalid JSON schema: enum array must not be empty$",
+            ):
+                _ = [chunk async for chunk in response]
+        assert len(received) == 1
+        assert received[0].output_kind == RequestOutputKind.DELTA
+
+    @pytest.mark.asyncio
     async def test_chat_completion(self):
         """Chat request extracts text prompt with no sampling params."""
         handler = _make_handler()
@@ -872,7 +1109,9 @@ class TestAggregatedTextStreamsDeltas:
         return steps
 
     @pytest.mark.asyncio
-    async def test_delta_text_is_emitted_whole(self):
+    @pytest.mark.parametrize("schema_requested", [False, True])
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_delta_text_is_emitted_whole(self, schema_requested, streaming):
         pytest.importorskip("vllm_omni.outputs")
         from vllm_omni.entrypoints.utils import coerce_param_message_types
 
@@ -884,6 +1123,8 @@ class TestAggregatedTextStreamsDeltas:
         assert coerced[0].output_kind == RequestOutputKind.DELTA
 
         handler = _make_handler(stage_types=("llm",))
+        handler.engine_client.stage_configs = [_text_stage_config()]
+        handler.engine_client.default_sampling_params_list = [SamplingParams()]
         handler.output_formatter = OutputFormatter(model_name="test-model")
         generate_calls = []
         steps = self._delta_steps()
@@ -904,17 +1145,28 @@ class TestAggregatedTextStreamsDeltas:
         handler._abort_monitor = no_abort_monitor
         handler.config.output_modalities = ["text"]
 
+        request = _json_schema_request(streaming=streaming)
+        if not schema_requested:
+            del request["response_format"]
         chunks = [
             c
             async for c in handler._generate_openai_mode(
-                {"messages": [{"role": "user", "content": "hi"}]},
+                request,
                 _live_context(),
                 "req-1",
             )
         ]
 
         assert len(generate_calls) == 1
-        assert "sampling_params_list" not in generate_calls[0]
+        if schema_requested:
+            params = generate_calls[0]["sampling_params_list"][0]
+            assert params.output_kind == RequestOutputKind.DELTA
+            assert (
+                params.structured_outputs.json
+                == request["response_format"]["json_schema"]["schema"]
+            )
+        else:
+            assert "sampling_params_list" not in generate_calls[0]
         assert len(chunks) == 3
         assert "".join(c["choices"][0]["delta"]["content"] for c in chunks) == (
             "Hello world"
@@ -1430,6 +1682,48 @@ class TestLoraRequestParsing:
 
 
 class TestLoraEnablement:
+    @pytest.mark.asyncio
+    async def test_json_schema_keeps_admitted_text_lora_top_level(self):
+        handler = _make_handler(stage_types=("llm",))
+        handler.config.engine_args.enable_lora = True
+        handler.engine_client.stage_configs = [_text_stage_config()]
+        handler.engine_client.default_sampling_params_list = [SamplingParams()]
+        handler._abort_monitor = lambda *args: nullcontext()
+        handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+            id=123, path="/cache/adapterA"
+        )
+        original_build = handler.build_engine_inputs
+
+        async def build_then_reload(*args, **kwargs):
+            inputs = await original_build(*args, **kwargs)
+            handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+                id=124, path="/cache/adapterA-new"
+            )
+            return inputs
+
+        handler.build_engine_inputs = build_then_reload
+        received = []
+
+        async def generate(**kwargs):
+            received.append(kwargs)
+            if False:
+                yield None
+
+        handler.engine_client.generate = generate
+        request = _json_schema_request()
+        request["model"] = "adapterA"
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=MagicMock()
+        ):
+            assert [
+                chunk
+                async for chunk in handler._generate_openai_mode(request, None, "req")
+            ] == []
+
+        assert len(received) == 1
+        assert received[0]["lora_request"].lora_int_id == 124
+        assert received[0]["sampling_params_list"][0].structured_outputs is not None
+
     def test_resolve_lora_request_unknown_adapter_raises_when_enabled(self):
         handler = _make_handler()
         handler.config.engine_args.enable_lora = True
@@ -1655,6 +1949,46 @@ class TestBuildOriginalPrompt:
 
 class TestParseOmniRequest:
     """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("enum_values", [("ok",), ()], ids=["valid", "invalid"])
+    async def test_json_schema_without_stage_metadata_rejected_before_tokenization(
+        self, streaming, enum_values
+    ):
+        tokenizer_getter = AsyncMock()
+        request = {
+            "messages": [{"role": "user", "content": "Respond with JSON"}],
+            "stream": streaming,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "string", "enum": list(enum_values)},
+                },
+            },
+        }
+
+        with pytest.raises(InvalidArgument) as caught:
+            await parse_omni_request(
+                request, ["text"], tokenizer_getter=tokenizer_getter
+            )
+
+        assert str(caught.value) == (
+            "response_format.type=json_schema is not supported by this "
+            "Dynamo vLLM-Omni configuration"
+        )
+        tokenizer_getter.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_json_schema_stays_out_of_generic_stage_overrides(self):
+        request = _json_schema_request()
+        result = await parse_omni_request(
+            request, ["text"], stage_config=_text_stage_config()
+        )
+        assert result["engine_inputs"] == "Respond with JSON"
+        assert result["sampling_params_list"] is None
+        assert "response_format" not in result["original_prompt"]
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):

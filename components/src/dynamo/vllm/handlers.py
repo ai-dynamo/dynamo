@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing, nullcontext
+from dataclasses import replace
 from typing import (
     Any,
     AsyncIterator,
@@ -37,7 +38,6 @@ import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
-from vllm.exceptions import VLLMClientError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -47,7 +47,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 
 from dynamo._core import Context
@@ -117,7 +117,6 @@ from .engine_generate import (
     publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
-from .errors import uuid_image_cache_miss_error, vllm_client_error_to_http_error
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -864,6 +863,15 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> KvHintsEnvelope | None:
     return envelope
 
 
+@functools.lru_cache(maxsize=1)
+def _response_format_type_adapter():
+    # Optional SDK protocol imports must not run during lightweight discovery.
+    from pydantic import TypeAdapter
+    from vllm.entrypoints.generate.base.protocol import AnyResponseFormat
+
+    return TypeAdapter(AnyResponseFormat)
+
+
 def build_sampling_params_openai(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -880,6 +888,59 @@ def build_sampling_params_openai(
     """
     sampling_params = SamplingParams(**default_sampling_params)
     sampling_params.detokenize = True
+    if sampling_params.structured_outputs is not None:
+        # Native validation records backend selection on this per-request object.
+        sampling_params.structured_outputs = replace(sampling_params.structured_outputs)
+
+    response_format = request.get("response_format")
+    if response_format is not None:
+        # Text workers bypass the Rust response_format -> guided_decoding mapping.
+        from pydantic import ValidationError
+        from vllm.entrypoints.generate.base.protocol import (
+            structured_outputs_from_response_format,
+        )
+
+        try:
+            typed_format = _response_format_type_adapter().validate_python(
+                response_format
+            )
+        except ValidationError as exc:
+            raise InvalidArgument("Invalid response_format") from exc
+        if typed_format.type == "json_schema" and (
+            typed_format.json_schema is None
+            or typed_format.json_schema.json_schema is None
+        ):
+            raise InvalidArgument("Invalid response_format")
+        sampling_params.structured_outputs = structured_outputs_from_response_format(
+            sampling_params.structured_outputs, typed_format
+        )
+
+    legacy = {
+        key: value
+        for key in ("json", "regex", "grammar", "choice")
+        if (value := request.get(f"guided_{key}")) is not None
+        and not (key == "choice" and value == [])
+    }
+    if "json" in legacy:
+        # Match Rust get_guided_json: an explicit legacy schema wins response_format.
+        legacy["json_object"] = None
+    outputs = sampling_params.structured_outputs
+    if legacy or outputs is not None:
+        if (whitespace := request.get("guided_whitespace_pattern")) is not None:
+            legacy["whitespace_pattern"] = whitespace
+        if legacy:
+            sampling_params.structured_outputs = (
+                replace(outputs, **legacy)
+                if outputs is not None
+                else StructuredOutputsParams(**legacy)
+            )
+    if (
+        sampling_params.structured_outputs is not None
+        and sampling_params.structured_outputs.json is not None
+    ):
+        reject_nonprogressing_guided_json_ref_cycles(
+            sampling_params.structured_outputs.json
+        )
 
     # Map common OpenAI parameters to SamplingParams
     openai_mapping = {
@@ -976,20 +1037,14 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
-async def _translate_vllm_client_errors(
+def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
-    request: dict[str, Any],
+    request: dict[str, Any] | None = None,
 ) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
-    try:
-        async for chunk in generator:
-            yield chunk
-    except VLLMClientError as exc:
-        raise vllm_client_error_to_http_error(exc) from exc
-    except (ValueError, EngineGenerateError) as exc:
-        if error := uuid_image_cache_miss_error(exc, request):
-            raise error from exc
-        raise
+    # Keep exception imports lazy for optional-SDK module discovery.
+    from .errors import _translate_vllm_client_errors as translate
+
+    return translate(generator, request)
 
 
 def _as_exact_int(value: object) -> Optional[int]:

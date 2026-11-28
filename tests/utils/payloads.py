@@ -105,6 +105,9 @@ class BasePayload:
     def before_request(self) -> None:
         """Prepare observations immediately before each HTTP request attempt."""
 
+    def accepts_status_code(self, status_code: int) -> bool:
+        return status_code == self.expected_status_code
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")

@@ -219,7 +219,7 @@ The skill pins the Claude Code and Codex ACP adapters. If a harness release chan
 
 On Chat Completions and Responses requests, function tools with explicit `strict: true` receive schema preflight before inference. Invalid schemas now return HTTP 400 where earlier versions could accept them. Responses validates every submitted function, including namespace members and functions excluded by `allowed_tools` or `tool_choice: "none"`. Omitted, `null`, or `false` strictness and omitted or `null` parameters retain existing behavior.
 
-Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Request Validation](../tool-calling-and-reasoning/structural-tag.md#request-validation) for object rules, size budgets, and Dynamo's bounded local-reference support.
+Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Strict Function Schemas](../tool-calling-and-reasoning/tool-call-parsing.mdx#strict-function-schemas) for object rules, size budgets, and Dynamo's bounded local-reference support.
 
 ## Next
 

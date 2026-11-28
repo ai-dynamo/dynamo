@@ -128,7 +128,7 @@ class EngineProcess(ManagedProcess):
             EngineResponseError: If the response is invalid or missing expected content
         """
 
-        if response.status_code != payload.expected_status_code:
+        if not payload.accepts_status_code(response.status_code):
             logger.error(
                 "Response returned unexpected status code: got %d, expected %d",
                 response.status_code,

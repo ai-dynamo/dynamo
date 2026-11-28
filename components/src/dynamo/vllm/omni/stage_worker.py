@@ -19,7 +19,7 @@ from typing import Any, AsyncGenerator, Iterator
 
 import torch
 import yaml
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm_omni.config import register_pipeline
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
@@ -37,6 +37,10 @@ from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
+from dynamo.vllm.omni.request_validation import (
+    apply_json_schema_response_format,
+    json_schema_stage_index,
+)
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 from dynamo.vllm.omni.utils import (
     _build_sampling_params,
@@ -99,6 +103,12 @@ class OmniStageWorker:
         )
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
+        schema_stage = json_schema_stage_index(
+            request,
+            [self.stage_config],
+            staged=True,
+            output_modalities=self._output_modalities,
+        )
         req = StageRequest.model_validate(request)
         request_id = req.request_id or context.id()
         original_prompt = req.original_prompt
@@ -150,13 +160,14 @@ class OmniStageWorker:
                         return
                 else:
                     prompt = upstream
-        elif req.request_id is not None:
+        elif req.request_id is not None or schema_stage is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
             parsed = await parse_omni_request(
                 request,
                 self._output_modalities,
                 self._default_video_fps,
                 tokenizer_getter=self.engine.get_tokenizer,
+                stage_config=self.stage_config,
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
@@ -176,7 +187,9 @@ class OmniStageWorker:
             sp = _build_sampling_params(
                 self.stage_config, sampling_params_list_override
             )
-        except VLLMValidationError as e:
+            if schema_stage is not None:
+                sp = [apply_json_schema_response_format(request, sp[0] if sp else None)]
+        except VLLMClientError as e:
             raise vllm_client_error_to_public_error(e) from e
         last_result = None
 
@@ -185,7 +198,11 @@ class OmniStageWorker:
                 prompt, request_id=request_id, sampling_params_list=sp
             ):
                 last_result = chunk
+        except VLLMClientError as e:
+            raise vllm_client_error_to_public_error(e) from e
         except Exception as e:
+            if schema_stage is not None:
+                raise
             logger.error(
                 "Stage %d engine error for %s: %s",
                 self.stage_id,

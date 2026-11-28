@@ -294,7 +294,16 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
-  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, SGLang shares this default, and vLLM shares it on vLLM 0.33 or later, including release candidates and development builds; the vLLM sidecar on older vLLM and the TensorRT-LLM sidecar default to `false` because their engines reject these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named, Kimi K3 named, and Muse Spark required/named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, SGLang shares this default, and vLLM shares it on vLLM 0.33 or later, including release candidates and development builds. The vLLM sidecar on older vLLM defaults to `false` because its gRPC server rejects these tags. The TensorRT-LLM sidecar also defaults to `false`. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+
+  The flag and `DYN_STRUCTURAL_TAG` accept `true`, `false`, or a JSON object, for example `'{"scope":"always","schema":"strict"}'`. The flag without a value means `true`. Unknown fields and invalid values are rejected during worker startup. Every JSON field is optional:
+
+  - **`scope`** (`auto` or `always`, default `always`): selects eligible tool-calling requests.
+  - **`schema`** (`auto` or `strict`, default `auto`): selects which tool argument schemas are enforced.
+  - **`allow_tool_calls_with_structured_output`** (boolean, default `false`): lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Requires parsers v2.
+  - **`exclude_special_tokens`** (boolean or `null`, default `null`): controls reasoning and tool-call marker exclusions. `null` preserves the model-family default. Requires parsers v2.
+  - **`reasoning_boundary`** (`auto`, `structural_tag`, or `backend`, default `auto`): selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `auto` follows the backend's advertised policy. `backend` requires parsers v2 and a reasoning parser. If the backend advertises that it owns reasoning-aware grammar activation, explicitly selecting `structural_tag` is rejected to avoid applying both reasoning gates. Explicit `backend` selection assumes the inference engine is configured accordingly.
+  - **`tool_arguments_any_order`** (boolean, default `false`): allows tool argument properties in any order. This weakens required-property and duplicate-key validation and requires parsers v2 with XGrammar >= 0.2.3. Structured-output schemas are unaffected.
 
   Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
