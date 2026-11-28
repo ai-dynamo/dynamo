@@ -3157,6 +3157,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantOriginVersion: "1.6.0",
 		},
 		{
+			name:                   "root termination delay accepts typed topology and defaults the target",
+			wantRootProviderTarget: "PodCliqueSet",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"terminationDelay":"2m"}}}`)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "rack"}
+			}),
+		},
+		{
+			name: "root termination delay rejects zero",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"terminationDelay":"0s"}}}`)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.template.terminationDelay: Invalid value: null: must be a positive duration`},
+		},
+		{
 			name: "valid Grove root provider override is admitted and defaulted",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = groveProviderOverride(
