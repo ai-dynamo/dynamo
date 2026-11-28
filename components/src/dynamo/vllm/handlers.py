@@ -238,6 +238,9 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
+_UNKNOWN_SLEEP_OUTCOME = "vLLM sleep outcome is unknown; restart the worker"
+
+
 class VllmEnginePauseController:
     def __init__(
         self,
@@ -249,6 +252,11 @@ class VllmEnginePauseController:
         self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
         self._is_paused = False
         self._generation_paused = False
+        self._sleep_outcome_unknown = False
+
+    @property
+    def sleep_outcome_unknown(self) -> bool:
+        return self._sleep_outcome_unknown
 
     @property
     def is_paused(self) -> bool:
@@ -265,20 +273,13 @@ class VllmEnginePauseController:
         level = args[0] if args else None
         await self._engine_client.pause_generation()
         self._generation_paused = True
-        try:
-            if level is None:
-                await self._engine_client.sleep()
-            else:
-                await self._engine_client.sleep(level)
-        except Exception:
-            try:
-                await self._engine_client.resume_generation()
-                self._generation_paused = False
-            except Exception:
-                logger.exception(
-                    "Failed to resume generation after native vLLM sleep failure"
-                )
-            raise
+        # An error or cancellation can arrive after vLLM unmaps memory.
+        self._sleep_outcome_unknown = True
+        if level is None:
+            await self._engine_client.sleep()
+        else:
+            await self._engine_client.sleep(level)
+        self._sleep_outcome_unknown = False
         # Prepare before recording the pause: a failed prepare must not leave
         # the controller claiming paused, or the next resume would issue a
         # checkpoint_restore with no matching prepare.
@@ -288,6 +289,8 @@ class VllmEnginePauseController:
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
+        if self._sleep_outcome_unknown:
+            raise RuntimeError(_UNKNOWN_SLEEP_OUTCOME)
         if not self._is_paused and not self._generation_paused:
             return False
 
@@ -1289,6 +1292,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         level = body.get("level", 1)
         async with self._pause_lock:
+            if self._pause_controller.sleep_outcome_unknown:
+                return {"status": "error", "message": _UNKNOWN_SLEEP_OUTCOME}
             if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
@@ -1324,9 +1329,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
-                # If pause rolled back cleanly the engine is serving-safe again,
-                # but discovery still shows us unregistered and wake_up will
-                # early-return. Re-register so the worker rejoins the routing pool.
+                if self._pause_controller.sleep_outcome_unknown:
+                    return {
+                        "status": "error",
+                        "message": f"{_UNKNOWN_SLEEP_OUTCOME}: {e}",
+                    }
+                # A failure before native sleep can leave discovery withdrawn.
                 if (
                     unregistered
                     and not self._pause_controller.is_paused
@@ -1336,7 +1344,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     try:
                         await self.generate_endpoint.register_endpoint_instance()
                         logger.info(
-                            "[Sleep] Re-registered endpoint after failed sleep rollback"
+                            "[Sleep] Re-registered endpoint after failure before native sleep"
                         )
                     except Exception as reg_err:
                         logger.error(
@@ -1863,6 +1871,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # re-enable generation while an update's collective_rpc is still
         # mutating weights (dynamo-ops).
         async with self._pause_lock:
+            if self._pause_controller.sleep_outcome_unknown:
+                return {"status": "error", "message": _UNKNOWN_SLEEP_OUTCOME}
             try:
                 await self.engine_client.resume_generation()
                 self._paused = False
