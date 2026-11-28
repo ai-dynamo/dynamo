@@ -3,6 +3,8 @@
 
 """Unit tests for Planner's AISimulate performance-model adapter."""
 
+from unittest.mock import Mock
+
 import pytest
 
 try:
@@ -15,7 +17,7 @@ except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 
 from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model import ais_adapter
+from dynamo.planner.core.perf_model import ais_adapter, engine_query
 from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
@@ -525,6 +527,214 @@ def test_decode_capacity_passes_accept_length_to_engine_model(fake_engine_factor
     assert capacity is not None
     assert capacity.rps == 200.0
     assert capacity.itl_ms == 25.0
+
+
+@pytest.fixture
+def recorded_forward_passes(monkeypatch):
+    estimator = Mock()
+    estimator.diagnostics.return_value = {}
+    estimator.estimate_forward_pass_time_ms.return_value = 1.0
+    monkeypatch.setattr(
+        engine_query.AISForwardPassPerfModel, "best_available", lambda _: estimator
+    )
+    return estimator.estimate_forward_pass_time_ms
+
+
+def _largest_decode_batch(estimate) -> list[int]:
+    return max(
+        (
+            [rank["scheduled_requests"]["num_decode_requests"] for rank in call.args[0]]
+            for call in estimate.call_args_list
+        ),
+        key=sum,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dp", "kv_bound", "backend", "speculation", "expected"),
+    [
+        pytest.param(1, 256, "vllm", None, [64], id="single-rank"),
+        pytest.param(2, 256, "vllm", None, [64, 64], id="two-ranks"),
+        pytest.param(2, 31, "vllm", None, [16, 15], id="kv-bound"),
+        pytest.param(2, 256, "sglang", None, [128, 128], id="sglang"),
+        pytest.param(2, 256, "vllm", "worker", [128, 128], id="worker-speculative"),
+        pytest.param(2, 256, "vllm", "profile", [128, 128], id="profile-speculative"),
+    ],
+)
+def test_decode_capacity_respects_vllm_rank_budget(
+    recorded_forward_passes, dp, kv_bound, backend, speculation, expected
+):
+    config = _config(dp=dp)
+    config.backend = backend
+    role = config.ais_perf_model.roles["decode"]
+    role["backend"] = backend
+    if speculation == "profile":
+        role["nextn"] = 3
+
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=256,
+            max_kv_tokens=kv_bound * 48,  # ISL + OSL / 2.
+            speculative_nextn=3 if speculation == "worker" else None,
+        ),
+    )
+
+    assert model.find_engine_capacity_rps(isl=32, osl=32) is not None
+    assert _largest_decode_batch(recorded_forward_passes) == expected
+
+
+@pytest.mark.parametrize(
+    ("registered_ranks", "rank_groups", "expected_shape"),
+    [(2, ((0, 1), (4, 5)), [64, 64]), (None, ((0, 1),), [128])],
+    ids=["two-hybrid-workers", "unknown-legacy-topology"],
+)
+def test_decode_capacity_respects_registered_topology_without_ais_profile(
+    recorded_forward_passes, registered_ranks, rank_groups, expected_shape
+):
+    config = _config()
+    config.ais_perf_model = None
+    config.backend = "vllm"
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=registered_ranks,
+        ),
+    )
+    fpms = {
+        (f"w{worker}", rank): ForwardPassMetrics(
+            worker_id=f"w{worker}",
+            dp_rank=rank,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_decode_requests=64, sum_decode_kv_tokens=640
+            ),
+        )
+        for worker, ranks in enumerate(rank_groups)
+        for rank in ranks
+    }
+    groups = model.query_groups(fpms)
+    if registered_ranks:
+        assert len(groups) == 2
+        for _, group in groups:
+            assert [fpm.dp_rank for fpm in group] == [0, 1]
+            assert model.estimate_scheduled_decode_itl(group) is not None
+        recorded_forward_passes.reset_mock()
+
+    capacity = model.find_engine_capacity_rps(isl=32, osl=32)
+    assert capacity is not None
+    assert _largest_decode_batch(recorded_forward_passes) == [max(expected_shape)]
+    assert capacity.rps == pytest.approx(sum(expected_shape) / 0.032)
+    if registered_ranks:
+        first_ranks = [
+            call.args[0][0] for call in recorded_forward_passes.call_args_list[:2]
+        ]
+        assert [
+            (
+                rank["scheduled_requests"]["num_decode_requests"],
+                rank["scheduled_requests"]["sum_decode_kv_tokens"],
+            )
+            for rank in first_ranks
+        ] == [(1, 48), (0, 0)]
+
+
+def test_no_profile_decode_training_keeps_staggered_rank_frames_separate(monkeypatch):
+    native = Mock()
+    native.diagnostics.return_value = {}
+    factory = Mock(return_value=native)
+    monkeypatch.setattr(engine_query.AISForwardPassPerfModel, "best_available", factory)
+    config = _config()
+    config.ais_perf_model = None
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=2,
+        ),
+    )
+    earlier_rank = ForwardPassMetrics(
+        worker_id="w",
+        dp_rank=4,
+        counter_id=3,
+        scheduled_requests=ScheduledRequestMetrics(num_decode_requests=32),
+    )
+    later_rank = ForwardPassMetrics(
+        worker_id="w",
+        dp_rank=5,
+        counter_id=4,
+        scheduled_requests=ScheduledRequestMetrics(num_decode_requests=32),
+    )
+
+    model.add_observations({("w", 4): earlier_rank, ("w", 5): later_rank})
+
+    assert factory.call_args.args[0]["attention_dp"] == 1
+    iterations = native.tune_with_fpms.call_args.args[0]
+    assert [
+        [(fpm["dp_rank"], fpm["counter_id"]) for fpm in group] for group in iterations
+    ] == [[(0, 3)], [(0, 4)]]
+
+
+def test_registered_decode_topology_refresh_drops_single_rank_history(
+    recorded_forward_passes,
+):
+    config = _config()
+    config.ais_perf_model = None
+    config.backend = "vllm"
+    caps = EngineCapabilities(
+        max_num_batched_tokens=64, max_num_seqs=128, max_kv_tokens=100_000
+    )
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=config, capabilities=caps
+    )
+    model.add_observations({("w0", 0): _decode_fpm()})
+    assert model._retained_iterations
+
+    model.update_capabilities(
+        EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=2,
+        )
+    )
+
+    assert not model._retained_iterations
+    capacity = model.find_engine_capacity_rps(isl=32, osl=32)
+    assert capacity is not None
+    assert _largest_decode_batch(recorded_forward_passes) == [64]
+    assert capacity.rps == pytest.approx(4000)
+
+
+def test_decode_capacity_refreshes_when_advertised_default_budget_disappears(
+    recorded_forward_passes,
+):
+    caps = EngineCapabilities(
+        max_num_batched_tokens=8192,
+        max_num_seqs=8193,
+        max_kv_tokens=8193 * 48,
+    )
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=_config(), capabilities=caps
+    )
+
+    assert model.find_engine_capacity_rps(isl=32, osl=32) is not None
+    assert _largest_decode_batch(recorded_forward_passes) == [8192]
+
+    recorded_forward_passes.reset_mock()
+    model.update_capabilities(
+        EngineCapabilities(max_num_seqs=8193, max_kv_tokens=8193 * 48)
+    )
+
+    assert model.find_engine_capacity_rps(isl=32, osl=32) is not None
+    assert _largest_decode_batch(recorded_forward_passes) == [8193]
 
 
 def test_agg_capacity_passes_accept_length_to_engine_model(fake_engine_factory):

@@ -54,6 +54,7 @@ _MDC_REFRESH_FIELDS = (
     "max_num_batched_tokens",
     "context_length",
     "speculative_nextn",
+    "data_parallel_size",
 )
 _MDC_IDENTITY_FIELDS = ("component_name", "endpoint")
 
@@ -389,8 +390,15 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def _refresh_component_worker_info(
         self, sub_type: SubComponentType, component_state, get_worker_info
     ) -> None:
+        refresh_decode_topology = (
+            sub_type == SubComponentType.DECODE
+            and self.config.backend == "vllm"
+            and self.config.mode in ("decode", "disagg")
+            and self.config.ais_perf_model is None
+        )
         if (
-            component_state.info is not None
+            not refresh_decode_topology
+            and component_state.info is not None
             and component_state.info.max_num_batched_tokens is not None
         ):
             return
@@ -408,6 +416,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if component_state.info is None:
             component_state.info = fresh
             return
+
+        if refresh_decode_topology and fresh.max_num_batched_tokens is not None:
+            # A replacement card without a rank count makes topology unknown.
+            component_state.info.data_parallel_size = fresh.data_parallel_size
 
         # Fallback WorkerInfo carries no capacity fields. Once worker metadata
         # supplies them, its endpoint identity also replaces the fallback guess,

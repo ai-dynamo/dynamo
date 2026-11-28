@@ -43,6 +43,8 @@ class EnginePerfLimits:
     max_num_batched_tokens: int
     max_num_seqs: int
     max_kv_tokens: int
+    decode_uses_batched_token_budget: bool = False
+    rank_local_decode_estimator: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -230,7 +232,13 @@ class AISCoreEnginePerfModel:
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
-            self._validate_metrics_by_rank(metrics_by_rank)
+            if self._limits.rank_local_decode_estimator:
+                if len(metrics_by_rank) != 1 or metrics_by_rank[0].dp_rank != 0:
+                    raise ValueError(
+                        "rank-local tuning requires a single rank-zero frame"
+                    )
+            else:
+                self._validate_metrics_by_rank(metrics_by_rank)
         self._model.tune_with_fpms(
             [
                 [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
@@ -405,6 +413,12 @@ class AISCoreEnginePerfModel:
         accept_length = _normalized_accept_length(request.accept_length)
         context_length = _decode_context_length(request)
         max_batch = self._decode_max_batch(context_length)
+        if self._limits.decode_uses_batched_token_budget:
+            # Ordinary decode schedules one token per request on each rank.
+            max_batch = min(
+                max_batch,
+                self._limits.max_num_batched_tokens * self._attention_dp_size,
+            )
         if max_batch == 0:
             return None
 
@@ -514,9 +528,7 @@ class AISCoreEnginePerfModel:
     ) -> Optional[float]:
         return self._estimate_forward_pass_seconds(
             _synthetic_decode_by_rank(
-                batch_size,
-                _saturating_mul_u32(batch_size, context_length),
-                self._attention_dp_size,
+                batch_size, ranks=self._attention_dp_size, context_length=context_length
             )
         )
 
@@ -615,15 +627,22 @@ class AISCoreEnginePerfModel:
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        estimate_ms = self._model.estimate_forward_pass_time_ms(
-            [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
+        payload = [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
+        queries = (
+            [[row | {"dp_rank": 0}] for row in payload]
+            if self._limits.rank_local_decode_estimator
+            else [payload]
         )
-        if estimate_ms is None:
-            return None
-        if not math.isfinite(estimate_ms):
-            raise ValueError(
-                f"AISimulate forward-pass estimate must be finite, got {estimate_ms}"
-            )
+        estimate_ms = 0.0
+        for query in queries:
+            rank_ms = self._model.estimate_forward_pass_time_ms(query)
+            if rank_ms is None:
+                return None
+            if not math.isfinite(rank_ms):
+                raise ValueError(
+                    f"AISimulate forward-pass estimate must be finite, got {rank_ms}"
+                )
+            estimate_ms = max(estimate_ms, rank_ms)
         return _checked_duration_seconds(
             max(0.0, estimate_ms) / 1000.0,
             "AISimulate forward-pass estimate",
@@ -676,16 +695,17 @@ def _synthetic_prefill_by_rank(tokens: int, ranks: int) -> list[ForwardPassMetri
 
 
 def _synthetic_decode_by_rank(
-    num_requests: int, kv_tokens: int, ranks: int
+    num_requests: int, *, ranks: int, context_length: int
 ) -> list[ForwardPassMetrics]:
     metrics_by_rank: list[ForwardPassMetrics] = []
     for dp_rank in range(max(1, ranks)):
+        requests = _split_total(num_requests, ranks, dp_rank)
         metrics_by_rank.append(
             _replace_scheduled(
                 _empty_fpm(dp_rank),
                 ScheduledRequestMetrics(
-                    num_decode_requests=_split_total(num_requests, ranks, dp_rank),
-                    sum_decode_kv_tokens=_split_total(kv_tokens, ranks, dp_rank),
+                    num_decode_requests=requests,
+                    sum_decode_kv_tokens=_saturating_mul_u32(requests, context_length),
                 ),
             )
         )

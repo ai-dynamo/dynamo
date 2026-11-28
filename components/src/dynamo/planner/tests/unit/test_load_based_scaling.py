@@ -117,6 +117,21 @@ class TestRefreshWorkerInfoFromConnector:
     def _prefill_info(self, planner):
         return planner.environment.deployment_state().prefill.info
 
+    def test_decode_topology_refreshes_with_existing_budget(self):
+        planner = self._make_planner()
+        planner.environment.config.mode = "decode"
+        info = self._decode_info(planner)
+        info.max_num_batched_tokens = 64
+        info.data_parallel_size = 1
+
+        for size in (2, 1, None):
+            connector = self._install_mock_connector(
+                planner, max_num_batched_tokens=64, data_parallel_size=size
+            )
+            self._refresh_worker_info(planner)
+            connector.get_worker_info.assert_called_once()
+            assert self._decode_info(planner).data_parallel_size == size
+
     def test_refresh_populates_missing_fields(self):
         """Connector returns a populated WorkerInfo; missing fields backfill."""
         planner = self._make_planner()

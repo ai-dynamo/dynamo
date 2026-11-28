@@ -20,6 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
+import msgspec
 from aisim_core.datasets import prepare_execution_profile
 from aisim_core.sdk import ForwardPassPerfModelConfig
 
@@ -147,7 +148,14 @@ class PlannerEnginePerfModel:
     # ------------------------------------------------------------------
 
     def update_capabilities(self, capabilities: Optional[EngineCapabilities]) -> None:
+        held_profile = self._config.ais_perf_model is not None
+        previous_rank_count = None if held_profile else self._attention_dp_size()
         self._capabilities = capabilities
+        if not held_profile and (self._attention_dp_size() or 1) != (
+            previous_rank_count or 1
+        ):
+            self._retained_iterations.clear()
+            self._pending_iterations.clear()
         if self._engine_model is None:
             self._init_engine_model()
             return
@@ -243,7 +251,7 @@ class PlannerEnginePerfModel:
         max_kv_tokens = caps.max_kv_tokens or DEFAULT_MAX_KV_TOKENS
         return (max_num_batched_tokens, max_num_seqs, max_kv_tokens)
 
-    def _build_limits(self) -> Optional[Any]:
+    def _build_limits(self) -> Optional[EnginePerfLimits]:
         values = self._limit_values()
         if values is None:
             return None
@@ -252,7 +260,26 @@ class PlannerEnginePerfModel:
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
+            decode_uses_batched_token_budget=self._decode_uses_batched_token_budget(),
+            rank_local_decode_estimator=self._uses_rank_local_decode_estimator(),
         )
+
+    def _decode_uses_batched_token_budget(self) -> bool:
+        caps = self._capabilities
+        # Only an advertised vLLM budget bounds ordinary decode on this path.
+        if (
+            self._worker_type != "decode"
+            or self._config.backend != "vllm"
+            or caps is None
+            or caps.max_num_batched_tokens is None
+            or self._attention_dp_size() is None
+            or self._effective_speculative_nextn() > 0
+        ):
+            return False
+        role = (
+            self._configured_role() if self._config.ais_perf_model is not None else {}
+        )
+        return not (role.get("speculation") or role.get("nextn"))
 
     def _build_options(self) -> dict[str, int]:
         values = self._limit_values()
@@ -367,12 +394,13 @@ class PlannerEnginePerfModel:
         return config
 
     def _model_key(self) -> Optional[tuple[Any, ...]]:
-        values = self._limit_values()
-        if values is None:
+        limits = self._build_limits()
+        if limits is None:
             return None
         return (
             self._worker_type,
-            values,
+            limits,
+            self._attention_dp_size(),
             json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
         )
 
@@ -382,11 +410,20 @@ class PlannerEnginePerfModel:
             return int(caps.speculative_nextn)
         return max(0, int(self._config.speculative_nextn or 0))
 
+    def _uses_rank_local_decode_estimator(self) -> bool:
+        return (
+            self._worker_type == "decode"
+            and self._config.ais_perf_model is None
+            and (self._attention_dp_size() or 1) > 1
+        )
+
     def _attention_dp_size(self) -> Optional[int]:
-        spec = self._config.ais_perf_model
-        if spec is None:
-            return None
-        return self._configured_role()["attention_dp"]
+        if self._config.ais_perf_model is not None:
+            return self._configured_role()["attention_dp"]
+        caps = self._capabilities
+        if self._worker_type == "decode" and caps is not None:
+            return caps.data_parallel_size
+        return None
 
     # ------------------------------------------------------------------
     # Observation and bootstrap
@@ -492,6 +529,12 @@ class PlannerEnginePerfModel:
         *,
         for_query: bool,
     ) -> list[list[ForwardPassMetrics]]:
+        if not for_query and self._uses_rank_local_decode_estimator():
+            # A snapshot stores each rank's latest frame, which can come from
+            # different iterations. Train the fallback on each frame alone.
+            return [
+                [msgspec.structs.replace(fpm, dp_rank=0)] for fpm in fpm_stats.values()
+            ]
         should_group_for_engine = self._engine_model is not None if for_query else True
         if should_group_for_engine:
             dp_size = self._attention_dp_size()
@@ -500,7 +543,7 @@ class PlannerEnginePerfModel:
                 for (worker_id, _dp_rank), fpm in fpm_stats.items():
                     by_worker.setdefault(worker_id, []).append(fpm)
                 return [
-                    sorted(group, key=lambda item: item.dp_rank)
+                    self._local_rank_group(group, dp_size)
                     for group in by_worker.values()
                 ]
         return [
@@ -509,6 +552,25 @@ class PlannerEnginePerfModel:
                 fpm_stats.items(), key=lambda item: item[0]
             )
         ]
+
+    @staticmethod
+    def _local_rank_group(
+        group: list[ForwardPassMetrics], dp_size: int
+    ) -> list[ForwardPassMetrics]:
+        ordered = sorted(group, key=lambda item: item.dp_rank)
+        start = ordered[0].dp_rank
+        # Hybrid workers report global ranks but AIS expects local indices.
+        # An incomplete or malformed group stays subject to AIS validation.
+        if (
+            start > 0
+            and len(ordered) == dp_size
+            and all(fpm.dp_rank == start + index for index, fpm in enumerate(ordered))
+        ):
+            return [
+                msgspec.structs.replace(fpm, dp_rank=index)
+                for index, fpm in enumerate(ordered)
+            ]
+        return ordered
 
     def _iteration_groups_from_list(
         self, fpms: list[ForwardPassMetrics]
@@ -520,6 +582,8 @@ class PlannerEnginePerfModel:
         # one FPM per rank.
         # TODO: consume grouped per-rank bootstrap data when profiling exports
         # iteration/rank grouping for attention-DP workloads.
+        if self._uses_rank_local_decode_estimator():
+            return [[msgspec.structs.replace(fpm, dp_rank=0)] for fpm in fpms]
         dp_size = self._attention_dp_size()
         if dp_size is not None and dp_size > 1:
             logger.info(
