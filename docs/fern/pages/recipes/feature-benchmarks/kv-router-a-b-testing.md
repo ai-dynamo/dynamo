@@ -101,7 +101,7 @@ Follow the [Dynamo Kubernetes Installation Guide](../../kubernetes/installation/
 kubectl get pods -n dynamo-bench
 ```
 
-Expect operator, etcd, and nats pods Running before deploying the graph.
+Expect the operator pod Running before deploying the graph. etcd and NATS pods are listed only if you installed them with `global.etcd.install=true` or `global.nats.install=true`.
 
 ---
 
