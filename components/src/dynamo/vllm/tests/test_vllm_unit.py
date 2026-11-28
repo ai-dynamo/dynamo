@@ -703,7 +703,9 @@ def test_tekken_checkpoints_pin_guidance(
     assert outputs.backend == expected
 
 
-def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
+def test_pinned_tekken_backend_serves_mixed_structured_outputs(
+    tmp_path: Path,
+) -> None:
     """A regex, a JSON schema and a lark grammar resolve to one backend.
 
     Under `auto`, vLLM resolves the lark grammar to a different backend than
@@ -714,7 +716,15 @@ def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
     from vllm.tokenizers.mistral import MistralTokenizer
 
     vllm_main = _load_vllm_main()
-    tokenizer = MistralTokenizer.from_pretrained(str(_MOCK_TEKKEN_DIR))
+    # mistral-common < 1.13.0 (vLLM XPU image: 1.11.7) rejects the `json_schema`
+    # builder, which Rust frontend tests need; backend resolution ignores it.
+    tekken = json.loads((_MOCK_TEKKEN_DIR / "tekken.json").read_text())
+    tekken["model_settings_builder"].pop("json_schema", None)
+    (tmp_path / "tekken.json").write_text(json.dumps(tekken))
+    (tmp_path / "params.json").write_text(
+        (_MOCK_TEKKEN_DIR / "params.json").read_text()
+    )
+    tokenizer = MistralTokenizer.from_pretrained(str(tmp_path))
 
     def resolved_backends(config: StructuredOutputsConfig) -> list[str]:
         backends = []
@@ -736,9 +746,7 @@ def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
         "guidance",
     ]
     pinned = StructuredOutputsConfig(backend="auto")
-    vllm_main.pin_guidance_for_tekken_checkpoints(
-        _tekken_vllm_config(_MOCK_TEKKEN_DIR, pinned)
-    )
+    vllm_main.pin_guidance_for_tekken_checkpoints(_tekken_vllm_config(tmp_path, pinned))
     assert resolved_backends(pinned) == ["guidance", "guidance", "guidance"]
 
 
