@@ -71,6 +71,7 @@ from .utils import (
     nvext_extra_field_requested,
     request_id_from_context,
     resolve_chat_template,
+    routing_hints_from_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -1185,7 +1186,7 @@ class VllmProcessor:
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
-            "routing": request.get("routing"),
+            "routing": routing_hints_from_request(request),
         }
         if cache_salt is not None:
             # The router and worker must use the same public namespace. The
