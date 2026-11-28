@@ -149,6 +149,39 @@ operators predating this support do not interpret the alias.
 Valid stored override documents are not rewritten and serving workloads are not
 rolled by this change.
 
+#### CRD and admission breaking changes
+
+##### Checkpoint restore launch checked when a DGD is applied
+
+**Change:** When a DynamoGraphDeployment component sets `experimental.checkpoint.enabled: true`,
+admission renders the launch that each restore destination container will run, after operator
+defaults and backend rewrites. It rejects the DGD if that launch does not directly invoke
+`python -m <module>`. Before this change the DGD was accepted and its restore Pods were rejected
+later. DynamoComponentDeployments are not checked.
+
+**Affected:** Checkpoint-enabled DGD components whose `main` container omits `command`, sets a shell
+wrapper such as `/bin/sh -c`, or uses a vLLM launch that the operator wraps in a shell for Ray, for
+example `--enable-elastic-ep --data-parallel-backend ray` or multinode tensor parallelism with the
+Ray executor backend. These components could not be restored before this change either. A
+checkpoint-enabled DGD is also rejected when admission cannot render the launch, for example when its
+GPU `ResourceClaimTemplate` does not exist yet.
+Admission also refuses to render more than 1,024 MPI hostnames for an operator-managed
+multinode TensorRT-LLM leader. This bounds memory use while checking checkpoint-enabled components;
+role-authored launches and components without checkpointing are unaffected.
+
+**Action:** Set `command` to a direct `python -m <module>` launch, or disable checkpointing for the
+component. If the operator wraps the launch in a shell for Ray, also change the Ray settings that
+cause the wrapper; changing `command` alone does not help. If the launch cannot be rendered because
+a GPU `ResourceClaimTemplate` is missing, create the template before you apply the DGD.
+
+**Existing deployments:** An update that leaves the rendered restore launch unchanged is still
+accepted, for example a `replicas` change. An update is rejected when it enables checkpointing with
+an unsupported launch, changes an unsupported launch to another unsupported launch, or moves the
+restore to another unsupported container. If the launch cannot be rendered, for example while a
+GPU `ResourceClaimTemplate` is missing, an update is accepted only when it changes nothing that
+renders the launch except `replicas`, and the old launch failed to render the same way. Any other
+update to that component is rejected until the launch can be rendered.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract

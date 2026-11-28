@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4843,6 +4844,220 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 		assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, container.Resources.Claims)
 		assert.NotContains(t, container.Resources.Limits, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
 		assert.NotContains(t, container.Resources.Requests, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
+	}
+}
+
+func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
+	tests := []struct {
+		name            string
+		deploymentType  commonconsts.MultinodeDeploymentType
+		annotations     map[string]string
+		specAnnotations map[string]string
+		nodeCount       int32
+		args            []string
+		interPodGMS     bool
+		mixedBackends   bool
+		orderedEnv      bool
+		wantShell       map[Role]bool
+	}{
+		{
+			name:           "Grove multinode TP over DRA GPUs uses the Ray shell launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			annotations:    map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+			nodeCount:      2,
+			args:           []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			wantShell:      map[Role]bool{RoleLeader: true, RoleWorker: true},
+		},
+		{
+			name:           "LWS multinode TP over DRA GPUs uses the Ray shell launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			annotations:    map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+			nodeCount:      2,
+			args:           []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			wantShell:      map[Role]bool{RoleLeader: true, RoleWorker: true},
+		},
+		{
+			name:            "Grove metadata annotations take precedence over spec annotations",
+			deploymentType:  commonconsts.MultinodeDeploymentTypeGrove,
+			annotations:     map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+			specAnnotations: map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp"},
+			nodeCount:       2,
+			args:            []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			wantShell:       map[Role]bool{RoleLeader: true, RoleWorker: true},
+		},
+		{
+			name:            "LWS spec annotations take precedence over metadata annotations",
+			deploymentType:  commonconsts.MultinodeDeploymentTypeLWS,
+			annotations:     map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+			specAnnotations: map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp"},
+			nodeCount:       2,
+			args:            []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			wantShell:       map[Role]bool{RoleLeader: false, RoleWorker: false},
+		},
+		{
+			name:           "Grove single-node elastic EP with Ray uses the shell launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			nodeCount:      1,
+			args:           []string{"-m", "dynamo.vllm", enableElasticEPFlag, dataParallelBackendFlag, dataParallelBackendRay},
+			wantShell:      map[Role]bool{RoleMain: true},
+		},
+		{
+			name:           "LWS single-node elastic EP with Ray uses the shell launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			nodeCount:      1,
+			args:           []string{"-m", "dynamo.vllm", enableElasticEPFlag, dataParallelBackendFlag, dataParallelBackendRay},
+			wantShell:      map[Role]bool{RoleMain: true},
+		},
+		{
+			name:           "Grove multinode inter-pod GMS uses the rank-aware launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			annotations:    map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp"},
+			nodeCount:      2,
+			args:           []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			interPodGMS:    true,
+			wantShell:      map[Role]bool{RoleLeader: false, RoleWorker: false},
+		},
+		{
+			name:           "LWS custom worker takes the graph-wide vLLM backend of its DCD",
+			deploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			nodeCount:      1,
+			args:           []string{"-m", "my_worker", enableElasticEPFlag, dataParallelBackendFlag, dataParallelBackendRay},
+			mixedBackends:  true,
+			wantShell:      map[Role]bool{RoleMain: true},
+		},
+		{
+			name:           "Grove preserves ordered graph and container environment",
+			deploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			nodeCount:      1,
+			args:           []string{"-m", "dynamo.vllm"},
+			orderedEnv:     true,
+			wantShell:      map[Role]bool{RoleMain: false},
+		},
+		{
+			name:           "LWS preserves ordered graph and container environment",
+			deploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			nodeCount:      1,
+			args:           []string{"-m", "dynamo.vllm"},
+			orderedEnv:     true,
+			wantShell:      map[Role]bool{RoleMain: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Create a one-GPU ResourceClaimTemplate that the main container claims")
+			scheme := runtime.NewScheme()
+			require.NoError(t, resourcev1.AddToScheme(scheme))
+			claimTemplate, deviceClass := oneGPUDRAObjects()
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claimTemplate, deviceClass).Build()
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name:        "launch-parity",
+				Namespace:   "default",
+				Annotations: tt.annotations,
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: string(BackendFrameworkVLLM),
+					Annotations:      tt.specAnnotations,
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "agg",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: new("one-gpu")}},
+								Containers: []corev1.Container{{
+									Name:      commonconsts.MainContainerName,
+									Image:     "vllm-test",
+									Command:   []string{"python3"},
+									Args:      tt.args,
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}},
+								}},
+							},
+						},
+					}},
+				},
+			}
+			if tt.orderedEnv {
+				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "MODEL_ROOT", Value: "/models"}}
+				dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(MODEL_ROOT)/model"}}
+			}
+			if tt.nodeCount > 1 {
+				dgd.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: tt.nodeCount}
+			}
+			if tt.interPodGMS {
+				dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+				}
+			}
+			if tt.mixedBackends {
+				dgd.Spec.BackendFramework = ""
+				vllmWorker := dgd.Spec.Components[0].DeepCopy()
+				vllmWorker.ComponentName = "vllm"
+				vllmWorker.PodTemplate.Spec.Containers[0].Args = []string{"-m", "dynamo.vllm"}
+				dgd.Spec.Components = append(dgd.Spec.Components, *vllmWorker)
+			}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{}
+			component := &dgd.Spec.Components[0]
+			roles := expandRolesForComponent(component.ComponentName, component.Replicas, component.GetNumberOfNodes(), component)
+
+			t.Log("Render every role's complete Pod as the workload provider does")
+			rendered := make(map[Role]corev1.Container, len(roles))
+			if tt.deploymentType == commonconsts.MultinodeDeploymentTypeGrove {
+				pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, nil, operatorConfig, &controller_common.RuntimeConfig{}, kubeClient, nil, nil, nil, false, nil)
+				require.NoError(t, err)
+				for _, role := range roles {
+					for _, clique := range pcs.Spec.Template.Cliques {
+						if clique.Name == strings.ToLower(role.Name) {
+							rendered[role.Role] = clique.Spec.PodSpec.Containers[0]
+						}
+					}
+				}
+			} else {
+				children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+				require.NoError(t, err)
+				require.Len(t, children, len(dgd.Spec.Components))
+				for _, dcd := range children {
+					if dcd.Spec.ComponentName != component.ComponentName {
+						continue
+					}
+					backendFramework, err := GetBackendFrameworkFromDynamoComponent(dcd)
+					require.NoError(t, err)
+					containerGPUs := sync.OnceValues(func() (int64, error) {
+						return ResolveContainerGPUs(context.Background(), kubeClient, dgd.Namespace, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+					})
+					for _, role := range roles {
+						podSpec, err := GenerateBasePodSpec(&dcd.Spec.DynamoComponentDeploymentSharedSpec, backendFramework, nil, dgd.Name, dgd.Namespace, role.Role, tt.nodeCount, operatorConfig, tt.deploymentType, component.ComponentName, nil, containerGPUs, GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env})
+						require.NoError(t, err)
+						rendered[role.Role] = podSpec.Containers[0]
+					}
+				}
+			}
+
+			t.Log("Prepare only the main containers through the shared launch preparation")
+			prepared, err := PrepareDGDComponentMainContainers(context.Background(), kubeClient, dgd, component, operatorConfig, tt.deploymentType)
+			require.NoError(t, err)
+
+			t.Log("Verify each engine role's prepared launch equals the rendered Pod launch")
+			var engineRoles []ServiceRole
+			for _, role := range roles {
+				if role.Role != RoleGMS && !slices.ContainsFunc(engineRoles, func(r ServiceRole) bool { return r.Role == role.Role }) {
+					engineRoles = append(engineRoles, role)
+				}
+			}
+			require.Len(t, prepared, len(engineRoles))
+			for i, role := range engineRoles {
+				want, ok := rendered[role.Role]
+				require.True(t, ok, "role %s was not rendered", role.Role)
+				got := prepared[i]
+				assert.Equal(t, role.Role, got.Role)
+				assert.Equal(t, want.Command, got.Container.Command, "role %s command", role.Role)
+				assert.Equal(t, want.Args, got.Container.Args, "role %s args", role.Role)
+				if tt.orderedEnv {
+					assert.Equal(t, want.Env, got.Container.Env, "role %s environment", role.Role)
+					assert.Contains(t, got.Container.Env, corev1.EnvVar{Name: "MODEL_PATH", Value: "$(MODEL_ROOT)/model"})
+				}
+				shell := len(got.Container.Command) == 2 && slices.Contains([]string{"sh", "/bin/sh"}, got.Container.Command[0]) && got.Container.Command[1] == "-c"
+				assert.Equal(t, tt.wantShell[role.Role], shell, "role %s shell launch: %q", role.Role, got.Container.Command)
+			}
+		})
 	}
 }
 
@@ -12428,4 +12643,14 @@ func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendFrameworkVLLM, backend)
 	assert.Equal(t, []string{"python3", "unchanged"}, backing)
+}
+
+func TestUpdateDynDeploymentConfigBytes_NullEntry(t *testing.T) {
+	for _, tt := range []struct{ config, serviceName string }{
+		{config: `{"frontend":null}`, serviceName: "frontend"},
+		{config: `{"Frontend":null}`, serviceName: "frontend-svc"},
+	} {
+		_, err := updateDynDeploymentConfigBytes([]byte(tt.config), tt.serviceName, 8000)
+		assert.ErrorContains(t, err, "must be an object", "config %s", tt.config)
+	}
 }

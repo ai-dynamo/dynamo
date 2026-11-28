@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -168,6 +169,8 @@ func (v *sharedValidation) validateLPXConfig(config *nvidiacomv1beta1.LPXConfig,
 type sharedValidation struct {
 	ctx                                context.Context
 	mgr                                ctrl.Manager
+	operatorConfig                     *configv1alpha1.OperatorConfiguration
+	restoreReader                      *memoReader
 	warnings                           admission.Warnings
 	runtimeVersionSource               runtimeVersionValidationSource
 	ratchetRuntimeVersion              bool
@@ -190,6 +193,10 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
 	groveStrategyChanged              bool
+	// restoreLaunchDGD is the DGD that renders this component. It enables the
+	// restore launch rule, which applies only to DGD components; DCDs leave it nil.
+	restoreLaunchDGD    *nvidiacomv1beta1.DynamoGraphDeployment
+	oldRestoreLaunchDGD *nvidiacomv1beta1.DynamoGraphDeployment
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -370,6 +377,34 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
+
+	// Reject a checkpoint-enabled DGD whose rendered restore launch is not a direct python -m.
+	// An update keeps an existing violation only when its rendered launch is unchanged.
+	if options.restoreLaunchDGD != nil && dynamo.GetCheckpoint(spec) != nil && !spec.IsLPX() {
+		reader := v.restoreLaunchReader()
+		launches, err := renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.restoreLaunchDGD, spec, options.grovePathway)
+		var oldLaunches []restoreLaunch
+		var oldErr error
+		hasOld := options.oldComponent != nil && options.oldRestoreLaunchDGD != nil && dynamo.GetCheckpoint(options.oldComponent) != nil
+		if hasOld {
+			oldLaunches, oldErr = renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.oldRestoreLaunchDGD, options.oldComponent, options.grovePathway)
+		}
+		// An underivable launch is rejected unless an earlier error already explains it, or the update
+		// leaves the component's render inputs unchanged and the old object failed the same way.
+		if err != nil && !renderErrorExplained(allErrs, err) && (!hasOld || oldErr == nil || oldErr.Error() != err.Error() ||
+			!restoreRenderInputsUnchanged(options.oldRestoreLaunchDGD, options.restoreLaunchDGD, options.oldComponent, spec)) {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("experimental", "checkpoint"),
+				fmt.Sprintf("cannot determine the rendered restore launch: %v", err),
+			))
+		}
+		for _, launch := range launches {
+			if checkpoint.HasSupportedRestoreEntrypoint(&launch.container) || hasUnchangedRestoreLaunch(oldLaunches, launch) {
+				continue
+			}
+			allErrs = append(allErrs, field.Forbidden(restoreLaunchPath(spec, launch, fldPath), unsupportedRestoreLaunchDetail(launch)))
+		}
+	}
 
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) && !spec.IsLPX() {
