@@ -39,7 +39,6 @@ class SweepConfig:
     input_files: List[str] = field(default_factory=list)
     configs: List[BenchmarkConfig] = field(default_factory=list)
     output_dir: str = "benchmarks/results/multimodal_default"
-    skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
 
@@ -134,7 +133,6 @@ def load_config(
         input_files=raw.get("input_files", []),
         configs=configs,
         output_dir=raw.get("output_dir", "benchmarks/results/multimodal_default"),
-        skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
     )

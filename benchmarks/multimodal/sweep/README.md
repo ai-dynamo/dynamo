@@ -2,7 +2,7 @@
 
 YAML-driven benchmark orchestrator that launches serving backends, runs
 [aiperf](https://github.com/ai-dynamo/aiperf) concurrency
-sweeps, and optionally generates comparison plots.
+sweeps.
 
 ## Quick Start
 
@@ -21,7 +21,6 @@ python -m benchmarks.multimodal.sweep \
    - Stop the server (by default the server restarts between concurrency
      levels to avoid warm-cache bias — controlled by
      `restart_server_every_benchmark`).
-3. Generate comparison plots across configs for each input file.
 
 ## YAML Config Reference
 
@@ -66,8 +65,7 @@ python -m benchmarks.multimodal.sweep \
   --config experiments/embedding_cache/vllm_serve.yaml \
   --concurrencies 1,2,4 \
   --osl 200 \
-  --conversation-num 10 \
-  --skip-plots
+  --conversation-num 10
 ```
 
 ## Warmup semantics
@@ -100,19 +98,15 @@ Given the config above with two input files and two configs (`cache-off`,
 │   │   │       └── aiperf.log
 │   │   └── c32/
 │   │       └── ...
-│   ├── cache-on/
-│   │   ├── c16/
-│   │   │   └── ...
-│   │   └── c32/
-│   │       └── ...
-│   └── plots/                              # ← comparison plots across configs
-│       └── ...
+│   └── cache-on/
+│       ├── c16/
+│       │   └── ...
+│       └── c32/
+│           └── ...
 └── 1000req_4img_200pool_400word_http/
     ├── cache-off/
     │   └── ...
-    ├── cache-on/
-    │   └── ...
-    └── plots/
+    └── cache-on/
         └── ...
 ```
 
