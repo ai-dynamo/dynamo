@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -162,5 +164,54 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 
 			})
 		}
+	}
+}
+
+// A pending WaitForCheckpoint must not rewrite the existing PCS template seed;
+// the scaler gates the live child.
+func TestGroveRendererWaitForCheckpointKeepsTemplateSeed(t *testing.T) {
+	for _, grouped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("grouped=%t", grouped), func(t *testing.T) {
+			const seed, desired = int32(2), int32(4)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: "graph", Namespace: "default", UID: "dgd-uid",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: new(seed),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:1.6.0"}}}},
+				}}},
+			}
+			if grouped {
+				dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}
+			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
+			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
+			existing, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil)
+			require.NoError(t, err)
+			existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
+			reader := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(existing).Build()
+			renderer := groveWorkloadRenderer{reader: reader, config: config, runtimeConfig: runtimeConfig, dockerSecretRetriever: secrets}
+			dgd.Spec.Components[0].Replicas = new(desired)
+
+			t.Log("Render with the checkpoint pending")
+			rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, map[string]*checkpoint.CheckpointInfo{
+				"worker": {
+					Enabled:       true,
+					StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				},
+			}, false)
+			require.NoError(t, err)
+
+			t.Log("The existing template seed is kept")
+			template := rendered.desired.Spec.Template
+			if grouped {
+				require.Len(t, template.PodCliqueScalingGroupConfigs, 1)
+				require.NotNil(t, template.PodCliqueScalingGroupConfigs[0].Replicas)
+				require.Equal(t, seed, *template.PodCliqueScalingGroupConfigs[0].Replicas)
+			} else {
+				require.Len(t, template.Cliques, 1)
+				require.Equal(t, seed, template.Cliques[0].Spec.Replicas)
+			}
+		})
 	}
 }
