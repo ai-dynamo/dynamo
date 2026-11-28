@@ -248,6 +248,7 @@ rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
+tower = { workspace = true }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
