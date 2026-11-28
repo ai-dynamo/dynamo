@@ -874,7 +874,14 @@ impl NvCreateChatCompletionRequest {
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
-        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
+        // `nvext.greed_sampling` runs the request at temperature 0, so check that value.
+        let greedy = self.nvext.as_ref().and_then(|nvext| nvext.greed_sampling) == Some(true);
+        let temperature = if greedy {
+            Some(0.0)
+        } else {
+            self.inner.temperature
+        };
+        validate::validate_n_with_temperature(self.inner.n, temperature)?;
         validate::validate_continue_final_message(
             self.common.add_generation_prompt,
             self.common.continue_final_message,
@@ -1030,6 +1037,37 @@ mod tests {
             assert!(
                 sampling.guided_decoding.is_none(),
                 "{extra} sets no constraint, so guided decoding must not be engaged",
+            );
+        }
+    }
+
+    #[test]
+    fn test_greed_sampling_forces_temperature_zero() {
+        for (extra, expected_temperature, expected_top_p) in [
+            (
+                json!({"nvext": {"greed_sampling": true}, "temperature": 0.7, "top_p": 0.9}),
+                Some(0.0),
+                None,
+            ),
+            (
+                json!({"nvext": {"greed_sampling": true}, "temperature": 0.0}),
+                Some(0.0),
+                None,
+            ),
+            (json!({"nvext": {"greed_sampling": true}}), Some(0.0), None),
+            (
+                json!({"nvext": {"greed_sampling": false}, "temperature": 0.7, "top_p": 0.9}),
+                Some(0.7),
+                Some(0.9),
+            ),
+        ] {
+            let sampling = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must be valid, got: {e}"));
+            assert_eq!(
+                (sampling.temperature, sampling.top_p),
+                (expected_temperature, expected_top_p),
+                "{extra}"
             );
         }
     }

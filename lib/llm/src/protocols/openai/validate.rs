@@ -1617,4 +1617,46 @@ mod tests {
             "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n=2, temperature=0",
         );
     }
+
+    #[test]
+    fn greed_sampling_counts_as_temperature_zero_for_n() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let rejected = "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n=2, temperature=0";
+        for (extra, valid) in [
+            (json!({"n": 2, "nvext": {"greed_sampling": true}}), false),
+            (
+                json!({"n": 2, "temperature": 0.7, "nvext": {"greed_sampling": true}}),
+                false,
+            ),
+            (
+                json!({"n": 2, "temperature": 0.7, "nvext": {"greed_sampling": false}}),
+                true,
+            ),
+            (json!({"n": 1, "nvext": {"greed_sampling": true}}), true),
+        ] {
+            let mut chat =
+                json!({"model": "test", "messages": [{"role": "user", "content": "hi"}]});
+            let mut completion = json!({"model": "test", "prompt": "hi"});
+            for (key, value) in extra.as_object().unwrap() {
+                chat[key] = value.clone();
+                completion[key] = value.clone();
+            }
+            let results = [
+                serde_json::from_value::<NvCreateChatCompletionRequest>(chat)
+                    .unwrap()
+                    .validate(),
+                serde_json::from_value::<NvCreateCompletionRequest>(completion)
+                    .unwrap()
+                    .validate(),
+            ];
+            for result in results {
+                if valid {
+                    result.unwrap_or_else(|e| panic!("{extra} must be valid, got: {e}"));
+                } else {
+                    assert_plain_error(result, rejected);
+                }
+            }
+        }
+    }
 }
