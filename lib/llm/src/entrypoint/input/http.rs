@@ -16,7 +16,7 @@ use crate::{
         service_v2::{self, HttpService},
     },
     kv_router::plugins::RouterPluginBuilder,
-    local_model::runtime_config::TokenizerBackend,
+    local_model::{NativeParserOverrides, runtime_config::TokenizerBackend},
     model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::chat_completions::{
@@ -270,6 +270,7 @@ async fn run_with_router_plugins(
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
+                model.native_parser_overrides().clone(),
                 generate_engine_capabilities,
                 systemone_enabled,
                 plugins,
@@ -358,6 +359,7 @@ async fn run_watcher(
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
+    native_parser_overrides: NativeParserOverrides,
     generate_engine_capabilities: Vec<&'static str>,
     systemone_enabled: bool,
     plugins: RouterPluginBuilder,
@@ -384,6 +386,7 @@ async fn run_watcher(
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
+    watch_obj.set_native_parser_overrides(native_parser_overrides);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     watch_obj.set_systemone_enabled(systemone_enabled);
     tracing::debug!("Waiting for remote model");

@@ -230,6 +230,7 @@ pub struct WorkerSet {
 
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
+    pub(crate) native_parser_overrides: crate::local_model::NativeParserOverrides,
 
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
@@ -292,6 +293,7 @@ impl WorkerSet {
             topology_target: None,
             mdcsum,
             card,
+            native_parser_overrides: Default::default(),
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -625,7 +627,9 @@ impl WorkerSet {
     }
 
     /// Share base-set engines, admission, and lifecycle under a LoRA model card.
-    pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
+    pub(crate) fn adapter_view(&self, mut card: ModelDeploymentCard) -> Self {
+        self.native_parser_overrides
+            .apply_parser_names(&mut card.runtime_config);
         let lora_name = card
             .lora
             .as_ref()
@@ -644,6 +648,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
+            native_parser_overrides: Default::default(),
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
@@ -816,6 +821,29 @@ mod tests {
         assert!(adapter.card.tokenizer.is_none());
         assert_eq!(base.input_policy(), adapter.input_policy());
         assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
+    }
+
+    #[test]
+    fn adapter_view_applies_base_parser_overrides_and_falls_back_to_adapter_card() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.native_parser_overrides = crate::local_model::NativeParserOverrides {
+            tool_call_parser: Some("glm47".to_string()),
+            reasoning_parser: None,
+        };
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        adapter_card.runtime_config.reasoning_parser = Some("glm45".to_string());
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+
+        let adapter = base.adapter_view(adapter_card);
+        let options = adapter.parsing_options();
+
+        assert_eq!(options.tool_call_parser.as_deref(), Some("glm47"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("glm45"));
     }
 
     #[tokio::test]

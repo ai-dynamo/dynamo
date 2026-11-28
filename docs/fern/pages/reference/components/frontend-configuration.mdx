@@ -903,6 +903,19 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
   Environment variable: `DYN_ISOLATE_TOOL_CALL_MARKERS`
 </ParamField>
 
+These overrides apply to every token-input chat model the native Dynamo frontend discovers,
+including its LoRA views. The `vllm` chat processor uses its own parser options.
+
+| CLI option | Environment variable | Default when both are unset |
+| --- | --- | --- |
+| `--tool-call-parser` | `DYN_TOOL_CALL_PARSER` | Parser from the worker's model card |
+| `--reasoning-parser` | `DYN_REASONING_PARSER` | Parser from the worker's model card |
+
+Explicit CLI values take precedence over environment variables. The resolved frontend overrides
+appear in the `config` section of `--dump-config-to` output. Workers read the same
+environment variables for `--dyn-tool-call-parser` and `--dyn-reasoning-parser`, so
+a shared environment sets defaults for both the frontend and worker.
+
 <ParamField path="--dyn-chat-processor-config" type="string (JSON object)">
   Settings passed to a custom chat processor. Rejected with the built-in processors.
 
