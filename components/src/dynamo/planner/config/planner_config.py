@@ -1023,9 +1023,10 @@ class DgdrExecutorConfig(BaseModel):
             "in epoch seconds, so they survive planner restarts."
         ),
     )
-    claim_name: str = Field(
+    claim_name: Optional[str] = Field(
+        default=None,
         min_length=1,
-        description="RWX PersistentVolumeClaim, in the DGD namespace, holding traces.",
+        description="Optional legacy claim name; when supplied it must match the Planner component's retune.traceStorage.claimName.",
     )
     mount_path: str = Field(
         default="/trace",

@@ -2179,6 +2179,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	t.Log("Add root environment uniqueness, origin selection and ratcheting cases in both APIs")
 	tests = append(tests, environmentDCDAdmissionCases(t)...)
 
+	t.Log("Accept Retune wiring only for graph-controlled Planner components")
+	tests = append(tests, retuneDCDAdmissionCases(t)...)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gates := features.Gates{Checkpoint: !tt.checkpointOff}

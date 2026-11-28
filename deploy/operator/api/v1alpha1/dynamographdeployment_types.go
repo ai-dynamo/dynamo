@@ -20,6 +20,7 @@
 package v1alpha1
 
 import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -295,6 +296,12 @@ type RollingUpdateStatus struct {
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
+	// Retune acknowledges the semantic target binding for a Planner.
+	// This native field shares the beta schema and belongs to the resource's
+	// status.observedGeneration. Omission means current wiring is unavailable.
+	// +optional
+	Retune *v1beta1.RetuneStatus `json:"retune,omitempty"`
+
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 	// +required
 	ComponentKind ComponentKind `json:"componentKind"`

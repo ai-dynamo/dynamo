@@ -5,7 +5,7 @@
 
 ``RouterActuator.reconcile`` runs one round: list the DGD's frontend pods,
 ``GET /router_policy`` on each pod's admin listener (the frontend serves the
-router policy API on no other port; ``PodInfo.admin_port``), keep the routers of the DGD's dynamo
+router policy API on no other port; the operator publishes its port), keep the routers of the DGD's dynamo
 namespace, latch each router's initial configuration, check it against the
 parsed startup maps (P14), write what the target needs and report whether
 every router has converged.
@@ -57,6 +57,11 @@ parameters equal to the target (``apply``: the desired map;
 that answers GET is checked like the others; one that does not answer is
 ignored (a restarted frontend comes back at revision 0, its initial). No
 routers at all is not converged.
+
+Rollback with checkpointed initials instead requires every still-live owned
+router to match its initial, regardless of its namespace or worker type. Only
+process retirement proves a missing owned router is gone; replacement routers
+cannot establish rollback convergence.
 """
 
 from __future__ import annotations
@@ -72,8 +77,6 @@ from typing import Any, Optional
 import aiohttp
 
 from dynamo.planner.retune.live.contracts import (
-    ENV_FRONTEND_ADMIN_API,
-    ENV_FRONTEND_ADMIN_PORT,
     POD_LABEL_COMPONENT_TYPE,
     POD_LABEL_DGD_NAME,
     POLICY_PARAMETER_KEYS,
@@ -81,6 +84,7 @@ from dynamo.planner.retune.live.contracts import (
     ActuationTarget,
     DgdRef,
     PodInfo,
+    PodInstance,
     PolicyCallResult,
     RetuneKube,
     RetuneMetricsSink,
@@ -112,10 +116,6 @@ ROUTER_CONTROL_TIMEOUT_S = 5.0
 DEFAULT_CLIENT_TIMEOUT_S = ROUTER_CONTROL_TIMEOUT_S + 3.0
 # Pod phases after which no container runs again.
 _FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
-# (pod uid, restarts): one run of a frontend; its routers live only as long.
-_PodInstance = tuple[str, Optional[int]]
-
-
 # ----------------------------------------------------------------- client
 
 
@@ -137,6 +137,7 @@ class AiohttpRouterPolicyClient:
         timeout_s: float = DEFAULT_CLIENT_TIMEOUT_S,
         scheme: str = "http",
         *,
+        admin_port: Optional[int],
         max_connections: int = 32,
     ) -> None:
         if not (math.isfinite(timeout_s) and timeout_s > 0):
@@ -146,16 +147,17 @@ class AiohttpRouterPolicyClient:
         self._timeout = aiohttp.ClientTimeout(total=float(timeout_s))
         self._scheme = scheme
         self._max_connections = int(max_connections)
+        self._admin_port = admin_port
         self._session: Optional[aiohttp.ClientSession] = None
 
     def url(self, pod: PodInfo) -> Optional[str]:
         """The pod's ``/router_policy`` URL on its admin listener, or None
         without a pod IP or an admin listener."""
 
-        if not pod.ip or pod.admin_port is None:
+        if not pod.ip or self._admin_port is None:
             return None
         host = f"[{pod.ip}]" if ":" in pod.ip else pod.ip
-        return f"{self._scheme}://{host}:{pod.admin_port}{ROUTER_POLICY_PATH}"
+        return f"{self._scheme}://{host}:{self._admin_port}{ROUTER_POLICY_PATH}"
 
     async def get(self, pod: PodInfo) -> PolicyCallResult:
         return await self._call(pod, "GET", None, _parse_list)
@@ -205,10 +207,7 @@ class AiohttpRouterPolicyClient:
                 return PolicyCallResult(status=0, error=f"pod {pod.name} has no IP")
             return PolicyCallResult(
                 status=0,
-                error=(
-                    f"pod {pod.name} has no frontend admin listener the planner "
-                    f"can read ({ENV_FRONTEND_ADMIN_API} and {ENV_FRONTEND_ADMIN_PORT})"
-                ),
+                error=(f"pod {pod.name} has no operator-published Retune admin port"),
             )
         try:
             session = self._ensure_session()
@@ -299,6 +298,7 @@ class _Round:
 
     target: ActuationTarget
     initials: Mapping[str, Mapping[str, float]]
+    router_hosts: Optional[Mapping[str, Sequence[PodInstance]]] = None
     errors: dict[str, int] = field(default_factory=dict)
 
     def error(self, kind: str) -> None:
@@ -336,6 +336,7 @@ class RouterActuator:
         *,
         list_timeout_s: float = 10.0,
         admin_disabled_rounds: int = ADMIN_API_DISABLED_ROUNDS,
+        frontend_component_name: Optional[str] = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -348,18 +349,19 @@ class RouterActuator:
         self._max_concurrency = int(max_concurrency)
         self._list_timeout_s = float(list_timeout_s)
         self._admin_disabled_rounds = int(admin_disabled_rounds)
+        self._frontend_component_name = frontend_component_name
         # router_id -> initial configuration latched by this process.
         self._latched: dict[str, dict[str, float]] = {}
         # router_id -> the pod instances it may run on: the one it was last
         # seen on, or for an initial not seen by this process, every
         # frontend listed when it was first missing.
-        self._router_hosts: dict[str, frozenset[_PodInstance]] = {}
+        self._router_hosts: dict[str, frozenset[PodInstance]] = {}
         # router_id -> signature of a write the router rejected with 422;
         # the same write is not retried until the target changes.
         self._rejected: dict[str, str] = {}
         # pod uid -> consecutive rounds without a reachable /router_policy: the
-        # GET returned 404, or the pod has no admin port (counted as at the
-        # limit at once). Dropped once the pod is terminating or finished.
+        # GET returned 404. Missing status is not proof that a running
+        # frontend disabled its admin listener or restored its routers.
         self._admin_missing_rounds: dict[str, int] = {}
         self._last_pods: Optional[tuple[PodInfo, ...]] = None
         self._startup_maps: dict[str, dict[str, float]] = {}
@@ -369,10 +371,13 @@ class RouterActuator:
 
     @property
     def label_selector(self) -> str:
-        return (
+        selector = (
             f"{POD_LABEL_DGD_NAME}={self._dgd.name},"
             f"{POD_LABEL_COMPONENT_TYPE}=frontend"
         )
+        if self._frontend_component_name is not None:
+            selector += f",nvidia.com/dynamo-component={self._frontend_component_name}"
+        return selector
 
     @property
     def worker_types(self) -> tuple[str, ...]:
@@ -409,11 +414,16 @@ class RouterActuator:
         *,
         initials: Mapping[str, Mapping[str, float]],
         expected_frontends: int,
+        router_hosts: Optional[Mapping[str, Sequence[PodInstance]]] = None,
     ) -> ActuationReport:
         """Run one round; see the module docstring. Never raises."""
 
         try:
-            report = await self._reconcile(target, initials, expected_frontends)
+            for router_id, hosts in (router_hosts or {}).items():
+                self._router_hosts.setdefault(router_id, frozenset(hosts))
+            report = await self._reconcile(
+                target, initials, expected_frontends, router_hosts
+            )
         except asyncio.CancelledError:
             raise
         except Exception:  # never raise: the supervisor retries next round
@@ -433,8 +443,9 @@ class RouterActuator:
         target: ActuationTarget,
         initials: Mapping[str, Mapping[str, float]],
         expected_frontends: int,
+        router_hosts: Optional[Mapping[str, Sequence[PodInstance]]] = None,
     ) -> ActuationReport:
-        state = _Round(target=target, initials=initials)
+        state = _Round(target=target, initials=initials, router_hosts=router_hosts)
         target_error = self._target_error(target)
         if target_error is not None:
             logger.error("retune router actuator: invalid target: %s", target_error)
@@ -478,14 +489,38 @@ class RouterActuator:
         outcomes = list(await asyncio.gather(*(run(pod) for pod in targeted)))
 
         self._track_admin_api(live, outcomes)
-        converged = target_error is None and self._converged(
-            state, ready, outcomes, max(1, int(expected_frontends))
-        )
+        seen = self._seen_router_ids(state, pods, outcomes)
+        if target.mode == "rollback" and (initials or not target.learn_unknown):
+            # Historical ownership survives namespace/type changes. A new
+            # router cannot prove that an older owned process was restored.
+            restored = {
+                router.router_id
+                for outcome in outcomes
+                if outcome.ok
+                for router in outcome.routers
+                if _same_map(router.configuration, initials.get(router.router_id))
+            }
+            converged = (
+                target_error is None and set(initials).intersection(seen) <= restored
+            )
+        else:
+            converged = target_error is None and self._converged(
+                state, ready, outcomes, max(1, int(expected_frontends))
+            )
+        # A published component selector scopes rollback to the old binding.
+        # An empty successful listing proves those processes no longer exist;
+        # an unknown port or an unsuccessful HTTP call does not.
+        if (
+            target_error is None
+            and target.mode == "rollback"
+            and self._frontend_component_name is not None
+            and not pods
+        ):
+            converged = True
         routers_present = self._routers_present(
             ready, outcomes, max(1, int(expected_frontends))
         )
         parity_ok, mismatches = self._parity(state, outcomes)
-        seen = self._seen_router_ids(state, pods, outcomes)
         self._prune(seen)
         new_initials = {
             router_id: dict(configuration)
@@ -510,6 +545,15 @@ class RouterActuator:
             admin_api_disabled=admin_api_disabled,
             errors=dict(state.errors),
             routers_present=routers_present,
+            router_hosts={
+                key: tuple(
+                    sorted(
+                        value,
+                        key=lambda host: (host[0], -1 if host[1] is None else host[1]),
+                    )
+                )
+                for key, value in self._router_hosts.items()
+            },
         )
 
     def _routers_present(
@@ -582,7 +626,10 @@ class RouterActuator:
                 retry = retry or needs_reget
             if not retry or retried:
                 return _PodOutcome(
-                    pod=pod, ok=True, get_status=200, routers=tuple(final)
+                    pod=pod,
+                    ok=True,
+                    get_status=200,
+                    routers=tuple(final),
                 )
             # 409, 503 or PATCH 404: re-read the pod once and retry.
             retried = True
@@ -595,14 +642,17 @@ class RouterActuator:
     def _in_scope(
         self, pod: PodInfo, routers: Sequence[RouterInfo], state: _Round
     ) -> list[RouterInfo]:
-        """Routers of the DGD's dynamo namespace and the planner's worker
-        types; latch the initials of routers at revision 0."""
+        """Current semantic scope plus checkpointed router IDs during rollback."""
 
         scoped = []
         for router in routers:
-            if router.namespace != self._dgd.dynamo_namespace:
-                continue
-            if router.worker_type not in self._startup_maps:
+            historical = (
+                state.target.mode == "rollback" and router.router_id in state.initials
+            )
+            if not historical and (
+                router.namespace != self._dgd.dynamo_namespace
+                or router.worker_type not in self._startup_maps
+            ):
                 continue
             self._router_hosts[router.router_id] = frozenset({_instance(pod)})
             if router.configuration is None:
@@ -698,6 +748,12 @@ class RouterActuator:
         if not _same_map(state.initials.get(router.router_id), initial):
             # Latched but not persisted yet: hold until the state records it.
             return None
+        if state.router_hosts is not None and set(
+            state.router_hosts.get(router.router_id, ())
+        ) != self._router_hosts.get(router.router_id, frozenset()):
+            # Persist the process identity with the initial before any policy
+            # can outlive the admin listener or this Planner process.
+            return None
         if not _same_map(initial, self._startup_maps[router.worker_type]):
             # P14 failed for this router; writing explicit values would put
             # planner-parsed values into keys the sweep never searched.
@@ -777,6 +833,11 @@ class RouterActuator:
         unknown = 0
         for outcome in outcomes:
             for router in outcome.routers:
+                if (
+                    router.namespace != self._dgd.dynamo_namespace
+                    or router.worker_type not in self._startup_maps
+                ):
+                    continue
                 if router.configuration is None:
                     continue
                 initial = self._initial(router.router_id, state)
@@ -812,9 +873,9 @@ class RouterActuator:
         A GET answers without the routers whose control call timed out or
         failed (``router_policy.rs``), so a router missing from its pod's
         answer may still be there. A known router is gone only once every
-        pod instance it may run on is gone: no longer listed, finished
-        (Succeeded/Failed), or restarted (a restarted frontend registers new
-        routers).
+        pod it may run on is gone: no longer listed or finished
+        (Succeeded/Failed). A restart count can lag the GET that observed a
+        router, so a different count does not prove that router retired.
         """
 
         observed = {
@@ -831,7 +892,7 @@ class RouterActuator:
             # router runs on a frontend listed now (a pod never comes back),
             # or on none.
             hosts = self._router_hosts.setdefault(router_id, present)
-            if hosts & present:
+            if any(uid == other_uid for uid, _ in hosts for other_uid, _ in present):
                 seen.add(router_id)
         return seen
 
@@ -850,11 +911,7 @@ class RouterActuator:
             del self._admin_missing_rounds[uid]
         for outcome in outcomes:
             uid = outcome.pod.uid
-            if outcome.pod.ip and outcome.pod.admin_port is None:
-                # The pod's env starts no admin listener the planner can read:
-                # no call was made, and none will answer until it changes.
-                self._admin_missing_rounds[uid] = self._admin_disabled_rounds
-            elif outcome.get_status == 404:
+            if outcome.get_status == 404:
                 self._admin_missing_rounds[uid] = (
                     self._admin_missing_rounds.get(uid, 0) + 1
                 )
@@ -865,7 +922,7 @@ class RouterActuator:
 # ---------------------------------------------------------------- helpers
 
 
-def _instance(pod: PodInfo) -> _PodInstance:
+def _instance(pod: PodInfo) -> PodInstance:
     """One run of a pod's frontend: its uid and container restart count."""
 
     return (pod.uid, pod.restarts)

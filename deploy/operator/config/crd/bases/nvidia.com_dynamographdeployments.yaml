@@ -12358,6 +12358,63 @@ spec:
                                 type: string
                             type: object
                         type: object
+                      retune:
+                        description: |-
+                          Retune requests operator-owned trace storage and frontend admin wiring for
+                          a Planner component. It is a native field with the same semantics as beta:
+                          only componentType planner accepts it, and enabled Retune requires exactly
+                          one frontend selected by type in the DGD and a traceStorage PVC reference.
+                          Absent or disabled Retune does not change ordinary rendering or autoscaling.
+                        properties:
+                          enabled:
+                            description: |-
+                              enabled configures the frontend selected by type in the same DGD and the
+                              Planner with shared trace storage, a reachable frontend admin listener, and
+                              KV routing with replica synchronization and the supplied startup values.
+                              It does not enable replica scaling or choose an optimization strategy.
+                              Omission or false leaves ordinary component rendering unchanged. Enabling,
+                              disabling, or changing semantic settings changes the affected Pod templates.
+                            type: boolean
+                          router:
+                            description: |-
+                              router supplies initial serving values, not Planner search domains. The
+                              operator injects these through existing frontend environment variables.
+                              Explicit CLI arguments and router-policy configuration retain their normal
+                              precedence; effective runtime validation is not provided by this setting.
+                              Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0.
+                            properties:
+                              overlapScoreCredit:
+                                default: 1
+                                description: overlapScoreCredit is the initial KV overlap credit. Defaults to 1.
+                                minimum: 0
+                                type: number
+                              prefillLoadScale:
+                                default: 1
+                                description: prefillLoadScale is the initial prefill-load weight. Defaults to 1.
+                                minimum: 0
+                                type: number
+                              temperature:
+                                default: 0
+                                description: temperature is the initial router sampling temperature. Defaults to 0.
+                                minimum: 0
+                                type: number
+                            type: object
+                          traceStorage:
+                            description: |-
+                              traceStorage references the user-provided trace PVC. Required when enabled.
+                              The operator owns the mounts, trace layout, and associated environment
+                              bindings. Component status acknowledges the semantic target contract's hash.
+                            properties:
+                              claimName:
+                                description: |-
+                                  claimName is an existing writable ReadWriteMany PVC in the DGD namespace.
+                                  The operator does not create the claim or wait for it during admission.
+                                minLength: 1
+                                type: string
+                            required:
+                              - claimName
+                            type: object
+                        type: object
                       roles:
                         description: |-
                           Roles expose the named Pod-producing parts inside a compound component.
@@ -21298,6 +21355,24 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      retune:
+                        description: |-
+                          Retune acknowledges the semantic target binding for a Planner.
+                          This native field shares the beta schema and belongs to the resource's
+                          status.observedGeneration. Omission means current wiring is unavailable.
+                        properties:
+                          configHash:
+                            description: |-
+                              configHash is the opaque binding of the operator-generated launch contract.
+                              Publication acknowledges that the frontend and Planner target lowerings
+                              have been applied, independently of readiness or optional role projections.
+                              The Planner also matches its immutable launch binding before starting
+                              tuning windows; this hash does not acknowledge effective runtime settings.
+                            minLength: 1
+                            type: string
+                        required:
+                          - configHash
+                        type: object
                       runtimeComponentName:
                         description: |-
                           RuntimeComponentName is an explicit Dynamo runtime component identity
@@ -30621,6 +30696,70 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      retune:
+                        description: |-
+                          retune requests operator-owned live Retune wiring. It is valid only for a
+                          planner component; enabled Retune requires exactly one frontend component
+                          selected by type in the same graph, one enabled Planner owner, and traceStorage.
+                          The operator configures request-end trace recording, shared PVC mounts, and
+                          a reachable frontend admin listener, KV routing with replica synchronization,
+                          and typed router startup values. The Planner receives a semantic launch
+                          contract whose hash is acknowledged in status.components[name].retune.
+                          Generated environment bindings are operator-owned while enabled; explicit
+                          frontend CLI and router-policy settings retain their normal precedence.
+                          The current admin API has no authentication; restrict network access to it.
+                          This setting does not enable the Planner loop, alter search parameters, or
+                          enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
+                        properties:
+                          enabled:
+                            description: |-
+                              enabled configures the frontend selected by type in the same DGD and the
+                              Planner with shared trace storage, a reachable frontend admin listener, and
+                              KV routing with replica synchronization and the supplied startup values.
+                              It does not enable replica scaling or choose an optimization strategy.
+                              Omission or false leaves ordinary component rendering unchanged. Enabling,
+                              disabling, or changing semantic settings changes the affected Pod templates.
+                            type: boolean
+                          router:
+                            description: |-
+                              router supplies initial serving values, not Planner search domains. The
+                              operator injects these through existing frontend environment variables.
+                              Explicit CLI arguments and router-policy configuration retain their normal
+                              precedence; effective runtime validation is not provided by this setting.
+                              Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0.
+                            properties:
+                              overlapScoreCredit:
+                                default: 1
+                                description: overlapScoreCredit is the initial KV overlap credit. Defaults to 1.
+                                minimum: 0
+                                type: number
+                              prefillLoadScale:
+                                default: 1
+                                description: prefillLoadScale is the initial prefill-load weight. Defaults to 1.
+                                minimum: 0
+                                type: number
+                              temperature:
+                                default: 0
+                                description: temperature is the initial router sampling temperature. Defaults to 0.
+                                minimum: 0
+                                type: number
+                            type: object
+                          traceStorage:
+                            description: |-
+                              traceStorage references the user-provided trace PVC. Required when enabled.
+                              The operator owns the mounts, trace layout, and associated environment
+                              bindings. Component status acknowledges the semantic target contract's hash.
+                            properties:
+                              claimName:
+                                description: |-
+                                  claimName is an existing writable ReadWriteMany PVC in the DGD namespace.
+                                  The operator does not create the claim or wait for it during admission.
+                                minLength: 1
+                                type: string
+                            required:
+                              - claimName
+                            type: object
+                        type: object
                       roles:
                         description: |-
                           roles expose the named Pod-producing parts inside a compound component.
@@ -39723,6 +39862,24 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      retune:
+                        description: |-
+                          retune acknowledges the operator-generated semantic target binding for a
+                          Planner under status.observedGeneration, not a running process revision.
+                          Omission means that current target wiring has not been acknowledged.
+                        properties:
+                          configHash:
+                            description: |-
+                              configHash is the opaque binding of the operator-generated launch contract.
+                              Publication acknowledges that the frontend and Planner target lowerings
+                              have been applied, independently of readiness or optional role projections.
+                              The Planner also matches its immutable launch binding before starting
+                              tuning windows; this hash does not acknowledge effective runtime settings.
+                            minLength: 1
+                            type: string
+                        required:
+                          - configHash
+                        type: object
                       runtimeComponentName:
                         description: |-
                           runtimeComponentName is an explicit Dynamo runtime component identity

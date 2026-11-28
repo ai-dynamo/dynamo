@@ -27,6 +27,7 @@ from dynamo.planner.retune.live.contracts import (
     FrontendStartup,
     KubeConflict,
     KubeError,
+    RetuneCapability,
 )
 from dynamo.planner.retune.live.state import (
     HISTORY_ANNOTATION,
@@ -58,7 +59,10 @@ from dynamo.planner.retune.live.state import (
     rollback_start,
     state_lease_name,
 )
-from dynamo.planner.tests.live_retune_fakes import FakeRetuneKube
+from dynamo.planner.tests.live_retune_fakes import (
+    FakeRetuneKube,
+    retune_launch_contract,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -337,6 +341,59 @@ def test_claim_changes_only_the_term() -> None:
     state = deployed_state()
     claimed = claim(state, dgd_uid="ignored", term="t9")
     assert claimed == dataclasses.replace(state, leader_term="t9")
+
+
+def test_legacy_state_migrates_to_ownership_preserving_format():
+    annotations = {
+        STATE_ANNOTATION: json.dumps(
+            {"version": 1, "dgd_uid": "uid-1", "mode": "active", "by_wt": DEPLOYED}
+        )
+    }
+    legacy = RetuneState.from_annotations(annotations)
+    assert legacy.capability is None and legacy.router_hosts == {}
+    capability = RetuneCapability.from_dict(retune_launch_contract())
+    current = dataclasses.replace(
+        legacy, capability=capability, router_hosts={"router": (("pod-uid", 2),)}
+    )
+    encoded = current.to_annotations()
+    assert json.loads(encoded[STATE_ANNOTATION])["version"] == 2
+    assert RetuneState.from_annotations(encoded) == current
+
+
+def test_capability_is_part_of_the_retune_fingerprint():
+    config = live_config()
+    capability = RetuneCapability.from_dict(retune_launch_contract())
+    original = fingerprint(config, startup(), capability)
+    for field, value in (
+        ("claim_name", "new-claim"),
+        ("admin_port", 9100),
+        ("frontend_component_name", "new-frontend"),
+    ):
+        assert (
+            fingerprint(
+                config, startup(), dataclasses.replace(capability, **{field: value})
+            )
+            != original
+        )
+
+
+@pytest.mark.parametrize("mutation", ["version", "malformed"])
+def test_unreadable_checkpointed_binding_cannot_be_treated_as_resettable_corruption(
+    mutation,
+):
+    state = dataclasses.replace(
+        deployed_state(),
+        capability=RetuneCapability.from_dict(retune_launch_contract()),
+    )
+    annotations = state.to_annotations()
+    body = json.loads(annotations[STATE_ANNOTATION])
+    if mutation == "version":
+        body["retune_capability"]["version"] = 2
+    else:
+        body["retune_capability"]["traceStorage"] = None
+    annotations[STATE_ANNOTATION] = json.dumps(body)
+    with pytest.raises(StateVersionError, match="state.retune_capability"):
+        RetuneState.from_annotations(annotations)
 
 
 def test_deploy_rollback_and_reset_replace_the_deployment() -> None:

@@ -10,7 +10,8 @@ each can be built and tested with fakes.
 
 from __future__ import annotations
 
-import re
+import math
+import posixpath
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -39,55 +40,8 @@ DGDR_ROUTER_KNOBS: dict[str, str] = {
     "temperature": "router_temperature",
 }
 
-# The frontend admin listener, the only one that serves GET/PATCH
-# /router_policy (lib/llm/src/http/service/service_v2.rs: off unless
-# DYN_ENABLE_FRONTEND_ADMIN_API is truthy, bound to
-# DYN_FRONTEND_ADMIN_HOST:DYN_FRONTEND_ADMIN_PORT, by default 127.0.0.1:8002).
-ENV_FRONTEND_ADMIN_API = "DYN_ENABLE_FRONTEND_ADMIN_API"
-ENV_FRONTEND_ADMIN_HOST = "DYN_FRONTEND_ADMIN_HOST"
-ENV_FRONTEND_ADMIN_PORT = "DYN_FRONTEND_ADMIN_PORT"
-DEFAULT_FRONTEND_ADMIN_PORT = 8002
-# lib/truthy is_truthy.
-TRUTHY = frozenset({"1", "true", "on", "yes"})
-_DIGITS = re.compile(r"[0-9]+")
-
-
-def is_truthy(value: Optional[str]) -> bool:
-    """``lib/truthy`` ``is_truthy``: 1/true/on/yes, any case, trimmed."""
-
-    return value is not None and value.strip().lower() in TRUTHY
-
-
-def parse_u16(value: str) -> Optional[int]:
-    """Rust's ``str::parse::<u16>``: an optional ``+`` and ASCII digits
-    (leading zeros allowed), at most 65535; ``None`` otherwise."""
-
-    digits = value[1:] if value.startswith("+") else value
-    if _DIGITS.fullmatch(digits) is None:
-        return None
-    # Strip leading zeros before int(): no digit-count limit, no overflow.
-    significant = digits.lstrip("0") or "0"
-    if len(significant) > 5 or int(significant) > 65535:
-        return None
-    return int(significant)
-
-
-def frontend_admin_port(value: Optional[str]) -> Optional[int]:
-    """The port a frontend's admin listener binds for
-    ``DYN_FRONTEND_ADMIN_PORT=value`` (``None``: unset).
-
-    Mirrors ``default_admin_port``: a value that does not parse as a ``u16``
-    falls back to 8002. ``0`` asks the OS for a port nobody else can know,
-    so it maps to ``None``.
-    """
-
-    if value is None:
-        return DEFAULT_FRONTEND_ADMIN_PORT
-    port = parse_u16(value)
-    if port is None:
-        return DEFAULT_FRONTEND_ADMIN_PORT
-    return port or None
-
+# Immutable binding rendered into the Planner Pod by the operator.
+ENV_RETUNE_CAPABILITY = "DYN_PLANNER_RETUNE_CAPABILITY"
 
 LABEL_PREFIX = "nvidia.com/planner-retune-"
 LABEL_DGD = LABEL_PREFIX + "dgd"
@@ -177,6 +131,127 @@ class DgdRef:
 
 
 @dataclass(frozen=True)
+class RetuneCapability:
+    """Immutable operator launch contract, checkpointed for router cleanup."""
+
+    frontend_component_name: str
+    claim_name: str
+    mount_path: str
+    segments_dir: str
+    windows_dir: str
+    admin_port: int
+    config_hash: str
+    overlap_score_credit: float
+    prefill_load_scale: float
+    temperature: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "configHash": self.config_hash,
+            "frontendComponentName": self.frontend_component_name,
+            "traceStorage": {
+                "claimName": self.claim_name,
+                "mountPath": self.mount_path,
+                "segmentsDir": self.segments_dir,
+                "windowsDir": self.windows_dir,
+            },
+            "adminPort": self.admin_port,
+            "router": {
+                "overlapScoreCredit": self.overlap_score_credit,
+                "prefillLoadScale": self.prefill_load_scale,
+                "temperature": self.temperature,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> RetuneCapability:
+        if not isinstance(value, Mapping):
+            raise ValueError("the Retune capability is unavailable")
+        if type(value.get("version")) is not int or value["version"] != 1:
+            raise ValueError("unsupported Retune launch contract version")
+        config_hash = value.get("configHash")
+        if not isinstance(config_hash, str) or not config_hash:
+            raise ValueError("Retune configHash must be a non-empty string")
+        router = value.get("router")
+        if not isinstance(router, Mapping):
+            raise ValueError("Retune router settings are unavailable")
+        parameters = []
+        for name in ("overlapScoreCredit", "prefillLoadScale", "temperature"):
+            parameter = router.get(name)
+            if isinstance(parameter, bool) or not isinstance(parameter, (int, float)):
+                raise ValueError(
+                    f"Retune router.{name} must be finite and non-negative"
+                )
+            try:
+                number = float(parameter)
+            except OverflowError as error:
+                raise ValueError(
+                    f"Retune router.{name} must be finite and non-negative"
+                ) from error
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(
+                    f"Retune router.{name} must be finite and non-negative"
+                )
+            parameters.append(number)
+        storage = value.get("traceStorage")
+        if not isinstance(storage, Mapping):
+            raise ValueError("Retune traceStorage is unavailable")
+        frontend = value.get("frontendComponentName")
+        claim = storage.get("claimName")
+        mount = storage.get("mountPath")
+        segments = storage.get("segmentsDir")
+        windows = storage.get("windowsDir")
+        if (
+            not isinstance(frontend, str)
+            or not frontend
+            or not isinstance(claim, str)
+            or not claim
+            or not isinstance(mount, str)
+            or not mount
+            or not isinstance(segments, str)
+            or not segments
+            or not isinstance(windows, str)
+            or not windows
+        ):
+            raise ValueError(
+                "Retune capability names and paths must be non-empty strings"
+            )
+        if not mount.startswith("/") or posixpath.normpath(mount) != mount:
+            raise ValueError("Retune mountPath must be an absolute normalized path")
+        for name, path in (("segmentsDir", segments), ("windowsDir", windows)):
+            if path.startswith("/") or any(
+                part in ("", ".", "..") for part in path.split("/")
+            ):
+                raise ValueError(
+                    f"Retune {name} must be a normalized claim-relative directory"
+                )
+        if (
+            segments == windows
+            or segments.startswith(windows + "/")
+            or windows.startswith(segments + "/")
+        ):
+            raise ValueError("Retune trace directories must not overlap")
+        port = value.get("adminPort")
+        if (
+            isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+        ):
+            raise ValueError("Retune adminPort must be between 1 and 65535")
+        return cls(
+            frontend,
+            claim,
+            mount,
+            segments,
+            windows,
+            port,
+            config_hash,
+            *parameters,
+        )
+
+
+@dataclass(frozen=True)
 class PodInfo:
     name: str
     uid: str
@@ -184,15 +259,15 @@ class PodInfo:
     ready: bool
     terminating: bool
     labels: Mapping[str, str] = field(default_factory=dict)
-    # Port of the frontend admin listener, which serves /router_policy, from
-    # the main container's env; ``None`` when that env does not enable the
-    # admin API or the port cannot be read.
-    admin_port: Optional[int] = None
     # ``status.phase`` (Pending, Running, Succeeded, Failed, Unknown).
     phase: Optional[str] = None
     # ``restartCount`` of the ``main`` container, if reported. A restarted
     # frontend registers new routers (new router ids).
     restarts: Optional[int] = None
+
+
+# A frontend process is replaced by a new Pod UID or main-container restart.
+PodInstance = tuple[str, Optional[int]]
 
 
 class RetuneKube(Protocol):
@@ -277,10 +352,10 @@ class RetuneKube(Protocol):
 
 @dataclass(frozen=True)
 class FrontendStartup:
-    """The frontend router configuration parsed from the DGD spec.
+    """The frontend startup configuration resolved from the launch profile.
 
-    ``router_config`` is the startup ``KvRouterConfig`` JSON (only keys the
-    frontend sets); ``startup_maps`` is ``policy_parameters(wt)`` for each
+    ``router_config`` is the complete startup ``KvRouterConfig`` JSON;
+    ``startup_maps`` is ``policy_parameters(wt)`` for each
     worker type of the planner mode. ``fingerprint_source`` is a canonical
     JSON string of everything parsed that the state fingerprint covers.
     """
@@ -397,6 +472,7 @@ class ActuationReport:
     # P12: enough Ready frontends, each with a configured router for every
     # worker type, whatever their values. Gates launches; convergence does not.
     routers_present: Optional[bool] = None
+    router_hosts: dict[str, tuple[PodInstance, ...]] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------- reconciler

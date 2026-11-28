@@ -337,9 +337,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 	allErrs := field.ErrorList{}
 
-	// LPX cardinality determines the root overrides and shared draft/target contract.
-	lpxComponentCount, independentEngineCount := 0, 0
+	// Count graph-scoped owners before validating each component's local fields.
+	lpxComponentCount, independentEngineCount, frontendCount, retunePlannerCount := 0, 0, 0, 0
 	for i := range spec.Components {
+		component := &spec.Components[i]
+		if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend {
+			frontendCount++
+		}
+		if component.ComponentType == nvidiacomv1beta1.ComponentTypePlanner && component.Retune != nil && component.Retune.Enabled {
+			retunePlannerCount++
+		}
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
 			if dynamolpx.ServesEndpoint(&spec.Components[i]) {
@@ -393,6 +400,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
+
+		// Type-based selection must have one frontend and one Retune writer.
+		if component.Retune != nil && component.Retune.Enabled {
+			retunePath := componentPath.Child("retune")
+			if frontendCount != 1 {
+				allErrs = append(allErrs, field.Forbidden(retunePath, "enabled Retune requires exactly one frontend component selected by type"))
+			}
+			if retunePlannerCount > 1 {
+				allErrs = append(allErrs, field.Forbidden(retunePath, "only one Planner component may enable Retune in a DGD"))
+			}
+		}
 
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {

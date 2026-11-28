@@ -34,16 +34,12 @@ from dynamo.planner.retune.live.contracts import (
     DGDR_REQUESTS,
     DGDR_RUNS,
     DGDR_VERSION,
-    ENV_FRONTEND_ADMIN_API,
-    ENV_FRONTEND_ADMIN_PORT,
     KubeAlreadyExists,
     KubeConflict,
     KubeError,
     KubeInvalid,
     KubeNotFound,
     PodInfo,
-    frontend_admin_port,
-    is_truthy,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,7 +121,6 @@ def _pod_info(pod: Any) -> PodInfo:
         ready=ready,
         terminating=metadata.deletion_timestamp is not None,
         labels=dict(metadata.labels or {}),
-        admin_port=_admin_port(pod.spec),
         phase=status.phase if status is not None else None,
         restarts=_main_restarts(status),
     )
@@ -138,40 +133,6 @@ def _main_restarts(status: Any) -> Optional[int]:
         if container.name == MAIN_CONTAINER_NAME:
             return int(container.restart_count)
     return None
-
-
-def _admin_port(spec: Any) -> Optional[int]:
-    """The admin listener port the main container's env gives the frontend.
-
-    ``None`` when the env does not enable the admin API, or when a value
-    comes from ``valueFrom`` or a ``$(VAR)`` reference the pod spec leaves
-    unexpanded: the planner cannot know it (P10 requires literal values).
-    """
-
-    containers = list((spec.containers if spec is not None else None) or ())
-    main = next(
-        (c for c in containers if c.name == MAIN_CONTAINER_NAME),
-        containers[0] if containers else None,
-    )
-    if main is None:
-        return None
-    env = {item.name: item for item in main.env or ()}
-
-    def literal(name: str) -> tuple[bool, Optional[str]]:
-        """(readable, value); an unset name is readable with value None."""
-        item = env.get(name)
-        if item is None:
-            return True, None
-        value = item.value
-        if item.value_from is not None or (value is not None and "$(" in value):
-            return False, None
-        return True, value or ""
-
-    readable, enabled = literal(ENV_FRONTEND_ADMIN_API)
-    if not readable or not is_truthy(enabled):
-        return None
-    readable, port = literal(ENV_FRONTEND_ADMIN_PORT)
-    return frontend_admin_port(port) if readable else None
 
 
 def _decode(response: Any) -> dict:

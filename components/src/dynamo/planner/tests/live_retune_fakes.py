@@ -48,6 +48,33 @@ from dynamo.planner.retune.live.contracts import (
     PodInfo,
 )
 
+
+def retune_planner_status() -> dict[str, Any]:
+    return {"retune": {"configHash": "retune-test-config"}}
+
+
+def retune_launch_contract(*, mount_path: str = "/trace") -> dict[str, Any]:
+    """Independent launch binding, not inferred from a deployment's templates."""
+
+    return {
+        "version": 1,
+        "configHash": "retune-test-config",
+        "frontendComponentName": "Frontend",
+        "traceStorage": {
+            "claimName": "request-traces",
+            "mountPath": mount_path,
+            "segmentsDir": "segments",
+            "windowsDir": "windows",
+        },
+        "adminPort": 8002,
+        "router": {
+            "overlapScoreCredit": 1.0,
+            "prefillLoadScale": 1.0,
+            "temperature": 0.0,
+        },
+    }
+
+
 # Operator constants (deploy/operator/internal/controller at #17483).
 REQUEST_GENERATION_ANNOTATION = "nvidia.com/dgdr-request-generation"
 CANDIDATE_ID_LABEL = "nvidia.com/dgdr-candidate-id"
@@ -293,7 +320,7 @@ def router_points(effective_input: Mapping[str, Any]) -> list[dict[str, float]]:
 
 
 def planner_points(
-    effective_input: Mapping[str, Any]
+    effective_input: Mapping[str, Any],
 ) -> list[Optional[dict[str, Any]]]:
     """The planner points of an input's ``planner.retune_sweep`` section;
     ``[None]`` without one (fixed replicas)."""
@@ -564,7 +591,6 @@ class FakeRetuneKube:
         ready: bool = True,
         terminating: bool = False,
         ip: str | None = None,
-        admin_port: int | None = 8002,
         labels: Mapping[str, str] | None = None,
         restarts: int | None = 0,
     ) -> PodInfo:
@@ -580,7 +606,6 @@ class FakeRetuneKube:
             ready=ready,
             terminating=terminating,
             labels=all_labels,
-            admin_port=admin_port,
             restarts=restarts,
         )
         with self._lock:

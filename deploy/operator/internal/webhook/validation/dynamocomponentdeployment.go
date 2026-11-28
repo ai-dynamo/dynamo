@@ -169,6 +169,11 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
+
+	// A standalone component cannot supply the graph's frontend/Planner wiring.
+	if dcd.Spec.Retune != nil && dcd.Spec.Retune.Enabled && dcd.GetGraphDeploymentController() == nil {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "retune"), "enabled Retune is supported only on DynamoGraphDeployment-managed components"))
+	}
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(
 		&dcd.Spec, oldSpec, field.NewPath("spec"),
 		dynamo.DCDUsesOrderedEnvironment(dcd), oldDCD != nil && dynamo.DCDUsesOrderedEnvironment(oldDCD),

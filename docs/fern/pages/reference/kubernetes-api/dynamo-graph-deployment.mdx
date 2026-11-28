@@ -547,6 +547,35 @@ Replica information for a single component, keyed by component name in `status.c
   Replicas scheduled by the backend, in complete Dynamo component-replica units rather than raw pod counts. Helps distinguish scheduling shortfalls from runtime readiness. Omitted when the backend cannot report a reliable count; absence means not reported, not zero scheduled. Minimum `0`.
 </ParamField>
 
+<ParamField path="retune" type="RetuneStatus">
+  Operator-owned live Retune target acknowledgment for an enabled Planner component. See [RetuneStatus](#retunestatus). Omitted while required targets have not acknowledged lowering or when the feature is disabled. It describes the applied lowering at global `status.observedGeneration`, not runtime readiness. Generic role status is not required.
+
+  The Planner compares this hash with its immutable `DYN_PLANNER_RETUNE_CAPABILITY` launch contract. This is a target-lowering acknowledgment, not a frontend runtime compatibility check. New target status does not change an existing process's storage mount.
+</ParamField>
+
+### RetuneStatus
+
+The operator injects the semantic configuration into the frontend and Planner at launch. Status
+only acknowledges its opaque binding hash. Consumers require current global
+`status.observedGeneration` and a matching hash, not role Pod templates.
+
+```yaml
+status:
+  observedGeneration: 7
+  components:
+    optimizer:
+      retune:
+        configHash: "<operator-generated>"
+```
+
+<ParamField path="configHash" type="string" required={true}>
+  Acknowledged semantic launch binding. The operator hashes the versioned configuration and
+  selected graph/component identities, excluding replica counts, readiness, global generation,
+  and incidental operator-version changes. Consumers treat it as opaque. A semantic edit rolls
+  affected workloads normally; an old Planner stops new windows on a hash mismatch and uses its
+  checkpointed historical binding for cleanup.
+</ParamField>
+
 ### ComponentCheckpointStatus
 
 Checkpoint information for a single component, keyed by component name in `status.checkpoints`.

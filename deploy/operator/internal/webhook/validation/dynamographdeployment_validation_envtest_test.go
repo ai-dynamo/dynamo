@@ -4269,6 +4269,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	t.Log("Add root environment name uniqueness and full-list ratcheting in both source APIs")
 	tests = append(tests, environmentDGDAdmissionCases(t)...)
 
+	t.Log("Validate explicit Retune ownership and type-selected frontend wiring in both APIs")
+	tests = append(tests, retuneDGDAdmissionCases(t)...)
+
 	t.Log("Own one topology fixture for all DGD admission scenarios")
 	createTestClusterTopology(t, admissionEnv.ForTest(t))
 

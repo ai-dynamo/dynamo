@@ -59,6 +59,7 @@ from dynamo.planner.retune.live.contracts import (
     NullMetrics,
     PodInfo,
     PolicyCallResult,
+    RetuneCapability,
     RouterInfo,
 )
 from dynamo.planner.retune.live.reconciler import Reconciler
@@ -73,6 +74,8 @@ from dynamo.planner.tests.live_retune_fakes import (
     FakeDgdrOperator,
     FakeRetuneKube,
     default_metrics,
+    retune_launch_contract,
+    retune_planner_status,
 )
 from dynamo.planner.tests.retune_stubs import caps
 
@@ -150,22 +153,9 @@ def startup_map() -> dict[str, float]:
 # ------------------------------------------------------------- DGD, config
 
 
-def dgd_object() -> dict[str, Any]:
+def dgd_object(*, mount_path: str = "/trace") -> dict[str, Any]:
     """A DGD that satisfies every spec premise (P4, P6-P10)."""
 
-    env = [
-        {
-            "name": "DYN_POD_NAME",
-            "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
-        },
-        {"name": "DYN_REQUEST_TRACE", "value": "1"},
-        {"name": "DYN_REQUEST_TRACE_RECORDS", "value": "request_end"},
-        {"name": "DYN_REQUEST_TRACE_SINKS", "value": "file"},
-        {"name": "DYN_REQUEST_TRACE_FILE_FORMAT", "value": "jsonl_gz"},
-        {"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": TRACE_FILE_PATH},
-        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
-        {"name": "DYN_FRONTEND_ADMIN_HOST", "value": "0.0.0.0"},
-    ]
     frontend = {
         "name": "Frontend",
         "type": "frontend",
@@ -184,7 +174,6 @@ def dgd_object() -> dict[str, Any]:
                             "kv",
                             "--router-replica-sync",
                         ],
-                        "env": env,
                         "volumeMounts": [{"name": "traces", "mountPath": "/trace"}],
                     }
                 ],
@@ -219,8 +208,21 @@ def dgd_object() -> dict[str, Any]:
     return {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD_NAME, "namespace": K8S_NAMESPACE, "uid": DGD_UID},
+        "metadata": {
+            "name": DGD_NAME,
+            "namespace": K8S_NAMESPACE,
+            "uid": DGD_UID,
+            "generation": 1,
+        },
         "spec": {"components": [frontend, worker, planner]},
+        # These independent operator facts are not computed from the authored recipe.
+        "status": {
+            "observedGeneration": 1,
+            "components": {
+                "Planner": retune_planner_status(),
+                "worker": {"servedModelName": MODEL},
+            },
+        },
     }
 
 
@@ -380,9 +382,16 @@ class FakeFrontends:
         self.kube = kube
         self.routers: dict[str, list[FakeRouter]] = {}
         self.writes: list[PolicyWrite] = []
+        self.probes: list[str] = []
 
-    def start(self, pod: str) -> None:
-        self.kube.add_pod(pod, dgd=DGD_NAME, component_type="frontend", ready=True)
+    def start(self, pod: str, component: str = "Frontend") -> None:
+        self.kube.add_pod(
+            pod,
+            dgd=DGD_NAME,
+            component_type="frontend",
+            ready=True,
+            labels={"nvidia.com/dynamo-component": component},
+        )
         self._register(pod)
 
     def restart(self, pod: str) -> None:
@@ -430,11 +439,13 @@ class FakeRouterPolicyClient:
 
     async def get(self, pod: PodInfo) -> PolicyCallResult:
         self.gets += 1
+        self.frontends.probes.append(pod.name)
         routers = self.frontends.routers.get(pod.name)
         if routers is None:
             return PolicyCallResult(status=0, error="connection refused")
         return PolicyCallResult(
-            status=200, routers=tuple(router.info() for router in routers)
+            status=200,
+            routers=tuple(router.info() for router in routers),
         )
 
     async def patch(
@@ -630,8 +641,18 @@ class Planner:
             namespace_fn=lambda: DYNAMO_NAMESPACE,
             metrics=self.metrics,
             identity=self.identity,
-            actuator_factory=lambda dgd, maps: RouterActuator(
-                world.kube, self.client, dgd, maps, self.metrics
+            process_capability=RetuneCapability.from_dict(
+                retune_launch_contract(mount_path=str(world.claim.mount))
+            ),
+            actuator_factory=lambda dgd, maps, capability: RouterActuator(
+                world.kube,
+                self.client,
+                dgd,
+                maps,
+                self.metrics,
+                frontend_component_name=(
+                    None if capability is None else capability.frontend_component_name
+                ),
             ),
             reconciler=reconciler,
             context_factory=context_factory,
@@ -713,7 +734,7 @@ class World:
         # mid-way), so window 1 is the first one recorded in full.
         self.clock = SimClock(T0 - 600.0)
         self.kube = FakeRetuneKube(K8S_NAMESPACE, now=self.clock.time)
-        self.kube.put_dgd(dgd_object())
+        self.kube.put_dgd(dgd_object(mount_path=str(tmp_path / "claim")))
         self.dgd_ref = DgdRef(DGD_NAME, K8S_NAMESPACE, DGD_UID, DYNAMO_NAMESPACE)
         self.frontends = FakeFrontends(self.kube)
         for pod in FRONTENDS:
@@ -979,6 +1000,8 @@ async def test_advisory_records_recommendations_and_never_writes(make_world):
 @pytest.mark.timeout(180)
 async def test_apply_restart_handover_and_advisory_rollback(make_world):
     world = make_world()
+    unrelated = "unrelated-frontend"
+    world.frontends.start(unrelated, component="unrelated")
     applied_1 = {CREDIT: 0.5, LOAD: 1.0, TEMP: 0.0}
     applied_3 = {CREDIT: 0.5, LOAD: 1.0, TEMP: 0.2}
     world.prefer(1, applied_1)
@@ -1041,12 +1064,14 @@ async def test_apply_restart_handover_and_advisory_rollback(make_world):
     } == {"grid-0", "probe"}
     assert sorted(world.created()) == sorted(window_1_requests)
 
-    # A frontend restarts: its new router (revision 0, startup values) is
+    # A frontend Pod is replaced: its new router (revision 0, startup values) is
     # latched and re-applied with explicit values; the persisted initials
     # follow the new router id (the final rollback depends on them).
     restarted = FRONTENDS[1]
     gone = world.frontends.router(restarted).router_id
     world.frontends.restart(restarted)
+    replacement = world.kube.pods[restarted]
+    world.kube.pods[restarted] = dataclasses.replace(replacement, uid=str(uuid.uuid4()))
     writes_before = len(world.frontends.writes)
     await world.run_until(launch_s(1) + SCALE_INTERVAL + 4 * STEP)
     reapplied = world.frontends.writes[writes_before:]
@@ -1213,5 +1238,7 @@ async def test_apply_restart_handover_and_advisory_rollback(make_world):
             "req.000003.jsonl.gz",
             "req.000004.jsonl.gz",
         ]
+    assert unrelated not in world.frontends.probes
+    assert all(write.pod != unrelated for write in world.frontends.writes)
     for planner in (p1, p2, p3, p4):
         assert planner.metrics.of("patch_error") == []

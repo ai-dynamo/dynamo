@@ -219,6 +219,24 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      retune:
+                        description: |-
+                          retune acknowledges the operator-generated semantic target binding for a
+                          Planner under status.observedGeneration, not a running process revision.
+                          Omission means that current target wiring has not been acknowledged.
+                        properties:
+                          configHash:
+                            description: |-
+                              configHash is the opaque binding of the operator-generated launch contract.
+                              Publication acknowledges that the frontend and Planner target lowerings
+                              have been applied, independently of readiness or optional role projections.
+                              The Planner also matches its immutable launch binding before starting
+                              tuning windows; this hash does not acknowledge effective runtime settings.
+                            minLength: 1
+                            type: string
+                        required:
+                          - configHash
+                        type: object
                       runtimeComponentName:
                         description: |-
                           runtimeComponentName is an explicit Dynamo runtime component identity

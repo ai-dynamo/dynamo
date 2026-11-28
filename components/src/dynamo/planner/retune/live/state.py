@@ -30,7 +30,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -43,6 +43,8 @@ from dynamo.planner.retune.live.contracts import (
     KubeAlreadyExists,
     KubeConflict,
     KubeError,
+    PodInstance,
+    RetuneCapability,
     RetuneKube,
 )
 
@@ -54,7 +56,7 @@ logger = logging.getLogger(__name__)
 STATE_ANNOTATION = "nvidia.com/planner-retune-state"
 HISTORY_ANNOTATION = "nvidia.com/planner-retune-history"
 HISTORY_LIMIT = 50
-STATE_FORMAT_VERSION = 1
+STATE_FORMAT_VERSION = 2
 
 DGD_API_VERSION = "nvidia.com/v1beta1"
 DGD_KIND = "DynamoGraphDeployment"
@@ -152,7 +154,11 @@ def maps_equal(
     return True
 
 
-def fingerprint(config: PlannerConfig, startup: Optional[FrontendStartup]) -> str:
+def fingerprint(
+    config: PlannerConfig,
+    startup: Optional[FrontendStartup],
+    capability: Optional[RetuneCapability] = None,
+) -> str:
     """What the deployed point was chosen under; a change resets it.
 
     Covers the router search domain as configured (its expansion is a pure
@@ -179,6 +185,7 @@ def fingerprint(config: PlannerConfig, startup: Optional[FrontendStartup]) -> st
         "model": None if dgdr is None else dgdr.model,
         "sku": None if dgdr is None else dgdr.sku,
         "startup": None if startup is None else startup.fingerprint_source,
+        "retune_capability": None if capability is None else capability.to_dict(),
     }
     digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
     return digest[:16]
@@ -239,6 +246,38 @@ def _nested_map(value: Any, what: str) -> dict[str, dict[str, float]]:
     return {str(key): _float_map(item, f"{what}.{key}") for key, item in value.items()}
 
 
+def _router_hosts(value: Any) -> dict[str, tuple[PodInstance, ...]]:
+    if not isinstance(value, Mapping):
+        raise StateFormatError("state.router_hosts must be an object")
+    result: dict[str, tuple[PodInstance, ...]] = {}
+    for router_id, hosts in value.items():
+        if not isinstance(router_id, str) or not isinstance(hosts, list) or not hosts:
+            raise StateFormatError(
+                "state.router_hosts entries must be non-empty process lists"
+            )
+        parsed: list[PodInstance] = []
+        for host in hosts:
+            if (
+                not isinstance(host, list)
+                or len(host) != 2
+                or not isinstance(host[0], str)
+                or not host[0]
+            ):
+                raise StateFormatError(
+                    "state.router_hosts needs a Pod UID and restart count"
+                )
+            restart = host[1]
+            if restart is not None and (
+                isinstance(restart, bool) or not isinstance(restart, int) or restart < 0
+            ):
+                raise StateFormatError(
+                    "state.router_hosts restart count must be non-negative or null"
+                )
+            parsed.append((host[0], restart))
+        result[router_id] = tuple(parsed)
+    return result
+
+
 @dataclass(frozen=True)
 class RetuneState:
     """The persisted live retune state of one DGD.
@@ -262,6 +301,8 @@ class RetuneState:
     last_window_end_ms: Optional[int] = None
     updated_ms: int = 0
     history: tuple[dict[str, Any], ...] = ()
+    capability: Optional[RetuneCapability] = None
+    router_hosts: dict[str, tuple[PodInstance, ...]] = field(default_factory=dict)
 
     @property
     def has_deployment(self) -> bool:
@@ -283,6 +324,10 @@ class RetuneState:
             "initials": self.initials,
             "last_window_end_ms": self.last_window_end_ms,
             "updated_ms": self.updated_ms,
+            "retune_capability": (
+                None if self.capability is None else self.capability.to_dict()
+            ),
+            "router_hosts": self.router_hosts,
         }
         return {
             STATE_ANNOTATION: canonical_json(body),
@@ -312,7 +357,7 @@ class RetuneState:
         version = body.get("version")
         if isinstance(version, bool) or not isinstance(version, int):
             raise StateFormatError("state.version must be an integer")
-        if version != STATE_FORMAT_VERSION:
+        if version not in (1, STATE_FORMAT_VERSION):
             raise StateVersionError(
                 f"state format version {version} is not {STATE_FORMAT_VERSION}"
             )
@@ -351,6 +396,16 @@ class RetuneState:
                         "retune state: %d malformed history entries dropped",
                         len(parsed) - len(history),
                     )
+        capability_raw = body.get("retune_capability")
+        try:
+            capability = (
+                None
+                if capability_raw is None
+                else RetuneCapability.from_dict(capability_raw)
+            )
+        except ValueError as error:
+            # Never discard ownership because this runtime cannot read its binding.
+            raise StateVersionError(f"state.retune_capability: {error}") from error
         return cls(
             dgd_uid=dgd_uid,
             leader_term=str(body.get("leader_term") or ""),
@@ -364,6 +419,8 @@ class RetuneState:
             last_window_end_ms=None if last is None else int(last),
             updated_ms=0 if updated is None else int(updated),
             history=tuple(history[-HISTORY_LIMIT:]),
+            capability=capability,
+            router_hosts=_router_hosts(body.get("router_hosts", {})),
         )
 
 
@@ -513,6 +570,7 @@ def merge_initials(
     latched: Mapping[str, Mapping[str, float]],
     *,
     keep: Optional[Iterable[str]] = None,
+    router_hosts: Optional[Mapping[str, Sequence[PodInstance]]] = None,
 ) -> RetuneState:
     """Merge newly latched initials; drop router ids not in ``keep``."""
 
@@ -522,7 +580,15 @@ def merge_initials(
     if keep is not None:
         kept = set(keep)
         initials = {rid: cfg for rid, cfg in initials.items() if rid in kept}
-    return dataclasses.replace(state, initials=initials)
+    hosts = {
+        **state.router_hosts,
+        **{key: tuple(value) for key, value in (router_hosts or {}).items()},
+    }
+    return dataclasses.replace(
+        state,
+        initials=initials,
+        router_hosts={key: value for key, value in hosts.items() if key in initials},
+    )
 
 
 def append_history(state: RetuneState, entry: Mapping[str, Any]) -> RetuneState:
@@ -553,9 +619,9 @@ def record_decision(
     last = state.last_window_end_ms
     return dataclasses.replace(
         new,
-        last_window_end_ms=int(window_end_ms)
-        if last is None
-        else max(last, int(window_end_ms)),
+        last_window_end_ms=(
+            int(window_end_ms) if last is None else max(last, int(window_end_ms))
+        ),
     )
 
 

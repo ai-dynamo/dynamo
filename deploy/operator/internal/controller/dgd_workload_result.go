@@ -47,6 +47,9 @@ type ReconcileResult struct {
 	Reason          Reason
 	Message         Message
 	ComponentStatus map[string]nvidiacomv1beta1.ComponentReplicaStatus
+	// RetuneTargetsAcknowledged observes the frontend/Planner target-lowering
+	// boundary, independently of optional role projection and Pod readiness.
+	RetuneTargetsAcknowledged bool
 }
 
 // clearComponentGPUShapes removes previously projected GPU shapes before a

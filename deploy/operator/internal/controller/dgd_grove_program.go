@@ -268,6 +268,7 @@ func (p *groveProgram) Reconcile(
 		}
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+	programResult.applyRetuneStatus(req.DGD, true)
 
 	// A status-only DGD update does not pass the primary predicate, so advance restart progress by requeueing.
 	if restartChanged {

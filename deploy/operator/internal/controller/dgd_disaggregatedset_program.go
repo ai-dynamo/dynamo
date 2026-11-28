@@ -140,6 +140,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+	programResult.applyRetuneStatus(req.DGD, result.RetuneTargetsAcknowledged)
 	return programResult, nil
 }
 

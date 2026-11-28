@@ -148,6 +148,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
 	// values to first-class component types.
 	dst.ComponentType = sharedComponentTypeToHub(src)
+	dst.Retune = src.Retune
 
 	// v1alpha1 ServiceName <-> v1beta1 ComponentName: the same logical
 	// identifier, renamed at v1beta1 to align with the
@@ -541,6 +542,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	}
 
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
+	dst.Retune = src.Retune
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
 	dst.MinAvailable = src.MinAvailable

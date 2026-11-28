@@ -331,11 +331,10 @@ def test_list_pods_builds_pod_info(kube):
         ready=True,
         terminating=False,
         labels={"nvidia.com/dynamo-component-type": "frontend"},
-        admin_port=9100,  # the main container's env, not the sidecar's
         restarts=2,  # the main container's
     )
     assert (pods[1].ready, pods[1].terminating, pods[1].ip) == (False, True, None)
-    assert pods[2].admin_port is None  # no admin API
+    assert not hasattr(pods[2], "admin_port")  # no raw Pod-env interpretation
 
 
 def _admin_pod(*env: dict) -> dict:
@@ -355,7 +354,7 @@ ENABLED = {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "true"}
         ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "$(PORT)"}), None),
     ],
 )
-def test_list_pods_reads_the_admin_port_from_the_main_env(kube, env, port):
+def test_list_pods_does_not_interpret_admin_environment(kube, env, port):
     retune_kube, transport = kube
     transport.reply(
         {
@@ -365,7 +364,7 @@ def test_list_pods_reads_the_admin_port_from_the_main_env(kube, env, port):
             "items": [_admin_pod(*env)],
         }
     )
-    assert retune_kube.list_pods("x=y").pop().admin_port == port
+    assert not hasattr(retune_kube.list_pods("x=y").pop(), "admin_port")
 
 
 def test_leases_round_trip_raw_json(kube):
