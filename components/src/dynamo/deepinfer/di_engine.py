@@ -12,16 +12,22 @@ reads several of those variables at import time.
 from __future__ import annotations
 
 import functools
+import hashlib
 import importlib
+import json
 import logging
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import metadata
 from typing import TYPE_CHECKING, Any, Optional
 
+from dynamo.deepinfer.disagg import DecodeFlow, PrefillFlow
 from dynamo.deepinfer.kv_cache.base import make_cache_manager
-from dynamo.deepinfer.protocol import LOCKSTEP_ENV, EngineMeta
+from dynamo.deepinfer.kv_transfer import base as kv_transfer
+from dynamo.deepinfer.kv_transfer.base import KVLayout, KVRegion
+from dynamo.deepinfer.protocol import LAYOUT_ENV, LOCKSTEP_ENV, EngineMeta
 
 if TYPE_CHECKING:
     from dynamo.deepinfer.rank import RankSpec
@@ -77,12 +83,30 @@ def make_engine_class(base: type) -> type:
 
     class DynamoLLMEngine(base):  # type: ignore[valid-type, misc]
         dynamo_cache: Any = None
+        dynamo_prefill: Any = None
+        dynamo_decode: Any = None
+        dynamo_transfer: Any = None
+
+        def post_schedule(self, scheduler_outputs: Any) -> None:
+            super().post_schedule(scheduler_outputs)
+            if self.dynamo_cache is not None:
+                self.dynamo_cache.on_post_schedule(scheduler_outputs, self)
 
         def finalize_seq(self, seq: Any) -> None:
             if self.dynamo_cache is None:
                 super().finalize_seq(seq)
             else:
                 self.dynamo_cache.on_finished(seq)
+
+        def pe_do_save_kvcache(self, scheduled: list[Any], finished: list[Any]) -> None:
+            super().pe_do_save_kvcache(scheduled, finished)
+            if self.dynamo_prefill is not None:
+                self.dynamo_prefill.on_kv_saved(scheduled, finished)
+
+        def send_processed_prompts(self) -> None:
+            super().send_processed_prompts()
+            if self.dynamo_prefill is not None:
+                self.dynamo_prefill.on_processed_prompts()
 
     DynamoLLMEngine.__qualname__ = f"DynamoLLMEngine[{base.__module__}]"
     return DynamoLLMEngine
@@ -121,12 +145,12 @@ def evict_page_cache(model_dir: str) -> tuple[int, int]:
 def evict_page_cache_before_engram(model_dir: str) -> None:
     """Evict the checkpoint's page cache right before DeepEP pins Engram storage.
 
-    DeepEP allocates each rank's Engram table as pinned ``cuMemCreate`` host
-    memory on the GPU's NUMA node (about 92 GiB per rank for DeepSeek-V4.1-Flash
-    at DEP2). That allocation fails with ``CUDA_ERROR_OUT_OF_MEMORY`` instead of
-    reclaiming page cache, which loading the checkpoint has just filled, so
-    engines that share a node can fail to start.
-    ``DYN_DEEPINFER_EVICT_CHECKPOINT_CACHE=0`` turns this off.
+    DeepEP allocates each rank's Engram table (91.6 GiB per rank at DEP2) as
+    pinned ``cuMemCreate`` host memory on the GPU's NUMA node. That allocation
+    fails with ``CUDA_ERROR_OUT_OF_MEMORY`` instead of reclaiming page cache, and
+    loading a ~510 GB checkpoint just filled it: two DEP2 engines on one GB300
+    node (4 x 91.6 GiB pinned) could not start. ``DYN_DEEPINFER_EVICT_CHECKPOINT_CACHE=0``
+    turns this off.
     """
     if os.environ.get("DYN_DEEPINFER_EVICT_CHECKPOINT_CACHE", "1") in (
         "0",
@@ -179,7 +203,7 @@ def evict_page_cache_before_engram(model_dir: str) -> None:
 
 
 def build_engine(api: DeepInferAPI, spec: RankSpec) -> Any:
-    """Build this rank's engine and attach its cache manager."""
+    """Build this rank's engine and attach its cache manager and P/D flow."""
     cls = make_engine_class(api.LLMEngine)
     engine_args = api.EngineArgs(
         **spec.engine_args, engine_type=api.EngineType[spec.engine_type]
@@ -190,6 +214,32 @@ def build_engine(api: DeepInferAPI, spec: RankSpec) -> Any:
     engine.dynamo_cache = make_cache_manager(
         spec.cache_manager, engine, **spec.cache_options
     )
+    transfer = kv_transfer.make_kv_transfer(
+        spec.kv_transfer,
+        rank=spec.rank,
+        engine_id=spec.engine_id,
+        **spec.transfer_options,
+    )
+    engine.dynamo_transfer = transfer
+    layout = kv_layout(engine, api.envs)
+    if transfer is not None:
+        transfer.register(layout)
+    if spec.engine_type == "PROMPT":
+        engine.dynamo_prefill = PrefillFlow(
+            engine,
+            engine.dynamo_cache,
+            transfer,
+            dp_rank=spec.rank,
+            engine_id=spec.engine_id,
+            layout_hash=layout.layout_hash,
+            lease_s=spec.kv_lease_s,
+        )
+    elif spec.engine_type == "COMPLETION":
+        if transfer is None:
+            raise ValueError("decode workers need a KV transfer (--kv-transfer)")
+        engine.dynamo_decode = DecodeFlow(
+            engine, transfer, layout_hash=layout.layout_hash
+        )
     return engine
 
 
@@ -273,3 +323,51 @@ def lockstep_settings(api: DeepInferAPI, engine_type: str) -> dict[str, Optional
         derived = api.EngineType[engine_type].default_zero_overhead_scheduling
         env[zos] = "1" if derived else "0"
     return env
+
+
+def _region(name: str, buf: Any) -> KVRegion:
+    if hasattr(buf, "data_ptr"):  # torch.Tensor
+        return KVRegion(
+            name=name,
+            base_ptr=buf.data_ptr(),
+            num_items=buf.shape[0],
+            item_bytes=buf.stride(0) * buf.element_size(),
+            device_id=buf.device.index if buf.device.type == "cuda" else -1,
+            buffer=buf,
+        )
+    return KVRegion(  # numpy array (CPU fake)
+        name=name,
+        base_ptr=buf.ctypes.data,
+        num_items=buf.shape[0],
+        item_bytes=buf.strides[0],
+        device_id=-1,
+        buffer=buf,
+    )
+
+
+def kv_layout(engine: Any, envs: Any) -> KVLayout:
+    """The two per-rank KV regions: block rows and per-request state slots.
+
+    The hash covers ``LAYOUT_ENV`` as DeepInfer resolved it (``envs``), not
+    the raw environment: a role that leaves a setting unset and one that
+    spells out its default have the same layout.
+    """
+    cache_engine = engine.driver_worker.cache_engine
+    regions = [_region("gpu_blocks", cache_engine.gpu_blocks)]
+    if cache_engine.gpu_states is not None:
+        regions.append(_region("gpu_states", cache_engine.gpu_states))
+    try:
+        version = metadata.version("deepinfer")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    key = {
+        "model": os.path.basename(
+            os.path.normpath(str(getattr(engine.model_config, "model", "")))
+        ),
+        "deepinfer": version,
+        "block_size": int(engine.cache_config.block_size),
+        "regions": [(r.name, r.item_bytes) for r in regions],
+        "env": {k: getattr(envs, k) for k in LAYOUT_ENV},
+    }
+    digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
+    return KVLayout(regions=regions, layout_hash=digest[:16])

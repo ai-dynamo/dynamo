@@ -13,6 +13,7 @@ FROM nvidia/cuda:13.3.1-devel-ubuntu24.04
 ARG DEEPINFER_REF=774ce24
 # Dynamo wheels for everything but dynamo.deepinfer, which comes from this checkout below.
 ARG DYNAMO_VERSION=1.6.0.dev20261019
+ARG NIXL_VERSION=1.5.0
 ARG MAX_JOBS=32
 ARG NVCC_THREADS=4
 
@@ -34,11 +35,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && python3.12 -m venv /opt/venv
 
-# DeepInfer at a pinned ref. FlashMLA's register-spill guard trips under CUDA 13.2+.
+# DeepInfer at a pinned ref plus the bindings the prefix cache and disaggregation need
+# (block_table access, prefix-aware allocation, decode-side injection). FlashMLA's
+# register-spill guard trips under CUDA 13.2+.
+COPY examples/backends/deepinfer/patches /opt/deepinfer-patches
 RUN --mount=type=cache,target=/root/.cache/pip \
     git clone https://github.com/deepseek-ai/DeepInfer.git /opt/DeepInfer \
     && cd /opt/DeepInfer \
     && git checkout ${DEEPINFER_REF} \
+    && git apply /opt/deepinfer-patches/*.patch \
     && pip install setuptools wheel \
     && MAX_JOBS=${MAX_JOBS} NVCC_THREADS=${NVCC_THREADS} FLASH_MLA_SKIP_REG_SPILL_CHECK=1 ./build.sh
 
@@ -46,8 +51,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # DeepInfer's pins (transformers/tokenizers); the in-process worker path does not import them.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-deps "ai-dynamo-runtime==${DYNAMO_VERSION}" "ai-dynamo==${DYNAMO_VERSION}" \
+        "nixl-cu13==${NIXL_VERSION}" "nixl==${NIXL_VERSION}" \
     && pip install "pydantic==2.13.5" "uvloop>=0.21.0" "msgspec>=0.19.0" \
-        "prometheus-client>=0.23.1,<1"
+        "prometheus-client>=0.23.1,<1" cbor2 xxhash
 
 # Frontend in its own venv, with ai-dynamo's full dependency set.
 RUN --mount=type=cache,target=/root/.cache/pip \

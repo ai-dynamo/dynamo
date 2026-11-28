@@ -22,8 +22,8 @@ routing to data-parallel ranks, cancellation and metrics.
 | Reasoning and tool-call parsing | Ready | Dynamo's `deepseek_v41` parsers |
 | Logprobs | Ready | |
 | Request cancellation | Ready | |
-| Prefix cache and KV events | Not yet | |
-| Disaggregated serving | Not yet | |
+| Prefix cache and KV events | Ready | `--kv-cache-manager prefix`; needs the DeepInfer bindings patch in the example image | |
+| Disaggregated serving | Ready | `--disaggregation-mode prefill/decode`, KV read over NIXL |
 | Multimodal input | Not supported | |
 | `n` > 1 | Not supported | |
 
