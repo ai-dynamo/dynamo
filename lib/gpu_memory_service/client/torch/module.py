@@ -95,6 +95,27 @@ def _iter_module_tensors(
             yield from _iter_module_tensors(submodule, subprefix)
 
 
+def _is_read_only_property(obj: object, name: str) -> bool:
+    """Whether ``name`` is a property of ``obj``'s class without a setter.
+
+    The writer's traversal reads properties too. A read-only one cannot be
+    assigned; its value derives from attributes attached under their own
+    names (vLLM's MoE ``expert_map`` returns the ``_expert_map`` buffer).
+    """
+    attr = getattr(type(obj), name, None)
+    return isinstance(attr, property) and attr.fset is None
+
+
+def _same_contents(value: torch.Tensor, published: torch.Tensor) -> bool:
+    """``torch.equal``, except that a NaN matches a NaN in the same position."""
+    if torch.equal(value, published):
+        return True
+    # torch.equal is false for a tensor that holds a NaN, even against itself.
+    return value.shape == published.shape and bool(
+        ((value == published) | (value.isnan() & published.isnan())).all()
+    )
+
+
 def _resolve_module_attr(
     root: torch.nn.Module, qualified_name: str
 ) -> Tuple[torch.nn.Module, str]:
@@ -178,6 +199,7 @@ def materialize_module_from_gms(
         device_index: CUDA device index.
     """
     specs = GMSTensorSpec.load_all(gms_client_memory_manager)
+    derived = []
 
     for name, spec in specs.items():
         tensor = spec.materialize(gms_client_memory_manager, device_index)
@@ -192,6 +214,8 @@ def materialize_module_from_gms(
                 and attr in mod._buffers
             ):
                 mod._buffers[attr] = tensor.detach().clone()
+            elif _is_read_only_property(mod, attr):
+                derived.append((name, mod, attr, tensor))
             else:
                 setattr(mod, attr, tensor.detach().clone())
             continue
@@ -216,6 +240,19 @@ def materialize_module_from_gms(
 
         # Fallback: set as attribute
         setattr(mod, attr, tensor)
+
+    # A read-only property must now return what the writer published, from
+    # the tensors attached under their own names.
+    for name, mod, attr, tensor in derived:
+        value = getattr(mod, attr)
+        if not (
+            torch.is_tensor(value)
+            and (value.device, value.dtype) == (tensor.device, tensor.dtype)
+            and _same_contents(value, tensor)
+        ):
+            raise RuntimeError(
+                f"[GMS] Read-only property {name!r} does not match its published value"
+            )
 
     # Check for meta tensors and warn
     meta_tensors = [n for n, p in model.named_parameters() if p.is_meta]
