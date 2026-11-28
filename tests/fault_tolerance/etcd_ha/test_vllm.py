@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from enum import Enum
@@ -492,6 +493,8 @@ ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS = 10  # worker-side drain bound
 ZOMBIE_FRONTEND_DRAIN_TIMEOUT_SECS = 300
 ZOMBIE_WORKER_EXIT_DEADLINE_SECS = ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS + 50
 ZOMBIE_INFLIGHT_MAX_TOKENS = 8000
+# Bound on waiting for SIGKILLed frozen engines to exit before the next test.
+ZOMBIE_ENGINE_EXIT_TIMEOUT_SECS = 30
 
 
 def _zombie_verify_serving():
@@ -564,14 +567,66 @@ def _freeze_vllm_engine_descendants(worker_pid: int) -> list:
 
 
 def _resume_kill(pids: list) -> None:
-    """Resume then kill frozen engines so they can't hang teardown or hold a GPU."""
+    """Resume, kill and wait for frozen engines so they can't hold a GPU.
+
+    On lease loss, vLLM's shutdown in the worker SIGKILLs the frozen EngineCore
+    without waiting for it to exit, so the worker can exit while its engine is
+    still dying. ManagedProcess teardown polls the worker's process group, which
+    holds the engine, for only 8 s. This waits up to
+    ZOMBIE_ENGINE_EXIT_TIMEOUT_SECS for each engine pid to be gone or a zombie,
+    and fails the owning test if one is not, so the next test does not start a
+    worker while a killed engine still holds the device. An orphan may never be
+    reaped, and a zombie has already released its memory, so a zombie counts
+    as exited.
+    """
+    procs = []
     for pid in pids:
         try:
             proc = psutil.Process(pid)
             proc.resume()
             proc.kill()
+            procs.append(proc)
         except psutil.NoSuchProcess:
-            pass
+            logger.info("vLLM engine pid=%s already exited before resume", pid)
+
+    start = time.monotonic()
+    while True:
+        for proc in list(procs):
+            try:
+                exited = proc.status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                exited = True
+            if exited:
+                logger.info(
+                    "vLLM engine pid=%s exited %.1fs after SIGKILL",
+                    proc.pid,
+                    time.monotonic() - start,
+                )
+                procs.remove(proc)
+        if not procs or time.monotonic() - start > ZOMBIE_ENGINE_EXIT_TIMEOUT_SECS:
+            break
+        time.sleep(0.1)
+
+    if procs:
+        alive = []
+        for proc in procs:
+            try:
+                status = proc.status()
+            except psutil.NoSuchProcess:
+                continue
+            if status != psutil.STATUS_ZOMBIE:
+                alive.append(f"pid={proc.pid} status={status}")
+        if not alive:
+            return
+        msg = (
+            f"vLLM engine(s) still alive {ZOMBIE_ENGINE_EXIT_TIMEOUT_SECS}s "
+            f"after SIGKILL: {', '.join(alive)}"
+        )
+        # Called from a finally block: do not replace an exception that is
+        # already propagating.
+        if sys.exc_info()[0] is None:
+            pytest.fail(msg)
+        logger.error(msg)
 
 
 @pytest.mark.gpu_1
@@ -627,8 +682,8 @@ def test_etcd_lease_loss_zombie_vllm_frozen_engine(
 
                     # Freeze the engine: the in-flight request is now
                     # non-cancellable (cannot complete or be aborted). Resume/kill
-                    # in finally before the worker context unwinds, so a SIGSTOP-ed
-                    # engine can't hang teardown or strand a GPU-holding process.
+                    # in finally, then wait for exit, so a SIGSTOP-ed engine can't
+                    # hang teardown or strand a GPU-holding process for the next test.
                     frozen_pids = _freeze_vllm_engine_descendants(worker.proc.pid)
                     try:
                         time.sleep(1)
