@@ -10,6 +10,7 @@ Run from the repo root with the compliance package on the path:
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,38 @@ def test_sbom_flags_ffmpeg_below_cve_floor(tmp_path: Path):
     )
     hits = scan_sbom(sbom, _POLICY)
     assert [h["path"] for h in hits] == ["sbom:ffmpeg@9.0.2"]
+
+
+def test_sbom_flags_rust_codec_crate(tmp_path: Path):
+    """Flag the Rust AAC crate row of the wheel SBOM, but not its sibling crates."""
+    sbom = tmp_path / "s.cdx.json"
+    sbom.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {"name": "symphonia-codec-aac", "version": "0.6.1"},
+                    {"name": "symphonia-codec-alac", "version": "0.6.1"},
+                    {"name": "symphonia", "version": "0.6.1+dynamo"},
+                ]
+            }
+        )
+    )
+    hits = scan_sbom(sbom, _POLICY)
+    assert [h["path"] for h in hits] == ["sbom:symphonia-codec-aac@0.6.1"]
+
+
+def test_rust_codec_bans_match_deny_components():
+    """Every codec crate that deny.toml bans is also a denied SBOM component."""
+    deny_toml = Path(__file__).resolve().parents[3] / "deny.toml"
+    bans = tomllib.loads(deny_toml.read_text(encoding="utf-8"))["bans"]["deny"]
+    banned = {
+        entry["crate"]
+        for entry in bans
+        if "media-codec allowlist" in entry.get("reason", "")
+    }
+    assert banned, "deny.toml has no media-codec bans"
+    denied = {d["name"].lower() for d in _POLICY.deny_components}
+    assert sorted(banned - denied) == []
 
 
 def test_codec_under_tmp_is_scanned(tmp_path: Path):

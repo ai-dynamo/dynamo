@@ -167,6 +167,10 @@ tikv-jemalloc-ctl = { version = "0.6", default-features = false }
 [profile.release.package.llm-multimodal]
 opt-level = 1
 
+# Drops symphonia-codec-aac, which deny.toml bans. Same patch as the root Cargo.toml.
+[patch.crates-io]
+symphonia = { path = "../../patches/symphonia" }
+
 [profile.profiling]
 inherits = "release"
 debug = true

@@ -253,6 +253,11 @@ tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
 
+# Drops symphonia-codec-aac, which deny.toml bans. lib/bindings/python/Cargo.toml
+# carries the same patch, because it is a separate workspace.
+[patch.crates-io]
+symphonia = { path = "lib/patches/symphonia" }
+
 [profile.dev.package]
 insta.opt-level = 3
 

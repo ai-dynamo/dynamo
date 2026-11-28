@@ -269,6 +269,7 @@
 /Cargo.toml                                                                                             @ai-dynamo/dynamo-ops-codeowners
 /.coveragerc                                                                                            @ai-dynamo/dynamo-ops-codeowners
 /conftest.py                                                                                            @ai-dynamo/dynamo-ops-codeowners
+/lib/patches/                                                                                           @ai-dynamo/dynamo-ops-codeowners
 /.clang-format                                                                                          @ai-dynamo/dynamo-ops-codeowners
 /.dockerignore                                                                                          @ai-dynamo/dynamo-ops-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners
