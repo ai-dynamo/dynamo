@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_runtime::{
+    engine::AsyncEngineContext,
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
@@ -21,16 +22,20 @@ use dynamo_runtime::{
 };
 use dynamo_scheduler::host::{PrefillLoadEstimator, RouterConfigOverride, RoutingConstraints};
 use dynamo_worker_selection::host::ConditionalDisaggPolicy;
-use futures::stream::{self, StreamExt};
+use futures::{StreamExt, stream};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    kv_router::{
+        RoutingHost, SelectionPolicySource,
+        encoder_router::EncoderResultReleaseSupported,
+        routing_host::{PrefillDispatch, cancelled_error},
+    },
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+        preprocessor::{BootstrapInfo, ENCODER_RESULT_RELEASE_SUPPORTED, PrefillResult, TraceLink},
         timing::RequestPhase,
     },
     protocols::response_merge::{
@@ -245,7 +250,7 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// from the prefill response and injecting them into the decode request.
 ///
 /// Modes:
-/// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
+/// - Query-only: KV routing with `query_instance_id` → returns worker IDs without execution
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
 ///
@@ -263,6 +268,7 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// channel.
 pub struct PrefillRouter {
     binding: ArcSwapOption<PrefillBinding>,
+    required: AtomicBool,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
@@ -291,7 +297,6 @@ pub struct PrefillRouter {
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
-    /// Initialization and worker availability state.
     lifecycle: AtomicU8,
     #[cfg(test)]
     activation_task_state: Arc<()>,
@@ -305,6 +310,7 @@ struct PrefillBinding {
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
+    encoder_result_requires_prefill: bool,
 }
 
 struct PrefillBuildContext {
@@ -418,7 +424,9 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        // Extract request data while preserving context
+        let handoff = EncoderHandoff::for_request(&request);
+        let requires_prefill =
+            request.encoder_result.is_some() && self.required.load(Ordering::Acquire);
         let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
@@ -434,52 +442,15 @@ impl
             .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
         let client_requested_bypass_marker = req.annotations.len() != annotations_before;
 
-        // Save original max_tokens for decode
-        let original_max_tokens = req.stop_conditions.max_tokens;
-
-        // Query-only requests are owned by the decode RoutingHost. In particular,
-        // do not turn an advisory worker lookup into conditional local execution.
-        let query_only = req.get_annotation_value("query_instance_id").is_some();
-
-        // Hot path: an active router with a published binding never takes the
-        // target lock. Anything else is resolved from one locked snapshot.
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
-            match self.activation_snapshot() {
-                // Activation completed between the lock-free read and the snapshot:
-                // continue through the prefill path below.
-                ActivationSnapshot::Active(_) => {}
-                // Model admission gates on the registered worker topology, which counts
-                // a prefill worker as live the moment it registers. This router only
-                // learns the matching target then, and its binding is built
-                // asynchronously. Until that build completes the namespace is already
-                // selectable, so forwarding the request would hand a decode-only worker
-                // an aggregated request it cannot run (`bootstrap_info is required for
-                // disaggregated decode`). Fail closed with a migratable error instead:
-                // the retry layer re-dispatches and the client sees a retryable 503
-                // rather than a backend failure.
-                ActivationSnapshot::Pending if !query_only => {
-                    tracing::debug!(
-                        request_id = %request_id,
-                        model_name = %self.model_name,
-                        namespace = %self.namespace,
-                        "Prefill router target is still activating; rejecting request instead of \
-                         forwarding it to decode without a prefill hop"
-                    );
-                    return Err(prefill_activation_pending_error(
-                        &self.model_name,
-                        &self.namespace,
-                    ));
-                }
-                // Query-only previews never reach the engine. Otherwise no prefill
-                // target was ever set (aggregated-capable deployment) or every prefill
-                // worker left (target cleared): route directly to the backend.
-                ActivationSnapshot::Pending | ActivationSnapshot::Untargeted => {
-                    return next.generate(context.map(|_| req)).await;
-                }
-            }
+        // Worker lookups never execute Prefill or consume an encoder export.
+        if self.is_query_only(&req) {
+            return next.generate(context.map(|_| req)).await;
         }
-
-        if query_only {
+        handoff.check_cancellation(engine_ctx.as_ref())?;
+        if self.lifecycle_state() != PrefillLifecycleState::Active
+            && self.binding_for_request(&req)?.is_none()
+        {
+            self.validate_passthrough(&req, requires_prefill)?;
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -489,13 +460,23 @@ impl
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
-        if self.conditional_disagg_policy.is_enabled() {
+        let passthrough_phase = req.phase();
+        if self.conditional_disagg_policy.is_enabled()
+            && handoff != EncoderHandoff::MustConsume
+            && !requires_prefill
+            && !(req.encoder_result.is_some() && engine_ctx.is_stopped())
+        {
             let conditional_request = context.map(|_| req);
             match self
                 .plan_conditional_disagg_decode(&conditional_request, &request_id)
                 .await
             {
                 Ok(Some(decision)) => {
+                    let mut conditional_request = conditional_request;
+                    conditional_request.ensure_tracker();
+                    if let Some(ref tracker) = conditional_request.tracker {
+                        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+                    }
                     let worker = decision.plan.worker();
                     tracing::info!(
                         request_id = %request_id,
@@ -506,12 +487,6 @@ impl
                         "Conditional disagg routing to decode worker"
                     );
 
-                    let mut conditional_request = conditional_request;
-                    conditional_request.ensure_tracker();
-                    if let Some(ref tracker) = conditional_request.tracker {
-                        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-                    }
-
                     conditional_request
                         .annotations
                         .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
@@ -520,8 +495,22 @@ impl
                         .decode_routing_host
                         .get()
                         .expect("conditional plan requires a decode RoutingHost");
+                    let tracker = conditional_request.tracker.clone();
+                    let encoder_binding = decision.encoder_binding;
                     let response_stream = decode_host
-                        .dispatch_kv_plan(conditional_request, decision.plan)
+                        .dispatch_kv_plan_with_validation(
+                            conditional_request,
+                            decision.plan,
+                            || async {
+                                if self.allows_encoder_bypass(encoder_binding.as_ref()) {
+                                    return Ok(());
+                                }
+                                if let Some(tracker) = &tracker {
+                                    let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+                                }
+                                Err(prefill_changed_error())
+                            },
+                        )
                         .await?;
                     return with_bypass_marker(response_stream, client_requested_bypass_marker);
                 }
@@ -548,244 +537,53 @@ impl
             }
         }
 
-        // Ensure tracker exists for routing decisions in disaggregated mode.
-        // Create one if not provided by the upstream DeltaGenerator.
-        req.ensure_tracker();
-        let tracker = req.tracker.as_ref().unwrap();
-        let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
-
-        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-
-        // Try to resolve prefill worker upfront: if we can get bootstrap info early,
-        // spawn prefill in background and proceed to decode immediately.
-        let preselected_worker = prefill_req
-            .routing
-            .as_ref()
-            .and_then(|r| r.prefill_worker_id);
-
-        let tracker = prefill_req.tracker.clone();
-        let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
-        let prefill_ctx = prefill_context.context();
-        if let Some(session_affinity) = session_affinity {
-            prefill_context.insert(
-                SESSION_AFFINITY_CONTEXT_KEY,
-                session_affinity.as_ref().clone(),
-            );
-        }
-        let prefill_engine_ctx = prefill_context.context();
-        let binding = match self.binding.load_full() {
-            Some(binding) => binding,
-            // The target was replaced after the gate above (a WorkerSet succession
-            // while this request awaited the phase barrier): `set_target` cleared the
-            // binding. Resolve from one locked snapshot: the successor may already
-            // have activated, in which case serve through it; if it is still
-            // building, fail closed rather than forward to decode without a prefill hop.
-            None => match self.activation_snapshot() {
-                ActivationSnapshot::Active(binding) => binding,
-                ActivationSnapshot::Pending => {
-                    return Err(prefill_activation_pending_error(
-                        &self.model_name,
-                        &self.namespace,
-                    ));
-                }
-                ActivationSnapshot::Untargeted => {
-                    return next.generate(context.map(|_| req)).await;
-                }
-            },
-        };
-
-        // Keyed on the prefill mode, not the decode set's, and checked after
-        // the binding loads because that is where the prefill mode lives.
-        if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
-            return Err(anyhow::anyhow!(
-                "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
-            ));
-        }
-
-        let router = &binding.router;
-        let endpoint_id = &binding.endpoint_id;
-        let mut prefill_completion = None;
-        let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let PrefillDispatch {
-                metadata: prepared,
-                stream: prefill_stream,
-                booking,
-            } = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
-                    let prefill_supports_cancellation =
-                        self.model_manager.worker_supports_runtime_capability(
-                            endpoint_id,
-                            prepared.worker_id,
-                            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
-                        );
-                    if let Some(guard) = cancellation::arm_for(
-                        prefill_supports_cancellation,
-                        self.decode_supports_prefill_cancellation,
-                        engine_ctx.clone(),
-                        Arc::downgrade(&prefill_ctx),
-                    ) {
-                        prefill_ctx.retain(guard);
-                    }
-                    Ok(prepared)
-                })
-                .await?;
-            if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
-                state.store_prefill_release(booking);
-            }
-            let topology_constraints = prepared.topology_constraints;
-            let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                prefill_completion =
-                    Some(self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier));
-                PrefillOutcome::Bootstrap {
-                    bootstrap_info,
-                    worker_id: prepared.worker_id,
-                    prefill_dp_rank: prepared.prefill_dp_rank,
-                }
-            } else {
-                drop(prefill_phase_barrier);
-                let completion =
-                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
-                        .await?;
-
-                match completion {
-                    PrefillCompletion::Handoff {
-                        result,
-                        worker_link,
-                        completion,
-                    } => {
-                        prefill_completion = completion;
-                        if let Some(bootstrap_info) =
-                            extract_bootstrap_info(&result.disaggregated_params)
-                        {
-                            PrefillOutcome::Bootstrap {
-                                bootstrap_info,
-                                worker_id: prepared.worker_id,
-                                prefill_dp_rank: prepared.prefill_dp_rank,
-                            }
-                        } else {
-                            PrefillOutcome::Completed {
-                                result,
-                                worker_id: prepared.worker_id,
-                                worker_link,
-                            }
-                        }
-                    }
-                    PrefillCompletion::Terminal { output } => PrefillOutcome::Terminal { output },
-                }
-            };
-            Ok((outcome, topology_constraints))
-        }
-        .await;
-        let (outcome, topology_constraints) = match prefill_result {
-            Ok(result) => result,
-            Err(error) => {
-                match classify_prefill_dispatch_error(error.as_ref()) {
-                    PrefillDispatchErrorClass::Cancelled => {
-                        tracing::debug!(error = %error, "Remote prefill cancelled");
-                    }
-                    PrefillDispatchErrorClass::AtCapacity => tracing::warn!(
-                        error = %error,
-                        "request rejected by prefill worker (at capacity)"
-                    ),
-                    PrefillDispatchErrorClass::Failed => {
-                        tracing::error!(error = %error, "Remote prefill failed, failing request");
-                    }
-                }
-                return Err(error);
-            }
-        };
-
-        // A prefill request can terminate before the backend establishes a KV
-        // handoff (for example, EOS on the one-token context step). Native
-        // disaggregated backends return that context response directly instead
-        // of launching a generation-only request with missing handoff IDs.
-        let outcome = match outcome {
-            PrefillOutcome::Terminal { output } => {
-                let output = strip_terminal_disaggregated_params(*output);
-                return Ok(dynamo_runtime::pipeline::ResponseStream::new(
-                    Box::pin(stream::once(async move { output })),
-                    engine_ctx,
-                ));
-            }
-            outcome => outcome,
-        };
-
-        // NVBugs 5969206: Do NOT abort decode routing when context is killed.
-        // In disaggregated serving, the prefill may have completed and KV transfer
-        // is in flight. Blocking decode here orphans the transfer (no receiver)
-        // and leaks KV blocks permanently. The decode handler's
-        // kv_transfer_complete_event guard will clean up after KV is received.
-        // Log-only; decode routing must proceed for KV transfer cleanup.
-        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!(
-                "Context {} killed/stopped after prefill, allowing decode routing for KV transfer",
-                engine_ctx.id()
-            );
-        }
-
-        tracing::debug!("Prefill completed, proceeding to decode");
-
-        // Set phase to Decode for the decode request.
-        // In bootstrap path, this blocks until the spawned prefill task releases its
-        // phase barrier after routing completes, ensuring correct worker attribution.
-        if let Some(ref tracker) = req.tracker {
-            let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-        }
-
-        let mut decode_req = into_decode_request(req, outcome);
-
-        if let Some(topology_constraints) = topology_constraints {
-            merge_decode_topology_constraints(&mut decode_req, topology_constraints);
-        }
-
-        decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-        // Decode should not account prompt-side load. Normal disagg also
-        // forces zero overlap credit so decode routing stays load-only.
-        let existing_override = decode_req.router_config_override.take();
-        decode_req.router_config_override = Some(build_decode_router_override(
-            existing_override,
-            self.conditional_disagg_policy.is_enabled(),
-        ));
-
-        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
-        let output = match (
-            annotated(PREFILL_OUTPUT_ANNOTATION),
-            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
-        ) {
-            (false, _) => PrefillNeed::None,
-            (true, false) => PrefillNeed::BeforeLast,
-            (true, true) => PrefillNeed::BeforeFirst,
-        };
-        let decode = next.generate(context.map(|_| decode_req));
-        match prefill_completion {
-            Some(completion) => {
-                completion
-                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
-                    .await
-            }
-            None => decode.await,
-        }
+        self.prefill_and_decode(
+            context.map(|_| req),
+            next,
+            handoff,
+            session_affinity,
+            passthrough_phase,
+            requires_prefill,
+        )
+        .await
     }
 }
 
-/// Prefill must survive client cancellation once decode needs its KV transfer.
-/// Copy request identity and metadata, but keep a separate cancellation controller.
-fn independent_prefill_context(
-    request: PreprocessedRequest,
-    source: &Context<()>,
-) -> Result<Context<PreprocessedRequest>> {
-    let mut prefill =
-        Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
-    propagate_first_response_guard(source, &mut prefill)?;
-    Ok(prefill)
+fn prefill_changed_error() -> anyhow::Error {
+    DynamoError::builder()
+        .class(ErrorClass::WorkerUnavailable)
+        .message("Prefill target changed during conditional decode planning")
+        .build()
+        .into()
 }
 
 impl PrefillRouter {
+    fn is_query_only(&self, request: &PreprocessedRequest) -> bool {
+        self.decode_router_mode.is_kv_routing()
+            && request.get_annotation_value("query_instance_id").is_some()
+    }
+
+    fn validate_passthrough(
+        &self,
+        request: &PreprocessedRequest,
+        encoder_result_requires_prefill: bool,
+    ) -> Result<()> {
+        if encoder_result_requires_prefill
+            && request.encoder_result.is_some()
+            && !self.is_query_only(request)
+        {
+            return Err(DynamoError::builder()
+                .class(ErrorClass::WorkerUnavailable)
+                .message(format!(
+                    "Prefill worker required to consume the encoder handoff for model {} in namespace {} is unavailable",
+                    self.model_name, self.namespace
+                ))
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
@@ -917,8 +715,296 @@ fn merge_decode_topology_constraints(
         .extend(topology_constraints.preferred_taints);
 }
 
+/// Only outstanding exports need disposal or independent consumer execution.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EncoderHandoff {
+    None,
+    Releasable,
+    MustConsume,
+}
+
+impl EncoderHandoff {
+    pub(super) fn for_request(request: &SingleIn<PreprocessedRequest>) -> Self {
+        if request.encoder_result.is_none() {
+            Self::None
+        } else if request
+            .get_optional::<EncoderResultReleaseSupported>(ENCODER_RESULT_RELEASE_SUPPORTED)
+            .is_ok_and(|capability| capability.is_some_and(|capability| capability.0))
+        {
+            Self::Releasable
+        } else {
+            Self::MustConsume
+        }
+    }
+
+    pub(super) fn check_cancellation(self, context: &dyn AsyncEngineContext) -> Result<()> {
+        if self == Self::Releasable && context.is_stopped() {
+            return Err(cancelled_error(context.id()));
+        }
+        Ok(())
+    }
+}
+
+struct RemotePrefill {
+    outcome: PrefillOutcome,
+    topology_constraints: Option<RoutingConstraints>,
+    completion: Option<PrefillTask>,
+}
+
+impl PrefillRouter {
+    pub(super) async fn prefill_and_decode(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        handoff: EncoderHandoff,
+        session_affinity: Option<Arc<SessionAffinityId>>,
+        passthrough_phase: RequestPhase,
+        requires_prefill: bool,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let (mut req, context) = request.into_parts();
+        let engine_ctx = context.context();
+        let original_max_tokens = req.stop_conditions.max_tokens;
+        let tracker = req.ensure_tracker().clone();
+        let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
+        handoff.check_cancellation(engine_ctx.as_ref())?;
+
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
+        let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        if let Some(session_affinity) = session_affinity {
+            prefill_context.insert(
+                SESSION_AFFINITY_CONTEXT_KEY,
+                session_affinity.as_ref().clone(),
+            );
+        }
+        let prefill_engine_ctx = prefill_context.context();
+
+        // A tracker barrier may have outlived the target or its serving generation.
+        let Some(binding) = self.binding_for_request(&req)? else {
+            self.validate_passthrough(&req, requires_prefill)?;
+            drop(prefill_phase_barrier);
+            {
+                let _permit = tracker.set_phase(passthrough_phase).await;
+            }
+            return next.generate(context.map(|_| req)).await;
+        };
+        if binding.prefill_router_mode.is_direct_routing()
+            && req
+                .routing
+                .as_ref()
+                .and_then(|r| r.prefill_worker_id)
+                .is_none()
+        {
+            anyhow::bail!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
+            );
+        }
+        let RemotePrefill {
+            outcome,
+            topology_constraints,
+            completion,
+        } = async {
+            let dispatched = self
+                .dispatch_prefill(prefill_context, &binding, handoff, engine_ctx.clone())
+                .await?;
+            self.finish_prefill_dispatch(&req, dispatched, prefill_phase_barrier)
+                .await
+        }
+        .await
+        .inspect_err(log_prefill_failure)?;
+
+        let outcome = match outcome {
+            PrefillOutcome::Terminal { output } => {
+                let output = strip_terminal_disaggregated_params(*output);
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::once(async move { output })),
+                    engine_ctx,
+                ));
+            }
+            outcome => outcome,
+        };
+
+        // A stopped caller still needs Decode to receive and release staged KV.
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!(
+                request_id = %engine_ctx.id(),
+                "Context killed/stopped after prefill, allowing decode routing for KV transfer"
+            );
+        }
+        tracing::debug!("Prefill completed, proceeding to decode");
+
+        // Background Prefill releases this barrier after its routing attribution.
+        {
+            let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        }
+        let mut decode_req = into_decode_request(req, outcome);
+        if let Some(topology_constraints) = topology_constraints {
+            merge_decode_topology_constraints(&mut decode_req, topology_constraints);
+        }
+        decode_req.stop_conditions.max_tokens = original_max_tokens;
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(build_decode_router_override(
+            existing_override,
+            self.conditional_disagg_policy.is_enabled(),
+        ));
+        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
+        let output = match (
+            annotated(PREFILL_OUTPUT_ANNOTATION),
+            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
+        ) {
+            (false, _) => PrefillNeed::None,
+            (true, false) => PrefillNeed::BeforeLast,
+            (true, true) => PrefillNeed::BeforeFirst,
+        };
+        let decode = next.generate(context.map(|_| decode_req));
+        match completion {
+            Some(completion) => {
+                completion
+                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
+                    .await
+            }
+            None => decode.await,
+        }
+    }
+
+    async fn dispatch_prefill(
+        &self,
+        prefill_context: SingleIn<PreprocessedRequest>,
+        binding: &Arc<PrefillBinding>,
+        handoff: EncoderHandoff,
+        client: Arc<dyn AsyncEngineContext>,
+    ) -> Result<PrefillDispatch<PreparedPrefill>> {
+        let prefill_ctx = prefill_context.context();
+        binding
+            .router
+            .select_and_dispatch_prefill(prefill_context, |request, target| {
+                if handoff != EncoderHandoff::None {
+                    handoff.check_cancellation(client.as_ref())?;
+                    if !matches!(self.activation_snapshot(), ActivationSnapshot::Active(current)
+                        if Arc::ptr_eq(&current, binding))
+                    {
+                        return Err(prefill_activation_pending_error(
+                            &self.model_name,
+                            &self.namespace,
+                        ));
+                    }
+                }
+                let prepared =
+                    self.prepare_prefill_dispatch(request, target, &binding.endpoint_id)?;
+                let prefill_supports_cancellation =
+                    self.model_manager.worker_supports_runtime_capability(
+                        &binding.endpoint_id,
+                        prepared.worker_id,
+                        DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                    );
+                if handoff != EncoderHandoff::MustConsume
+                    && let Some(guard) = cancellation::arm_for(
+                        prefill_supports_cancellation,
+                        self.decode_supports_prefill_cancellation,
+                        client.clone(),
+                        Arc::downgrade(&prefill_ctx),
+                    )
+                {
+                    prefill_ctx.retain(guard);
+                }
+                Ok(prepared)
+            })
+            .await
+    }
+
+    async fn finish_prefill_dispatch(
+        &self,
+        request: &PreprocessedRequest,
+        dispatch: PrefillDispatch<PreparedPrefill>,
+        prefill_phase_barrier: OwnedSemaphorePermit,
+    ) -> Result<RemotePrefill> {
+        let PrefillDispatch {
+            metadata: prepared,
+            stream,
+            booking,
+        } = dispatch;
+        if let (Some(state), Some(booking)) = (request.migration_state.as_ref(), booking) {
+            state.store_prefill_release(booking);
+        }
+        let tracker = request.tracker.clone();
+        let (outcome, completion) = if let Some(bootstrap_info) = prepared.bootstrap_info {
+            let completion = self.spawn_prefill_task(stream, tracker, prefill_phase_barrier);
+            (
+                PrefillOutcome::Bootstrap {
+                    bootstrap_info,
+                    worker_id: prepared.worker_id,
+                    prefill_dp_rank: prepared.prefill_dp_rank,
+                },
+                Some(completion),
+            )
+        } else {
+            drop(prefill_phase_barrier);
+            match Self::consume_prefill_stream(stream, tracker, self.task_guard.clone()).await? {
+                PrefillCompletion::Handoff {
+                    result,
+                    worker_link,
+                    completion,
+                } => {
+                    let outcome = match extract_bootstrap_info(&result.disaggregated_params) {
+                        Some(bootstrap_info) => PrefillOutcome::Bootstrap {
+                            bootstrap_info,
+                            worker_id: prepared.worker_id,
+                            prefill_dp_rank: prepared.prefill_dp_rank,
+                        },
+                        None => PrefillOutcome::Completed {
+                            result,
+                            worker_id: prepared.worker_id,
+                            worker_link,
+                        },
+                    };
+                    (outcome, completion)
+                }
+                PrefillCompletion::Terminal { output } => {
+                    (PrefillOutcome::Terminal { output }, None)
+                }
+            }
+        };
+        Ok(RemotePrefill {
+            outcome,
+            topology_constraints: prepared.topology_constraints,
+            completion,
+        })
+    }
+}
+
+fn log_prefill_failure(error: &anyhow::Error) {
+    match classify_prefill_dispatch_error(error.as_ref()) {
+        PrefillDispatchErrorClass::Cancelled => {
+            tracing::debug!(%error, "Remote prefill cancelled");
+        }
+        PrefillDispatchErrorClass::AtCapacity => {
+            tracing::warn!(%error, "request rejected by prefill worker (at capacity)");
+        }
+        PrefillDispatchErrorClass::Failed => {
+            tracing::error!(%error, "Remote prefill failed, failing request");
+        }
+    }
+}
+
+/// Preserve request metadata while letting Prefill outlive caller cancellation.
+pub(super) fn independent_prefill_context(
+    request: PreprocessedRequest,
+    source: &Context<()>,
+) -> Result<Context<PreprocessedRequest>> {
+    let mut prefill =
+        Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
+    propagate_first_response_guard(source, &mut prefill)?;
+    Ok(prefill)
+}
+
+#[cfg(test)]
+pub(in crate::kv_router) use tests::epd::reject_stale_media_plan;
+
 #[cfg(test)]
 mod tests {
+    pub(super) mod epd;
+
     use super::*;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
@@ -1148,9 +1234,8 @@ mod tests {
 
     #[tokio::test]
     async fn pending_target_still_serves_query_only_requests() {
-        // Routing previews never reach the engine, so they are not at risk and
-        // must keep working while the prefill binding is being built.
-        let router = fresh_decode_router();
+        // Only KV routing interprets the annotation as a worker lookup.
+        let router = active_conditional_router();
         mark_target_pending(&router);
 
         let host = Arc::new(QueryOnlyDecodeHost::default());
@@ -1161,7 +1246,7 @@ mod tests {
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn target_replaced_mid_flight_fails_closed_at_binding_load() {
         // The lifecycle gate runs once at the top of `generate`; the binding is
         // loaded only after the prefill phase barrier. A WorkerSet succession in
@@ -1170,10 +1255,8 @@ mod tests {
         // the target, then release it: the request must fail closed rather than
         // reach the missing-binding passthrough.
         let router = fresh_decode_router();
-        router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
+        router.set_test_binding(Some(epd::local_prefill_binding("phase-succession").await));
+        tokio::time::pause();
         let tracker = Arc::new(RequestTracker::new());
         let barrier = tracker.set_phase(RequestPhase::Prefill).await;
         let mut request = inference_request();

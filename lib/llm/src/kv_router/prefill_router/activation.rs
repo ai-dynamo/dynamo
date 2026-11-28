@@ -17,14 +17,6 @@ use dynamo_runtime::{
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 
-/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
-pub(super) enum ActivationSnapshot {
-    Active(Arc<PrefillBinding>),
-    /// A target is set but its binding is not published yet: fail closed.
-    Pending,
-    /// No prefill target (never set, or cleared): passthrough to decode is safe.
-    Untargeted,
-}
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     entrypoint::RouterConfig,
@@ -37,6 +29,14 @@ use crate::{
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
+/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
+pub(super) enum ActivationSnapshot {
+    Active(Arc<PrefillBinding>),
+    /// A target is set but its binding is not published yet: fail closed.
+    Pending,
+    /// No active prefill target; request policy decides whether decode is safe.
+    Untargeted,
+}
 /// What the prefill worker set's cards say about how to route to it.
 #[derive(Debug)]
 struct PrefillAdvertisement {
@@ -45,6 +45,7 @@ struct PrefillAdvertisement {
     /// `role_routing::prefill_routing` combines the two.
     router_config: Option<RouterConfig>,
     is_eagle: bool,
+    encoder_result_requires_prefill: bool,
     /// The prefill workers' own block size, which is what their KV events are
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
@@ -71,6 +72,7 @@ fn resolve_advertisement_from_cards(
     let advertisement = PrefillAdvertisement {
         router_config: first.router_config.clone(),
         is_eagle: first.runtime_config.enable_eagle,
+        encoder_result_requires_prefill: cards.iter().any(ModelManager::requires_encoder_result),
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
@@ -156,6 +158,7 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            required: std::sync::atomic::AtomicBool::new(false),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
@@ -215,6 +218,7 @@ impl PrefillRouter {
 
         let router = Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            required: std::sync::atomic::AtomicBool::new(false),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
@@ -419,6 +423,7 @@ impl PrefillRouter {
             endpoint_id,
             router,
             prefill_router_mode,
+            encoder_result_requires_prefill: advertisement.encoder_result_requires_prefill,
         })
     }
 
@@ -553,6 +558,9 @@ impl PrefillRouter {
                     if current_target.as_ref() != Some(&target_id) {
                         continue;
                     }
+                    router_ref
+                        .required
+                        .store(binding.encoder_result_requires_prefill, Ordering::Release);
                     router_ref.binding.store(Some(Arc::new(binding)));
                     router_ref
                         .lifecycle
@@ -593,13 +601,19 @@ impl PrefillRouter {
     }
 
     /// Update the desired Prefill endpoint. Clearing is synchronous so requests
-    /// holding an older catalog snapshot bypass a removed endpoint before the
+    /// holding an older catalog snapshot cannot use a removed endpoint after the
     /// replacement catalog is published.
     pub(crate) fn set_target(&self, target: Option<WorkerSetTarget>) {
         let target_id = target.as_ref().map(WorkerSetTarget::id);
         let mut current = self.target.lock();
         if *current == target_id {
             return;
+        }
+        if let Some(WorkerSetTarget::Committed(target)) = &target {
+            self.required.store(
+                ModelManager::requires_encoder_result(&target.card),
+                Ordering::Release,
+            );
         }
         *current = target_id.clone();
         let reuses_binding = target_id.is_some()
@@ -632,19 +646,71 @@ impl PrefillRouter {
     /// way two separate lock-free reads can.
     pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
         let target = self.target.lock();
+        self.snapshot_for_target(target.is_some())
+    }
+
+    fn snapshot_for_target(&self, targeted: bool) -> ActivationSnapshot {
         match self.lifecycle_state() {
             PrefillLifecycleState::Active => match self.binding.load_full() {
                 Some(binding) => ActivationSnapshot::Active(binding),
                 // The binding is stored before `Active` under this lock, so this
                 // arm is not expected; resolve by target rather than panicking.
-                None if target.is_some() => ActivationSnapshot::Pending,
+                None if targeted => ActivationSnapshot::Pending,
                 None => ActivationSnapshot::Untargeted,
             },
-            PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
+            PrefillLifecycleState::Pending if targeted => ActivationSnapshot::Pending,
             PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => {
                 ActivationSnapshot::Untargeted
             }
         }
+    }
+
+    pub(super) fn binding(&self) -> Option<Arc<PrefillBinding>> {
+        self.binding.load_full()
+    }
+
+    pub(super) fn binding_for_request(
+        &self,
+        request: &crate::protocols::common::llm_backend::PreprocessedRequest,
+    ) -> Result<Option<Arc<PrefillBinding>>> {
+        if request.encoder_result.is_none()
+            && request
+                .multi_modal_data
+                .as_ref()
+                .is_none_or(|media| media.values().all(Vec::is_empty))
+            && self.lifecycle_state() == PrefillLifecycleState::Active
+            && let Some(binding) = self.binding.load_full()
+        {
+            return Ok(Some(binding));
+        }
+        let target = self.target.lock();
+        match self.snapshot_for_target(target.is_some()) {
+            ActivationSnapshot::Active(binding) => Ok(Some(binding)),
+            ActivationSnapshot::Pending => Err(super::prefill_activation_pending_error(
+                &self.model_name,
+                &self.namespace,
+            )),
+            ActivationSnapshot::Untargeted => {
+                self.validate_passthrough(request, self.required.load(Ordering::Acquire))?;
+                Ok(None)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_binding(&self, binding: Option<Arc<PrefillBinding>>) {
+        let _target = self.target.lock();
+        if let Some(binding) = &binding {
+            self.required
+                .store(binding.encoder_result_requires_prefill, Ordering::Release);
+        }
+        let state = if binding.is_some() {
+            PrefillLifecycleState::Active
+        } else {
+            PrefillLifecycleState::Pending
+        };
+        self.binding.store(binding);
+        self.lifecycle.store(state as u8, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -658,7 +724,7 @@ impl PrefillRouter {
 #[cfg(test)]
 mod tests {
     use dynamo_runtime::protocols::maybe_error::MaybeError;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -703,6 +769,56 @@ mod tests {
             resolved.router_config.map(|config| config.router_mode),
             Some(RouterMode::KV)
         );
+    }
+
+    #[test]
+    fn encoder_requirement_follows_the_committed_card() {
+        let mut selected = card(None);
+        assert!(
+            !resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
+            serde_json::json!(true),
+        );
+        assert!(
+            resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
+            serde_json::json!(false),
+        );
+        assert!(!ModelManager::requires_encoder_result(&selected));
+        assert!(
+            !resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
+            serde_json::json!(true),
+        );
+        assert!(ModelManager::requires_encoder_result(&selected));
+        assert!(
+            resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
+        );
+        let optional = card(None);
+        for cards in [
+            vec![selected.clone(), optional.clone()],
+            vec![optional, selected],
+        ] {
+            assert!(
+                resolve_advertisement_from_cards(&cards, RouterMode::KV)
+                    .unwrap()
+                    .encoder_result_requires_prefill
+            );
+        }
     }
 
     #[test]
@@ -948,7 +1064,7 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
-        let retired = router.binding.load_full().unwrap();
+        let retired = router.binding().unwrap();
         let chooser = retired
             .router
             .kv_router_if_enabled()
@@ -1052,8 +1168,7 @@ mod tests {
         );
         assert_eq!(
             router
-                .binding
-                .load_full()
+                .binding()
                 .unwrap()
                 .router
                 .kv_router_if_enabled()
@@ -1073,6 +1188,32 @@ mod tests {
             .expect("retired prefill admission must fail promptly")
             .is_err()
         );
+
+        for kill in [false, true] {
+            let mut input = request();
+            input.encoder_result = Some(serde_json::json!({"opaque": "legacy-producer"}));
+            input.annotations.push("query_instance_id:".into());
+            let input = SingleIn::new(input);
+            if kill {
+                input.context().kill();
+            } else {
+                input.context().stop_generating();
+            }
+            let mut response = tokio::time::timeout(
+                Duration::from_secs(5),
+                router.generate(input, Arc::new(PrefillWorker(99, None))),
+            )
+            .await
+            .unwrap()
+            .expect("producer without release support still needs consumption");
+            let output = response.next().await.unwrap().data.unwrap();
+            assert_eq!(
+                output.token_ids,
+                vec![2],
+                "Prefill must consume the cancelled handoff"
+            );
+            assert!(response.next().await.is_none());
+        }
 
         drop(router);
         for worker in workers {
@@ -1264,7 +1405,7 @@ mod tests {
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
-            while router.lifecycle_state() != PrefillLifecycleState::Active {
+            while !matches!(router.activation_snapshot(), ActivationSnapshot::Active(_)) {
                 tokio::task::yield_now().await;
             }
         })
@@ -1592,7 +1733,7 @@ mod tests {
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
-            while router.lifecycle_state() != PrefillLifecycleState::Active {
+            while !matches!(router.activation_snapshot(), ActivationSnapshot::Active(_)) {
                 tokio::task::yield_now().await;
             }
         })
@@ -1787,10 +1928,8 @@ mod tests {
             );
             router.set_target(Some(target));
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !router
-                    .binding
-                    .load_full()
-                    .is_some_and(|binding| binding.target_id == target_id)
+                while !matches!(router.activation_snapshot(), ActivationSnapshot::Active(binding)
+                    if binding.target_id == target_id)
                 {
                     tokio::task::yield_now().await;
                 }

@@ -196,6 +196,9 @@ pub trait MultimodalCacheIndex: Send + Sync {
 
 pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
 
+mod cleanup;
+pub use cleanup::CleanupRoute;
+
 #[derive(Clone)]
 pub struct PushRouter<T, U>
 where
@@ -1134,7 +1137,7 @@ where
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        F: FnOnce(&mut T, &Instance) -> anyhow::Result<M>,
     {
         let selected = self.select_by(mode)?;
         tracing::info!(
@@ -1362,6 +1365,36 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
+        self.select_and_dispatch_instance(request, |request, instance| {
+            prepare(request, instance.id())
+        })
+        .await
+    }
+
+    /// Retain the resolved producer route for cleanup after discovery retirement.
+    pub async fn select_and_dispatch_with_cleanup(
+        &self,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<(CleanupRoute<T, U>, ManyOut<U>)> {
+        self.select_and_dispatch_instance(request, |_, instance| {
+            Ok(CleanupRoute::new(
+                self.addressed.clone(),
+                instance,
+                self.establish_timeout
+                    .filter(|_| self.fault_detection_enabled),
+            ))
+        })
+        .await
+    }
+
+    async fn select_and_dispatch_instance<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, &Instance) -> anyhow::Result<M>,
+    {
         match self.router_mode {
             RouterMode::DeviceAwareWeighted => {
                 self.device_aware_weighted_prepared(request, prepare).await
@@ -1382,18 +1415,19 @@ where
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        F: FnOnce(&mut T, &Instance) -> anyhow::Result<M>,
     {
         let (metadata, stream) = self
-            .generate_with_fault_detection_prepared(
+            .generate_with_fault_detection_prepared_inner(
                 instance_id,
                 request,
                 TransportFallback::Allow,
-                |request, resolved_instance_id| {
+                OverloadCheck::Required,
+                |request, instance| {
                     if let Some(permit) = permit.as_mut() {
-                        permit.retarget(resolved_instance_id);
+                        permit.retarget(instance.id());
                     }
-                    prepare(request, resolved_instance_id)
+                    prepare(request, instance)
                 },
             )
             .await?;
@@ -1424,7 +1458,7 @@ where
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        F: FnOnce(&mut T, &Instance) -> anyhow::Result<M>,
     {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
@@ -1756,7 +1790,7 @@ where
             request,
             fallback,
             OverloadCheck::Required,
-            prepare,
+            |request, instance| prepare(request, instance.id()),
         )
         .await
     }
@@ -1770,7 +1804,7 @@ where
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        F: FnOnce(&mut T, &Instance) -> anyhow::Result<M>,
     {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -1815,7 +1849,7 @@ where
             return Err(error);
         }
 
-        let metadata = match prepare(&mut request, instance_id) {
+        let metadata = match prepare(&mut request, &instance) {
             Ok(metadata) => metadata,
             Err(error) => {
                 record_route_error(&route_span, error.as_ref());

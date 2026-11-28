@@ -5365,7 +5365,7 @@ async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_pat
     }
 }
 
-/// The carve-out must stay narrow. Nothing without staged KV blocks may reach a
+/// The carve-out must stay narrow. Nothing without a staged handoff may reach a
 /// worker after the client has gone — including a decode request, which is what
 /// the conditional-disaggregation bypass produces: `RequestPhase::Decode`
 /// without a remote prefill behind it, so nothing to release.

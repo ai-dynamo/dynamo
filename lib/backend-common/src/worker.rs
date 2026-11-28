@@ -1164,16 +1164,25 @@ impl Worker {
                 // the adapter directly, outside admission.
                 let admission_gate = self.admission_gate.get()?;
                 admission_gate.record_model_card(local_model.card());
-                let ingress = Ingress::for_engine_with_lifecycle_role(
-                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
-                    lifecycle_role,
-                )
-                .map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
+                let admitted_engine = if self.config.disaggregation_mode.is_encode() {
+                    AdmissionEngine::new_with_cleanup(admission_gate, engine_adapter.clone(), {
+                        let engine = engine.clone();
+                        move |request| {
+                            request.is_encoder_result_release()
+                                && engine.is_cleanup_request(request)
+                        }
+                    })
+                } else {
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone())
+                };
+                let ingress =
+                    Ingress::for_engine_with_lifecycle_role(admitted_engine, lifecycle_role)
+                        .map_err(|e| {
+                            err(
+                                ErrorType::Backend(BackendError::Unknown),
+                                format!("ingress: {e}"),
+                            )
+                        })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
@@ -3756,6 +3765,189 @@ mod handoff_and_lifecycle_tests {
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn encode_ingress_releases_outputs_while_inference_admission_is_full() {
+        use crate::engine::{GenerateContext, LLMEngineOutput};
+        use dynamo_llm::protocols::common::FinishReason;
+        use dynamo_runtime::pipeline::{PushRouter, RouterMode, SingleIn};
+        use dynamo_runtime::protocols::{annotated::Annotated, maybe_error::MaybeError};
+        use futures::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The process-wide TCP listener must outlive every runtime that uses it.
+        const CHILD: &str = "DYNAMO_ENCODE_INGRESS_TEST";
+        let test_name = concat!(
+            module_path!(),
+            "::encode_ingress_releases_outputs_while_inference_admission_is_full"
+        )
+        .split_once("::")
+        .unwrap()
+        .1;
+        if std::env::var(CHILD).as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("Encode admission subprocess must finish")
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+                "Encode admission subprocess must run its test: {stdout}\n{stderr}"
+            );
+            return;
+        }
+
+        struct Producer(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl LLMEngine for Producer {
+            async fn start(&self, _: u64) -> Result<EngineConfig, DynamoError> {
+                Ok(EngineConfig::default())
+            }
+
+            fn is_cleanup_request(&self, _: &PreprocessedRequest) -> bool {
+                true
+            }
+
+            async fn generate(
+                &self,
+                request: PreprocessedRequest,
+                _: GenerateContext,
+            ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                if request.is_encoder_result_release() {
+                    Ok(Box::pin(futures::stream::iter([Ok(
+                        LLMEngineOutput::stop(),
+                    )])))
+                } else {
+                    Ok(Box::pin(futures::stream::pending()))
+                }
+            }
+
+            async fn cleanup(&self) -> Result<(), DynamoError> {
+                Ok(())
+            }
+        }
+
+        fn request() -> PreprocessedRequest {
+            PreprocessedRequest::builder()
+                .model("producer".to_string())
+                .token_ids(Vec::new())
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap()
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT", Some("1")),
+                ("DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT", Some("0")),
+                (GRACE_PERIOD_ENV, Some("0")),
+            ],
+            async {
+                let endpoint = test_local_endpoint().await;
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mut worker = Worker::new(
+                    Arc::new(Producer(calls.clone())),
+                    WorkerConfig {
+                        disaggregation_mode: DisaggregationMode::Encode,
+                        ..WorkerConfig::default()
+                    },
+                );
+                let engine_config = EngineConfig {
+                    model: "producer".to_string(),
+                    ..EngineConfig::default()
+                };
+                let shutdown = CancellationToken::new();
+                let serve = tokio::spawn({
+                    let shutdown = shutdown.clone();
+                    let endpoint = endpoint.clone();
+                    async move {
+                        worker
+                            .serve_with_orchestrator(&engine_config, endpoint, shutdown)
+                            .await
+                    }
+                });
+                let client = endpoint.client().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut instances = client.instance_source.as_ref().clone();
+                    while instances.borrow_and_update().is_empty() {
+                        instances.changed().await.unwrap();
+                    }
+                })
+                .await
+                .expect("Encode worker must register");
+                let router =
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_options(
+                        client,
+                        RouterMode::RoundRobin,
+                        dynamo_llm::kv_router::plugins::push_router_options(),
+                    )
+                    .await
+                    .unwrap();
+                let (cleanup, held) = router
+                    .select_and_dispatch_with_cleanup(SingleIn::new(request()))
+                    .await
+                    .unwrap();
+                let refused = router.round_robin(SingleIn::new(request())).await;
+                let error = match refused {
+                    Err(error) => error.downcast::<DynamoError>().unwrap(),
+                    Ok(mut stream) => tokio::time::timeout(Duration::from_secs(5), stream.next())
+                        .await
+                        .expect("ordinary inference must be rejected")
+                        .unwrap()
+                        .err()
+                        .expect("ordinary inference cannot bypass admission"),
+                };
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "inference was admitted: {error}");
+                let mut release = request();
+                release.encoder_result = Some(serde_json::json!({"ref": "producer-owned"}));
+                release.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+                let mut stream = cleanup.dispatch(SingleIn::new(release)).await.unwrap();
+                let ack = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                    .await
+                    .expect("release must bypass the full Encode gate")
+                    .unwrap();
+                assert_eq!(ack.data.unwrap().finish_reason, Some(FinishReason::Stop));
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                let refused = cleanup.dispatch(SingleIn::new(request())).await;
+                let error = match refused {
+                    Err(error) => error.downcast::<DynamoError>().unwrap(),
+                    Ok(mut stream) => tokio::time::timeout(Duration::from_secs(5), stream.next())
+                        .await
+                        .expect("cleanup must not free the held inference permit")
+                        .unwrap()
+                        .err()
+                        .expect("held inference still fills the gate"),
+                };
+                assert_eq!(calls.load(Ordering::SeqCst), 2, "inference was admitted: {error}");
+                drop(stream);
+                drop(held);
+                shutdown.cancel();
+                tokio::time::timeout(Duration::from_secs(10), serve)
+                    .await
+                    .expect("Encode worker must stop")
+                    .unwrap()
+                    .unwrap();
+            },
+        )
+        .await;
+    }
 
     /// Build a real serving `Endpoint` from a test DRT, mirroring how
     /// `run_inner` resolves namespace → component → endpoint.

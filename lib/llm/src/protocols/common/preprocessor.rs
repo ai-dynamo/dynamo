@@ -27,6 +27,13 @@ use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
+/// Encoder output metadata declaring that an unused result can be returned to its producer.
+pub const ENCODER_RESULT_RELEASE_SUPPORTED: &str = "encoder_result_release";
+/// Internal encode-worker request to release the attached opaque result.
+pub const RELEASE_ENCODER_RESULT: &str = "release_encoder_result";
+/// Deployment metadata for consumers that cannot encode media inline.
+pub const REQUIRES_ENCODER_RESULT: &str = "requires_encoder_result";
+
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
 /// which worker(s) should handle the request.
@@ -808,6 +815,26 @@ impl PreprocessedRequest {
 
     pub fn builder() -> PreprocessedRequestBuilder {
         PreprocessedRequestBuilder::default()
+    }
+
+    /// A release control carries a handoff and no inference input.
+    pub fn is_encoder_result_release(&self) -> bool {
+        self.extra_args
+            .as_ref()
+            .and_then(|args| args.get(RELEASE_ENCODER_RESULT))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && self
+                .encoder_result
+                .as_ref()
+                .is_some_and(serde_json::Value::is_object)
+            && self.token_ids.is_empty()
+            && self.prompt_embeds.is_none()
+            && self
+                .multi_modal_data
+                .as_ref()
+                .is_none_or(|media| media.is_empty())
+            && self.prefill_result.is_none()
     }
 
     /// Get mutable access to routing hints, creating default if None

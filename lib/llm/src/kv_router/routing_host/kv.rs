@@ -329,6 +329,19 @@ impl RoutingHost {
         request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        self.dispatch_kv_plan_with_validation(request, plan, || async { Ok(()) })
+            .await
+    }
+
+    pub(crate) async fn dispatch_kv_plan_with_validation<Fut>(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        plan: RoutePlan,
+        validate: impl FnOnce() -> Fut + Send,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error>
+    where
+        Fut: Future<Output = Result<(), Error>> + Send,
+    {
         let RoutePlan {
             phase,
             mut selection,
@@ -337,9 +350,13 @@ impl RoutingHost {
             budget,
             ..
         } = plan;
-        let guard = self
+        let mut guard = self
             .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
             .await?;
+        if let Err(error) = validate().await {
+            guard.abort(Some(error.as_ref())).await;
+            return Err(error);
+        }
         self.dispatch_selection(request, selection, phase, guard, &budget, affinity)
             .await
     }

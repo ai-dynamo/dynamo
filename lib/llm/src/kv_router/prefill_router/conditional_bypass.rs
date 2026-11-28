@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
 use dynamo_runtime::pipeline::SingleIn;
 use dynamo_worker_selection::host::ConditionalDisaggDecisionInput;
 
 use super::PrefillRouter;
+use crate::kv_router::encoder_router::{INLINE_ENCODER_FALLBACK, InlineEncoderFallback};
 use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
 use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
@@ -15,6 +19,19 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
+    pub(super) encoder_binding: Option<Arc<super::PrefillBinding>>,
+}
+
+impl PrefillRouter {
+    pub(super) fn allows_encoder_bypass(
+        &self,
+        expected: Option<&Arc<super::PrefillBinding>>,
+    ) -> bool {
+        expected.is_none_or(|expected| {
+            matches!(self.activation_snapshot(), super::ActivationSnapshot::Active(current)
+                if Arc::ptr_eq(&current, expected))
+        })
+    }
 }
 
 fn decode_gate_allows_bypass(
@@ -33,6 +50,33 @@ impl PrefillRouter {
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
+        let has_raw_media = request.encoder_result.is_none()
+            && request
+                .multi_modal_data
+                .as_ref()
+                .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+        if has_raw_media
+            && (self.required.load(Ordering::Acquire)
+                || request
+                    .get_optional::<InlineEncoderFallback>(INLINE_ENCODER_FALLBACK)
+                    .map_err(anyhow::Error::msg)?
+                    .is_some())
+        {
+            // Keep raw media on Prefill after Encode failure or when Prefill is required.
+            return Ok(None);
+        }
+        let encoder_binding = if request.encoder_result.is_some() || has_raw_media {
+            let Some(binding) = self
+                .binding()
+                .filter(|binding| !binding.encoder_result_requires_prefill)
+            else {
+                return Ok(None);
+            };
+            Some(binding)
+        } else {
+            None
+        };
+
         // Conditional disagg chooses a cache-hot decode worker, so it only
         // applies to a KV-routed decode set.
         if !self.decode_router_mode.is_kv_routing() {
@@ -141,6 +185,7 @@ impl PrefillRouter {
                 plan,
                 overlap_tokens,
                 net_new_tokens,
+                encoder_binding,
             }));
         }
 
@@ -154,7 +199,7 @@ impl PrefillRouter {
         let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
             return Ok(None);
         };
-        let Some(binding) = self.binding.load_full() else {
+        let Some(binding) = self.binding() else {
             return Ok(None);
         };
         Ok(Some(
