@@ -19,7 +19,7 @@ For the profiling workflow and DGDR spec structure, see the [Profiler Guide](../
 </ParamField>
 
 <ParamField path="--output-dir" type="string" default="profiling_results">
-  Path to the output results directory. The profiler writes plots, the interpolation data, `profile_sla.log`, a `profiler_status.yaml` status file, and, for the rapid search strategy, `sla_candidates.csv` with every simulated configuration that meets the SLA here.
+  Path to the output results directory. The profiler writes plots, the interpolation data, `profile_sla.log`, and a `profiler_status.yaml` status file here. With the rapid search strategy, it also writes `sla_candidates.csv`, which lists simulated configurations that meet the SLA, plus the selected configuration even if it misses the SLA.
 </ParamField>
 
 <ParamField path="--deployment-timeout" type="integer" default="3600">

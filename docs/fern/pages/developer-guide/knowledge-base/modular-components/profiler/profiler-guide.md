@@ -96,10 +96,12 @@ searchStrategy: rapid
 
 The rapid strategy deploys only its rank-1 pick, but the simulation usually
 finds other configurations that also meet the SLA and trade per-user speed for
-per-GPU throughput differently. The profiler writes all of them to
-`sla_candidates.csv` in the output directory and lists the file under
-`outputs.sla_candidates` in `profiler_status.yaml`. The file is written even
-when no configuration meets the SLA.
+per-GPU throughput differently. The profiler writes the compliant ones from
+AIC's Pareto frontier and top-ranked picks to `sla_candidates.csv` in the
+output directory and lists the file under `outputs.sla_candidates` in
+`profiler_status.yaml`. The file is written even when no configuration meets
+the SLA. It isn't written when the planner is enabled (autoscale picking) or
+when the profiler falls back to a naive config.
 
 Each row is one configuration. The first columns are:
 
