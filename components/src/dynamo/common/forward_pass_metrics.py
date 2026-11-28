@@ -194,6 +194,10 @@ class ForwardPassMetrics(
     # Requests that exist in the waiting queue but were not scheduled.
     queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
 
+    # Backend-defined scope measured by wall_time, when more specific than the
+    # full scheduler iteration. Omitted for publishers using the legacy scope.
+    timing_scope: str | None | msgspec.UnsetType = msgspec.UNSET
+
     def is_idle(self) -> bool:
         """Whether both scheduled and queued work are empty."""
         return (

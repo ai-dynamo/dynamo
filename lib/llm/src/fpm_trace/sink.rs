@@ -521,6 +521,22 @@ mod tests {
         event_with_wall_time(worker_id, dp_rank, counter_id, 0.01)
     }
 
+    fn event_with_timing_scope(
+        worker_id: &str,
+        dp_rank: i64,
+        counter_id: i64,
+        timing_scope: &str,
+    ) -> FpmTraceEvent {
+        let mut event = event(worker_id, dp_rank, counter_id);
+        let mut payload: Value = rmp_serde::from_slice(&event.payload).unwrap();
+        payload.as_object_mut().unwrap().insert(
+            "timing_scope".to_string(),
+            Value::String(timing_scope.to_string()),
+        );
+        event.payload = Bytes::from(rmp_serde::to_vec_named(&payload).unwrap());
+        event
+    }
+
     fn key(worker_id: &str, dp_rank: i64) -> FpmKey {
         (source(), worker_id.to_string(), dp_rank)
     }
@@ -755,6 +771,32 @@ mod tests {
                 .iter()
                 .all(|record| record["event"]["capture_mode"] == "full")
         );
+    }
+
+    #[tokio::test]
+    async fn full_mode_preserves_timing_scope_without_changing_legacy_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full-trace-timing-scope");
+        let writer = test_writer(&path).await;
+        let (sender, receiver) = broadcast::channel(8);
+        let shutdown = CancellationToken::new();
+        let owner = owner(sender.clone(), shutdown.clone());
+        let task = tokio::spawn(run_full(receiver, writer, owner));
+
+        sender
+            .send(event_with_timing_scope("worker-a", 0, 1, "model_step_cuda"))
+            .unwrap();
+        sender.send(event("worker-a", 0, 2)).unwrap();
+        shutdown.cancel();
+        task.await.unwrap();
+
+        let records = read_trace_records(&path);
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0]["event"]["fpm"]["timing_scope"],
+            "model_step_cuda"
+        );
+        assert!(records[1]["event"]["fpm"].get("timing_scope").is_none());
     }
 
     #[tokio::test(start_paused = true)]
