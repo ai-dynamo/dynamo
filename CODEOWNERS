@@ -105,6 +105,7 @@
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
 /lib/global-*/**                                                                                        @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-receiver/                                                                              @ai-dynamo/dynamo-global-router-codeowners
+/deploy/global-discovery-mcs/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-broadcaster/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 /container/global-discovery-service.yaml                                                                @ai-dynamo/dynamo-global-router-codeowners
@@ -686,6 +687,7 @@ requirements.txt                                                                
 /container/deps/requirements.sglang.txt                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /container/deps/requirements.trtllm.txt                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/templates/planner.Dockerfile                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/deploy/global-discovery-mcs/Dockerfile                                                                 @ai-dynamo/dynamo-global-router-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/preprocessor/media/rdma.rs                                                                 @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols/openai/images.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/protocols/openai/videos.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners

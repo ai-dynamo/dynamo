@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Built binaries, downloaded tools and envtest assets.
+bin/
+# Coverage output of make test.
+cover.out
+# Test binaries of go test -c.
+*.test
+# The repository's .gitignore ignores every server/ directory; this one is
+# source.
+!internal/server/
