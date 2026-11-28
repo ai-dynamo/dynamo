@@ -112,8 +112,8 @@ jobs:
             echo "@${USER} authorized via ${ORG}/${TEAM}"
           done
 
-  # RESOLVE TARGET (read-only) — validate inputs; resolve the branch tip SHA (the
-  # commit whose post-merge images this rc stages), the rc round, and the subsets.
+  # RESOLVE TARGET (read-only) — validate inputs; resolve the SHA whose post-merge images this rc
+  # stages (the latest post-merge-built commit on the branch, normally its tip), the rc round, and the subsets.
   # Reads no environment secrets (only GITHUB_TOKEN), so it runs outside
   # automated-release.
   resolve-target:
@@ -122,6 +122,7 @@ jobs:
     runs-on: prod-default-small-v2
     permissions:
       contents: read
+      actions: read
     outputs:
       bump_sha: ${{ steps.target.outputs.bump_sha }}
       rc_number: ${{ steps.target.outputs.rc_number }}
@@ -177,7 +178,25 @@ jobs:
             echo "::error::branch '${CI_BRANCH}' not found (HTTP ${HTTP}) — cut it first with 'Cut Release Branch'."
             exit 1
           fi
-          SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['object']['sha'])" "${RUNNER_TEMP}/ref.json")
+          TIP=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['object']['sha'])" "${RUNNER_TEMP}/ref.json")
+          # Post-merge CI skips docs-only pushes (paths-ignore), so the tip may have no
+          # images. Stage the most recent commit post-merge CI actually ran on (the tip
+          # itself when it ran); push runs only, since a manual dispatch skips the
+          # dynamo-runtime and planner builds; fall back to the tip if
+          # the lookup fails or finds nothing, and let await-post-merge report it.
+          SHA="${TIP}"
+          if BUILT=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?branch=${CI_BRANCH}&event=push&exclude_pull_requests=true&per_page=1" \
+              | jq -r '.workflow_runs[0].head_sha // empty') && [ -n "${BUILT}" ]; then
+            SHA="${BUILT}"
+          else
+            echo "::warning::could not find a post-merge CI run on ${CI_BRANCH}; using the branch tip"
+          fi
+          if [ "${SHA}" != "${TIP}" ]; then
+            echo "::notice::${CI_BRANCH} tip ${TIP} has no post-merge CI run (docs-only push?); staging the latest built commit ${SHA}"
+          fi
           echo "bump_sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
           echo "Staging ${RELEASE_BRANCH} (CI branch ${CI_BRANCH}) @ ${SHA} as ${RELEASE_VERSION}-rc.${RC_ROUND}"
