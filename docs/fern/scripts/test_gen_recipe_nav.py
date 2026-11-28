@@ -9,6 +9,7 @@ pytest config ignores docs/, so the standalone pytest.ini beside this file
 supplies the marker registrations.
 """
 
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -33,9 +34,10 @@ def recipe(
     provider: str,
     targets: tuple[str, ...] = ("agg",),
     generation: tuple[int, ...] = (1,),
+    badges: tuple[str | None, ...] = (),
 ) -> gen.Recipe:
     return gen.Recipe(
-        rid, rid.upper(), provider, f"pages/{rid}.mdx", rid, targets, generation
+        rid, rid.upper(), provider, f"pages/{rid}.mdx", rid, targets, generation, badges
     )
 
 
@@ -247,6 +249,167 @@ def test_cards_list_their_recipe_targets_replacing_stale_ones():
     assert gen.sort_cards(body, groups) == card(
         "zai", "zai", targets="vllm-agg vllm-disagg"
     )
+
+
+def badged_recipe(*badges: str | None) -> gen.Recipe:
+    targets = tuple(f"t{i}" for i in range(len(badges)))
+    base = recipe("zai", "zai", targets=targets, badges=badges)
+    details = tuple(("vLLM", "8x B200", "Aggregated") for _ in badges)
+    return dataclasses.replace(base, details=details)
+
+
+def badged_groups(*badges: str | None) -> list[gen.Group]:
+    registry, ranked = providers(["zai"], {"zai": "Z.ai"})
+    return gen.group_recipes(registry, ranked, [badged_recipe(*badges)])
+
+
+def panel(target: str | None, *facts: str) -> list[str]:
+    tagged = "" if target is None else f' data-target="{target}"'
+    return [
+        f'<div className="dynamo-target-picker-summary" data-sku="b200"{tagged}>',
+        *facts,
+        "</div>",
+    ]
+
+
+FACT = "<span><b>GPUs</b> 8x B200</span>"
+OPTIMIZED = (
+    '<span className="dynamo-target-badge"><b>Badge</b>'
+    '<span className="dynamo-badge dynamo-badge-optimized" title="Perf-tuned and '
+    'benchmarked by NVIDIA. Includes everything Functional means.">Optimized</span>'
+    "</span>"
+)
+
+
+def test_tagged_panel_shows_its_target_badge_first():
+    page = "\n".join(panel("t0", FACT) + panel("t1", FACT))
+    out = gen.set_target_badges(page, badged_recipe("optimized", "functional"))
+    lines = out.split("\n")
+    assert lines[1] == OPTIMIZED
+    assert lines[2] == FACT
+    assert "dynamo-badge-functional" in lines[5]
+    # Regenerating a badged page changes nothing.
+    assert gen.set_target_badges(out, badged_recipe("optimized", "functional")) == out
+
+
+def test_untagged_panel_and_unbadged_target_show_no_badge():
+    page = "\n".join(panel(None, FACT) + panel("t0", FACT))
+    assert gen.set_target_badges(page, badged_recipe(None)) == page
+
+
+def test_stale_panel_badge_is_replaced_or_dropped():
+    page = "\n".join(panel("t0", OPTIMIZED, FACT))
+    promoted = gen.set_target_badges(page, badged_recipe("nvidia-certified"))
+    assert "dynamo-badge-nvidia-certified" in promoted
+    assert "dynamo-badge-optimized" not in promoted
+    assert gen.set_target_badges(page, badged_recipe(None)) == "\n".join(
+        panel("t0", FACT)
+    )
+
+
+def test_panel_must_name_a_catalog_target():
+    page = "\n".join(panel("vllm-agg-h200", FACT))
+    with pytest.raises(gen.CatalogError, match="not a target id in recipes/zai.yaml"):
+        gen.set_target_badges(page, badged_recipe("optimized"))
+
+
+def test_target_badges_table_lists_every_target():
+    lines = gen.render_target_badges(badged_recipe("optimized", None))
+    assert lines[0] == "" and lines[-1] == ""
+    assert lines[1] == "## Target Badges"
+    rows = [line for line in lines if line.startswith("| `")]
+    assert rows[0].startswith("| `t0` | vLLM | 8x B200 | Aggregated | <span")
+    assert rows[0].endswith(">Optimized</span> |")
+    assert rows[1] == "| `t1` | vLLM | 8x B200 | Aggregated | Not assigned |"
+
+
+def test_target_badges_table_stays_empty_without_badges():
+    assert gen.render_target_badges(badged_recipe(None, None)) == []
+
+
+@pytest.mark.parametrize(
+    "framework, expected",
+    [
+        ("vllm", "vLLM"),
+        ("vLLM 0.21.0", "vLLM"),
+        ("Dynamo + SGLang", "SGLang"),
+        ("TensorRT-LLM", "TensorRT-LLM"),
+        ("trtllm", "TensorRT-LLM"),
+    ],
+)
+def test_target_details_name_the_runtime(framework, expected):
+    entry = {
+        "targets": [
+            {
+                "runtime": {"framework": framework},
+                "hardware": {"gpu": "H100/H200", "count": 16},
+                "topology": "disaggregated",
+            }
+        ]
+    }
+    assert gen.parse_details(entry) == ((expected, "16x H100/H200", "Disaggregated"),)
+
+
+def test_every_recipe_page_has_a_target_badges_span():
+    _, _, recipes = gen.load_catalog()
+    for item in recipes:
+        text = (gen.FERN_DIR / item.page).read_text(encoding="utf-8")
+        assert text.count("target-badges:begin") == 1, item.page
+        assert "<RecipeStyles />" in text, item.page
+
+
+def test_model_cards_carry_no_badges():
+    out = gen.sort_cards(card("zai", "zai"), badged_groups("optimized"))
+    assert "badge" not in "\n".join(out)
+
+
+def test_unknown_badge_is_rejected():
+    entry = {
+        "id": "zai",
+        "title": "Zai",
+        "provider": "zai",
+        "page": "pages/zai.mdx",
+        "targets": [{"id": "agg", "badge": "day-0"}],
+    }
+    registry, _ = providers(["zai"], {"zai": "Z.ai"})
+    with pytest.raises(gen.CatalogError, match="badge 'day-0' must be one of"):
+        gen.parse_recipe(entry, registry, "recipes/zai.yaml")
+
+
+def test_badge_legend_stays_empty_without_badges():
+    assert gen.render_badge_legend(badged_groups(None, None)) == []
+
+
+def test_badge_legend_defines_every_badge():
+    legend = gen.render_badge_legend(badged_groups("functional"))
+    assert legend[0] == "" and legend[-1] == ""
+    assert legend[1] == "## Recipe Badges"
+    rows = [line for line in legend if line.startswith("| <span")]
+    assert len(rows) == len(gen.BADGES)
+    for badge, row in zip(gen.BADGES, rows):
+        assert f">{badge.label}</span> | {badge.meaning} |" in row
+
+
+def test_badge_legend_sits_below_the_catalog():
+    overview = gen.OVERVIEW_MDX.read_text(encoding="utf-8")
+    assert overview.index("badge-legend:begin") > overview.index("</form>")
+    assert overview.index("badge-legend:begin") > overview.index("recipe-cards:end")
+
+
+@pytest.mark.parametrize("badge", gen.BADGES, ids=lambda b: b.key)
+def test_badge_text_is_safe_in_jsx_and_tables(badge):
+    assert not set(badge.label + badge.meaning) & set('"{}|<>')
+
+
+def test_badge_keys_match_the_validator_and_the_styles():
+    validator = (gen.CATALOG_DIR / "validate.py").read_text(encoding="utf-8")
+    listed = validator.split("\nBADGES = (", 1)[1].split(")", 1)[0]
+    assert sorted(gen.BADGE_KEYS) == sorted(
+        key.strip(' "') for key in listed.split(",") if key.strip()
+    )
+    styles = gen.STYLES_TSX.read_text(encoding="utf-8")
+    for key in gen.BADGE_KEYS:
+        assert f"\n.dynamo-badge-{key} {{" in styles
 
 
 def test_card_opening_div_must_end_on_its_first_line():

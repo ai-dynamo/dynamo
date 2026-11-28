@@ -45,7 +45,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg" data-target="sglang-agg-h200">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
 <span><b>Precision</b> FP8 + FP8 KV</span>
 <span><b>GPUs</b> 8x H200, one worker</span>
@@ -53,7 +53,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="disagg" data-target="sglang-disagg-h200">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
 <span><b>Precision</b> FP8 + FP8 KV</span>
 <span><b>GPUs</b> 16x H200, one prefill + one decode</span>
@@ -61,7 +61,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg" data-target="sglang-agg-b200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B200, two workers</span>
@@ -69,7 +69,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="disagg" data-target="sglang-disagg-b200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B200, one prefill + one decode</span>
@@ -77,7 +77,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="agg" data-target="sglang-agg-b300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B300, two workers</span>
@@ -85,7 +85,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="disagg" data-target="sglang-disagg-b300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B300, one prefill + one decode</span>
@@ -93,7 +93,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg" data-target="sglang-agg-gb200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB200, two workers</span>
@@ -101,7 +101,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg" data-target="sglang-disagg-gb200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB200, one prefill + one decode</span>
@@ -109,7 +109,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="agg" data-target="sglang-agg-gb300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB300, two workers</span>
@@ -117,7 +117,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg" data-target="sglang-disagg-gb300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB300, one prefill + one decode</span>
@@ -125,7 +125,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg" data-target="vllm-agg-h200">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
 <span><b>Precision</b> FP8 + FP8 KV</span>
 <span><b>GPUs</b> 8x H200, one worker</span>
@@ -133,7 +133,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg" data-target="vllm-disagg-h200">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
 <span><b>Precision</b> FP8 + FP8 KV</span>
 <span><b>GPUs</b> 16x H200, one prefill + one decode</span>
@@ -141,7 +141,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg" data-target="vllm-agg-b200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B200, two workers</span>
@@ -149,7 +149,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg" data-target="vllm-disagg-b200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B200, one prefill + one decode</span>
@@ -157,7 +157,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="agg" data-target="vllm-agg-b300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B300, two workers</span>
@@ -165,7 +165,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="disagg" data-target="vllm-disagg-b300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x B300, one prefill + one decode</span>
@@ -173,7 +173,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg" data-target="vllm-agg-gb200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB200, two workers</span>
@@ -181,7 +181,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg" data-target="vllm-disagg-gb200-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB200, one prefill + one decode</span>
@@ -189,7 +189,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware, NIXL KV transfer</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg" data-target="vllm-agg-gb300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB300, two workers</span>
@@ -197,7 +197,7 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Routing</b> KV-aware</span>
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg" data-target="vllm-disagg-gb300-nvfp4">
 <span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
 <span><b>GPUs</b> 8x GB300, one prefill + one decode</span>
@@ -206,6 +206,9 @@ H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
 <span><b>Context</b> Up to 1,048,576 tokens</span>
 </div>
 </div>
+
+{/* target-badges:begin — generated by scripts/gen_recipe_nav.py, do not edit */}
+{/* target-badges:end */}
 
 ## Prerequisites
 
