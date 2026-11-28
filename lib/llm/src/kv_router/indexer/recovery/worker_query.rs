@@ -68,6 +68,19 @@ struct SourceSlot {
     rejected_source: Option<KvSourceId>,
 }
 
+/// What the recovery task does after one response has been handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryOutcome {
+    /// Nothing was applied: the task is stale, or the snapshot failed and a
+    /// later live event has to start the recovery again.
+    Deferred,
+    /// The response was handled: applied, degraded to live events, or fenced.
+    Settled,
+    /// The response was applied, but live events were seen past a missing ID:
+    /// ask the worker again from `start_event_id`.
+    Requery { start_event_id: u64 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TargetFaultDisposition {
     Recovering,
@@ -778,28 +791,55 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         let cancel = binding.lifetime.child_token();
         let task_cancel = cancel.clone();
         let client = self.clone();
-        let initial_recovery = start_event_id.is_none();
+        let mut initial_recovery = start_event_id.is_none();
+        let (mut start_event_id, mut end_event_id) = (start_event_id, end_event_id);
         let handle = tokio::spawn(async move {
             if start_event_id.is_none() {
                 let jitter_us = rand::rng().random_range(0..3000u64);
                 tokio::time::sleep(Duration::from_micros(jitter_us)).await;
             }
-            let recovery =
-                client.fetch_recovery_response(key, target, start_event_id, end_event_id);
-            let result = tokio::select! {
-                biased;
-                _ = task_cancel.cancelled() => return,
-                result = recovery => result,
-            };
-            if task_cancel.is_cancelled() {
-                return;
-            }
-            let complete_initial = client
-                .clone()
-                .finish_recovery(key, binding, task_cancel, result)
-                .await;
-            if initial_recovery && complete_initial {
-                client.target.complete_initial_recovery(key.0, key.1).await;
+            // NOTE: KV RECOVERY CONTRACT: One re-query per recovery, issued from this
+            // task (spawn_recovery would cancel the task that calls it). Without a new
+            // loss the second response covers every ID seen so far; the cap also keeps a
+            // pending-buffer overflow to one extra snapshot.
+            let mut allow_requery = true;
+            loop {
+                let recovery = client.fetch_recovery_response(
+                    key,
+                    target.clone(),
+                    start_event_id,
+                    end_event_id,
+                );
+                let result = tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => return,
+                    result = recovery => result,
+                };
+                if task_cancel.is_cancelled() {
+                    return;
+                }
+                let outcome = client
+                    .clone()
+                    .finish_recovery(
+                        key,
+                        binding.clone(),
+                        task_cancel.clone(),
+                        allow_requery,
+                        result,
+                    )
+                    .await;
+                if initial_recovery && outcome != RecoveryOutcome::Deferred {
+                    client.target.complete_initial_recovery(key.0, key.1).await;
+                }
+                let RecoveryOutcome::Requery {
+                    start_event_id: first_missing,
+                } = outcome
+                else {
+                    return;
+                };
+                initial_recovery = false;
+                allow_requery = false;
+                (start_event_id, end_event_id) = (Some(first_missing), None);
             }
         });
         self.recovery_lane.insert(key, cancel, handle);
@@ -810,13 +850,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         key: RecoveryKey,
         binding: Arc<SourceBinding>,
         cancel: CancellationToken,
+        allow_requery: bool,
         result: Result<WorkerKvQueryResponse>,
-    ) -> bool {
+    ) -> RecoveryOutcome {
         if cancel.is_cancelled() {
-            return false;
+            return RecoveryOutcome::Deferred;
         }
         let Some(slot) = self.slots.get(&key).map(|entry| entry.clone()) else {
-            return false;
+            return RecoveryOutcome::Deferred;
         };
         let mut slot = slot.lock().await;
         if cancel.is_cancelled()
@@ -825,7 +866,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 .as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, &binding))
         {
-            return false;
+            return RecoveryOutcome::Deferred;
         }
 
         // NOTE: KV RECOVERY CONTRACT: The server selects the response. Events updates the
@@ -846,7 +887,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return true;
+                    return RecoveryOutcome::Settled;
                 }
                 (
                     events,
@@ -868,7 +909,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         "Ignoring unsupported domain-scoped recovery snapshot"
                     );
                     slot.rank.retry_after_failed_snapshot();
-                    return false;
+                    return RecoveryOutcome::Deferred;
                 }
                 if !recovery_events_match_source(key, &events) {
                     tracing::error!(
@@ -879,7 +920,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return true;
+                    return RecoveryOutcome::Settled;
                 }
                 if let Err(error) = self
                     .target
@@ -888,7 +929,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 {
                     slot.fence_for_reset(binding.source_id.clone());
                     tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to transactionally replace rank from recovery tree dump; rank remains fenced");
-                    return true;
+                    return RecoveryOutcome::Settled;
                 }
                 (Vec::new(), CursorState::Initial.advance_to(last_event_id))
             }
@@ -904,7 +945,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     "Worker tree dump failed; leaving authoritative state and cursor unchanged"
                 );
                 slot.rank.retry_after_failed_snapshot();
-                return false;
+                return RecoveryOutcome::Deferred;
             }
             Ok(response) => {
                 tracing::warn!(
@@ -915,45 +956,53 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 );
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return true;
+                return RecoveryOutcome::Settled;
             }
             Err(error) if error.is::<NonAuthoritativeRecoveryError>() => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "Authoritative KV recovery snapshot remained unavailable after bounded retries; leaving state and cursor unchanged");
                 slot.rank.retry_after_failed_snapshot();
-                return false;
+                return RecoveryOutcome::Deferred;
             }
             Err(error) => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "KV recovery failed; continuing with degraded live events");
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return true;
+                return RecoveryOutcome::Settled;
             }
         };
 
-        // NOTE: KV RECOVERY CONTRACT: Catch up from the local pending buffer only. Warn and
-        // continue through missing IDs, including buffer overflow; never recursively query
-        // tail holes. This intentionally permits stale/missing advisory hints without relaxing
-        // source fencing or clear ordering. See local_catchup_warns_through_gaps_without_rpc.
+        // NOTE: KV RECOVERY CONTRACT: Catch up from the local pending buffer. While the
+        // re-query is unspent, admit only the events contiguous with the response and ask the
+        // worker again from the first missing ID: it still holds an event the router lost.
+        // After that, warn and continue through missing IDs, including buffer overflow. This
+        // permits stale/missing advisory hints without relaxing source fencing or clear
+        // ordering. See event_lost_during_recovery_is_requeried and
+        // second_loss_during_requery_warns_and_continues.
         // Plan against a clone so the cursor advances only after the entire group's admission
-        // (see RankState::cursor). The state-agent also uses this drain helper independently.
+        // (see RankState::cursor). The state-agent also uses the advisory drain independently.
         let mut rank_after_admission = slot.rank.clone();
         let recovered_through = recovered_cursor.last_applied_id().unwrap_or(0);
-        let tail_watermark = rank_after_admission
-            .pending_live_watermark()
-            .unwrap_or(recovered_through)
-            .max(recovered_through);
-        let buffered_tail = rank_after_admission.drain_advisory_tail_after(recovered_through);
-        let mut last_available = recovered_through;
-        for event in &buffered_tail {
-            self.warn_skipped_recovery_ids(
-                &binding.source_id,
-                last_available,
-                event.event.event_id - 1,
-            );
-            last_available = event.event.event_id;
-        }
-        // Arrival-order eviction can drop the highest observed ID before an older suffix.
-        self.warn_skipped_recovery_ids(&binding.source_id, last_available, tail_watermark);
+        let (buffered_tail, requery_from) = if allow_requery {
+            rank_after_admission.drain_contiguous_tail_after(recovered_through)
+        } else {
+            let tail_watermark = rank_after_admission
+                .pending_live_watermark()
+                .unwrap_or(recovered_through)
+                .max(recovered_through);
+            let buffered_tail = rank_after_admission.drain_advisory_tail_after(recovered_through);
+            let mut last_available = recovered_through;
+            for event in &buffered_tail {
+                self.warn_skipped_recovery_ids(
+                    &binding.source_id,
+                    last_available,
+                    event.event.event_id - 1,
+                );
+                last_available = event.event.event_id;
+            }
+            // Arrival-order eviction can drop the highest observed ID before an older suffix.
+            self.warn_skipped_recovery_ids(&binding.source_id, last_available, tail_watermark);
+            (buffered_tail, None)
+        };
 
         if let Err(error) = self
             .admit_events(
@@ -964,10 +1013,13 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         {
             slot.fence_for_reset(binding.source_id.clone());
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a recovery event; rank remains fenced");
-            return true;
+            return RecoveryOutcome::Settled;
         }
         slot.rank = rank_after_admission;
-        true
+        match requery_from {
+            Some(start_event_id) => RecoveryOutcome::Requery { start_event_id },
+            None => RecoveryOutcome::Settled,
+        }
     }
 
     fn warn_skipped_recovery_ids(&self, source: &KvSourceId, after: u64, through: u64) {
@@ -1854,6 +1906,7 @@ mod tests {
                 (worker.worker_id, worker.dp_rank),
                 old_binding,
                 CancellationToken::new(),
+                true,
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![store(100)],
                     last_event_id: 100,
@@ -2392,19 +2445,20 @@ mod tests {
         client.handle_live_batch(100, vec![store(1)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        let complete_initial = client
+        let outcome = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
+                true,
                 Ok(WorkerKvQueryResponse::Events {
                     events: vec![clear_for(WorkerWithDpRank::new(99, 4), 2)],
                     last_event_id: 2,
                 }),
             )
             .await;
-        assert!(complete_initial);
+        assert_eq!(outcome, RecoveryOutcome::Settled);
 
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(!contains_block(&events, 1));
@@ -2442,12 +2496,13 @@ mod tests {
         kv_indexer.shutdown();
         kv_indexer.event_sender().closed().await;
 
-        let complete_initial = client
+        let outcome = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
+                true,
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![clear_for(worker, 2)],
                     last_event_id: 2,
@@ -2455,7 +2510,7 @@ mod tests {
                 }),
             )
             .await;
-        assert!(complete_initial);
+        assert_eq!(outcome, RecoveryOutcome::Settled);
 
         let slot = client
             .slots
@@ -2490,19 +2545,20 @@ mod tests {
         client.handle_live_batch(100, vec![store(2)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        let complete_initial = client
+        let outcome = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
+                true,
                 Err(NonAuthoritativeRecoveryError {
                     message: "snapshot unavailable".to_string(),
                 }
                 .into()),
             )
             .await;
-        assert!(!complete_initial);
+        assert_eq!(outcome, RecoveryOutcome::Deferred);
 
         assert!(target.calls.lock().await.is_empty());
         let slot = client
@@ -2672,7 +2728,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_catchup_warns_through_gaps_without_rpc() {
+    async fn event_lost_during_recovery_is_requeried() {
+        // A worker buffer of 2 makes the gap response a snapshot through 5.
+        let (client, transport, kv_indexer, target) = start_local_recovery(2, None).await;
+        for id in 3..=5 {
+            transport
+                .indexer
+                .apply_event_with_buffer(store(id))
+                .await
+                .unwrap();
+        }
+        client.handle_live_batch(100, vec![store(5)]).await;
+        transport.wait_for_response().await;
+
+        // While that response is in flight the worker removes block 5 (event 6) and stores
+        // block 7. The remove is lost in transit; the store arrives live.
+        let mut remove = store(6);
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(5)],
+        });
+        for event in [remove, store(7)] {
+            transport
+                .indexer
+                .apply_event_with_buffer(event)
+                .await
+                .unwrap();
+        }
+        client.handle_live_batch(100, vec![store(7)]).await;
+
+        transport.release_response.add_permits(1);
+        transport.wait_for_response().await;
+        assert_eq!(
+            *transport.requests.lock().await,
+            vec![(None, None), (Some(3), None), (Some(6), None)]
+        );
+        assert_eq!(
+            *target.calls.lock().await,
+            vec![TargetCall::Replace(100)],
+            "7 must wait behind the missing 6"
+        );
+        let slot = client.slots.get(&(42, 4)).unwrap().clone();
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(5));
+
+        finish_local_response(&client, &transport).await;
+        assert_eq!(
+            *target.calls.lock().await,
+            vec![
+                TargetCall::Replace(100),
+                TargetCall::Admit(100, 6),
+                TargetCall::Admit(100, 7),
+            ]
+        );
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(
+            !contains_block(&events, 5),
+            "the lost remove must be recovered"
+        );
+        assert!(contains_block(&events, 7));
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(7));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn second_loss_during_requery_warns_and_continues() {
         let logs = CapturedLogs::default();
         let writer = logs.clone();
         let _interest_guard = crate::test_utils::tracing_interest_guard();
@@ -2685,11 +2803,11 @@ mod tests {
                 .finish(),
         );
         for (pending, expected_tail, final_cursor, skipped_end) in [
-            (vec![7, 6, 7, 4], vec![6, 7], 7, 5),
-            // Arrival-order eviction drops 5 and 6 beyond the response watermark of 4.
-            ((5..=1030).collect(), (7..=1030).collect(), 1030, 6),
+            (vec![9, 8, 9, 6], vec![8, 9], 9, 7),
+            // Arrival-order eviction drops 7 and 8 beyond the re-query watermark of 6.
+            ((7..=1032).collect(), (9..=1032).collect(), 1032, 8),
             // Even the highest observed event can be evicted by older duplicate arrivals.
-            ([vec![2000], vec![6; 1024]].concat(), vec![6], 6, 5),
+            ([vec![2000], vec![8; 1024]].concat(), vec![8], 8, 7),
         ] {
             logs.0.lock().unwrap().clear();
             let (client, transport, kv_indexer, target) = start_local_recovery(16, None).await;
@@ -2702,13 +2820,25 @@ mod tests {
             }
             client.handle_live_batch(100, vec![store(4)]).await;
             transport.wait_for_response().await;
+            // 5 is lost while the first response (through 4) is in flight: the one re-query
+            // asks for it and returns 5 and 6.
+            for id in [5, 6] {
+                transport
+                    .indexer
+                    .apply_event_with_buffer(store(id))
+                    .await
+                    .unwrap();
+            }
+            client.handle_live_batch(100, vec![store(6)]).await;
+            transport.release_response.add_permits(1);
+            transport.wait_for_response().await;
+            // Events lost while the re-query is in flight are skipped with a warning.
             client
                 .handle_live_batch(100, pending.into_iter().map(store).collect())
                 .await;
             finish_local_response(&client, &transport).await;
 
-            let expected_calls: Vec<_> = [3, 4]
-                .into_iter()
+            let expected_calls: Vec<_> = (3..=6)
                 .chain(expected_tail.iter().copied())
                 .map(|id| TargetCall::Admit(100, id))
                 .collect();
@@ -2723,42 +2853,27 @@ mod tests {
                 Some(final_cursor)
             );
             assert!(!slot.lock().await.rank.recovery_inflight);
-            assert_eq!(transport.requests.lock().await.len(), 2);
+            assert_eq!(
+                *transport.requests.lock().await,
+                vec![(None, None), (Some(3), None), (Some(5), None)],
+                "only one re-query per recovery"
+            );
             let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
             assert!(
                 captured.contains("KV recovery local catch-up skipped event IDs"),
                 "{captured}"
             );
             assert!(captured.contains("publisher_id: 100"), "{captured}");
-            assert!(captured.contains("skipped_start=5"), "{captured}");
+            assert!(captured.contains("skipped_start=7"), "{captured}");
             assert!(
                 captured.contains(&format!("skipped_end={skipped_end}")),
                 "{captured}"
             );
-            if final_cursor == 6 {
+            if final_cursor == 8 {
                 assert!(
-                    captured.contains("skipped_start=7 skipped_end=2000 skipped_count=1994"),
+                    captured.contains("skipped_start=9 skipped_end=2000 skipped_count=1992"),
                     "{captured}"
                 );
-            }
-
-            if final_cursor == 7 {
-                // A later independent live gap still issues the ordinary next-ID request.
-                for id in 5..=9 {
-                    transport
-                        .indexer
-                        .apply_event_with_buffer(store(id))
-                        .await
-                        .unwrap();
-                }
-                client.handle_live_batch(100, vec![store(9)]).await;
-                transport.wait_for_response().await;
-                finish_local_response(&client, &transport).await;
-                assert_eq!(
-                    *transport.requests.lock().await,
-                    vec![(None, None), (Some(3), None), (Some(8), None),]
-                );
-                assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(9));
             }
             client.shutdown().await;
         }
@@ -2833,6 +2948,7 @@ mod tests {
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
+                true,
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![store(1), store(2)],
                     last_event_id: 1,
@@ -2973,6 +3089,7 @@ mod tests {
                 (rank_4.worker_id, rank_4.dp_rank),
                 binding,
                 CancellationToken::new(),
+                true,
                 Ok(WorkerKvQueryResponse::Events {
                     events: vec![clear_for(rank_4, 2)],
                     last_event_id: 2,
