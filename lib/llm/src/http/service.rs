@@ -49,12 +49,79 @@ pub use frontend_extension::{
 };
 
 use crate::{
+    discovery::ModelManager,
     preprocessor::OpenAIPreprocessor,
     protocols::openai::{ParsingOptions, chat_completions::NvCreateChatCompletionRequest},
 };
 
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 use dynamo_runtime::error::DynamoError;
+use std::collections::HashMap;
+
+/// Build a lookup of model display_name -> context_length from model cards.
+/// Worker sets of one model can advertise different limits (for example during
+/// a rolling update), and requests are routed to any of them. Report the
+/// smallest known limit so that the value is stable and safe for every route;
+/// 0 (unknown) is used only when no card knows its limit.
+fn build_model_context_map(manager: &ModelManager) -> HashMap<String, u32> {
+    smallest_context_lengths(manager.get_model_cards())
+}
+
+fn smallest_context_lengths(
+    cards: impl IntoIterator<Item = crate::model_card::ModelDeploymentCard>,
+) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
+    for card in cards {
+        let context_length = card.effective_context_length();
+        map.entry(card.display_name)
+            .and_modify(|current: &mut u32| {
+                if context_length != 0 && (*current == 0 || context_length < *current) {
+                    *current = context_length;
+                }
+            })
+            .or_insert(context_length);
+    }
+    map
+}
+
+/// Read optional env var overrides for context window and max output tokens.
+/// The handlers call this for every model listing, so an invalid value is
+/// reported once, not on every request.
+fn model_env_overrides() -> (Option<u64>, Option<u64>) {
+    fn parse(name: &str, warned: &std::sync::Once) -> Option<u64> {
+        let value = std::env::var(name).ok()?;
+        let parsed = value.parse().ok();
+        if parsed.is_none() {
+            warned.call_once(
+                || tracing::warn!(env_var = name, %value, "Ignoring invalid environment override"),
+            );
+        }
+        parsed
+    }
+    static CONTEXT_WINDOW: std::sync::Once = std::sync::Once::new();
+    static MAX_OUTPUT_TOKENS: std::sync::Once = std::sync::Once::new();
+    (
+        parse("DYN_CONTEXT_WINDOW", &CONTEXT_WINDOW),
+        parse("DYN_MAX_OUTPUT_TOKENS", &MAX_OUTPUT_TOKENS),
+    )
+}
+
+/// Resolve context_window for a model: env override takes precedence over MDC.
+/// Aliases have no card of their own (the map is keyed by the primary's
+/// display_name), so fall back to the primary's context length.
+fn resolve_context_window(
+    manager: &ModelManager,
+    model_name: &str,
+    card_map: &HashMap<String, u32>,
+    env_override: Option<u64>,
+) -> Option<u64> {
+    env_override.or_else(|| {
+        card_map
+            .get(model_name)
+            .or_else(|| card_map.get(&manager.resolve_canonical_name(model_name)))
+            .map(|&cl| cl as u64)
+    })
+}
 
 /// Apply the request-level tool-call gates shared by the HTTP protocol handlers.
 fn apply_request_tool_call_parsing_options(
@@ -122,8 +189,28 @@ fn apply_request_tool_call_parsing_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_card::ModelDeploymentCard;
     use crate::protocols::openai::GuidedToolConstraint;
     use serde_json::{Value, json};
+
+    #[test]
+    fn model_context_map_reports_smallest_known_limit() {
+        let card = |context_length| {
+            let mut card = ModelDeploymentCard::with_name_only("primary");
+            card.runtime_config.context_length = context_length;
+            card
+        };
+        let limits = [Some(4096), None, Some(2048)];
+        // The first-card and last-card rules both fail one of these orders.
+        for order in [[0, 2, 1], [2, 1, 0]] {
+            let map = smallest_context_lengths(order.map(|i| card(limits[i])));
+            assert_eq!(map["primary"], 2048, "card order {order:?}");
+        }
+        assert_eq!(
+            smallest_context_lengths([card(None), card(None)])["primary"],
+            0
+        );
+    }
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {

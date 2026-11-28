@@ -1092,58 +1092,6 @@ async fn handler_count_tokens(
 // Model listing / retrieval (content-negotiating)
 // ---------------------------------------------------------------------------
 
-/// Build a lookup of model display_name -> context_length from model cards.
-fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
-    state
-        .manager()
-        .get_model_cards()
-        .iter()
-        .map(|c| (c.display_name.clone(), c.effective_context_length()))
-        .collect()
-}
-
-/// Read optional env var overrides for context window and max output tokens.
-fn model_env_overrides() -> (Option<u64>, Option<u64>) {
-    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
-        Ok(v) => match v.parse::<u64>() {
-            Ok(val) => Some(val),
-            Err(_) => {
-                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
-                None
-            }
-        },
-        Err(_) => None,
-    };
-    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
-        Ok(v) => match v.parse::<u64>() {
-            Ok(val) => Some(val),
-            Err(_) => {
-                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
-                None
-            }
-        },
-        Err(_) => None,
-    };
-    (context_window, max_output_tokens)
-}
-
-/// Resolve context_window for a model: env override takes precedence over MDC.
-/// Aliases have no card of their own (the map is keyed by the primary's
-/// display_name), so fall back to the primary's context length.
-fn resolve_context_window(
-    state: &service_v2::State,
-    model_name: &str,
-    card_map: &std::collections::HashMap<String, u32>,
-    env_override: Option<u64>,
-) -> Option<u64> {
-    env_override.or_else(|| {
-        card_map
-            .get(model_name)
-            .or_else(|| card_map.get(&state.manager().resolve_canonical_name(model_name)))
-            .map(|&cl| cl as u64)
-    })
-}
-
 /// List all models. Returns Anthropic format when `anthropic-version` header
 /// is present, otherwise OpenAI format.
 async fn list_models(
@@ -1160,8 +1108,8 @@ async fn list_models(
     // namespace, matching the OpenAI `/v1/models` gate. A registered-but-broken
     // deployment (e.g. decode-only with no prefill peer) stays hidden.
     let models: HashSet<String> = state.manager().serving_ready_display_names();
-    let card_map = build_model_context_map(&state);
-    let (cw_override, mot_override) = model_env_overrides();
+    let card_map = super::build_model_context_map(state.manager());
+    let (cw_override, mot_override) = super::model_env_overrides();
 
     if headers.contains_key("anthropic-version") {
         let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
@@ -1177,7 +1125,9 @@ async fn list_models(
                     "type": "model",
                     "created_at": created_at,
                 });
-                if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
+                if let Some(cw) =
+                    super::resolve_context_window(state.manager(), name, &card_map, cw_override)
+                {
                     obj["max_input_tokens"] = serde_json::json!(cw);
                 }
                 if let Some(mot) = mot_override {
@@ -1209,7 +1159,9 @@ async fn list_models(
                 "created": created,
                 "owned_by": "nvidia",
             });
-            if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
+            if let Some(cw) =
+                super::resolve_context_window(state.manager(), name, &card_map, cw_override)
+            {
                 obj["context_window"] = serde_json::json!(cw);
             }
             if let Some(mot) = mot_override {
@@ -1260,9 +1212,10 @@ async fn get_model(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let card_map = build_model_context_map(&state);
-    let (cw_override, mot_override) = model_env_overrides();
-    let context_window = resolve_context_window(&state, model_id, &card_map, cw_override);
+    let card_map = super::build_model_context_map(state.manager());
+    let (cw_override, mot_override) = super::model_env_overrides();
+    let context_window =
+        super::resolve_context_window(state.manager(), model_id, &card_map, cw_override);
 
     if headers.contains_key("anthropic-version") {
         let created_at = chrono::DateTime::from_timestamp(created as i64, 0)

@@ -5685,20 +5685,10 @@ async fn list_models_openai(
         .unwrap()
         .as_secs();
 
-    // Build context_length lookup from model deployment cards
-    let cards = state.manager().get_model_cards();
-    let card_map: HashMap<String, u32> = cards
-        .iter()
-        .map(|c| (c.display_name.clone(), c.effective_context_length()))
-        .collect();
+    let card_map = super::build_model_context_map(state.manager());
 
     // Env var overrides (take precedence over MDC values)
-    let cw_override: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok());
-    let mot_override: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    let (cw_override, mot_override) = super::model_env_overrides();
 
     let mut data = Vec::new();
 
@@ -5707,14 +5697,8 @@ async fn list_models_openai(
     // is hidden until a peer joins.
     let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        // Alias entries have no card of their own (keyed by the primary's
-        // display_name); fall back to the primary's context length.
-        let context_window = cw_override.or_else(|| {
-            card_map
-                .get(&model_name)
-                .or_else(|| card_map.get(&state.manager().resolve_canonical_name(&model_name)))
-                .map(|&cl| cl as u64)
-        });
+        let context_window =
+            super::resolve_context_window(state.manager(), &model_name, &card_map, cw_override);
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model",
@@ -6001,22 +5985,10 @@ fn get_model_retrieve(
         .unwrap()
         .as_secs();
 
-    // Alias entries have no card of their own (cards are keyed by the primary's
-    // display_name); fall back to the primary so an alias reports the same
-    // context_window that `GET /v1/models` lists for it.
-    let canonical_model = state.manager().resolve_canonical_name(model_id);
-    let cards = state.manager().get_model_cards();
-    let context_length = cards
-        .iter()
-        .find(|c| c.display_name == model_id || c.display_name == canonical_model)
-        .map(|c| c.effective_context_length() as u64);
-    let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .or(context_length);
-    let max_output_tokens: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    let card_map = super::build_model_context_map(state.manager());
+    let (cw_override, max_output_tokens) = super::model_env_overrides();
+    let context_window =
+        super::resolve_context_window(state.manager(), model_id, &card_map, cw_override);
 
     Ok(Json(ModelListing {
         id: model_id.to_string(),
