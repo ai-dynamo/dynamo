@@ -61,6 +61,7 @@ from dynamo.profiler.utils.profile_common import (
     warn_gpu_shortage,
 )
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
+from dynamo.profiler.utils.sla_candidates import write_sla_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -243,8 +244,16 @@ async def _execute_strategy(
     )
 
 
-def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bool:
-    """Write final_config.yaml and profiler status. Returns False on unrecoverable failure."""
+def _write_final_output(
+    ops: ProfilerOperationalConfig,
+    final_config: Any,
+    extra_outputs: dict[str, str] | None = None,
+) -> bool:
+    """Write final_config.yaml and profiler status. Returns False on unrecoverable failure.
+
+    ``extra_outputs`` names other files already written to the output
+    directory; they are listed next to ``final_config`` in the status file.
+    """
     output_file = f"{ops.output_dir}/final_config.yaml"
     if not final_config:
         if ops.dry_run:
@@ -276,6 +285,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
         message="Profiler completed successfully",
         outputs={
             "final_config": "final_config.yaml",
+            **(extra_outputs or {}),
         },
         phase=ProfilingPhase.Done,
     )
@@ -417,6 +427,13 @@ async def run_profile(
             search_strategy,
         )
 
+        extra_outputs: dict[str, str] = {}
+        sla_candidates_df = pick_result.get("sla_candidates_df")
+        if sla_candidates_df is not None:
+            extra_outputs["sla_candidates"] = write_sla_candidates(
+                sla_candidates_df, ops.output_dir
+            )
+
         base_dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
 
@@ -554,7 +571,7 @@ async def run_profile(
         if final_config:
             _validate_dgd_service_name_lengths(dgdr, final_config)
 
-        if not _write_final_output(ops, final_config):
+        if not _write_final_output(ops, final_config, extra_outputs):
             return
 
     except Exception as e:

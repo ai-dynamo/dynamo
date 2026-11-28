@@ -566,6 +566,50 @@ class TestRunDefaultSim:
         assert result["best_latencies"]["ttft"] == 123.0
         assert result["best_latencies"]["tpot"] == 7.0
 
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_returns_sla_candidates_from_frontier_and_pick(self):
+        """Every SLA-compliant config is returned, with the pick marked."""
+        dgdr = _make_dgdr()
+        picked = {"(d)parallel": "tp4", "ttft": 400.0, "tpot": 30.0}
+        frontier = pd.DataFrame(
+            [
+                picked,
+                {"(d)parallel": "tp2", "ttft": 300.0, "tpot": 20.0},
+                {"(d)parallel": "tp1", "ttft": 300.0, "tpot": 90.0},
+            ]
+        )
+        execute_return = (
+            "disagg",
+            {"disagg": pd.DataFrame([picked])},
+            {"disagg": frontier},
+            None,
+            {"disagg": {"ttft": 400.0, "tpot": 30.0, "request_latency": 0.0}},
+            {},
+        )
+        with (
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
+            patch("dynamo.profiler.rapid._execute_tasks", return_value=execute_return),
+            patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
+        ):
+            result = _run_default_sim(
+                dgdr,
+                "Qwen/Qwen3-32B",
+                "h200_sxm",
+                "trtllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                "default",
+            )
+
+        candidates = result["sla_candidates_df"]
+        assert candidates["(d)parallel"].tolist() == ["tp4", "tp2"]
+        assert candidates["selected"].tolist() == [True, False]
+
 
 # ---------------------------------------------------------------------------
 # Force-disagg when a downstream consumer needs separate worker picks
