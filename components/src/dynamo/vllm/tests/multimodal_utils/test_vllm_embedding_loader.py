@@ -344,11 +344,11 @@ class TestMultimodalEmbeddingLoader:
         metadata = {"shape": [4, 4, 3], "content_hash": "0123456789abcdef"}
         assert mod.parse_image_item({"Decoded": metadata}) == (None, metadata)
 
-        with pytest.raises(ValueError, match="Unsupported image item"):
+        with pytest.raises(RuntimeError, match="Unsupported image item"):
             mod.parse_image_item({"Url": "http://a.png", "Decoded": metadata})
-        with pytest.raises(ValueError, match="Unsupported image item"):
+        with pytest.raises(RuntimeError, match="Unsupported image item"):
             mod.parse_image_item({"ignored": "value"})
-        with pytest.raises(ValueError, match="Unsupported image item"):
+        with pytest.raises(RuntimeError, match="Unsupported image item"):
             mod.parse_image_item(123)
 
     @pytest.mark.asyncio

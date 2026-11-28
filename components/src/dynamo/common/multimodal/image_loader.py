@@ -662,15 +662,15 @@ class ImageLoader:
                         "Received Decoded multimodal data but enable_frontend_decoding=False. "
                         "Set enable_frontend_decoding=True to enable NIXL RDMA image transfer."
                     )
-                    raise ValueError("Could not load decoded media from frontend")
+                    raise RuntimeError("Could not load decoded media from frontend")
             elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
                 if not preserve_uuid_slots:
-                    raise ValueError(
+                    raise RuntimeError(
                         "UUID-only image slots require preserve_uuid_slots=True"
                     )
                 slot_to_future_idx.append(None)
             else:
-                raise ValueError(
+                raise RuntimeError(
                     f"Invalid image multimodal item at index {idx}. "
                     "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
                 )

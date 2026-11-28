@@ -632,7 +632,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
         load_multimodal_embeddings=AsyncMock(return_value={})
     )
 
-    with pytest.raises(ValueError, match="Unsupported image item"):
+    with pytest.raises(RuntimeError, match="Unsupported image item"):
         await processor.extract_multimodal_data(
             {
                 "multi_modal_data": {
@@ -1228,8 +1228,31 @@ def test_mark_forwarded_mm_hashes_for_routing(hashes, expected):
 
 
 def test_mark_forwarded_mm_hashes_rejects_noncanonical_hash():
-    with pytest.raises(ValueError, match="must start with 16 hex characters"):
+    with pytest.raises(RuntimeError, match="must start with 16 hex characters"):
         mod.mark_forwarded_mm_hashes_for_routing(["opaque-key"])
+
+
+def test_mm_internal_contract_breaks_are_server_errors():
+    with pytest.raises(RuntimeError, match="explicit_audio_count and video_count"):
+        mod._build_user_mm_uuids({}, False, use_audio_in_video=True)
+
+    with pytest.raises(RuntimeError, match="is_embed length"):
+        mod._placeholder_range_from_extra_arg(
+            {"offset": 0, "length": 4, "is_embed": [True, False]}
+        )
+
+    with pytest.raises(RuntimeError, match="vision_chunk entries must be objects"):
+        mod.compute_mm_uuids({"vision_chunk": ["not-a-dict"]})
+
+
+def test_qwen_decode_handoff_contract_breaks_are_server_errors():
+    from dynamo.vllm.multimodal_utils.model import construct_qwen_decode_mm_data
+
+    with pytest.raises(RuntimeError, match="No image grid provided"):
+        construct_qwen_decode_mm_data(None, (1, 3, 1024), "req-1")
+
+    with pytest.raises(RuntimeError, match="embeddings_shape is required"):
+        construct_qwen_decode_mm_data([(1, 3, 1024)], None, "req-1")
 
 
 def test_build_tokens_prompt_omits_absent_processor_kwargs():
