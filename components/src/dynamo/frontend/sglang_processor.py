@@ -574,6 +574,7 @@ def _preprocess_worker(
             request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
         force_reasoning=pre.force_reasoning,
+        positional_tool_history=pre.positional_tool_history,
     )
 
     effective_reasoning_parser_name = _effective_reasoning_parser_name(
@@ -600,6 +601,8 @@ def _build_dynamo_preproc(
     reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
     force_reasoning: bool = False,
+    *,
+    positional_tool_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     thinking_token_budget = resolve_thinking_token_budget(request)
@@ -702,7 +705,12 @@ def _build_dynamo_preproc(
 
     try:
         # Forward multimodal URLs so the backend handler can load the media.
-        mm_data, mm_uuids = extract_mm_urls(request.get("messages", []))
+        media_messages = (
+            positional_tool_history
+            if positional_tool_history is not None
+            else request.get("messages", [])
+        )
+        mm_data, mm_uuids = extract_mm_urls(media_messages)
         reject_unsupported_multimodal_uuids(mm_uuids)
     except ValueError as exc:
         raise PreprocessError(str(exc)) from exc
@@ -905,6 +913,7 @@ class SglangProcessor:
                     pre.guided_decoding,
                 ),
                 force_reasoning=pre.force_reasoning,
+                positional_tool_history=pre.positional_tool_history,
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc

@@ -117,7 +117,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+    MediaRequestExt, PromptToolHistory, ToolResultIndices, apply_continue_final_message,
+    prompt_formatter_from_mdc, prompt_formatter_with_history_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -2127,6 +2128,7 @@ impl EmbeddingTokenizerState {
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
+    prompt_tool_history: PromptToolHistory,
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
@@ -3022,11 +3024,27 @@ impl OpenAIPreprocessor {
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
-        match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
-        }
+        Self::new_with_model_formatter(mdc, tokenizer, None, None)
+    }
+
+    pub(crate) fn new_with_model_formatter(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+        runtime_configs: Option<RuntimeConfigWatch>,
+    ) -> Result<Arc<Self>> {
+        let (PromptFormatter::OAI(formatter), prompt_tool_history) =
+            prompt_formatter_with_history_from_mdc(&mdc)?;
+        Self::new_with_parts_inner(
+            mdc,
+            (formatter, prompt_tool_history),
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+            runtime_configs,
+        )
     }
 
     /// Build the preprocessor used by token-input embedding pipelines.
@@ -3040,7 +3058,7 @@ impl OpenAIPreprocessor {
         let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
         Self::new_with_parts_inner(
             mdc,
-            formatter,
+            (formatter, PromptToolHistory::AsProvided),
             tokenizer,
             Some(embedding_tokenizers),
             None,
@@ -3054,7 +3072,15 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false, None)
+        Self::new_with_parts_inner(
+            mdc,
+            (formatter, PromptToolHistory::AsProvided),
+            tokenizer,
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
     pub fn new_with_parts(
@@ -3074,7 +3100,7 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         Self::new_with_parts_inner(
             mdc,
-            formatter,
+            (formatter, PromptToolHistory::AsProvided),
             tokenizer,
             None,
             speculative_prefill_cancel,
@@ -3093,7 +3119,7 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         Self::new_with_parts_inner(
             mdc,
-            formatter,
+            (formatter, PromptToolHistory::AsProvided),
             tokenizer,
             None,
             speculative_prefill_cancel,
@@ -3108,7 +3134,7 @@ impl OpenAIPreprocessor {
     /// preserving the deployment card's identity and decode defaults.
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
-        formatter: Arc<dyn OAIPromptFormatter>,
+        (formatter, prompt_tool_history): (Arc<dyn OAIPromptFormatter>, PromptToolHistory),
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
@@ -3526,6 +3552,7 @@ impl OpenAIPreprocessor {
 
         Ok(Arc::new(Self {
             formatter,
+            prompt_tool_history,
             tokenizer,
             embedding_tokenizers,
             model_info,
@@ -3702,6 +3729,7 @@ impl OpenAIPreprocessor {
                 tracker,
                 PreprocessRequestOptions::default(),
                 None,
+                None,
             )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
@@ -3722,6 +3750,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
         lora_name: Option<String>,
+        tool_result_indices: Option<&ToolResultIndices>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -3735,8 +3764,15 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let (formatted_prompt, prompt_injected_reasoning) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            off_runtime(|| self.apply_template_and_prefill(request))
-                .with_context(|| "Failed to apply prompt template")?
+            off_runtime(|| {
+                let (prompt, prefill) = self.apply_template_and_prefill(request)?;
+                let prompt = match (prompt, tool_result_indices) {
+                    (Some(prompt), Some(indices)) => Some(indices.apply(prompt)?),
+                    (prompt, _) => prompt,
+                };
+                Ok::<_, anyhow::Error>((prompt, prefill))
+            })
+            .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
@@ -8991,8 +9027,12 @@ impl
             self.runtime_config.reasoning_parser.as_deref(),
         ));
         request
-            .normalize_responses_tools(self.formatter.supports_native_tools(&request))
+            .normalize_responses_tools_for_renderer(
+                self.formatter.supports_native_tools(&request),
+                self.prompt_tool_history,
+            )
             .map_err(|error| invalid_argument_error(error.to_string()))?;
+        let tool_result_indices = self.prompt_tool_history.prepare_request(&mut request);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -9067,6 +9107,7 @@ impl
                     .ok()
                     .flatten()
                     .map(|name| name.as_ref().clone()),
+                Some(&tool_result_indices),
             )
             .instrument(preprocessing.clone())
             .await?;

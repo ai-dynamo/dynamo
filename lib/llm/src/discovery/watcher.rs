@@ -20,8 +20,6 @@ use dynamo_runtime::{
 };
 use dynamo_scheduler::host::PrefillLoadEstimator;
 
-use dynamo_renderer::PromptFormatter;
-
 use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
@@ -35,9 +33,7 @@ use crate::{
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
-    preprocessor::{
-        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
-    },
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest},
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -1701,17 +1697,14 @@ fn worker_set_chat_preprocessor(
     cancellation: &CancellationToken,
     runtime_configs: RuntimeConfigWatch,
 ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
-    let PromptFormatter::OAI(formatter) =
-        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
     // A retained pipeline must stop its warmups when its WorkerSet is retired.
-    OpenAIPreprocessor::new_with_parts_and_runtime_configs(
+    OpenAIPreprocessor::new_with_model_formatter(
         card.clone(),
-        formatter,
         tokenizer,
         Some(cancellation.clone()),
-        runtime_configs,
+        Some(runtime_configs),
     )
-    .context("OpenAIPreprocessor.new_with_parts_and_runtime_configs")
+    .context("build chat preprocessor")
 }
 
 #[cfg(test)]

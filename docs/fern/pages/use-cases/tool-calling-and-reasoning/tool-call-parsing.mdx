@@ -158,11 +158,19 @@ Returned `message.tool_calls` entries use `type: "custom"` with
 the assistant call followed by a `role: "tool"` result with its matching
 `tool_call_id`. Ordinary function tools can appear in the same request.
 
-Responses supports the same capability using its own
+The Responses API uses its own
 [custom-tool API format](https://developers.openai.com/api/docs/guides/function-calling#custom-tools).
-Custom grammar formats are rejected before generation. Streaming custom input is
-buffered until the call completes, then emitted as text in `custom.input`. This
-streamed custom delta is a Dynamo extension to the published
+It accepts `text` and regex/Lark `grammar` formats. Grammar descriptors are
+**advisory**: decoding does not enforce them. See
+[Custom-Tool Grammar Constraints](troubleshooting-tool-calls.md#custom-tool-grammar-constraints)
+for validation requirements and older frontend errors.
+
+Chat Completions accepts only the `text` custom-tool format. It rejects grammar
+formats before generation.
+
+For **Chat Completions streaming**, Dynamo buffers custom input until the call
+completes, then emits it in `custom.input`. This streamed custom delta is a
+Dynamo extension to the published
 [OpenAI Chat streaming schema](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
 The optional `tool_call_dispatch` events currently cover function tools only;
 custom calls arrive through ordinary data chunks.
@@ -211,6 +219,11 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
         **Parser:** `kimi_k3` (alias `kimi-k3`)
 
         **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser. See the [Kimi K3 recipe](../../recipes/model-recipes/kimi-k3.mdx).
+
+        **Responses tool replay:** Replay each returned function-call item with its
+        original `call_id` to preserve a model-emitted bare tool name inside a
+        namespace. The function-call item's `id` is optional. Match each tool
+        result to the call with the same `call_id`.
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">

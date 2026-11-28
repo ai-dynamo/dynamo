@@ -507,6 +507,7 @@ impl WorkerSet {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
+            responses_emit_raw_reasoning: self.card.runtime_config.responses_emit_raw_reasoning(),
             exclude_tools_when_tool_choice_none: self
                 .card
                 .runtime_config

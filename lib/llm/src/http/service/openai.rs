@@ -60,20 +60,25 @@ use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
     decode_base64_to_floats,
 };
+use crate::protocols::agents::{
+    agent_context_header_values_for_session, session_affinity_header_value,
+};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
     agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
-    session_affinity_from_headers, upstream_elapsed_from_headers,
+    upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
-use crate::protocols::common::metadata_upload::UniqueJsonValue;
-use crate::protocols::openai::chat_completions::{
-    aggregator::ChatCompletionAggregator,
-    allowed_tools::{AllowedToolsRequest, ToolAllowlist},
-    tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
+use crate::protocols::common::unique_json::UniqueJsonValue;
+use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::chat_completions::allowed_tools::{
+    AllowedToolsRequest, ToolAllowlist,
+};
+use crate::protocols::openai::chat_completions::tool_call_merge::{
+    ToolCallMergeOutcome, merge_tool_call_chunk,
 };
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
@@ -132,6 +137,9 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
+
+static LEGACY_REASONING_REPLAY: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_RESPONSES_LEGACY_REASONING_REPLAY));
 
 use dynamo_error::http::{
     BackendStatusAction, ClientErrorAction, HttpError, SanitizedError,
@@ -1261,11 +1269,12 @@ where
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
     if let Some(mut agent_context) = agent_context {
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new(agent_context.session_id.as_str()),
+        );
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
-    }
-    if let Some(session_affinity) = session_affinity_from_headers(headers) {
-        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
 }
@@ -4947,8 +4956,42 @@ async fn handler_responses_input_tokens(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
-    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
+    let body = normalize_responses_input("responses input_tokens", &body)?;
+    let request: CountInputTokensRequest =
+        serde_json::from_value(body).map_err(json_deserialize_error)?;
+    let tokens = crate::protocols::openai::responses::estimate_input_tokens(request)
+        .map_err(responses_conversion_error_response)?;
+    Ok(Json(CountInputTokensResponse::new(tokens)).into_response())
+}
+
+fn responses_context_from_headers(
+    request: NvCreateResponse,
+    request_id: String,
+    headers: &HeaderMap,
+    body_affinity: Option<String>,
+    explicit_body_affinity: bool,
+) -> Result<Context<NvCreateResponse>, ErrorResponse> {
+    let session_id = if explicit_body_affinity {
+        body_affinity
+    } else {
+        session_affinity_header_value(headers).or(body_affinity)
+    };
+    let agent = session_id.map(|session_id| {
+        AgentContext::from(agent_context_header_values_for_session(headers, session_id))
+    });
+    context_from_headers_with_agent_context(request, request_id, headers, agent, |request| {
+        Some(classify_response_request(request))
+    })
+}
+
+fn normalize_responses_input(
+    endpoint: &'static str,
+    body: &[u8],
+) -> Result<serde_json::Value, ErrorResponse> {
+    let UniqueJsonValue(mut body_value) = parse_json_request(endpoint, body)?;
+    crate::protocols::openai::responses::request_compat::normalize_input(&mut body_value)
+        .map_err(|error| responses_conversion_error_response(error.into()))?;
+    Ok(body_value)
 }
 
 /// OpenAI Responses Request Handler
@@ -4960,7 +5003,16 @@ async fn handler_responses(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateResponse = parse_json_request("responses", &body)?;
+    let body_value = normalize_responses_input("responses", &body)?;
+    let body_affinity =
+        crate::protocols::openai::responses::request_compat::body_affinity(&body_value)
+            .map(str::to_owned);
+    let explicit_body_affinity = body_value
+        .pointer("/conversation_params/conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let mut request: NvCreateResponse =
+        serde_json::from_value(body_value).map_err(json_deserialize_error)?;
 
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
@@ -5002,10 +5054,13 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request =
-        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
-            Some(classify_response_request(request))
-        })?;
+    let mut request = responses_context_from_headers(
+        request,
+        request_id,
+        &headers,
+        body_affinity,
+        explicit_body_affinity,
+    )?;
     attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
@@ -5132,7 +5187,10 @@ async fn responses(
             .into_iter()
             .map(|tool| tool.inner)
             .collect();
-    let response_params = ResponseParams {
+    let mut response_params = ResponseParams {
+        legacy_reasoning_replay: *LEGACY_REASONING_REPLAY,
+        preserve_tool_spelling: false,
+        emit_backend_reasoning: false,
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
             &loaded_tools,
             Some(&request.inner.input),
@@ -5215,21 +5273,6 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let mut request = context.map(|mut _req| chat_request);
-    if response_params.max_output_tokens.is_none() {
-        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
-    }
-    // Clients get public tool names and namespaces, not backend aliases;
-    // request traces record them. Skip the map clone when traces are off.
-    if crate::request_trace::policy().emit_request_end_records()
-        && let Some(tool_names) = response_params.tool_names.clone()
-    {
-        request.insert(
-            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
-            crate::request_trace::ClientToolNames(std::sync::Arc::new(tool_names)),
-        );
-    }
-
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let (engine, parsing_options) = state
@@ -5240,6 +5283,24 @@ async fn responses(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+
+    response_params.emit_backend_reasoning = parsing_options.responses_emit_raw_reasoning;
+    response_params.preserve_tool_spelling =
+        parsing_options.responses_preserve_bare_tool_spelling();
+
+    let mut request = context.map(|mut _req| chat_request);
+    if response_params.max_output_tokens.is_none() {
+        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
+
+    if crate::request_trace::policy().emit_request_end_records()
+        && let Some(tool_names) = response_params.tool_names.clone()
+    {
+        request.insert(
+            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
+            crate::request_trace::ClientToolNames(std::sync::Arc::new(tool_names)),
+        );
+    }
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
@@ -6969,6 +7030,129 @@ pub fn audios_router(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn responses_affinity_preserves_canonical_parent_for_the_selected_session() {
+        for (session_header, body, explicit, canonical_parent, expected, expected_parent) in [
+            (
+                None,
+                Some("body"),
+                false,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
+            (
+                Some("x-session-id"),
+                None,
+                false,
+                Some("parent"),
+                "child",
+                Some("parent"),
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                false,
+                Some("child"),
+                "child",
+                None,
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                false,
+                None,
+                "child",
+                Some("native-parent"),
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                true,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
+            (
+                Some("x-dynamo-session-id"),
+                Some("body"),
+                true,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(name) = session_header {
+                headers.insert(name, "child".parse().unwrap());
+                headers.insert("x-parent-session-id", "native-parent".parse().unwrap());
+            }
+            if let Some(parent) = canonical_parent {
+                headers.insert("x-dynamo-parent-session-id", parent.parse().unwrap());
+            }
+            headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+            let context = responses_context_from_headers(
+                NvCreateResponse::default(),
+                "r".into(),
+                &headers,
+                body.map(str::to_owned),
+                explicit,
+            )
+            .unwrap();
+            let affinity = context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .unwrap();
+            assert_eq!(affinity.as_str(), expected);
+            let agent = context
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap();
+            assert_eq!(agent.session_id, expected);
+            assert_eq!(agent.parent_session_id.as_deref(), expected_parent);
+            assert_eq!(agent.session_final, Some(true));
+        }
+    }
+
+    #[test]
+    fn cache_and_correlation_hints_do_not_establish_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", "gateway-request-id".parse().unwrap());
+        headers.insert("x-dynamo-parent-session-id", "parent".parse().unwrap());
+        headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+        for conversation in [None, Some("conversation")] {
+            let body = serde_json::json!({
+                "prompt_cache_key": "x".repeat(257),
+                "conversation_params": {"conversation_id": conversation}
+            });
+            let affinity =
+                crate::protocols::openai::responses::request_compat::body_affinity(&body)
+                    .map(str::to_owned);
+            let request = responses_context_from_headers(
+                NvCreateResponse::default(),
+                "r".into(),
+                &headers,
+                affinity,
+                conversation.is_some(),
+            )
+            .unwrap();
+            assert_eq!(
+                request
+                    .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                    .ok()
+                    .as_deref()
+                    .map(SessionAffinityId::as_str),
+                conversation
+            );
+            let agent = request.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY).ok();
+            assert_eq!(
+                agent.as_deref().map(|agent| agent.session_id.as_str()),
+                conversation,
+            );
+            if let Some(agent) = agent {
+                assert_eq!(agent.parent_session_id.as_deref(), Some("parent"));
+                assert_eq!(agent.session_final, Some(true));
+            }
+        }
+    }
 
     use super::*;
     use crate::discovery::ModelManagerError;

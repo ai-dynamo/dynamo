@@ -31,6 +31,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Whether Responses exposes raw reasoning without a request opt-in.
+pub const RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY: &str = "responses_emit_raw_reasoning";
+
 /// Runtime-data key for the largest number of per-token log-probability
 /// alternatives the engine returns, as a non-negative integer (vLLM's
 /// `max_logprobs`). The frontend applies it to chat and responses
@@ -529,6 +532,32 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    pub(crate) fn responses_raw_reasoning_override(&self) -> Option<bool> {
+        self.runtime_data
+            .contains_key(RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY)
+            .then(|| self.runtime_flag_enabled(RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY))
+    }
+
+    pub(crate) fn responses_emit_raw_reasoning(&self) -> bool {
+        use crate::protocols::openai::chat_completions::unified_parser::{
+            GLM47_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY, canonical_family,
+        };
+
+        if let Some(enabled) = self.responses_raw_reasoning_override() {
+            return enabled;
+        }
+
+        // Legacy deployment profiles without an explicit policy use the reasoning
+        // parser when configured. A tool parser cannot override that channel.
+        matches!(
+            self.reasoning_parser
+                .as_deref()
+                .or(self.tool_call_parser.as_deref())
+                .and_then(canonical_family),
+            Some(KIMI_K3_UNIFIED_FAMILY | GLM47_UNIFIED_FAMILY)
+        )
+    }
+
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
         crate::protocols::openai::chat_completions::unified_parser::configured_family(
@@ -930,6 +959,30 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+
+    #[test]
+    fn responses_reasoning_default_follows_deployment_policy() {
+        let mut config = ModelRuntimeConfig {
+            tool_call_parser: Some("glm47".into()),
+            reasoning_parser: Some("qwen3".into()),
+            ..Default::default()
+        };
+        assert!(!config.responses_emit_raw_reasoning());
+        config.runtime_data.insert(
+            RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY.into(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(config.responses_emit_raw_reasoning());
+
+        config.reasoning_parser = Some("glm45".into());
+        config.runtime_data.insert(
+            RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY.into(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(!config.responses_emit_raw_reasoning());
+        config.runtime_data.clear();
+        assert!(config.responses_emit_raw_reasoning());
+    }
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

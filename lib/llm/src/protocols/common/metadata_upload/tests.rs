@@ -84,9 +84,18 @@ fn rejects_duplicate_fields_in_raw_json() {
     ] {
         let error = serde_json::from_str::<MetadataUpload>(input).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("duplicate"), "{input}: {error}");
+        assert!(
+            message.contains("duplicate metadata_upload field"),
+            "{error}"
+        );
         assert!(!message.contains("s3://") && !message.contains("X-Token"));
     }
+
+    let malformed = r#"{"url":"s3://private-bucket\q"}"#;
+    let error = serde_json::from_str::<MetadataUpload>(malformed).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("invalid metadata_upload JSON"), "{error}");
+    assert!(!message.contains("private-bucket"));
 }
 
 #[test]

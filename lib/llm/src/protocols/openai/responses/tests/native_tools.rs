@@ -338,6 +338,7 @@ fn python_adapter_preserves_native_catalog_and_engine_identities() {
     let python = chat
         .python_chat_processor_request_json(&Default::default())
         .unwrap();
+    assert!(python.get("positional_tool_history").is_none());
     let native = &python["responses_native_tools"];
     assert_eq!(native["template_tools"][0]["type"], "namespace");
     assert_eq!(native["template_tools"][0]["defer_loading"], true);
@@ -358,6 +359,56 @@ fn python_adapter_preserves_native_catalog_and_engine_identities() {
             .unwrap()
             .get("responses_native_tools")
             .is_none()
+    );
+}
+
+#[test]
+fn python_adapter_merges_split_tool_results_for_kimi_k3_alias() {
+    let response: NvCreateResponse = serde_json::from_value(json!({
+        "model":"team/Kimi--K3",
+        "input":[
+            {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c1","output":"first"},
+            {"type":"function_call_output","call_id":"c1","output":"second"}
+        ]
+    }))
+    .unwrap();
+    let chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+    let python = chat
+        .python_chat_processor_request_json(&Default::default())
+        .unwrap();
+    let history = python["positional_tool_history"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1]["tool_call_id"], "c1");
+    assert_eq!(history[1]["content"], "first\nsecond");
+    assert_eq!(python["messages"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn sparse_positional_tool_history_preserves_rendered_call_index() {
+    let response = request(
+        json!([]),
+        json!([
+            {"type":"message","role":"user","content":"Read both files"},
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{\"path\":\"one.txt\"}"},
+            {"type":"function_call","call_id":"b","name":"read","arguments":"{\"path\":\"two.txt\"}"},
+            {"type":"function_call_output","call_id":"b","output":"second result"}
+        ]),
+    );
+    let mut chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+    let indices = PromptToolHistory::Positional.prepare_request(&mut chat);
+
+    let renderer = dynamo_renderer::kimi_k3::KimiK3Formatter::new(false);
+    let prompt = renderer.render_prompt(&chat).unwrap();
+    let prompt = indices.apply(prompt).unwrap().into_text();
+    assert!(prompt.contains("<|open|>call tool=\"read\" index=\"1\"<|sep|>"));
+    assert!(prompt.contains("<|open|>call tool=\"read\" index=\"2\"<|sep|>"));
+    assert_eq!(prompt.matches("<|open|>message role=\"tool\"").count(), 1);
+    assert!(
+        prompt.contains(
+            "<|open|>message role=\"tool\" tool=\"read\" index=\"2\"<|sep|>second result"
+        ),
+        "{prompt}"
     );
 }
 

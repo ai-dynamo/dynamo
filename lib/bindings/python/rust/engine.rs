@@ -271,6 +271,14 @@ impl
                     if let Some(tools) = &request.chat_template_tools {
                         dict.set_item("chat_template_tools", pythonize(py, tools.as_ref())?)?;
                     }
+                    let positional_history = request
+                        .python_positional_tool_history(&runtime_config)
+                        .map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(error.to_string())
+                        })?;
+                    if let Some(history) = positional_history {
+                        dict.set_item("positional_tool_history", pythonize(py, &history)?)?;
+                    }
                     for (key, value) in request.passthrough_extra_fields() {
                         dict.set_item(key, pythonize(py, value)?)?;
                     }

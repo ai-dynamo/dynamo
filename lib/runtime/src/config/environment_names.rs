@@ -500,6 +500,9 @@ pub mod llm {
     /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
+    /// Enable base64 Responses reasoning replay for legacy TensorRT-LLM clients.
+    pub const DYN_RESPONSES_LEGACY_REASONING_REPLAY: &str = "DYN_RESPONSES_LEGACY_REASONING_REPLAY";
+
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
@@ -1169,6 +1172,7 @@ mod tests {
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+            llm::DYN_RESPONSES_LEGACY_REASONING_REPLAY,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_RUNTIME_LOAD_ENABLED,
             llm::DYN_LORA_DOWNLOADER_PLUGIN,

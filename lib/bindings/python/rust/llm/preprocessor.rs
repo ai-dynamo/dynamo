@@ -6,6 +6,11 @@ use std::time::Duration;
 
 use llm_rs::preprocessor::media::{MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher};
 
+#[pyfunction]
+pub(crate) fn _is_kimi_k3_prompt_hint(hint: &str) -> bool {
+    llm_rs::preprocessor::prompt::is_kimi_k3_prompt_hint(hint)
+}
+
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MediaDecoder {
