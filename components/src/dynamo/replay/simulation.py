@@ -115,8 +115,11 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
-            # The AIS model config carries these to replay timing and capacity.
-            supported_engine_model_controls=("gemm_quant_mode", "kvcache_quant_mode"),
+            # The AIS timing config carries every control to the estimator the
+            # mocker queries, so the engine runner's list applies here too.
+            supported_engine_model_controls=(
+                engine_capabilities.supported_engine_model_controls
+            ),
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:

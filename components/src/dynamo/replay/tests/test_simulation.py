@@ -752,14 +752,9 @@ def test_factory_supports_native_trtllm_disagg() -> None:
 
 
 @pytest.mark.parametrize(
-    "control,accepted",
-    [
-        ("kvcache_quant_mode", True),
-        ("gemm_quant_mode", True),
-        ("fmha_quant_mode", False),
-    ],
+    "control", ["kvcache_quant_mode", "gemm_quant_mode", "fmha_quant_mode"]
 )
-def test_factory_accepts_only_kv_and_gemm_quant_modes(control, accepted) -> None:
+def test_factory_accepts_quant_mode_controls(control) -> None:
     deployment = replace(
         _agg_deployment(),
         agg_engine_args={
@@ -776,12 +771,30 @@ def test_factory_accepts_only_kv_and_gemm_quant_modes(control, accepted) -> None
         workload={"isl": 100, "osl": 20},
         goal={"target": "throughput"},
     )
+
+    simulation.DynamoReplayRunnerFactory().capabilities().require_compatible(spec)
+
+
+def test_factory_advertises_the_engine_runner_model_controls(monkeypatch) -> None:
+    engine = simulation.EngineReplayRunnerFactory().capabilities()
+    assert "fmha_quant_mode" in engine.supported_engine_model_controls
+
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
-    if accepted:
-        capabilities.require_compatible(spec)
-    else:
-        with pytest.raises(ValueError, match="engine model controls"):
-            capabilities.require_compatible(spec)
+
+    assert (
+        capabilities.supported_engine_model_controls
+        == engine.supported_engine_model_controls
+    )
+
+    # A control the engine runner adds later needs no change here.
+    native = replace(engine, supported_engine_model_controls=("future_control",))
+    monkeypatch.setattr(
+        simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
+    )
+
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+
+    assert capabilities.supported_engine_model_controls == ("future_control",)
 
 
 def test_factory_follows_engine_capabilities_with_adapter_constraints(
