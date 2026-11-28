@@ -821,6 +821,11 @@ impl NvCreateChatCompletionRequest {
             normalized.inner.normalize_custom_tools()?;
             return normalized.validate_with_max_top_logprobs(max_top_logprobs);
         }
+        if validate::needs_empty_tools_normalization(&self.inner) {
+            let mut normalized = self.clone();
+            validate::normalize_empty_tools(&mut normalized.inner);
+            return ValidateRequest::validate(&normalized);
+        }
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
@@ -2025,11 +2030,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_empty_tools_array() {
-        const EMPTY_TOOLS: &str =
-            "tools array cannot be empty; omit the field entirely to disable tool use";
+    fn test_empty_tools_array_is_treated_as_omitted() {
+        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-        for tool_choice in [None, Some("required")] {
+        // Same table as vLLM `ChatCompletionRequest.check_tool_usage`.
+        for (tool_choice, expected) in [
+            (None, None),
+            (Some("auto"), Some(ChatCompletionToolChoiceOption::None)),
+            (Some("required"), Some(ChatCompletionToolChoiceOption::None)),
+            (Some("none"), Some(ChatCompletionToolChoiceOption::None)),
+        ] {
             let mut request_json = json!({
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -2038,14 +2048,37 @@ mod tests {
             if let Some(tool_choice) = tool_choice {
                 request_json["tool_choice"] = tool_choice.into();
             }
-            let request: NvCreateChatCompletionRequest =
+            let mut request: NvCreateChatCompletionRequest =
                 serde_json::from_value(request_json).expect("Failed to deserialize request");
 
-            let err = ValidateRequest::validate(&request).expect_err("empty tools must fail");
-            assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|err| panic!("tool_choice={tool_choice:?}: {err}"));
+            assert!(validate::normalize_empty_tools(&mut request.inner));
+            assert_eq!(request.inner.tools, None, "tool_choice={tool_choice:?}");
+            assert_eq!(
+                request.inner.tool_choice, expected,
+                "tool_choice={tool_choice:?}"
+            );
         }
+    }
 
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+    #[test]
+    fn test_empty_tools_array_with_named_tool_choice_is_rejected() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [],
+            "tool_choice": {"type": "function", "function": {"name": "lookup"}}
+        }))
+        .expect("Failed to deserialize request");
+
+        assert!(!validate::normalize_empty_tools(&mut request.inner));
+        ValidateRequest::validate(&request).expect_err("a named tool needs a tools entry");
+    }
+
+    #[test]
+    fn test_empty_tools_array_keeps_system_message_tools() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
@@ -2055,8 +2088,14 @@ mod tests {
             "tool_choice": "required"
         }))
         .expect("Failed to deserialize request");
+
+        assert!(!validate::normalize_empty_tools(&mut request.inner));
         ValidateRequest::validate(&request)
             .expect("empty tools with system-message tools should validate");
+        let tools = request
+            .validated_effective_tools()
+            .expect("system-message tools should be effective");
+        assert_eq!(tools.len(), 1);
     }
 
     #[test]

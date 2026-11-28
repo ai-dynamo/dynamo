@@ -38,6 +38,7 @@ from dynamo.frontend.prepost import (
     _prepare_request,
     build_tool_call_guided_decoding,
 )
+from dynamo.frontend.utils import normalize_empty_tools
 from dynamo.llm.exceptions import (
     HttpError,
     InvalidArgument,
@@ -1406,6 +1407,55 @@ def cache_salt_processor(vllm_processor_module, monkeypatch):
         return processor, routed_engine
 
     return make_processor
+
+
+@pytest.mark.asyncio
+async def test_generator_treats_empty_tools_as_omitted(
+    vllm_processor_module, monkeypatch
+):
+    """The processor bypasses the Rust preprocessor, so it applies the
+    empty-tools rule on entry, to a copy of the caller's request."""
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    async def preprocess(request, **kwargs):
+        seen.append(request)
+        raise Stop
+
+    monkeypatch.setattr(vllm_processor_module, "preprocess_chat_request", preprocess)
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields={}, renderer=None, model_config=None
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    for tool_choice, expected in [
+        ("required", "none"),
+        ("auto", "none"),
+        ({"type": "function", "function": {"name": "get_weather"}}, None),
+    ]:
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [],
+            "tool_choice": tool_choice,
+        }
+        original = deepcopy(request)
+        with pytest.raises(Stop):
+            await anext(processor.generator(request))
+        assert request == original
+        if expected is None:
+            # A named choice keeps the empty list so validation reports it.
+            assert seen[-1] == original
+        else:
+            assert "tools" not in seen[-1]
+            assert seen[-1]["tool_choice"] == expected
 
 
 @pytest.mark.asyncio
@@ -5031,6 +5081,39 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == expected
+
+    # The fast path (model_construct) skips vLLM's check_tool_usage, so an
+    # explicit `tools: []` with a forced choice and a client constraint trips
+    # the forced-choice conflict check. The processor normalizes on entry
+    # (normalize_empty_tools), after which the constraint is kept.
+    @pytest.mark.parametrize("tool_choice", ["auto", "required"])
+    @pytest.mark.asyncio
+    async def test_empty_tools_keep_client_guided_regex(self, tokenizer, tool_choice):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [],
+            "tool_choice": tool_choice,
+            "guided_regex": "[a-z]+",
+        }
+        kwargs = {
+            "tokenizer": tokenizer,
+            "renderer": SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            "tool_parser_class": None,
+        }
+        if tool_choice == "required" and prepost_module.SKIP_REQUEST_VALIDATION:
+            with pytest.raises(InvalidArgument):
+                await prepost_module.preprocess_chat_request(dict(request), **kwargs)
+
+        result = await prepost_module.preprocess_chat_request(
+            normalize_empty_tools(request), **kwargs
+        )
+
+        assert result.guided_decoding == {"regex": "[a-z]+"}
 
     # A forced tool choice with a client-provided structured_outputs constraint
     # is a conflict: reject it rather than silently reuse or replace it. (The

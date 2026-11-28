@@ -2367,6 +2367,43 @@ mod tests {
         assert_eq!(hermes.inner.tools.as_ref().unwrap().len(), 1);
     }
 
+    /// The preprocessor promotes legacy declarations before it treats an explicit
+    /// `tools: []` as omitted, so a promoted tool keeps a required choice in force.
+    #[test]
+    fn beam_promotion_precedes_empty_tools_normalization() {
+        use crate::protocols::openai::validate::normalize_empty_tools;
+        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+        let declare = |parser: &str| {
+            let mut request = request(json!({"tools": [], "tool_choice": "required"}));
+            request.chat_template_args = Some(std::collections::HashMap::from([(
+                "builtin_tools".to_string(),
+                json!([{"name": "lookup", "parameters": {"type": "object", "properties": {}}}]),
+            )]));
+            declare_legacy_builtin_tools_for_beam(&mut request, Some(parser), None);
+            normalize_empty_tools(&mut request.inner);
+            request
+        };
+
+        let beam = declare("beam");
+        assert_eq!(
+            beam.inner.tools.as_ref().unwrap()[0].function.name,
+            "lookup"
+        );
+        assert_eq!(
+            beam.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+        );
+
+        // Off the Beam route nothing is promoted, so the empty list means "no tools".
+        let hermes = declare("hermes");
+        assert_eq!(hermes.inner.tools, None);
+        assert_eq!(
+            hermes.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        );
+    }
+
     /// With structural tags on (the default-on deployment shape), the open final
     /// channel still gets Beam's channel-aware grammar — only the answer — not the
     /// generic builder's fresh-turn grammar, which would make the model emit an analysis

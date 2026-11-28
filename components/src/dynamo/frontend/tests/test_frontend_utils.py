@@ -10,6 +10,7 @@ from dynamo.frontend.utils import (
     handle_engine_error,
     make_backend_error,
     make_internal_error,
+    normalize_empty_tools,
     request_id_from_context,
     resolve_chat_template,
     validate_legacy_guided_decoding_constraints,
@@ -210,3 +211,37 @@ class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must 
     )
     def test_unrelated_errors_are_left_alone(self, text):
         assert backend_invalid_argument_to_http_error(ValueError(text)) is None
+
+
+class TestNormalizeEmptyTools:
+    """Same table as vLLM ChatCompletionRequest.check_tool_usage."""
+
+    @pytest.mark.parametrize(
+        "tool_choice, expected",
+        [(None, None), ("auto", "none"), ("required", "none"), ("none", "none")],
+    )
+    def test_empty_tools_are_dropped(self, tool_choice, expected):
+        request = {"model": "m", "tools": []}
+        if tool_choice is not None:
+            request["tool_choice"] = tool_choice
+
+        normalized = normalize_empty_tools(request)
+
+        assert "tools" not in normalized
+        assert normalized.get("tool_choice") == expected
+        assert request["tools"] == [], "the caller's request is not mutated"
+
+    @pytest.mark.parametrize(
+        "request_",
+        [
+            {
+                "tools": [],
+                "tool_choice": {"type": "function", "function": {"name": "f"}},
+            },
+            {"tools": [{"type": "function", "function": {"name": "f"}}]},
+            {"tool_choice": "required"},
+        ],
+        ids=["named", "non-empty", "omitted"],
+    )
+    def test_other_requests_are_unchanged(self, request_):
+        assert normalize_empty_tools(request_) is request_
