@@ -24,6 +24,7 @@ from tests.utils.payloads import (
     EngineFailurePayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
+    HttpErrorPayload,
     ImagesAccountingPayload,
     ImagesPayload,
     ImageTokenMetricsPayload,
@@ -33,6 +34,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
+    ReasoningChatPayload,
     ResponsesPayload,
     ResponsesPayloadWithLogprobs,
     ResponsesStreamPayload,
@@ -43,6 +45,8 @@ from tests.utils.payloads import (
     SGLangMetricsPayload,
     StopStringChatPayload,
     StreamingChatPayload,
+    StreamingReasoningChatPayload,
+    StreamingStructuredOutputPayload,
     StreamingToolCallingChatPayload,
     ToolCallingChatPayload,
     TRTLLMMetricsPayload,
@@ -971,6 +975,143 @@ def chat_logprobs_and_structured_output_payloads(
         needs_token_ids=True,
     )
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+# Nested object, enums, a bounded array, an integer and a boolean: each is a
+# separate grammar rule, and the response is checked against the whole schema.
+_DEPLOYMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": ["api", "worker"]},
+                "replicas": {"type": "integer"},
+            },
+            "required": ["name", "replicas"],
+            "additionalProperties": False,
+        },
+        "regions": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["us", "eu", "ap"]},
+            "minItems": 1,
+            "maxItems": 3,
+        },
+        "healthy": {"type": "boolean"},
+    },
+    "required": ["service", "regions", "healthy"],
+    "additionalProperties": False,
+}
+
+
+def _json_schema_format(name: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    return {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}
+
+
+def structured_output_payloads() -> list[BasePayload]:
+    """A nested JSON Schema, buffered and streamed, and an invalid schema."""
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Describe a healthy deployment of the api service "
+                "with three replicas in the us and eu regions.",
+            }
+        ],
+        "max_tokens": 128,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "response_format": _json_schema_format("deployment", _DEPLOYMENT_SCHEMA),
+    }
+    nested = GuidedDecodingChatPayload(
+        body=body,
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason="stop",
+        max_attempts=3,
+    )
+    streamed = StreamingStructuredOutputPayload(
+        body={**body, "stream": True},
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason="stop",
+        max_attempts=3,
+    )
+    invalid = HttpErrorPayload(
+        body={
+            **body,
+            "response_format": _json_schema_format(
+                "invalid",
+                {"type": "object", "properties": {"ok": {"type": "not-a-type"}}},
+            ),
+        },
+        endpoint="/v1/chat/completions",
+        expected_response=[],
+        expected_log=[],
+    )
+    return [nested, streamed, invalid]
+
+
+def reasoning_payloads() -> list[BasePayload]:
+    """Thinking on: reasoning and answer split, buffered, streamed, and with a schema.
+
+    Needs a reasoning model served with Dynamo's reasoning parser, and for the
+    schema case the engine's parser too, so the grammar starts after the thinking.
+    """
+    # A question that needs little thought: arithmetic makes Qwen3-0.6B second-guess
+    # itself, sometimes past max_tokens.
+    question = "What is the capital of France?"
+    body = {
+        "messages": [{"role": "user", "content": f"{question} Answer in one word."}],
+        # Room to finish thinking: the answer must be complete, not cut off.
+        "max_tokens": 2048,
+        # Qwen3's recommended thinking-mode sampling: greedy decoding makes
+        # Qwen3-0.6B repeat itself until max_tokens.
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    # "source" is required but not in the prompt, so only an enforced grammar
+    # produces it: a model that merely follows the prompt fails the schema.
+    answer_schema = {
+        "type": "object",
+        "properties": {
+            "capital": {"type": "string"},
+            "source": {"type": "string", "enum": ["dynamo-sidecar-e2e"]},
+        },
+        "required": ["capital", "source"],
+        "additionalProperties": False,
+    }
+    # No expected answer: these check how Dynamo splits the reply, not the model's
+    # knowledge. Sampling varies, so retry as tests/README.md asks for model output.
+    return [
+        ReasoningChatPayload(
+            body=body, expected_response=[], expected_log=[], max_attempts=3
+        ),
+        StreamingReasoningChatPayload(
+            body={**body, "stream": True},
+            expected_response=[],
+            expected_log=[],
+            max_attempts=3,
+        ),
+        ReasoningChatPayload(
+            body={
+                **body,
+                # Ask for the JSON the grammar enforces: a prompt that wants a bare
+                # word makes the model stall in the grammar's free whitespace.
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f'{question} Reply as JSON: {{"capital": <name>}}',
+                    }
+                ],
+                "response_format": _json_schema_format("capital", answer_schema),
+            },
+            expected_response=[],
+            expected_log=[],
+            max_attempts=3,
+        ),
+    ]
 
 
 def forced_tool_call_payloads() -> list[BasePayload]:
