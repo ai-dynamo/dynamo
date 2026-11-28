@@ -36,6 +36,24 @@ impl LoraFilter {
         }
     }
 
+    /// Workers in `available` that report `lora_name` as loaded, in `available` order.
+    fn live_loaded(
+        observed: &LoraObservedSnapshot,
+        lora_name: &str,
+        available: &[u64],
+    ) -> Vec<u64> {
+        let loaded_ids: HashSet<u64> = observed
+            .get_loaded_workers(lora_name)
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+        available
+            .iter()
+            .copied()
+            .filter(|id| loaded_ids.contains(id))
+            .collect()
+    }
+
     /// Bounded fallback for an existing routing-table entry whose own replica workers are all
     /// unavailable (worker removal / controller lag). Instead of widening to EVERY available worker
     /// — which scatters adapter traffic across the cluster and forces cold loads on workers the
@@ -54,22 +72,14 @@ impl LoraFilter {
         lora_name: &str,
         available: &[u64],
     ) -> Vec<u64> {
-        let loaded = observed.get_loaded_workers(lora_name);
-        if !loaded.is_empty() {
-            let loaded_ids: HashSet<u64> = loaded.iter().map(|w| w.worker_id).collect();
-            let live_loaded: Vec<u64> = available
-                .iter()
-                .copied()
-                .filter(|id| loaded_ids.contains(id))
-                .collect();
-            if !live_loaded.is_empty() {
-                tracing::debug!(
-                    lora = lora_name,
-                    count = live_loaded.len(),
-                    "Replica workers unavailable; narrowed to known-loaded live workers"
-                );
-                return live_loaded;
-            }
+        let live_loaded = Self::live_loaded(observed, lora_name, available);
+        if !live_loaded.is_empty() {
+            tracing::debug!(
+                lora = lora_name,
+                count = live_loaded.len(),
+                "Replica workers unavailable; narrowed to known-loaded live workers"
+            );
+            return live_loaded;
         }
         // Deterministic single HRW pin among available workers (highest score, ties broken by id).
         if let Some(pin) = available.iter().copied().max_by(|&a, &b| {
@@ -92,7 +102,8 @@ impl LoraFilter {
     /// Logic:
     /// - `lora_name` is None: return all workers (base model request)
     /// - Active entry: prefer loaded workers in replica set, fall back to full replica set
-    /// - Inactive entry: return single HRW-pinned worker (cold-start determinism)
+    /// - Inactive entry: return single HRW-pinned worker (cold-start determinism), unless the pin
+    ///   does not have the adapter loaded and a live worker does; then return those live workers
     /// - Not in routing table: prefer known-loaded workers, fall back to all workers
     pub fn filter_worker_ids_for_lora(
         &self,
@@ -123,6 +134,8 @@ impl LoraFilter {
         selected
     }
 
+    /// Applies the routing-table rules documented on [`Self::filter_worker_ids_for_lora`] to
+    /// workers that already passed `eligible_workers`.
     fn filter_observed(
         &self,
         observed: &LoraObservedSnapshot,
@@ -203,10 +216,21 @@ impl LoraFilter {
             );
             self.bounded_fallback(observed, lora_name, available)
         } else {
-            // Inactive: cold-start pin
+            // Inactive: cold-start pin. The pin is ranked without the loaded set, and backends that
+            // serve only registered adapters reject it, so prefer live workers that have it loaded.
             if let Some(pin_id) = config.replica_set.first().map(|w| w.worker_id)
                 && available.contains(&pin_id)
             {
+                let live_loaded = Self::live_loaded(observed, lora_name, available);
+                if !live_loaded.is_empty() && !live_loaded.contains(&pin_id) {
+                    tracing::debug!(
+                        lora = lora_name,
+                        worker_id = pin_id,
+                        count = live_loaded.len(),
+                        "Cold-start pin does not have the adapter loaded; narrowed to known-loaded live workers"
+                    );
+                    return live_loaded;
+                }
                 tracing::debug!(
                     lora = lora_name,
                     worker_id = pin_id,
@@ -502,6 +526,58 @@ mod tests {
             again.keys().collect::<Vec<_>>(),
             "bounded HRW pin must be deterministic"
         );
+    }
+
+    fn set_inactive_pin(rt: &LoraRoutingTable, lora_name: &str, pin: u64) {
+        rt.update_allocation(
+            lora_name.to_string(),
+            LoraReplicaConfig {
+                lora_name: lora_name.to_string(),
+                replica_factor: 1,
+                replica_set: vec![make_worker(pin)],
+                updated_at: Instant::now(),
+                is_active: false,
+            },
+        );
+    }
+
+    #[test]
+    fn test_inactive_pin_without_adapter_prefers_live_loaded_worker() {
+        // A backend that serves only registered adapters would reject the request on the pin.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 1);
+        st.handle_mdc_addition(make_worker(1), &make_lora_info("lora-a"));
+        st.handle_mdc_addition(make_worker(3), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![3]);
+    }
+
+    #[test]
+    fn test_inactive_pin_with_adapter_keeps_pin() {
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 2);
+        st.handle_mdc_addition(make_worker(2), &make_lora_info("lora-b"));
+        st.handle_mdc_addition(make_worker(3), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![2]);
+    }
+
+    #[test]
+    fn test_inactive_pin_adapter_loaded_only_on_unavailable_worker_keeps_pin() {
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 2);
+        st.handle_mdc_addition(make_worker(9), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![2]);
     }
 
     #[test]
