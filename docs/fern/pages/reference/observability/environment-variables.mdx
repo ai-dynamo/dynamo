@@ -341,7 +341,11 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">
-  Seeding-text dataset: a local path or an `http(s)` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code.
+  Seeding-text dataset: a local path or an `https` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code. Any other URL requires `DYN_BENCH_KV_WARMUP_SHA256`. A redirect must also go to an `https` URL, or to plain `http` when `DYN_BENCH_KV_WARMUP_ALLOW_HTTP` is on.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_ALLOW_HTTP" type="boolean" default="false">
+  Allows a plain `http` URL in `DYN_BENCH_KV_WARMUP_DATASET`. Without it, a plain `http` URL is a configuration error: KV warm-up is skipped, and a benchmark run with `DYN_BENCH_PREFILL_CONTENT=sharegpt` or `sharegpt_chain` fails at startup. `DYN_BENCH_KV_WARMUP_SHA256` is still required.
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_CACHE_DIR" type="string">
@@ -349,7 +353,7 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_SHA256" type="string">
-  Expected sha256 of the dataset file. Required to pin a custom `DYN_BENCH_KV_WARMUP_DATASET` download; overrides the built-in digest for the default dataset.
+  Expected sha256 of the dataset file. Required for any `DYN_BENCH_KV_WARMUP_DATASET` URL other than the default; without it, nothing is downloaded, KV warm-up is skipped, and a benchmark run with `DYN_BENCH_PREFILL_CONTENT=sharegpt` or `sharegpt_chain` fails at startup. The digest is checked after a download and on every reuse of the cached file. Overrides the built-in digest for the default dataset. Not used for a local path.
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_THRESHOLD" type="integer" default="1000000">
