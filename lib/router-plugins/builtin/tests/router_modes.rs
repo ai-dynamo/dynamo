@@ -5,7 +5,9 @@ mod support;
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
+use dynamo_kv_router::plugins::host::{
+    HostedSelectionRequest, RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt,
+};
 use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::router_modes::{LEAST_LOADED, RANDOM, ROUND_ROBIN};
 use dynamo_router_policies::{default_registry, register, with_defaults};
@@ -83,4 +85,39 @@ fn routing_modes_select_eligible_workers_on_the_kv_path() {
             );
         }
     }
+}
+
+#[test]
+fn sticky_min_load_picks_from_active_request_counts() {
+    let mut registry = default_registry();
+    register(&mut registry).unwrap();
+    let factory = registry.resolve_type("dynamo-sticky-min-load").unwrap();
+    let policy = || {
+        factory(WorkerSelectionPolicyContext::new(
+            &SelectionConfig::default(),
+            WorkerType::Decode,
+            RoutingPartitionRef::new("model", "group"),
+        ))
+    };
+
+    // The fixture gives worker 0 the fewest active requests on both ranks.
+    let (workers, request) = fixture(4, 64);
+    let selected = policy()
+        .select_worker(selection_input(&workers, &request, 16))
+        .unwrap();
+    assert_eq!(selected.worker.worker_id, 0);
+
+    // A policy whose picker declares `LOAD` stays on the KV path.
+    let Ok(picker) = policy().into_hosted_picker() else {
+        panic!("sticky min-load should declare no KV-only inputs");
+    };
+    let active_requests = |worker_id: u64| [3, 1, 4][worker_id as usize];
+    let selected = picker
+        .select(
+            &[0, 1, 2],
+            Some(&active_requests),
+            &HostedSelectionRequest::new(16),
+        )
+        .unwrap();
+    assert_eq!(selected, 1);
 }

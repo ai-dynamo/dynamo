@@ -13,6 +13,7 @@
 //! bound go to the least-loaded worker. Bindings idle longer than `max_idle_secs` are swept at most
 //! once per `eviction_interval_secs`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +26,11 @@ pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";
 
 const DEFAULT_MAX_IDLE_SECS: u64 = 4 * 3600;
 const DEFAULT_EVICTION_INTERVAL_SECS: u64 = 60;
+
+thread_local! {
+    /// Each row's active request count, read once per pick.
+    static ACTIVE_REQUEST_COUNTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -94,7 +100,7 @@ impl StickyMinLoadPicker {
         session_id: Option<&str>,
         rows: usize,
         worker: impl Fn(usize) -> WorkerWithDpRank,
-        active_requests: impl Fn(usize) -> usize,
+        active_requests: impl Fn(usize) -> u64,
         now: Instant,
     ) -> Option<usize> {
         if rows == 0 {
@@ -132,7 +138,7 @@ impl StickyMinLoadPicker {
 }
 
 /// Pick uniformly among the rows with the fewest active requests.
-fn least_loaded(rows: usize, active_requests: &impl Fn(usize) -> usize) -> usize {
+fn least_loaded(rows: usize, active_requests: &impl Fn(usize) -> u64) -> usize {
     let min = (0..rows).map(active_requests).min().unwrap_or_default();
     let ties = (0..rows).filter(|&row| active_requests(row) == min).count();
     let nth = if ties > 1 { fastrand::usize(..ties) } else { 0 };
@@ -147,7 +153,9 @@ struct SharedStickyMinLoadPicker(Mutex<StickyMinLoadPicker>);
 
 impl WorkerPicker for SharedStickyMinLoadPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
+        // Active request counts, not `LOAD` rows: the host projects `LOAD` rows' decode cost
+        // from every rank's overlap with active prompts, which this policy never reads.
+        WorkerInputs::ACTIVE_REQUESTS
     }
 
     fn pick(
@@ -155,29 +163,32 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
         request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        let load = input
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
         let candidates = input.candidates();
-        if candidates.len() != load.len() {
-            return Err(WorkerSelectionPolicyError::failed(
-                "load input does not match candidates",
-            ));
-        }
         let session_id = request
             .info()
             .session_context()
             .map(|session| session.session_id());
-        self.0
-            .lock()
-            .select(
-                session_id,
-                candidates.len(),
-                |row| candidates[row].worker(),
-                |row| load[row].active_requests(),
-                Instant::now(),
-            )
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
+            load.clear();
+            // Declaring ACTIVE_REQUESTS guarantees a count for every in-range row.
+            for row in 0..input.len() {
+                load.push(
+                    input
+                        .active_requests(row)
+                        .expect("ACTIVE_REQUESTS supplies every candidate's count"),
+                );
+            }
+            self.0
+                .lock()
+                .select(
+                    session_id,
+                    load.len(),
+                    |row| candidates[row].worker(),
+                    |row| load[row],
+                    Instant::now(),
+                )
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        })
     }
 }
 
@@ -222,7 +233,7 @@ mod tests {
     fn select(
         picker: &mut StickyMinLoadPicker,
         session_id: Option<&str>,
-        rows: &[(u64, usize)],
+        rows: &[(u64, u64)],
         now: Instant,
     ) -> u64 {
         let row = picker
