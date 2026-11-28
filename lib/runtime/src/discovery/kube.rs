@@ -693,6 +693,7 @@ mod tests {
                 system_port: 0,
                 mode: KubeDiscoveryMode::Pod,
                 target: utils::KubeDiscoveryTarget::Pod("worker".into()),
+                discover_held_pods: false,
             },
         }
     }
@@ -821,6 +822,7 @@ mod tests {
                 system_port: 0,
                 mode: KubeDiscoveryMode::Pod,
                 target: utils::KubeDiscoveryTarget::Pod("worker-a".to_string()),
+                discover_held_pods: false,
             },
         };
         (client, state_tx)

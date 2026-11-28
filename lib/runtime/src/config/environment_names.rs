@@ -1046,6 +1046,12 @@ pub mod discovery {
 
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+    /// Discover worker Pods that wait on the frontend readiness gate, as held instances
+    /// (set to "1" or "true"). For frontends and routers: they prepare a held worker's
+    /// pipeline and keep it out of automatic routing until its Pod is Ready. In pod mode this
+    /// adds a Pod watch, so the process needs `list` and `watch` on Pods.
+    pub const DYN_KUBE_DISCOVERY_HELD_PODS: &str = "DYN_KUBE_DISCOVERY_HELD_PODS";
 }
 
 /// CUDA and GPU environment variables

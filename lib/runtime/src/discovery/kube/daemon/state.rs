@@ -19,6 +19,9 @@ pub(super) struct CachedCrMetadata {
 pub(super) struct ReadyEntry {
     pub(super) instance_id: u64,
     pub(super) pod_uid: String,
+    /// The worker is locally ready but its Pod still waits on the frontend readiness gate. It
+    /// is published as held: discovered, and out of automatic routing.
+    pub(super) held: bool,
 }
 
 impl ReadyEntry {
@@ -26,7 +29,13 @@ impl ReadyEntry {
         Self {
             instance_id,
             pod_uid,
+            held: false,
         }
+    }
+
+    pub(super) fn with_hold(mut self, held: bool) -> Self {
+        self.held = held;
+        self
     }
 }
 
@@ -41,6 +50,11 @@ struct ReadinessContribution {
 /// EndpointSlices can temporarily duplicate a Pod while they are resharded. The
 /// reverse index keeps the Pod ready until every identical contribution is gone.
 /// Conflicting Pod incarnations for the same CR key fail closed.
+///
+/// A Pod behind the frontend readiness gate is reported by the Pod itself and, once Ready,
+/// by its EndpointSlice too. The two watches are not synchronized, so one Pod incarnation can
+/// be held in one contribution and routable in another. It is then routable: the Pod was
+/// Ready in the newer of the two views.
 #[derive(Default)]
 pub(super) struct ReadinessIndex {
     by_object: HashMap<String, HashSet<ReadinessContribution>>,
@@ -104,7 +118,11 @@ impl ReadinessIndex {
 
     pub(super) fn resolved(&self, cr_key: &str) -> Option<ReadyEntry> {
         let entries = self.by_cr_key.get(cr_key)?;
-        if entries.len() != 1 {
+        let first = entries.keys().next()?;
+        if entries
+            .keys()
+            .any(|entry| entry.instance_id != first.instance_id || entry.pod_uid != first.pod_uid)
+        {
             tracing::warn!(
                 cr_key,
                 incarnations = entries.len(),
@@ -112,7 +130,11 @@ impl ReadinessIndex {
             );
             return None;
         }
-        entries.keys().next().cloned()
+        Some(
+            first
+                .clone()
+                .with_hold(entries.keys().all(|entry| entry.held)),
+        )
     }
 
     pub(super) fn resolved_entries(&self) -> HashMap<String, ReadyEntry> {
@@ -257,8 +279,12 @@ impl JoinTable {
             return;
         };
 
-        self.known
-            .insert(ready.instance_id, cached.metadata.clone());
+        let metadata = if ready.held {
+            Arc::new(cached.metadata.held())
+        } else {
+            cached.metadata.clone()
+        };
+        self.known.insert(ready.instance_id, metadata);
     }
 }
 
@@ -613,6 +639,102 @@ mod tests {
         assert!(matches!(
             publication.state_changes.as_slice(),
             [StateChange::Upsert(1, _)]
+        ));
+    }
+
+    fn held(instance_id: u64, pod_uid: &str) -> ReadyEntry {
+        ready(instance_id, pod_uid).with_hold(true)
+    }
+
+    fn endpoints_held(publication_events: &[DiscoveryEvent]) -> Vec<bool> {
+        publication_events
+            .iter()
+            .filter_map(|event| match event {
+                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => Some(instance.held),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The Pod and its EndpointSlice are watched separately, so one Pod can be held in one
+    /// report and routable in the other. Routable wins, in either order of arrival.
+    #[test]
+    fn a_held_and_a_routable_report_of_one_pod_resolve_to_routable() {
+        let mut index = ReadinessIndex::default();
+        index.replace_object(
+            "Pod/worker-a".to_string(),
+            vec![("worker-a".to_string(), held(7, TEST_POD_UID))],
+        );
+        assert_eq!(index.resolved("worker-a"), Some(held(7, TEST_POD_UID)));
+
+        index.replace_object(
+            "EndpointSlice/workers".to_string(),
+            vec![("worker-a".to_string(), ready(7, TEST_POD_UID))],
+        );
+        assert_eq!(index.resolved("worker-a"), Some(ready(7, TEST_POD_UID)));
+
+        // The Pod report catches up; the slice then drops out and the Pod report stands.
+        index.replace_object(
+            "Pod/worker-a".to_string(),
+            vec![("worker-a".to_string(), ready(7, TEST_POD_UID))],
+        );
+        index.remove_object("EndpointSlice/workers");
+        assert_eq!(index.resolved("worker-a"), Some(ready(7, TEST_POD_UID)));
+
+        // Two incarnations of the Pod still fail closed, held or not.
+        index.replace_object(
+            "EndpointSlice/workers".to_string(),
+            vec![("worker-a".to_string(), held(7, "other-pod-uid"))],
+        );
+        assert_eq!(index.resolved("worker-a"), None);
+    }
+
+    /// A held Pod is joined like a ready one, with its endpoints marked held. Its release is
+    /// one in-place update of the endpoint: nothing is removed, so a consumer keeps what it
+    /// built for the worker while it was held.
+    #[test]
+    fn held_pod_joins_with_held_endpoints_and_is_released_in_place() {
+        let mut table = JoinTable::new();
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            cached("cr-uid", TEST_POD_UID),
+        )]));
+
+        let joined = apply_readiness(
+            &mut table,
+            HashMap::from([("worker-a".to_string(), held(7, TEST_POD_UID))]),
+        );
+        assert_eq!(endpoints_held(&joined.events), vec![true]);
+        assert!(matches!(
+            joined.state_changes.as_slice(),
+            [StateChange::Upsert(7, metadata)]
+                if matches!(
+                    metadata.get_all_endpoints().as_slice(),
+                    [DiscoveryInstance::Endpoint(instance)] if instance.held
+                )
+        ));
+
+        // A repeated held report changes nothing.
+        let repeated = apply_readiness(
+            &mut table,
+            HashMap::from([("worker-a".to_string(), held(7, TEST_POD_UID))]),
+        );
+        assert!(repeated.events.is_empty());
+        assert!(repeated.state_changes.is_empty());
+
+        let released = apply_readiness(
+            &mut table,
+            HashMap::from([("worker-a".to_string(), ready(7, TEST_POD_UID))]),
+        );
+        assert_eq!(released.events.len(), 1, "{:?}", released.events);
+        assert_eq!(endpoints_held(&released.events), vec![false]);
+        assert!(matches!(
+            released.state_changes.as_slice(),
+            [StateChange::Upsert(7, metadata)]
+                if matches!(
+                    metadata.get_all_endpoints().as_slice(),
+                    [DiscoveryInstance::Endpoint(instance)] if !instance.held
+                )
         ));
     }
 }

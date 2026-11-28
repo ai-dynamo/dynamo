@@ -16,7 +16,9 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
 
 use super::crd::DynamoWorkerMetadata;
-use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
+use super::utils::{
+    KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_gated_pod, extract_ready_containers,
+};
 
 mod state;
 
@@ -32,7 +34,7 @@ const SOURCE_CHANNEL_CAPACITY: usize = 1024;
 pub(super) enum DaemonState {
     /// A reflector has not completed its initial list.
     Pending,
-    /// Both reflectors completed their initial list, and `list_state` holds the result.
+    /// Both required reflectors completed their initial list, and `list_state` holds the result.
     Ready,
     /// The daemon's cancellation token fired.
     Stopped,
@@ -48,6 +50,24 @@ pub(super) struct DaemonOutputs {
     pub(super) state_tx: watch::Sender<DaemonState>,
 }
 
+/// The Kubernetes objects a readiness reflector watches.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ReadinessKind {
+    EndpointSlices,
+    Pods,
+}
+
+impl ReadinessKind {
+    /// Key of one watched object in the readiness index. The kind keeps an EndpointSlice and
+    /// a Pod of the same name apart.
+    fn object_key(self, name: &str) -> String {
+        match self {
+            Self::EndpointSlices => format!("EndpointSlice/{name}"),
+            Self::Pods => format!("Pod/{name}"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ReadinessEvent {
     Apply {
@@ -57,7 +77,8 @@ enum ReadinessEvent {
     Delete {
         object_key: String,
     },
-    Rebuild,
+    /// The reflector for this kind completed a list.
+    Rebuild(ReadinessKind),
 }
 
 enum CrEvent {
@@ -67,12 +88,25 @@ enum CrEvent {
 }
 
 enum DiscoverySource {
-    EndpointSlice(reflector::Store<EndpointSlice>),
-    Pod(reflector::Store<Pod>),
+    /// Pod mode. EndpointSlices report the ready Pods. A process that discovers held Pods also
+    /// watches the Pods themselves for the ones behind the frontend readiness gate, which an
+    /// EndpointSlice cannot tell from a Pod whose containers are not ready.
+    EndpointSlice {
+        slices: reflector::Store<EndpointSlice>,
+        gated_pods: Option<reflector::Store<Pod>>,
+    },
+    /// Container mode. `update` reads a Pod's entries, with or without the held ones.
+    Pod {
+        pods: reflector::Store<Pod>,
+        update: PodUpdate,
+    },
 }
 
+/// Reads the readiness entries of one watched Pod.
+type PodUpdate = fn(&Pod) -> Option<(String, Vec<(String, ReadyEntry)>)>;
+
 fn endpoint_slice_update(slice: &EndpointSlice) -> Option<(String, Vec<(String, ReadyEntry)>)> {
-    let object_key = slice.metadata.name.clone()?;
+    let object_key = ReadinessKind::EndpointSlices.object_key(slice.metadata.name.as_deref()?);
     let entries = extract_endpoint_info(slice)
         .into_iter()
         .map(|(instance_id, cr_key, pod_uid)| (cr_key, ReadyEntry::new(instance_id, pod_uid)))
@@ -80,11 +114,41 @@ fn endpoint_slice_update(slice: &EndpointSlice) -> Option<(String, Vec<(String, 
     Some((object_key, entries))
 }
 
+/// Container mode: one entry per ready container, held while the Pod waits on the frontend
+/// readiness gate.
 fn pod_update(pod: &Pod) -> Option<(String, Vec<(String, ReadyEntry)>)> {
-    let object_key = pod.metadata.name.clone()?;
+    let object_key = ReadinessKind::Pods.object_key(pod.metadata.name.as_deref()?);
     let entries = extract_ready_containers(pod)
         .into_iter()
-        .map(|(instance_id, cr_key, pod_uid)| (cr_key, ReadyEntry::new(instance_id, pod_uid)))
+        .map(|(instance_id, cr_key, pod_uid, held)| {
+            (
+                cr_key,
+                ReadyEntry::new(instance_id, pod_uid).with_hold(held),
+            )
+        })
+        .collect();
+    Some((object_key, entries))
+}
+
+/// Container mode for a process that does not discover held Pods: a container of a Pod that
+/// waits on the frontend readiness gate stays unknown until the gate has passed.
+fn unheld_pod_update(pod: &Pod) -> Option<(String, Vec<(String, ReadyEntry)>)> {
+    let (object_key, mut entries) = pod_update(pod)?;
+    entries.retain(|(_, entry)| !entry.held);
+    Some((object_key, entries))
+}
+
+/// Pod mode: the entry of a Pod behind the frontend readiness gate, if it has one.
+fn gated_pod_update(pod: &Pod) -> Option<(String, Vec<(String, ReadyEntry)>)> {
+    let object_key = ReadinessKind::Pods.object_key(pod.metadata.name.as_deref()?);
+    let entries = extract_gated_pod(pod)
+        .into_iter()
+        .map(|(instance_id, cr_key, pod_uid, held)| {
+            (
+                cr_key,
+                ReadyEntry::new(instance_id, pod_uid).with_hold(held),
+            )
+        })
         .collect();
     Some((object_key, entries))
 }
@@ -97,28 +161,28 @@ fn endpoint_slice_event(event: watcher::Event<EndpointSlice>) -> Option<Readines
                 entries,
             })
         }
-        watcher::Event::Delete(slice) => slice
-            .metadata
-            .name
-            .map(|object_key| ReadinessEvent::Delete { object_key }),
-        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild),
+        watcher::Event::Delete(slice) => slice.metadata.name.map(|name| ReadinessEvent::Delete {
+            object_key: ReadinessKind::EndpointSlices.object_key(&name),
+        }),
+        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild(ReadinessKind::EndpointSlices)),
         watcher::Event::Init | watcher::Event::InitApply(_) => None,
     }
 }
 
-fn pod_event(event: watcher::Event<Pod>) -> Option<ReadinessEvent> {
+/// Translate a Pod watch event. `update` reads the Pod's readiness entries: per container in
+/// container mode, the gated Pod in pod mode.
+fn pod_event(event: watcher::Event<Pod>, update: PodUpdate) -> Option<ReadinessEvent> {
     match event {
         watcher::Event::Apply(pod) => {
-            pod_update(&pod).map(|(object_key, entries)| ReadinessEvent::Apply {
+            update(&pod).map(|(object_key, entries)| ReadinessEvent::Apply {
                 object_key,
                 entries,
             })
         }
-        watcher::Event::Delete(pod) => pod
-            .metadata
-            .name
-            .map(|object_key| ReadinessEvent::Delete { object_key }),
-        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild),
+        watcher::Event::Delete(pod) => pod.metadata.name.map(|name| ReadinessEvent::Delete {
+            object_key: ReadinessKind::Pods.object_key(&name),
+        }),
+        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild(ReadinessKind::Pods)),
         watcher::Event::Init | watcher::Event::InitApply(_) => None,
     }
 }
@@ -145,18 +209,23 @@ impl DiscoverySource {
 
         match pod_info.mode {
             KubeDiscoveryMode::Pod => {
-                let api: Api<EndpointSlice> = Api::namespaced(kube_client, &pod_info.pod_namespace);
-                let (reader, writer) = reflector::store();
-                tracing::info!("Daemon watching EndpointSlices (pod mode)");
+                let api: Api<EndpointSlice> =
+                    Api::namespaced(kube_client.clone(), &pod_info.pod_namespace);
+                let (slices, writer) = reflector::store();
+                tracing::info!(
+                    discover_held_pods = pod_info.discover_held_pods,
+                    "Daemon watching EndpointSlices (pod mode)"
+                );
 
-                let stream = reflector(writer, watcher(api, labels)).default_backoff();
+                let stream = reflector(writer, watcher(api, labels.clone())).default_backoff();
+                let slice_events = events.clone();
                 tokio::spawn(async move {
                     tokio::pin!(stream);
                     while let Some(res) = stream.next().await {
                         match res {
                             Ok(event) => {
                                 if let Some(event) = endpoint_slice_event(event)
-                                    && events.send(event).await.is_err()
+                                    && slice_events.send(event).await.is_err()
                                 {
                                     break;
                                 }
@@ -168,50 +237,95 @@ impl DiscoverySource {
                     }
                 });
 
-                Self::EndpointSlice(reader)
+                let gated_pods = pod_info.discover_held_pods.then(|| {
+                    Self::spawn_pod_reflector(
+                        pod_info,
+                        kube_client,
+                        labels,
+                        events,
+                        gated_pod_update,
+                    )
+                });
+                Self::EndpointSlice { slices, gated_pods }
             }
             KubeDiscoveryMode::Container => {
-                let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
-                let (reader, writer) = reflector::store();
-                tracing::info!("Daemon watching Pods (container mode)");
+                tracing::info!(
+                    discover_held_pods = pod_info.discover_held_pods,
+                    "Daemon watching Pods (container mode)"
+                );
+                let update: PodUpdate = if pod_info.discover_held_pods {
+                    pod_update
+                } else {
+                    unheld_pod_update
+                };
+                Self::Pod {
+                    pods: Self::spawn_pod_reflector(pod_info, kube_client, labels, events, update),
+                    update,
+                }
+            }
+        }
+    }
 
-                let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
-                    tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = pod_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Pod reflector error: {e}");
-                            }
+    /// Watch the discovery Pods of this namespace, reading each one's readiness entries with
+    /// `update`.
+    fn spawn_pod_reflector(
+        pod_info: &PodInfo,
+        kube_client: KubeClient,
+        labels: Config,
+        events: mpsc::Sender<ReadinessEvent>,
+        update: PodUpdate,
+    ) -> reflector::Store<Pod> {
+        let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
+        let (reader, writer) = reflector::store();
+        let stream = reflector(writer, watcher(api, labels)).default_backoff();
+        tokio::spawn(async move {
+            tokio::pin!(stream);
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(event) => {
+                        if let Some(event) = pod_event(event, update)
+                            && events.send(event).await.is_err()
+                        {
+                            break;
                         }
                     }
-                });
-
-                Self::Pod(reader)
+                    Err(e) => {
+                        tracing::warn!("Pod reflector error: {e}");
+                    }
+                }
             }
+        });
+        reader
+    }
+
+    /// The reflector whose first list completes the readiness view. In pod mode that is the
+    /// EndpointSlice reflector: the Pod reflector only adds held Pods, which take no automatic
+    /// request, so a slow or forbidden Pod list never delays discovery.
+    fn primary_kind(&self) -> ReadinessKind {
+        match self {
+            Self::EndpointSlice { .. } => ReadinessKind::EndpointSlices,
+            Self::Pod { .. } => ReadinessKind::Pods,
         }
     }
 
     fn rebuild_index(&self) -> ReadinessIndex {
         let mut index = ReadinessIndex::default();
         match self {
-            Self::EndpointSlice(reader) => {
-                for slice in reader.state() {
+            Self::EndpointSlice { slices, gated_pods } => {
+                for slice in slices.state() {
                     if let Some((object_key, entries)) = endpoint_slice_update(slice.as_ref()) {
                         index.replace_object(object_key, entries);
                     }
                 }
+                for pod in gated_pods.iter().flat_map(reflector::Store::state) {
+                    if let Some((object_key, entries)) = gated_pod_update(pod.as_ref()) {
+                        index.replace_object(object_key, entries);
+                    }
+                }
             }
-            Self::Pod(reader) => {
-                for pod in reader.state() {
-                    if let Some((object_key, entries)) = pod_update(pod.as_ref()) {
+            Self::Pod { pods, update } => {
+                for pod in pods.state() {
+                    if let Some((object_key, entries)) = update(pod.as_ref()) {
                         index.replace_object(object_key, entries);
                     }
                 }
@@ -303,8 +417,9 @@ impl DiscoveryDaemon {
     }
 }
 
-/// Each reflector sends one `Rebuild` after its initial list. `Ready` waits for both, because
-/// only then does the join table hold every instance the cluster had at start. Returns `Ok` on
+/// Each reflector sends one `Rebuild` after its initial list. `Ready` waits for the worker
+/// metadata and for the source's primary readiness reflector, because only then does the join
+/// table hold every routable instance the cluster had at start. Returns `Ok` on
 /// cancellation and an error when a reflector stream ends.
 async fn event_loop(
     source: DiscoverySource,
@@ -332,7 +447,7 @@ async fn event_loop(
                 let Some(event) = event else {
                     anyhow::bail!("Readiness reflector stream stopped");
                 };
-                if matches!(event, ReadinessEvent::Rebuild) {
+                if event == ReadinessEvent::Rebuild(source.primary_kind()) {
                     has_readiness_list = true;
                 }
                 apply_readiness_event(
@@ -402,7 +517,7 @@ fn apply_readiness_event(
             entries,
         } => readiness_index.replace_object(object_key, entries),
         ReadinessEvent::Delete { object_key } => readiness_index.remove_object(&object_key),
-        ReadinessEvent::Rebuild => {
+        ReadinessEvent::Rebuild(_) => {
             let next = source.rebuild_index();
             let resolved = next.resolved_entries();
             join_table.replace_readiness(resolved, changes);
@@ -661,7 +776,10 @@ mod tests {
             let cancel_token = cancel_token.clone();
             async move {
                 event_loop(
-                    DiscoverySource::Pod(pod_reader),
+                    DiscoverySource::Pod {
+                        pods: pod_reader,
+                        update: pod_update,
+                    },
                     cr_reader,
                     readiness_rx,
                     cr_rx,
@@ -672,7 +790,10 @@ mod tests {
             }
         });
 
-        readiness_tx.send(ReadinessEvent::Rebuild).await.unwrap();
+        readiness_tx
+            .send(ReadinessEvent::Rebuild(ReadinessKind::Pods))
+            .await
+            .unwrap();
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
@@ -696,6 +817,269 @@ mod tests {
 
         cancel_token.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    /// Pod mode end to end: a Pod behind the frontend readiness gate is published as held as
+    /// soon as its containers are ready, and its release changes the endpoint in place.
+    #[tokio::test]
+    async fn pod_mode_publishes_a_gated_pod_as_held_and_releases_it_in_place() {
+        use k8s_openapi::api::core::v1::ObjectReference;
+        use k8s_openapi::api::core::v1::{PodCondition, PodReadinessGate, PodSpec};
+        use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
+
+        let target = super::super::utils::KubeDiscoveryTarget::Pod(TEST_POD_NAME.to_string());
+        let endpoint_with_hold = |held| {
+            DiscoveryInstance::Endpoint(Instance {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                instance_id: target.instance_id(),
+                transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+                held,
+            })
+        };
+        let model_card = DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: target.instance_id(),
+            card_json: serde_json::json!({"display_name": "model"}),
+            model_suffix: None,
+        };
+        let mut metadata = DiscoveryMetadata::new();
+        metadata
+            .register_endpoint(endpoint_with_hold(false))
+            .unwrap();
+        metadata.register_model_card(model_card.clone()).unwrap();
+        let cr =
+            super::super::crd::build_cr(&target.cr_name(), TEST_POD_NAME, TEST_POD_UID, &metadata)
+                .unwrap();
+        let gated_pod = |conditions: &[&str]| Pod {
+            metadata: ObjectMeta {
+                name: Some(TEST_POD_NAME.to_string()),
+                uid: Some(TEST_POD_UID.to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                readiness_gates: Some(vec![PodReadinessGate {
+                    condition_type: super::super::utils::FRONTEND_ADMITTED_GATE.to_string(),
+                }]),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                conditions: Some(
+                    conditions
+                        .iter()
+                        .map(|condition| PodCondition {
+                            type_: condition.to_string(),
+                            status: "True".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+        };
+
+        let (slices, mut slice_writer) = reflector::store::<EndpointSlice>();
+        let (gated_pods, mut pod_writer) = reflector::store();
+        pod_writer.apply_watcher_event(&watcher::Event::Apply(gated_pod(&["ContainersReady"])));
+        let (cr_reader, mut cr_writer) = reflector::store();
+        cr_writer.apply_watcher_event(&watcher::Event::Apply(cr));
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (state_tx, mut state_rx) = watch::channel(DaemonState::Pending);
+        let list_state: ListState = Arc::new(RwLock::new(HashMap::new()));
+        let event_tx = broadcast::channel(16).0;
+        let mut events = event_tx.subscribe();
+        let outputs = DaemonOutputs {
+            list_state: list_state.clone(),
+            event_tx,
+            state_tx,
+        };
+        let cancel_token = CancellationToken::new();
+        let task = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            async move {
+                event_loop(
+                    DiscoverySource::EndpointSlice {
+                        slices,
+                        gated_pods: Some(gated_pods),
+                    },
+                    cr_reader,
+                    readiness_rx,
+                    cr_rx,
+                    &outputs,
+                    &cancel_token,
+                )
+                .await
+            }
+        });
+        let listed_endpoints = || async {
+            list_state
+                .read()
+                .await
+                .values()
+                .flat_map(|metadata| metadata.get_all_endpoints())
+                .collect::<Vec<_>>()
+        };
+
+        // Ready waits for the worker metadata and the EndpointSlices, not for the Pods: a
+        // held Pod takes no automatic request, so its list must never delay discovery.
+        cr_tx.send(CrEvent::Rebuild).await.unwrap();
+        readiness_tx
+            .send(ReadinessEvent::Rebuild(ReadinessKind::EndpointSlices))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            state_rx.wait_for(|state| *state == DaemonState::Ready),
+        )
+        .await
+        .expect("the EndpointSlice and metadata lists must make the daemon ready")
+        .unwrap();
+
+        // The Pod is not Ready, and it is discovered: held endpoint, model card.
+        let mut discovered = vec![events.recv().await.unwrap(), events.recv().await.unwrap()];
+        discovered.sort_by_key(|event| {
+            matches!(
+                event,
+                DiscoveryEvent::Added(DiscoveryInstance::Model { .. })
+            )
+        });
+        assert_eq!(listed_endpoints().await, vec![endpoint_with_hold(true)]);
+        assert_eq!(
+            discovered,
+            vec![
+                DiscoveryEvent::Added(endpoint_with_hold(true)),
+                DiscoveryEvent::Added(model_card),
+            ]
+        );
+
+        // The Pod turns Ready. The endpoint is updated in place and nothing is removed.
+        let ready_pod = gated_pod(&["ContainersReady", "Ready"]);
+        pod_writer.apply_watcher_event(&watcher::Event::Apply(ready_pod.clone()));
+        let (object_key, entries) = gated_pod_update(&ready_pod).unwrap();
+        readiness_tx
+            .send(ReadinessEvent::Apply {
+                object_key,
+                entries,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("the release was not published")
+                .unwrap(),
+            DiscoveryEvent::Added(endpoint_with_hold(false))
+        );
+        assert_eq!(listed_endpoints().await, vec![endpoint_with_hold(false)]);
+
+        // The EndpointSlice catching up, a Pod relist, and the Pod report going away all
+        // change nothing.
+        let slice = EndpointSlice {
+            metadata: ObjectMeta {
+                name: Some("workers".to_string()),
+                ..Default::default()
+            },
+            address_type: "IPv4".to_string(),
+            endpoints: vec![Endpoint {
+                conditions: Some(EndpointConditions {
+                    ready: Some(true),
+                    ..Default::default()
+                }),
+                target_ref: Some(ObjectReference {
+                    name: Some(TEST_POD_NAME.to_string()),
+                    uid: Some(TEST_POD_UID.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ports: None,
+        };
+        slice_writer.apply_watcher_event(&watcher::Event::Apply(slice.clone()));
+        let (object_key, entries) = endpoint_slice_update(&slice).unwrap();
+        readiness_tx
+            .send(ReadinessEvent::Apply {
+                object_key,
+                entries,
+            })
+            .await
+            .unwrap();
+        readiness_tx
+            .send(ReadinessEvent::Rebuild(ReadinessKind::Pods))
+            .await
+            .unwrap();
+        pod_writer.apply_watcher_event(&watcher::Event::Delete(ready_pod));
+        readiness_tx
+            .send(ReadinessEvent::Delete {
+                object_key: ReadinessKind::Pods.object_key(TEST_POD_NAME),
+            })
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(events.try_recv().is_err());
+        assert_eq!(listed_endpoints().await, vec![endpoint_with_hold(false)]);
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    /// Container mode without held-Pod discovery: a ready container of a Pod that waits on
+    /// the frontend readiness gate stays unknown. It used to be routable, which let traffic
+    /// reach a Pod the gate was holding back.
+    #[test]
+    fn container_mode_hides_a_gated_pod_from_a_process_that_does_not_discover_held_pods() {
+        use k8s_openapi::api::core::v1::{PodCondition, PodReadinessGate, PodSpec};
+
+        let pod = |admitted: bool| Pod {
+            metadata: ObjectMeta {
+                name: Some(TEST_POD_NAME.to_string()),
+                uid: Some(TEST_POD_UID.to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                readiness_gates: Some(vec![PodReadinessGate {
+                    condition_type: super::super::utils::FRONTEND_ADMITTED_GATE.to_string(),
+                }]),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                conditions: admitted.then(|| {
+                    [super::super::utils::FRONTEND_ADMITTED_GATE, "Ready"]
+                        .map(|condition| PodCondition {
+                            type_: condition.to_string(),
+                            status: "True".to_string(),
+                            ..Default::default()
+                        })
+                        .to_vec()
+                }),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    ready: true,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+        let held = |update: PodUpdate, pod: &Pod| {
+            let (_, entries) = update(pod).unwrap();
+            entries
+                .into_iter()
+                .map(|(_, entry)| entry.held)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(held(pod_update, &pod(false)), vec![true]);
+        assert!(held(unheld_pod_update, &pod(false)).is_empty());
+        // Once the gate has passed both readers agree.
+        assert_eq!(held(pod_update, &pod(true)), vec![false]);
+        assert_eq!(held(unheld_pod_update, &pod(true)), vec![false]);
     }
 
     fn make_cached(uid: &str) -> CachedCrMetadata {
@@ -888,7 +1272,7 @@ mod tests {
     #[test]
     fn relist_events_only_wake_on_init_done() {
         assert!(endpoint_slice_event(watcher::Event::Init).is_none());
-        assert!(pod_event(watcher::Event::Init).is_none());
+        assert!(pod_event(watcher::Event::Init, pod_update).is_none());
 
         let slice = EndpointSlice {
             metadata: Default::default(),
@@ -899,7 +1283,7 @@ mod tests {
         assert!(endpoint_slice_event(watcher::Event::InitApply(slice)).is_none());
         assert_eq!(
             endpoint_slice_event(watcher::Event::InitDone),
-            Some(ReadinessEvent::Rebuild)
+            Some(ReadinessEvent::Rebuild(ReadinessKind::EndpointSlices))
         );
         assert!(matches!(
             cr_event(watcher::Event::InitDone),
