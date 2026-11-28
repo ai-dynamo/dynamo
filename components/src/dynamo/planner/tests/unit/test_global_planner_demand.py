@@ -28,10 +28,15 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.merge.types import ComponentKey
+from dynamo.planner.plugins.merge.types import ComponentKey, PluginResult
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
-from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
+from dynamo.planner.plugins.types import (
+    ComponentTarget,
+    OverrideResult,
+    OverrideType,
+    ScalingProposal,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -59,9 +64,7 @@ def _config(mode="decode", environment="managed", **kwargs):
         prefill_scale_down_queue_tokens=100,
         decode_scale_up_kv_rate=80,
         decode_scale_down_kv_rate=20,
-        min_gpu_budget=-1,
-        max_gpu_budget=-1,
-        **kwargs,
+        **{"min_gpu_budget": -1, "max_gpu_budget": -1, **kwargs},
     )
 
 
@@ -350,6 +353,82 @@ def test_merged_baseline_and_rollout_echo_do_not_cancel_demand():
     counts = _counts("decode", decode_scaling_in_progress=True)
     counts.expected_num_decode = 3
     assert adapter._project_scale_to(outcome, counts) is None
+
+
+def _reconcile_only_outcome(override_type, replicas, final_decode):
+    """PROPOSE left decode out; one RECONCILE plugin targeted it."""
+    decode_key = ComponentKey(sub_component_type="decode")
+    return PipelineOutcome(
+        execute_action="apply",
+        final_proposal=ScalingProposal(
+            targets=[
+                ComponentTarget(sub_component_type="decode", replicas=final_decode)
+            ]
+        ),
+        proposed_components=frozenset(),
+        targeted_components=frozenset({decode_key}),
+        reconcile_results=[
+            PluginResult(
+                plugin_id="external-reconcile",
+                priority=10,
+                result=OverrideResult(
+                    targets=[
+                        ComponentTarget(
+                            sub_component_type="decode",
+                            replicas=replicas,
+                            type=override_type,
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("override_type", "replicas", "final_decode", "config_kwargs", "expected"),
+    [
+        pytest.param(OverrideType.SET, 3, 3, {}, 3, id="set-scale-up"),
+        pytest.param(OverrideType.SET, 2, 2, {}, 2, id="set-stable-hold"),
+        pytest.param(OverrideType.AT_MOST, 5, 2, {}, None, id="at-most-baseline"),
+        pytest.param(
+            OverrideType.SET, 5, 5, {"max_gpu_budget": 3}, 3, id="set-gpu-clamped"
+        ),
+    ],
+)
+def test_managed_reconcile_set_publishes_demand_without_propose(
+    override_type, replicas, final_decode, config_kwargs, expected
+):
+    adapter = OrchestratorEngineAdapter(
+        _config("decode", **config_kwargs), _caps(), clock=VirtualClock()
+    )
+    outcome = _reconcile_only_outcome(override_type, replicas, final_decode)
+
+    decision = adapter._project_scale_to(outcome, _counts("decode"))
+
+    if expected is None:
+        assert decision is None
+    else:
+        assert decision is not None
+        assert decision.num_decode == expected
+        assert decision.num_prefill is None
+
+
+def test_managed_disagg_reconcile_set_does_not_create_peer_demand():
+    adapter = OrchestratorEngineAdapter(
+        _config("disagg"), _caps(), clock=VirtualClock()
+    )
+    outcome = _reconcile_only_outcome(OverrideType.SET, 3, 3)
+    # type_aware_merge fills the peer from the ready-count baseline.
+    outcome.final_proposal.targets.append(
+        ComponentTarget(sub_component_type="prefill", replicas=2)
+    )
+
+    decision = adapter._project_scale_to(outcome, _counts("disagg"))
+
+    assert decision is not None
+    assert decision.num_decode == 3
+    assert decision.num_prefill is None
 
 
 def test_managed_allocation_requires_global_planner_environment():
