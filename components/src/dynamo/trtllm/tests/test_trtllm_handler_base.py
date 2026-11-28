@@ -1102,6 +1102,10 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async = MagicMock(
             return_value=self._make_mock_generation_result()
         )
+        # Audio, like images, is preprocessed on a thread before generate_async.
+        handler.engine.preprocess = mock.AsyncMock(
+            side_effect=lambda inputs, *_: inputs
+        )
 
         request = {
             "token_ids": [1],
@@ -1115,6 +1119,7 @@ class TestGenerateLocally:
         ]
 
         assert chunks
+        handler.engine.preprocess.assert_awaited_once()
         inputs = handler.engine.llm.generate_async.call_args.kwargs["inputs"]
         assert inputs["multi_modal_data"]["audio"] == [(audio, 16000)]
         assert inputs["prompt"] == "<|audio|> Transcribe this"
