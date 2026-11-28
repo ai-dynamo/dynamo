@@ -135,6 +135,8 @@ def _inject_thunderagent_route_proof(
 
 
 class ThunderAgentRouterHandler:
+    scheduler_cls = ThunderAgentScheduler
+
     def __init__(
         self,
         runtime: DistributedRuntime,
@@ -169,7 +171,7 @@ class ThunderAgentRouterHandler:
         self._capacity = WorkerCapacityProvider(worker_endpoint, worker_client)
         self._capacity.start()
 
-        self._scheduler = ThunderAgentScheduler(
+        self._scheduler = self.scheduler_cls(
             capacity=self._capacity,
             config=self._config.to_thunderagent_config(),
         )
@@ -226,6 +228,7 @@ class ThunderAgentRouterHandler:
                 else None
             )
             first_chunk = True
+            await self._before_dispatch(preprocessed)
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
@@ -306,6 +309,7 @@ class ThunderAgentRouterHandler:
             else None
         )
         try:
+            await self._before_dispatch(preprocessed)
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
@@ -378,6 +382,9 @@ class ThunderAgentRouterHandler:
                 replica_pin,
                 selected_worker_id,
             )
+
+    async def _before_dispatch(self, request: dict[str, Any]) -> None:
+        """Observe an admitted request immediately before backend dispatch."""
 
     async def status(self, request: Optional[dict[str, Any]] = None):
         scheduler_status = (
@@ -482,13 +489,21 @@ class ThunderAgentRouterHandler:
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime) -> None:
     config = parse_args()
+    await serve_router(runtime, config, ThunderAgentRouterHandler(runtime, config))
+
+
+async def serve_router(
+    runtime: DistributedRuntime,
+    config: ThunderAgentRouterConfig,
+    handler: ThunderAgentRouterHandler,
+) -> None:
+    """Register a router's model and serve its generate/status/metrics endpoints."""
     logger.info(
         "ThunderAgent Router starting (endpoint=%s, namespace=%s)",
         config.endpoint,
         config.namespace,
     )
 
-    handler = ThunderAgentRouterHandler(runtime, config)
     await handler.initialize()
 
     generate_endpoint = runtime.endpoint(
