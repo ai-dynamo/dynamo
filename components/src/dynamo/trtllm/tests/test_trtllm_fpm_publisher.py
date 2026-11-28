@@ -331,7 +331,6 @@ def _build_publisher_stub(
     pub.metrics_publisher = None
     pub.fpm_publisher = None
     pub.kv_event_publishers = None
-    pub.zmq_kv_event_publisher = None
     pub.publish_kv_cache_events_thread = None
     pub.publish_stats_thread = None
     pub.partial_block_hashes = set()
@@ -551,7 +550,6 @@ def test_handle_kv_event_suppresses_digest_token_blocks_and_descendants():
     # KV cache manager v2 emits a multimodal item's digest as a string token id.
     pub = _publisher_for_kv_event_test()
     publisher = MagicMock()
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
     digest = "d854e3211f299729f8e6e83012471d5cb867f5f66a104cce91950c9fe506e06f"
     events = [
@@ -595,7 +593,6 @@ def test_handle_kv_event_suppresses_digest_token_blocks_and_descendants():
 def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
     pub = _publisher_for_kv_event_test()
     publisher = MagicMock()
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
 
     pub._handle_kv_event_batch([_stored_kv_event()])
@@ -606,55 +603,10 @@ def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
     assert events[0]["cache_salt"] == "tenant-a"
 
 
-def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
-    pub = _publisher_for_kv_event_test()
-    pub.zmq_kv_event_publisher = MagicMock()
-    pub.kv_event_publishers = None
-
-    pub._handle_zmq_kv_event(_stored_kv_event())
-
-    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
-    assert pub.zmq_kv_event_publisher.publish_stored.call_args.args[-1] == "tenant-a"
-
-
-def test_handle_zmq_kv_event_batch_preserves_singleton_publication():
-    pub = _publisher_for_kv_event_test()
-    pub.zmq_kv_event_publisher = MagicMock()
-    pub.kv_event_publishers = None
-    removed = {
-        "event_id": 2,
-        "attention_dp_rank": 0,
-        "data": {"type": "removed", "block_hashes": [123]},
-    }
-
-    pub._handle_kv_event_drain([_stored_kv_event(), removed])
-
-    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
-    pub.zmq_kv_event_publisher.publish_removed.assert_called_once_with([123], 0)
-
-
-def test_handle_zmq_kv_event_batch_stops_on_malformed_event():
-    pub = _publisher_for_kv_event_test()
-    pub.zmq_kv_event_publisher = MagicMock()
-    pub.kv_event_publishers = None
-    removed = {
-        "event_id": 2,
-        "attention_dp_rank": 0,
-        "data": {"type": "removed", "block_hashes": [123]},
-    }
-
-    with pytest.raises(KeyError, match="event_id"):
-        pub._handle_zmq_kv_event_batch([_stored_kv_event(), {}, removed])
-
-    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
-    pub.zmq_kv_event_publisher.publish_removed.assert_not_called()
-
-
 @pytest.mark.asyncio
 async def test_polling_loop_drops_conflicting_salts_and_processes_next_event(caplog):
     pub = _publisher_for_kv_event_test()
     pub._stop_event = threading.Event()
-    pub.zmq_kv_event_publisher = None
     publisher = MagicMock()
     pub.kv_event_publishers = {0: publisher}
 
@@ -919,7 +871,6 @@ def test_filtered_kv_events_do_not_create_false_event_id_gaps():
     pub.should_drop_event = MagicMock(side_effect=[True, False])
     pub.processing_initial_created_events = True
     pub.max_window_size = None
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
 
     pub._handle_kv_event_batch(
@@ -941,7 +892,6 @@ def test_partial_only_removed_event_does_not_publish_empty_batch():
     pub.should_drop_event = MagicMock(return_value=False)
     pub.processing_initial_created_events = True
     pub.partial_block_hashes = {123}
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: kv_event_publisher}
 
     pub._handle_kv_event_batch(
@@ -956,7 +906,6 @@ def test_handle_kv_event_batch_groups_mixed_events_per_rank_in_order():
     pub = _publisher_for_kv_event_test()
     rank_0 = MagicMock()
     rank_1 = MagicMock()
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: rank_0, 1: rank_1}
 
     first = _stored_kv_event("tenant-a")
@@ -992,7 +941,6 @@ def test_handle_kv_event_batch_groups_mixed_events_per_rank_in_order():
 def test_handle_kv_event_batch_preserves_unknown_rank_warning(caplog):
     pub = _publisher_for_kv_event_test()
     publisher = MagicMock()
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
     event = _stored_kv_event()
     event["attention_dp_rank"] = 1
@@ -1007,7 +955,6 @@ def test_handle_kv_event_batch_preserves_unknown_rank_warning(caplog):
 def test_handle_kv_event_batch_propagates_malformed_event():
     pub = _publisher_for_kv_event_test()
     publisher = MagicMock()
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
 
     with pytest.raises(KeyError, match="event_id"):
@@ -1020,7 +967,6 @@ def test_handle_kv_event_batch_propagates_publish_failure():
     pub = _publisher_for_kv_event_test()
     publisher = MagicMock()
     publisher.publish_batch.side_effect = RuntimeError("publish failed")
-    pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: publisher}
 
     with pytest.raises(RuntimeError, match="publish failed"):
