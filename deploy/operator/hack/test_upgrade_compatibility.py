@@ -111,6 +111,27 @@ class CompatibilityFixtureTest(unittest.TestCase):
             sidecar["livenessProbe"],
         )
 
+    def test_native_vllm_rs_keeps_the_noop_worker_hash(self):
+        scenario = capture.SCENARIOS["native-vllm-rs"]
+        authored = scenario.create()
+        self.assertNotIn("backendFramework", authored["spec"])
+        worker = next(
+            c for c in authored["spec"]["components"] if c["name"] == "worker"
+        )
+        main = worker["podTemplate"]["spec"]["containers"][0]
+        self.assertEqual(capture.NATIVE_ENGINE_COMMAND, main["command"])
+        _, _, objects, provenance = self.fixture(scenario)
+        observation = provenance["observations"]["1.6.0"]
+        self.assertEqual(
+            capture.observe_native_vllm_rs(objects),
+            {
+                "backendFramework": None,
+                "workerCliqueHash": observation["workerHash"],
+            },
+        )
+        self.assertEqual(observation["workerCliqueHash"], observation["workerHash"])
+        self.assertIsNone(observation["backendFramework"])
+
     def test_final_export_ignores_server_metadata_only(self):
         _, _, objects, _ = self.fixture(capture.SCENARIOS["missing-origin"])
         with tempfile.TemporaryDirectory() as directory:

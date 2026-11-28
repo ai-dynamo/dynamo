@@ -53,6 +53,48 @@ var upgradeCompatibilityScenarioHooks = map[string]upgradeCompatibilityHooks{
 			requireMergedSidecarProbes(t, after)
 		},
 	},
+	"native-vllm-rs": {
+		beforeTakeover: func(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment, before []unstructured.Unstructured) {
+			require.Equal(t, "1.6.0", dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion])
+			require.Empty(t, dgd.Spec.BackendFramework)
+			t.Log("Recompute the 1.6.0 worker hash; resolving vllm-rs as vLLM would move it")
+			hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			require.Equal(t, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2], hash)
+			require.Equal(t, hash, workerCliqueHash(t, before))
+		},
+		afterTakeover: func(t *testing.T, env *clusterenv.TestEnv, namespace string, after []unstructured.Unstructured) {
+			t.Log("Keep the 1.6.0 worker hash on the DGD and the worker clique")
+			dgd := getOnlyClusterDGD(t, t.Context(), env.Client(), namespace)
+			require.Empty(t, dgd.Spec.BackendFramework)
+			hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			require.Equal(t, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2], hash)
+			require.Equal(t, hash, workerCliqueHash(t, after))
+		},
+	},
+}
+
+// workerCliqueHash returns the worker hash label of the only worker clique.
+func workerCliqueHash(t *testing.T, objects []unstructured.Unstructured) string {
+	t.Helper()
+	var hashes []any
+	for _, object := range objects {
+		if object.GetKind() != upgradePodCliqueSetKind {
+			continue
+		}
+		templates, err := upgradeWorkerTemplates(object)
+		require.NoError(t, err)
+		for _, value := range templates {
+			labels, _ := value.(map[string]any)["labels"].(map[string]any)
+			if labels["nvidia.com/dynamo-component"] == "worker" {
+				hashes = append(hashes, labels["nvidia.com/dynamo-worker-hash"])
+			}
+		}
+	}
+	require.Len(t, hashes, 1, "expected one worker clique")
+	hash, _ := hashes[0].(string)
+	return hash
 }
 
 // runUpgradeCompatibilityScenarios replays every snapshot under

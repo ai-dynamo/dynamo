@@ -268,6 +268,11 @@ gate keeps the merge for 1.6-origin workloads. `latest/frontend-sidecar-probes`
 is the same authored workload created by the development operator; its golden
 shows the complete-value replacement that origin 1.7 workloads receive.
 
+The `compatibility/native-vllm-rs` snapshot holds a native-sidecar worker that
+launches `vllm-rs` without `backendFramework`, as 1.6.0 persisted it with the
+`noop` backend. Its replay fails if the current operator detects `vllm-rs` as
+vLLM and moves the worker hash.
+
 Feature-specific shapes like this one live under `compatibility/` with their own
 provenance; the canonical matrix under `history/` covers topologies. Each
 compatibility scenario is declared in `hack/capture_compatibility.py`, which runs

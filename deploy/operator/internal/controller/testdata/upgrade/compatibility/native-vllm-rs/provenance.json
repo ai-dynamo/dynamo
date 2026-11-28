@@ -1,0 +1,27 @@
+{
+  "captureSources": {
+    "hack/capture_compatibility.py": "157e1d889896f23349e34c56fba4f689e97c7c886030b8ede6b94478641a73f4",
+    "hack/normalize_upgrade_snapshot/main.go": "5e8f3247947b384c93c79b4681d6389ca3d00c63aa0b85054a254f4d1ea1192b",
+    "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd",
+    "internal/testing/golden/snapshot.go": "f63c723b093b2bf6b8fe760e043e09e471cc7e1da80077da3b75b9e636b1db35"
+  },
+  "creation": "1.6.0 CREATE with mutating admission; origin stamped by the released operator",
+  "harness": {
+    "1.6.0": "ffcabe655bffda731682208e01a0d6d6963f01f277e2a122cc1da69e6b083ba4"
+  },
+  "inputSHA256": "a8614b8725094feadea134fc3667e7cbd8f1b11aaece86c3d140266c359c078b",
+  "observations": {
+    "1.6.0": {
+      "backendFramework": null,
+      "sha256": "a5cd92258dd0128b2c5ff82f167e065e4cbec2422f4e41867e390cabf6a8503a",
+      "workerCliqueHash": "e2a112ed",
+      "workerHash": "e2a112ed"
+    }
+  },
+  "reconcileBarrierSHA256": "5a2ce05158262546c9950a9a35cdf64b19131dfc7187f29c52c59361efbb6183",
+  "releases": {
+    "1.6.0": "701da25292ecca8f64d770cc0b17d389200019a1"
+  },
+  "scope": "native-sidecar worker launching vllm-rs without backendFramework, resolved as noop by 1.6.0"
+}
