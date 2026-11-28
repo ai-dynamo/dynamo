@@ -20,6 +20,8 @@ import tempfile
 import numpy as np
 import pytest
 
+from dynamo.common.utils.ffmpeg_command import ENV_XPU_FFMPEG_PATH
+
 try:
     from PIL import Image
 
@@ -35,6 +37,17 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(120),
 ]
+
+
+@pytest.fixture(autouse=True)
+def software_video_encoder(monkeypatch):
+    """Encode in software whatever the shell declares.
+
+    This guards the software encoder the image ships; with a hardware encoder
+    declared in the environment the output would be AV1, or the encode would
+    fail.
+    """
+    monkeypatch.delenv(ENV_XPU_FFMPEG_PATH, raising=False)
 
 
 def _synthetic_pil_frames(n: int = 8, size: int = 64) -> list:

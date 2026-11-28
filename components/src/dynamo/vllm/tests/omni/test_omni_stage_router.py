@@ -693,3 +693,127 @@ async def test_format_output_restores_completion_attrs_from_engine_inputs_wrappe
     restored = wrapped["engine_inputs"].outputs[0]
     assert restored.cumulative_token_ids == [1, 2, 3]
     assert restored.multimodal_output == {"hidden": True}
+
+
+# ── CMAF streaming ───────────────────────────────────────────
+
+
+def _cmaf_router(formatter):
+    """A one-stage router whose final stage reports an SHM payload."""
+
+    async def stage0_handler(request):
+        return {"shm_meta": {"some": "meta"}, "finished": True}
+
+    return _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=formatter,
+    )
+
+
+async def _router_chunks(router, request, result):
+    """Run ``router.generate`` for a video request whose final output is ``result``."""
+    with patch.object(stage_router, "shm_deserialize", return_value=result):
+        with patch(
+            "dynamo.vllm.omni.stage_router.parse_request_type",
+            return_value=(None, RequestType.VIDEO_GENERATION),
+        ):
+            with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
+                return [c async for c in router.generate(request, context=None)]
+
+
+@pytest.mark.asyncio
+async def test_cmaf_route_flag_streams_the_final_output(fake_cmaf_encoder):
+    """The frontend's CMAF route flag switches the router to the CMAF stream."""
+    import numpy as np
+
+    from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+    result = SimpleNamespace(
+        final_output_type="video",
+        images=[np.zeros((20, 8, 8, 3), dtype=np.float32)],
+        multimodal_output={"fps": 24},
+    )
+    router = _cmaf_router(OutputFormatter(model_name="test-model"))
+    request = {"prompt": "x", "nvext": {"fps": 16}, "extra_args": {"cmaf_stream": True}}
+
+    chunks = await _router_chunks(router, request, result)
+
+    assert [chunk["cmaf"] for chunk in chunks] == [
+        "cmaf:metadata",
+        "cmaf:init",
+        "cmaf:segment:1",
+        "cmaf:segment:2",
+        "cmaf:segment:3",
+    ]
+    # The generated frame rate wins over the request's, as on the batch path.
+    assert fake_cmaf_encoder.enc.fps == 24
+    assert fake_cmaf_encoder.enc.closed
+
+
+@pytest.mark.asyncio
+async def test_nothing_a_client_sends_selects_cmaf_in_the_router():
+    """Without the route flag the router answers with the ordinary response."""
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"data": [{"url": "http://x/v.mp4"}]}
+    router = _cmaf_router(mock_formatter)
+    request = {
+        "prompt": "x",
+        "nvext": {"annotations": ["cmaf", "cmaf_stream"]},
+        "extra_args": {"media_passthrough": {"cmaf_stream": True}},
+    }
+
+    chunks = await _router_chunks(
+        router, request, SimpleNamespace(final_output_type="video")
+    )
+
+    assert chunks == [{"data": [{"url": "http://x/v.mp4"}]}]
+    mock_formatter.format.assert_awaited_once()
+    mock_formatter.stream_cmaf.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmaf_failure_becomes_a_failed_response_not_a_bare_end(
+    fake_cmaf_encoder,
+):
+    """A failure after frames went out still ends the stream with an error."""
+    import numpy as np
+
+    from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+    class _Failing(fake_cmaf_encoder.cls):
+        async def finish(self):
+            """Fail like an ffmpeg exit after frames went out."""
+            raise RuntimeError("ffmpeg libvpx-vp9 CMAF encode failed (exit 1)")
+            yield  # unreachable; keeps finish an async generator
+
+    fake_cmaf_encoder.cls = _Failing
+    result = SimpleNamespace(
+        final_output_type="video", images=[np.zeros((8, 8, 8, 3), dtype=np.float32)]
+    )
+    router = _cmaf_router(OutputFormatter(model_name="test-model"))
+
+    chunks = await _router_chunks(
+        router, {"prompt": "x", "extra_args": {"cmaf_stream": True}}, result
+    )
+
+    assert [chunk["cmaf"] for chunk in chunks[:-1]] == ["cmaf:metadata", "cmaf:init"]
+    assert chunks[-1]["status"] == "failed"
+    assert "CMAF encode failed (exit 1)" in chunks[-1]["error"]
+    assert chunks[-1]["cmaf"] is None
+    assert fake_cmaf_encoder.enc.closed
+
+
+@pytest.mark.asyncio
+async def test_cmaf_fetch_failure_becomes_a_failed_response():
+    """A final stage that delivers nothing is reported, not streamed as empty."""
+    from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+    router = _cmaf_router(OutputFormatter(model_name="test-model"))
+    stage_output = SimpleNamespace(stage_connector_refs=None, shm_meta=None)
+
+    chunks = [c async for c in router._stream_cmaf(stage_output, "r", {})]
+
+    assert len(chunks) == 1
+    assert chunks[0]["status"] == "failed"
+    assert "Final stage produced no output" in chunks[0]["error"]
