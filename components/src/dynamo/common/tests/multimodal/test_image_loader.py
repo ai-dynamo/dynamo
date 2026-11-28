@@ -38,6 +38,8 @@ from dynamo.common.http import (
 )
 from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     ImageLoader,
@@ -49,6 +51,7 @@ from dynamo.common.multimodal.shared_image_cache import (
     _RateLimitedErrorWarnings,
     _size_bucket,
 )
+from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -998,6 +1001,137 @@ async def test_image_batch_prioritizes_typed_client_error(
         )
 
     assert exc_info.value is client_error
+
+
+def _batch_loader(kind: str):
+    """Build each loader without creating load coroutines or contacting a server."""
+    loader_type = {"image": ImageLoader, "audio": AudioLoader, "video": VideoLoader}[
+        kind
+    ]
+    return loader_type(url_policy=_permissive_policy())
+
+
+@pytest.mark.parametrize("loader_kind", ["image", "audio", "video"])
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["connection", "timeout", "mixed_fetch_first", "mixed_decode_first", "untyped"],
+)
+async def test_media_batch_aggregate_preserves_first_cause_and_fetch_family(
+    loader_kind: str, failure_kind: str
+) -> None:
+    """Keep the actual first cause and later fetch facts in either mixed order.
+
+    These raw per-item coroutine failures exercise aggregation itself, rather
+    than the different single-item normalization each loader already provides.
+    """
+    loader = _batch_loader(loader_kind)
+    if failure_kind == "connection":
+        failures = [
+            HttpConnectionError("PRIVATE_BATCH_HOST_ONE"),
+            HttpConnectionError("PRIVATE_BATCH_HOST_TWO"),
+        ]
+    elif failure_kind == "timeout":
+        failures = [
+            HttpTimeoutError("PRIVATE_BATCH_HOST_ONE"),
+            HttpTimeoutError("PRIVATE_BATCH_HOST_TWO"),
+        ]
+    elif failure_kind == "mixed_fetch_first":
+        failures = [
+            HttpConnectionError("PRIVATE_BATCH_HOST_ONE"),
+            RuntimeError("decode"),
+        ]
+    elif failure_kind == "mixed_decode_first":
+        failures = [
+            RuntimeError("decode"),
+            HttpConnectionError("PRIVATE_BATCH_HOST_ONE"),
+        ]
+    else:
+        failures = [RuntimeError("decode one"), RuntimeError("decode two")]
+    load_one = AsyncMock(side_effect=failures)
+    setattr(loader, f"load_{loader_kind}", load_one)
+
+    with pytest.raises(Exception) as caught:
+        await getattr(loader, f"load_{loader_kind}_batch")(
+            [
+                {URL_VARIANT_KEY: "https://example.com/one"},
+                {URL_VARIANT_KEY: "https://example.com/two"},
+            ]
+        )
+
+    expected_type = Exception if failure_kind == "untyped" else HttpError
+    assert type(caught.value) is expected_type
+    assert caught.value.__cause__ is failures[0]
+    assert caught.value.__context__ is None
+    assert all(str(failure) in str(caught.value) for failure in failures)
+    assert load_one.await_count == 2
+
+
+@pytest.mark.parametrize("loader_kind", ["image", "audio", "video"])
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.svg"),
+        UrlValidationError("blocked host"),
+        ValueError("invalid image input"),
+    ],
+    ids=["status", "url", "value"],
+)
+async def test_media_batch_preserves_client_error_precedence(
+    loader_kind: str, client_error: Exception
+) -> None:
+    """Raw fetch diagnostics cannot displace the established client-error verdict."""
+    loader = _batch_loader(loader_kind)
+    load_one = AsyncMock(
+        side_effect=[
+            HttpConnectionError("PRIVATE_BATCH_CONNECTION"),
+            HttpTimeoutError("PRIVATE_BATCH_TIMEOUT"),
+            client_error,
+        ]
+    )
+    setattr(loader, f"load_{loader_kind}", load_one)
+
+    with pytest.raises(type(client_error)) as caught:
+        await getattr(loader, f"load_{loader_kind}_batch")(
+            [
+                {URL_VARIANT_KEY: "https://example.com/one.png"},
+                {URL_VARIANT_KEY: "https://example.com/two.png"},
+                {URL_VARIANT_KEY: "https://example.com/rejected.png"},
+            ]
+        )
+
+    assert caught.value is client_error
+
+
+@pytest.mark.parametrize("loader_kind", ["audio", "video"])
+async def test_media_batch_preserves_missing_decoder_precedence(
+    loader_kind: str,
+) -> None:
+    """A known decoder configuration fault retains its original actionable type."""
+    loader = _batch_loader(loader_kind)
+    decoder_error = MissingMediaDecoderError("Install the required media decoder")
+    setattr(
+        loader,
+        f"load_{loader_kind}",
+        AsyncMock(side_effect=[HttpConnectionError("PRIVATE_FETCH"), decoder_error]),
+    )
+    with pytest.raises(MissingMediaDecoderError) as caught:
+        await getattr(loader, f"load_{loader_kind}_batch")(
+            [{"Url": "https://example.com/one"}, {"Url": "https://example.com/two"}]
+        )
+    assert caught.value is decoder_error
+
+
+@pytest.mark.parametrize("loader_kind", ["image", "audio", "video"])
+async def test_media_batch_preserves_cancellation(loader_kind: str) -> None:
+    """An item cancellation escapes without entering the aggregate fallback."""
+    loader = _batch_loader(loader_kind)
+    setattr(
+        loader, f"load_{loader_kind}", AsyncMock(side_effect=asyncio.CancelledError)
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await getattr(loader, f"load_{loader_kind}_batch")(
+            [{"Url": "https://example.com/one"}]
+        )
 
 
 @pytest.mark.parametrize(

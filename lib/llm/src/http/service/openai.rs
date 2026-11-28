@@ -44,7 +44,9 @@ use super::{
         StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{ContextLengthDetails, Protocol, invalid_argument, public_message_for},
+    error::{
+        ContextLengthDetails, Protocol, first_dynamo_error, invalid_argument, public_error_body,
+    },
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         EventConverter, process_chat_response_and_observe_metrics,
@@ -945,26 +947,18 @@ impl ErrorMessage {
             );
         }
 
+        let body = public_error_body(error, Protocol::OpenAi);
         Some((
             status,
             Json(ErrorMessage {
-                message: public_message_for(error, Protocol::OpenAi)
-                    .unwrap_or_else(|| public_message.to_string()),
+                message: body.message.unwrap_or_else(|| public_message.to_string()),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
-                details: error
-                    .public_details()
-                    .filter(|details| {
-                        !matches!(
-                            details,
-                            dynamo_runtime::error::PublicDetails::Message { .. }
-                        )
-                    })
+                details: body
+                    .details
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
-                context_length: error
-                    .public_details()
-                    .and_then(ContextLengthDetails::from_public_details),
+                context_length: body.context_length,
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -1009,9 +1003,9 @@ impl ErrorMessage {
         }
 
         if dynamo_http_server::metrics::request_was_cancelled(err.as_ref()) {
-            return ErrorMessage::sanitized_with_details(
-                SanitizedError::Cancelled,
-                format!("{err:#}"),
+            return with_source_body(
+                ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, format!("{err:#}")),
+                err.as_ref(),
             );
         }
 
@@ -1020,34 +1014,48 @@ impl ErrorMessage {
             && error.reason().as_str() != "runtime.unclassified"
             && let Some(response) = Self::from_semantic_error(error)
         {
-            return response;
+            return with_source_body(response, err.as_ref());
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
         if dynamo_http_server::metrics::request_was_rejected(err.as_ref()) {
-            return ErrorMessage::sanitized_with_details(
-                SanitizedError::Overloaded,
-                format!("{err:#}"),
+            return with_source_body(
+                ErrorMessage::sanitized_with_details(
+                    SanitizedError::Overloaded,
+                    format!("{err:#}"),
+                ),
+                err.as_ref(),
             );
         }
 
         // No backend workers are currently routable → HTTP 503.
         if dynamo_http_server::metrics::request_was_unavailable(err.as_ref()) {
-            return ErrorMessage::sanitized_with_details(
-                SanitizedError::Unavailable,
-                format!("{err:#}"),
+            return with_source_body(
+                ErrorMessage::sanitized_with_details(
+                    SanitizedError::Unavailable,
+                    format!("{err:#}"),
+                ),
+                err.as_ref(),
             );
         }
 
         if let Some(error) = canonical_error
             && let Some(response) = Self::from_semantic_error(error)
         {
-            return response;
+            return with_source_body(response, err.as_ref());
         }
 
         // Then check for HttpError
+        // Python's raw HTTP adapter retains disclosure context outside the
+        // typed source chain, so that context cannot select a semantic status.
+        let body_source = err
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .cloned();
         match err.downcast::<HttpError>() {
-            Ok(http_error) => ErrorMessage::from_backend_http_error(http_error),
+            Ok(http_error) => with_backend_body(
+                ErrorMessage::from_backend_http_error(http_error),
+                body_source.as_ref(),
+            ),
             Err(err) => {
                 ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"))
             }
@@ -1090,25 +1098,33 @@ impl ErrorMessage {
         }
     }
 
-    /// The status remains useful protocol information, but backend message text
-    /// is diagnostic-only and must not become public merely because it used a
-    /// 4xx status.
+    /// Keep legacy status triage while applying shared disclosure to received text.
     fn from_backend_http_error(mut err: HttpError) -> ErrorResponse {
         let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
         };
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(backend_http_error_class(status))
+            .upstream_error(
+                dynamo_runtime::error::UpstreamError::new(err.message.clone())
+                    .error_type("dynamo.http.HttpError")
+                    .code(err.code.to_string())
+                    .http_status(err.code),
+            )
+            .build();
         if status.is_client_error() && status.as_u16() != 499 && status != overload_status_code() {
-            tracing::debug!(status = %status, "Backend client error: {}", err.message);
             err.message = status
                 .canonical_reason()
                 .unwrap_or("Client error")
                 .to_string();
         }
-        Self::from_http_error(backend_http_error_class(status), err)
+        let mut response = Self::from_http_error(backend_http_error_class(status), err);
+        apply_semantic_body(&mut response, &error);
+        response
     }
 }
 
-fn backend_http_error_class(status: StatusCode) -> ErrorClass {
+pub(crate) fn backend_http_error_class(status: StatusCode) -> ErrorClass {
     if status == overload_status_code() {
         return ErrorClass::CapacityExhausted;
     }
@@ -3142,6 +3158,8 @@ pub(super) struct BackendErrorInfo {
     message: String,
     status: StatusCode,
     semantic: Option<dynamo_runtime::error::DynamoError>,
+    /// Disclosure provenance cannot promote a legacy payload into semantic status selection.
+    body_source: Option<dynamo_runtime::error::DynamoError>,
     /// Classification already established from the error chain, when the
     /// status alone is not enough to recover it. `None` means "derive it from
     /// `status`" — the ordinary case for a status the worker supplied.
@@ -3158,6 +3176,7 @@ impl BackendErrorInfo {
             message,
             status,
             semantic: None,
+            body_source: None,
             sanitized: None,
             metric_error_type: None,
         }
@@ -3165,6 +3184,7 @@ impl BackendErrorInfo {
 
     fn with_semantic(mut self, error: Option<&dynamo_runtime::error::DynamoError>) -> Self {
         self.semantic = error.cloned();
+        self.body_source = error.cloned();
         self
     }
 
@@ -3185,6 +3205,198 @@ impl BackendErrorInfo {
 struct ErrorPayload {
     message: Option<String>,
     code: Option<u16>,
+}
+
+#[cfg(test)]
+mod status_policy_tests {
+    use super::*;
+    use dynamo_runtime::error::{DynamoError, ErrorClass, UpstreamError};
+
+    #[test]
+    fn received_http_facts_do_not_override_semantic_status() {
+        for status in [408, 418, 422, 431, 501, 502, 503, 504, 529, 599] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .diagnostic("private wrapper")
+                .upstream_error(UpstreamError::new("source explanation").http_status(status))
+                .build();
+            let unary = ErrorMessage::from_anyhow(error.clone().into(), "fallback");
+            assert_eq!(unary.0, StatusCode::BAD_REQUEST);
+            assert_eq!(unary.1.code, 400);
+            assert_eq!(unary.1.message, "source explanation");
+            let mut event = Annotated::<String>::from_error(String::new());
+            event.error = Some(error);
+            let response =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1.code, 400);
+            assert_eq!(response.1.message, "source explanation");
+        }
+    }
+
+    #[test]
+    fn http_body_context_preserves_main_raw_status_ownership() {
+        for (status, expected) in [(422, 422), (502, 500), (503, 503), (504, 500)] {
+            for blocked in [false, true] {
+                let mut upstream = UpstreamError::new("received HTTP explanation").http_status(418);
+                if blocked {
+                    upstream = upstream.family("media_fetch");
+                }
+                let captured = DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .upstream_error(upstream)
+                    .build();
+                let error = anyhow::Error::new(HttpError {
+                    code: status,
+                    message: "received HTTP explanation".into(),
+                })
+                .context(captured);
+                assert!(find_canonical_error_in_chain(error.as_ref()).is_none());
+                let response = ErrorMessage::from_anyhow(error, "fallback");
+                assert_eq!(response.0.as_u16(), expected);
+                assert_eq!(response.1.code, expected);
+                if blocked {
+                    assert!(!response.1.message.contains("received HTTP explanation"));
+                    if expected == 500 {
+                        assert_eq!(response.1.message, "Internal server error");
+                    }
+                } else {
+                    assert_eq!(response.1.message, "received HTTP explanation");
+                }
+                if status == 502 || status == 504 {
+                    assert_eq!(
+                        response.1.details.as_ref().unwrap()["backend_status"],
+                        status
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backend_http_errors_keep_main_triage_and_numeric_details() {
+        for status in [501, 502, 504, 507] {
+            for received in [
+                "received engine explanation",
+                "[12:34:56] /PRIVATE/compiler.cc:83: private diagnostic",
+            ] {
+                let response = ErrorMessage::from_backend_http_error(HttpError {
+                    code: status,
+                    message: received.into(),
+                });
+                assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(response.1.code, 500);
+                assert_eq!(
+                    response.1.details.as_ref().unwrap()["backend_status"],
+                    status
+                );
+                assert_eq!(
+                    response.1.message,
+                    if received.starts_with('[') {
+                        "Internal server error"
+                    } else {
+                        received
+                    },
+                );
+            }
+        }
+        for status in [502, 504] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .diagnostic(
+                    serde_json::json!({"message": "PRIVATE_MEDIA_SOURCE", "code": status})
+                        .to_string(),
+                )
+                .upstream_error(
+                    UpstreamError::new("PRIVATE_MEDIA_SOURCE")
+                        .family("media_fetch")
+                        .http_status(status),
+                )
+                .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                    limit: 8,
+                    actual: Some(10),
+                    prompt_tokens: None,
+                })
+                .build();
+            let mut event = Annotated::<String>::from_error(String::new());
+            event.error = Some(error);
+            let response =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                response.1.details.as_deref(),
+                Some(&serde_json::json!({"backend_status": status})),
+            );
+            assert!(response.1.context_length.is_none());
+        }
+    }
+}
+
+/// Apply shared message/detail projection without changing status or metrics.
+fn apply_semantic_body(response: &mut ErrorResponse, error: &dynamo_runtime::error::DynamoError) {
+    let body = public_error_body(error, Protocol::OpenAi);
+    // This validated field is generated by main's 5xx normalization, not a worker.
+    let backend_status = response
+        .1
+        .details
+        .as_ref()
+        .and_then(|details| details.as_object())
+        .filter(|details| details.len() == 1)
+        .and_then(|details| details.get("backend_status"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|status| (500..=599).contains(status));
+    if body.blocked {
+        let class = if response.1.metric_error_type == Some(ErrorType::Overload) {
+            ErrorClass::CapacityExhausted
+        } else if response.0 == StatusCode::INTERNAL_SERVER_ERROR {
+            ErrorClass::Internal
+        } else {
+            backend_http_error_class(response.0)
+        };
+        response.1.message = match dynamo_error::http::http_action_for_class(class) {
+            ClientErrorAction::Respond { public_message, .. } => public_message.to_string(),
+            ClientErrorAction::NoDelivery => "Request cancelled".to_string(),
+        };
+    } else if let Some(message) = body.message {
+        response.1.message = message;
+    }
+    response.1.details = body
+        .details
+        .and_then(|details| serde_json::to_value(details).ok())
+        .map(Box::new);
+    if let Some(status) = backend_status {
+        let details = response
+            .1
+            .details
+            .get_or_insert_with(|| Box::new(serde_json::json!({})));
+        if let Some(details) = details.as_object_mut() {
+            details.insert("backend_status".into(), status.into());
+        }
+    }
+    response.1.context_length = body.context_length;
+}
+
+/// Project received content after the existing backend status decision is complete.
+fn with_backend_body(
+    mut response: ErrorResponse,
+    source: Option<&dynamo_runtime::error::DynamoError>,
+) -> ErrorResponse {
+    if let Some(error) = source {
+        apply_semantic_body(&mut response, error);
+    }
+    response
+}
+
+/// Use the outermost typed source for disclosure while retaining response status.
+fn with_source_body(
+    mut response: ErrorResponse,
+    source: &(dyn std::error::Error + 'static),
+) -> ErrorResponse {
+    if let Some(error) = first_dynamo_error(source) {
+        apply_semantic_body(&mut response, error);
+    }
+    response
 }
 
 /// Checks if an Annotated event represents a backend error and extracts error information.
@@ -3266,13 +3478,14 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
-            // Keep the typed error when it carries a public message, so the
-            // unary response renders it. Other messages stay diagnostic.
+            // Status selection keeps main's semantic guard; disclosure retains
+            // its own source even when the legacy envelope owns the status.
             let keep_semantic =
                 overloaded || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
+                body_source: semantic.cloned(),
                 semantic: if keep_semantic {
                     semantic.cloned()
                 } else {
@@ -3299,6 +3512,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 message: error_str,
                 status: overload_status_code(),
                 semantic: semantic.cloned(),
+                body_source: semantic.cloned(),
                 sanitized: Some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3534,6 +3748,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
         message,
         status,
         semantic,
+        body_source,
         sanitized,
         metric_error_type,
     } = backend_error;
@@ -3546,11 +3761,9 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             dynamo_http_server::metrics::record_failure(error);
             render_record_failure = false;
         }
-        return ErrorMessage::sanitized_with_details_recording(
-            variant,
-            message,
-            render_record_failure,
-        );
+        let response =
+            ErrorMessage::sanitized_with_details_recording(variant, message, render_record_failure);
+        return with_backend_body(response, body_source.as_ref());
     }
 
     if let Some(error) = &semantic {
@@ -3563,14 +3776,15 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
         {
-            return response;
+            return with_backend_body(response, body_source.as_ref());
         }
         if matches!(http_action_for_error(error), ClientErrorAction::NoDelivery) {
-            return ErrorMessage::sanitized_with_details_recording(
+            let response = ErrorMessage::sanitized_with_details_recording(
                 SanitizedError::Cancelled,
                 message,
                 false,
             );
+            return with_backend_body(response, body_source.as_ref());
         }
     }
 
@@ -3607,7 +3821,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     if let Some(error_type) = metric_error_type {
         response.1.metric_error_type = Some(error_type);
     }
-    response
+    with_backend_body(response, body_source.as_ref())
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -7847,8 +8061,14 @@ mod tests {
         let err = http_error_from_engine(400).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(response.1.message, "Bad Request");
-        assert!(!response.1.message.contains("custom error message"));
+        assert_eq!(response.1.message, "custom error message");
+        let error = HttpError {
+            code: 400,
+            message: "[12:34:56] /private/compiler.cc:83: compiler diagnostic".to_string(),
+        };
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(!response.1.message.contains("/private/"));
     }
 
     #[test]
@@ -8019,28 +8239,21 @@ mod tests {
     }
 
     #[test]
-    fn test_error_response_from_anyhow_out_of_range() {
-        // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths. 503 keeps
-        // its status, matching the streaming path
-        // (`test_check_for_backend_error_with_503_preserves_status`); the rest
-        // answer 500.
-        for (code, expected_status) in [
-            (399u16, 500u16),
-            (500, 500),
-            (501, 500),
-            (503, 503),
-            (507, 500),
+    fn test_backend_http_error_status_validation_and_forwarding() {
+        // Main normalizes unexpected 5xx to 500 while disclosure independently
+        // forwards received explanations that do not match the blocklist.
+        for (code, expected_status, expected_message) in [
+            (399u16, 500u16, "Internal server error"),
+            (500, 500, "custom error message"),
+            (501, 500, "custom error message"),
+            (503, 503, "custom error message"),
+            (507, 500, "custom error message"),
         ] {
             let err = http_error_from_engine(code).unwrap_err();
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
             assert_eq!(response.0.as_u16(), expected_status, "status for {code}");
             assert_eq!(response.1.code, expected_status, "body code for {code}");
-            assert_eq!(response.1.message, "Internal server error");
-            assert!(
-                !response.1.message.contains("custom error message"),
-                "client response must not include the backend-supplied HttpError message"
-            );
+            assert_eq!(response.1.message, expected_message, "message for {code}");
         }
     }
 
@@ -8054,6 +8267,7 @@ mod tests {
                 semantic: Some(dynamo_runtime::error::DynamoError::from(
                     &backend_payload as &(dyn std::error::Error + 'static),
                 )),
+                body_source: None,
                 sanitized: None,
                 metric_error_type: None,
             },
@@ -8076,6 +8290,7 @@ mod tests {
                         .class(dynamo_runtime::error::ErrorClass::Internal)
                         .build(),
                 ),
+                body_source: None,
                 sanitized: None,
                 metric_error_type: None,
             },
@@ -8406,6 +8621,7 @@ mod tests {
                 message: "Worker local total request limit reached (32/32)".to_string(),
                 status: StatusCode::TOO_MANY_REQUESTS,
                 semantic: None,
+                body_source: None,
                 sanitized: Some(SanitizedError::Overloaded),
                 metric_error_type: Some(ErrorType::Overload),
             },
@@ -8429,6 +8645,7 @@ mod tests {
                 message: "backend stopped".to_string(),
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 semantic: Some(cancelled),
+                body_source: None,
                 sanitized: None,
                 metric_error_type: None,
             },
@@ -8451,6 +8668,7 @@ mod tests {
                 message: "backend stopped".to_string(),
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 semantic: Some(cancelled),
+                body_source: None,
                 sanitized: None,
                 metric_error_type: None,
             },
@@ -9010,6 +9228,99 @@ mod tests {
         assert_eq!(response.1.message, "Invalid request");
         assert!(!response.1.message.contains("NATS"));
         assert!(!response.1.message.contains("payload_bytes"));
+    }
+
+    #[test]
+    fn received_backend_messages_preserve_legacy_http_status_selection() {
+        use dynamo_runtime::error::{DynamoError, UpstreamError};
+        for code in [400, 415, 418, 422] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .diagnostic(
+                    serde_json::json!({"message": "engine explanation", "code": code}).to_string(),
+                )
+                .upstream_error(
+                    UpstreamError::new("engine explanation")
+                        .error_type("dynamo.http.HttpError")
+                        .http_status(code),
+                )
+                .build();
+            let response = ErrorMessage::from_anyhow(error.clone().into(), BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1.message, "engine explanation");
+            let mut event = Annotated::<String>::from_error(String::new());
+            event.error = Some(error);
+            let response =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            assert_eq!(response.0.as_u16(), code);
+            assert_eq!(response.1.message, "engine explanation");
+        }
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic(serde_json::json!({"message": "x".repeat(8192), "code": 422}).to_string())
+            .upstream_error(
+                UpstreamError::new("x".repeat(8192))
+                    .family("http")
+                    .code("422")
+                    .http_status(422),
+            )
+            .build();
+        let response = ErrorMessage::from_anyhow(error.clone().into(), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message.len(), 4096);
+        let mut event = Annotated::<String>::from_error(String::new());
+        event.error = Some(error);
+        let response =
+            backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message.len(), 4096);
+    }
+
+    #[test]
+    fn backend_masking_strips_details_and_malformed_causes() {
+        use dynamo_runtime::error::{DynamoError, PublicDetails, UpstreamError};
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(UpstreamError::new("PRIVATE_FETCH_HOST").family("media_fetch"))
+            .public_details(PublicDetails::ContextLength {
+                limit: 10,
+                actual: Some(20),
+                prompt_tokens: None,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.clone().into(), BACKUP_ERROR_MESSAGE);
+        let body = serde_json::to_value(&response.1.0).unwrap();
+        assert_eq!(body["message"], "Invalid request");
+        assert!(body.get("details").is_none());
+        assert!(response.1.context_length_details().is_none());
+        assert!(!body.to_string().contains("PRIVATE_FETCH_HOST"));
+        let invalid: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest", "reason": "request.rate_limited", "caused_by": error,
+        }))
+        .unwrap();
+        let response = ErrorMessage::from_anyhow(invalid.into(), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Internal server error");
+        assert!(response.1.details.is_none());
+
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::CannotConnect)
+            .cause(
+                DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .upstream_error(UpstreamError::new("PRIVATE_INNER_EXPLANATION"))
+                    .build(),
+            )
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+        // Canonical status still comes from the inner request rejection, but
+        // disclosure must see the outer transport failure too.
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("PRIVATE_INNER_EXPLANATION")
+        );
     }
 
     #[test]

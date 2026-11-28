@@ -23,7 +23,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{Protocol, public_message_for};
+use crate::http::service::error::{Protocol, public_error_body, public_message_for};
 use dynamo_error::http::{ClientErrorAction, SanitizedError, http_action_for_error};
 use dynamo_http_server::disconnect::ConnectionHandle;
 #[cfg(test)]
@@ -237,11 +237,22 @@ impl Default for StreamMonitorOptions {
     }
 }
 
-fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+/// Apply disclosure to fallback SSE bodies without reclassifying the failure.
+fn openai_stream_error(source: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     let error = SanitizedError::Internal;
+    let mut current = Some(source);
+    let mut message = None;
+    while let Some(source) = current {
+        if let Some(source) = source.downcast_ref::<DynamoError>() {
+            let body = public_error_body(source, Protocol::OpenAi);
+            message = body.message.filter(|_| !body.blocked);
+            break;
+        }
+        current = source.source();
+    }
     let body = serde_json::json!({
         "error": {
-            "message": error.to_string(),
+            "message": message.unwrap_or_else(|| error.to_string()),
             "type": error.openai_type_slug(),
             "code": error.status().as_u16(),
         }
@@ -1197,6 +1208,46 @@ mod tests {
             body["error"]["code"],
             dynamo_error::http::overload_status_code().as_u16()
         );
+    }
+
+    #[test]
+    fn typed_and_fallback_stream_errors_use_the_frontend_body_policy() {
+        for blocked in [false, true] {
+            let mut upstream =
+                dynamo_runtime::error::UpstreamError::new("received engine explanation");
+            if blocked {
+                upstream = upstream.family("python_programming");
+            }
+            let error = DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+                .upstream_error(upstream)
+                .build();
+            for ((_, body), code, expected) in [
+                (
+                    openai_semantic_stream_error(&error),
+                    400,
+                    if blocked {
+                        "Invalid request"
+                    } else {
+                        "received engine explanation"
+                    },
+                ),
+                (
+                    openai_stream_error(&error),
+                    500,
+                    if blocked {
+                        "Internal server error"
+                    } else {
+                        "received engine explanation"
+                    },
+                ),
+            ] {
+                let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["error"]["code"], code);
+                assert_eq!(body["error"]["message"], expected);
+                assert!(body["error"].get("details").is_none());
+            }
+        }
     }
 
     #[test]

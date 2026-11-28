@@ -30,6 +30,7 @@ from dynamo.common.http.url_validator import (
     describe_media_source,
     validate_media_url,
 )
+from dynamo.common.multimodal.batch_errors import make_media_batch_error
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
@@ -477,6 +478,7 @@ class VideoLoader:
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
         collective_exceptions: list[str] = []
+        failures: list[BaseException] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         decoder_error: MissingMediaDecoderError | None = None
@@ -485,6 +487,7 @@ class VideoLoader:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
+                failures.append(result)
                 source = describe_media_source(
                     media_item.get(URL_VARIANT_KEY, "decoded")
                 )
@@ -521,6 +524,9 @@ class VideoLoader:
             raise value_error
 
         if collective_exceptions:
-            raise Exception("".join(collective_exceptions))
+            first_error = failures[0]
+            raise make_media_batch_error(
+                "".join(collective_exceptions), failures
+            ) from first_error
 
         return loaded_videos

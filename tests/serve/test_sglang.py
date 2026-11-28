@@ -48,6 +48,7 @@ from tests.utils.payload_builder import (
     kv_events_metrics_payload,
     lora_chat_payload,
     metric_payload_default,
+    public_error_payload,
     responses_payload_default,
     responses_stream_payload_default,
     router_selection_chat_payload_default,
@@ -156,6 +157,34 @@ sglang_configs = {
             _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
+            # Rejected schemas keep XGrammar's compiler file/line text private.
+            *[
+                public_error_payload(
+                    {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "What is 2+2? Return only JSON.",
+                            }
+                        ],
+                        "max_tokens": 32,
+                        "temperature": 0,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "d4_unsupported_type",
+                                "schema": {"type": "not_a_json_schema_type"},
+                            },
+                        },
+                    },
+                    expected_status_code=200 if stream else 400,
+                    expected_error_code=400,
+                    expected_message="Invalid request",
+                    stream=stream,
+                )
+                for stream in (False, True)
+            ],
+            chat_payload_default(),
         ],
     ),
     # Top-k logprobs on chat and completions with no opt-in env var; mirrors

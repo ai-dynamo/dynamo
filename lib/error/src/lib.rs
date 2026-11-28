@@ -44,7 +44,9 @@
 //!
 //! [`Diagnostic`] contains bounded operator-facing context. It may be used in logs and traces, but it must never be copied into a client response or metric label. Do not place secrets, credentials, prompts, generated text, or raw upstream response bodies in a diagnostic.
 //!
-//! [`PublicDetails`] is the only occurrence-specific channel available for client rendering, but the type does not sanitize its values. Producers must populate it only at a boundary that knows the value is safe. A [`PublicDetails::Message`] must contain fixed, cataloged, or explicitly allowlisted text; it must not contain user input, prompts, generated content, secrets, URLs, diagnostics, or raw upstream responses. Never derive public details from a diagnostic or arbitrary backend exception text.
+//! [`PublicDetails`] carries producer-authored client-safe replacements, but the type does not sanitize its values. A [`PublicDetails::Message`] must contain fixed, cataloged, or explicitly allowlisted text; never derive it from a diagnostic or arbitrary backend exception text.
+//!
+//! [`UpstreamError`] separately preserves received explanation text and factual source metadata for the frontend's message policy. Capture does not authorize disclosure: the frontend applies its blocklist before rendering. Never add this payload to metric labels or default logs/traces, or log the full serialized error. Its `Debug` implementation omits received text and metadata. Diagnostics remain operator-only and must never be used as a response fallback.
 //!
 //! # Producer guidance
 //!
@@ -629,6 +631,184 @@ fn bounded_message(mut message: String) -> String {
     message
 }
 
+/// Bounded received explanation and factual source metadata for frontend policy.
+///
+/// This is internal transport data, not an assertion that the content is safe.
+/// Unknown source types remain valid; oversized or malformed metadata is marked
+/// invalid rather than truncated into a different identifier. Consumers must
+/// mask such payloads instead of treating missing metadata as an unknown type.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct UpstreamError {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    invalid_metadata: bool,
+}
+
+impl UpstreamError {
+    /// Maximum byte length of each captured source identity tag.
+    pub const MAX_METADATA_BYTES: usize = 128;
+
+    /// Capture received text with the shared 4,096-byte UTF-8-safe bound.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: bounded_message(message.into()),
+            error_type: None,
+            code: None,
+            http_status: None,
+            family: None,
+            invalid_metadata: false,
+        }
+    }
+
+    // Reject oversized tags instead of truncating them into a different rule match.
+    fn metadata(&mut self, value: String) -> Option<String> {
+        if value.len() > Self::MAX_METADATA_BYTES {
+            self.invalid_metadata = true;
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    /// Record the source's qualified exception or native error type.
+    pub fn error_type(mut self, value: impl Into<String>) -> Self {
+        self.error_type = self.metadata(value.into());
+        self
+    }
+
+    /// Record a native code without interpreting it as an HTTP status.
+    pub fn code(mut self, value: impl Into<String>) -> Self {
+        self.code = self.metadata(value.into());
+        self
+    }
+
+    /// Capture an actual HTTP error response status, separately from a native code.
+    pub fn http_status(mut self, value: u16) -> Self {
+        self.http_status = if (400..=599).contains(&value) {
+            Some(value)
+        } else {
+            self.invalid_metadata = true;
+            None
+        };
+        self
+    }
+
+    /// Record an established base family, including for an unfamiliar subclass.
+    pub fn family(mut self, value: impl Into<String>) -> Self {
+        self.family = self.metadata(value.into());
+        self
+    }
+
+    /// Record that bounded source inspection could not recover complete metadata.
+    /// Frontend policy must mask this case instead of assuming an unknown type.
+    pub fn mark_incomplete_metadata(mut self) -> Self {
+        self.invalid_metadata = true;
+        self
+    }
+
+    /// Return received text before Dynamo adds diagnostic wrappers.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Return the captured source type, independently of Dynamo's semantic class.
+    pub fn error_type_name(&self) -> Option<&str> {
+        self.error_type.as_deref()
+    }
+
+    /// Return the code in its original source namespace.
+    pub fn code_value(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    /// Return source HTTP status only while all captured metadata is valid.
+    pub fn http_status_value(&self) -> Option<u16> {
+        self.http_status.filter(|_| self.metadata_valid())
+    }
+
+    /// Return established source ancestry used by frontend rules.
+    pub fn family_name(&self) -> Option<&str> {
+        self.family.as_deref()
+    }
+
+    /// Return false when metadata was malformed or could not be fully captured.
+    pub fn metadata_valid(&self) -> bool {
+        !self.invalid_metadata
+    }
+}
+
+impl fmt::Debug for UpstreamError {
+    // Incidental debug output must not reveal received text or source metadata.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpstreamError")
+            .field("message_bytes", &self.message.len())
+            .field("metadata_valid", &self.metadata_valid())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'de> Deserialize<'de> for UpstreamError {
+    // Apply capture bounds to wire data without silently discarding invalidity.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Malformed content stays decodable but invalid for frontend disclosure.
+        #[derive(Deserialize)]
+        struct Representation {
+            #[serde(default)]
+            message: Option<serde_json::Value>,
+            #[serde(default)]
+            error_type: Option<serde_json::Value>,
+            #[serde(default)]
+            code: Option<serde_json::Value>,
+            #[serde(default)]
+            http_status: Option<serde_json::Value>,
+            #[serde(default)]
+            family: Option<serde_json::Value>,
+            #[serde(default)]
+            invalid_metadata: bool,
+        }
+
+        let wire = Representation::deserialize(deserializer)?;
+        let (message, invalid_message) = match wire.message {
+            Some(serde_json::Value::String(message)) => (message, false),
+            _ => (String::new(), true),
+        };
+        let mut result = Self::new(message);
+        result.invalid_metadata = wire.invalid_metadata || invalid_message;
+        let mut metadata = |value: Option<serde_json::Value>| match value {
+            Some(serde_json::Value::String(value)) => result.metadata(value),
+            Some(_) => {
+                result.invalid_metadata = true;
+                None
+            }
+            None => None,
+        };
+        let error_type = metadata(wire.error_type);
+        let code = metadata(wire.code);
+        let family = metadata(wire.family);
+        result.error_type = error_type;
+        result.code = code;
+        result.family = family;
+        if let Some(value) = wire.http_status {
+            match value.as_u64().and_then(|value| u16::try_from(value).ok()) {
+                Some(status) => result = result.http_status(status),
+                None => result.invalid_metadata = true,
+            }
+        }
+        Ok(result)
+    }
+}
+
 /// Bounded operator-only diagnostic text.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostic {
@@ -734,7 +914,9 @@ pub struct DynamoError {
     /// Optional bounded operator-only context. This is not client-safe and must not be used as a metric label.
     pub diagnostic: Option<Diagnostic>,
     /// Optional explicitly client-safe data. The producer remains responsible for ensuring every contained value is safe to expose.
-    pub public: Option<PublicDetails>,
+    pub public: Option<Box<PublicDetails>>,
+    /// Received content for frontend policy; use [`Self::upstream_error`] to validate identity.
+    pub upstream_error: Option<Box<UpstreamError>>,
     retry_hint: Option<RetryHint>,
 }
 
@@ -746,6 +928,7 @@ impl Serialize for DynamoError {
         use serde::ser::SerializeStruct;
 
         let public = self.public_details();
+        let upstream_error = self.upstream_error();
         let retry_hint = self.retry_hint();
         let dp_rank = match self.error_type() {
             ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
@@ -760,6 +943,7 @@ impl Serialize for DynamoError {
             "DynamoError",
             4 + usize::from(self.diagnostic.is_some())
                 + usize::from(public.is_some())
+                + usize::from(upstream_error.is_some())
                 + usize::from(dp_rank.is_some())
                 + usize::from(caused_by.is_some())
                 + usize::from(retry_hint.is_some()),
@@ -773,6 +957,9 @@ impl Serialize for DynamoError {
         }
         if let Some(public) = public {
             state.serialize_field("public", public)?;
+        }
+        if let Some(upstream_error) = upstream_error {
+            state.serialize_field("upstream_error", upstream_error)?;
         }
         if let Some(retry_hint) = retry_hint {
             state.serialize_field("retry_hint", &retry_hint)?;
@@ -806,6 +993,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             message: Option<Diagnostic>,
             #[serde(default, rename = "public", alias = "public_details")]
             public: Option<PublicDetails>,
+            #[serde(default)]
+            upstream_error: Option<UpstreamError>,
             #[serde(default, deserialize_with = "deserialize_dp_rank")]
             dp_rank: Option<u32>,
             #[serde(default, deserialize_with = "deserialize_retry_hint")]
@@ -834,6 +1023,7 @@ impl<'de> Deserialize<'de> for DynamoError {
         let valid_reason = !invalid_declared_class
             && reason
                 .as_ref()
+                .filter(|reason| reason.as_str() != "runtime.invalid_error")
                 .and_then(|reason| ErrorReason::catalog_class(reason.as_str()))
                 .is_some_and(|class| class == canonical_class);
         let stored_class = legacy_error_type
@@ -851,7 +1041,7 @@ impl<'de> Deserialize<'de> for DynamoError {
                     _ => stored_class,
                 },
                 reason,
-                representation.public,
+                representation.public.map(Box::new),
             ),
             _ => (
                 ErrorClass::Internal,
@@ -874,6 +1064,10 @@ impl<'de> Deserialize<'de> for DynamoError {
             reason,
             diagnostic,
             public,
+            upstream_error: valid_reason
+                .then_some(representation.upstream_error)
+                .flatten()
+                .map(Box::new),
             retry_hint: representation.retry_hint,
         })
     }
@@ -907,8 +1101,9 @@ impl DynamoError {
     }
 
     fn has_valid_identity(&self) -> bool {
-        ErrorReason::catalog_class(self.reason.as_str())
-            .is_some_and(|class| class == self.class.normalized())
+        self.reason.as_str() != "runtime.invalid_error"
+            && ErrorReason::catalog_class(self.reason.as_str())
+                .is_some_and(|class| class == self.class.normalized())
     }
 
     /// Returns the canonical semantic error class.
@@ -982,13 +1177,20 @@ impl DynamoError {
     /// Returns structured client-safe details.
     pub fn public_details(&self) -> Option<&PublicDetails> {
         self.has_valid_identity()
-            .then_some(self.public.as_ref())
+            .then_some(self.public.as_deref())
             .flatten()
     }
 
     /// Returns the explicitly captured client-safe rejection message.
     pub fn public_message(&self) -> Option<&str> {
         self.public_details().and_then(PublicDetails::message)
+    }
+
+    /// Received explanation for frontend policy, hidden for invalid identities.
+    pub fn upstream_error(&self) -> Option<&UpstreamError> {
+        self.has_valid_identity()
+            .then_some(self.upstream_error.as_deref())
+            .flatten()
     }
 
     /// Returns the legacy error message view.
@@ -1031,6 +1233,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 reason: ErrorReason::from_static("runtime.unclassified"),
                 diagnostic: Some(diagnostic),
                 public: None,
+                upstream_error: None,
                 retry_hint: None,
             };
         };
@@ -1042,7 +1245,8 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 class: source.error_type(),
                 reason: source.reason().clone(),
                 diagnostic: Some(diagnostic),
-                public: source.public_details().cloned(),
+                public: source.public_details().cloned().map(Box::new),
+                upstream_error: source.upstream_error().cloned().map(Box::new),
                 retry_hint: source.retry_hint(),
             };
         }
@@ -1052,6 +1256,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
             reason: ErrorReason::from_static("runtime.unclassified"),
             diagnostic: Some(diagnostic),
             public: None,
+            upstream_error: source.upstream_error().cloned().map(Box::new),
             retry_hint: None,
         }
     }
@@ -1087,6 +1292,7 @@ pub struct DynamoErrorBuilder {
     reason: Option<ErrorReason>,
     diagnostic: Option<Diagnostic>,
     public: Option<PublicDetails>,
+    upstream_error: Option<UpstreamError>,
     retry_hint: Option<RetryHint>,
 }
 
@@ -1148,6 +1354,12 @@ impl DynamoErrorBuilder {
         self
     }
 
+    /// Capture received content separately from diagnostics and public replacements.
+    pub fn upstream_error(mut self, upstream_error: UpstreamError) -> Self {
+        self.upstream_error = Some(upstream_error);
+        self
+    }
+
     /// Preserve compatibility with existing builders while keeping native causes out of the semantic payload.
     pub fn cause(mut self, cause: impl std::error::Error + 'static) -> Self {
         let message = cause.to_string();
@@ -1166,15 +1378,17 @@ impl DynamoErrorBuilder {
         let reason = self
             .reason
             .unwrap_or_else(|| ErrorReason::for_class(raw_class));
-        let valid_reason = ErrorReason::catalog_class(reason.as_str())
-            .is_some_and(|class| class == raw_class.normalized());
+        let valid_reason = reason.as_str() != "runtime.invalid_error"
+            && ErrorReason::catalog_class(reason.as_str())
+                .is_some_and(|class| class == raw_class.normalized());
 
         if valid_reason {
             DynamoError {
                 class: raw_class,
                 reason,
                 diagnostic: self.diagnostic,
-                public: self.public,
+                public: self.public.map(Box::new),
+                upstream_error: self.upstream_error.map(Box::new),
                 retry_hint: self.retry_hint,
             }
         } else {
@@ -1183,6 +1397,7 @@ impl DynamoErrorBuilder {
                 reason: ErrorReason::from_static("runtime.invalid_error"),
                 diagnostic: self.diagnostic,
                 public: None,
+                upstream_error: None,
                 retry_hint: None,
             }
         }
@@ -1245,6 +1460,277 @@ mod tests {
     fn dynamo_error_is_error_send_sync_static() {
         fn assert_bounds<T: std::error::Error + Send + Sync + 'static>() {}
         assert_bounds::<DynamoError>();
+    }
+
+    #[test]
+    fn absent_upstream_payload_costs_only_one_pointer_on_stream_frames() {
+        assert_eq!(
+            std::mem::size_of_val(&DynamoError::builder().build().upstream_error),
+            std::mem::size_of::<usize>()
+        );
+        assert!(std::mem::size_of::<DynamoError>() < 128);
+        assert_eq!(
+            std::mem::size_of_val(&DynamoError::builder().build().public),
+            std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn upstream_payload_roundtrips_alongside_structured_public_details() {
+        let upstream = UpstreamError::new("engine request explanation")
+            .error_type("new_engine.CustomFailure")
+            .code("unrecognized_native_code")
+            .http_status(422)
+            .family("media_fetch");
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private Dynamo wrapper")
+            .upstream_error(upstream.clone())
+            .public_details(PublicDetails::ContextLength {
+                limit: 100,
+                actual: Some(101),
+                prompt_tokens: Some(101),
+            })
+            .build();
+        let wire = serde_json::to_value(&error).unwrap();
+        let decoded: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.class(), error.class());
+        assert_eq!(decoded.reason(), error.reason());
+        assert_eq!(decoded.public_details(), error.public_details());
+        assert_eq!(decoded.upstream_error(), Some(&upstream));
+        assert_eq!(upstream.message(), "engine request explanation");
+        assert_eq!(upstream.error_type_name(), Some("new_engine.CustomFailure"));
+        assert_eq!(upstream.code_value(), Some("unrecognized_native_code"));
+        assert_eq!(upstream.http_status_value(), Some(422));
+        assert_eq!(upstream.family_name(), Some("media_fetch"));
+        assert!(upstream.metadata_valid());
+
+        #[derive(Deserialize)]
+        struct LegacyReader {
+            message: String,
+        }
+        let legacy: LegacyReader = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.message, "private Dynamo wrapper");
+        let legacy: DynamoError = serde_json::from_str(
+            r#"{"error_type":"InvalidArgument","message":"legacy diagnostic"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.upstream_error(), None);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("upstream_error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upstream_text_is_bounded_and_omitted_from_debug() {
+        let payload = UpstreamError::new("é".repeat(Diagnostic::MAX_BYTES))
+            .error_type("SECRET_SOURCE_TYPE")
+            .code("SECRET_NATIVE_CODE");
+        assert!(payload.message().len() <= Diagnostic::MAX_BYTES);
+        assert!(payload.message().ends_with(Diagnostic::TRUNCATION_SUFFIX));
+        let decoded: UpstreamError = serde_json::from_value(serde_json::json!({
+            "message": "é".repeat(Diagnostic::MAX_BYTES),
+        }))
+        .unwrap();
+        assert_eq!(decoded.message(), payload.message());
+        let error = DynamoError::builder()
+            .upstream_error(
+                UpstreamError::new("SECRET_UPSTREAM_MESSAGE").error_type("SECRET_SOURCE_TYPE"),
+            )
+            .build();
+        let debug = format!("{error:?} {payload:?}");
+        for secret in [
+            "SECRET_UPSTREAM_MESSAGE",
+            "SECRET_SOURCE_TYPE",
+            "SECRET_NATIVE_CODE",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+    }
+
+    #[test]
+    fn only_http_error_statuses_are_valid_source_metadata() {
+        for status in [200, 302, 399, 600, u16::MAX] {
+            let payload = UpstreamError::new("explanation").http_status(status);
+            assert!(!payload.metadata_valid());
+            assert_eq!(payload.http_status_value(), None);
+            let decoded: UpstreamError =
+                serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap();
+            assert!(!decoded.metadata_valid());
+            assert_eq!(decoded.http_status_value(), None);
+        }
+        for status in [
+            serde_json::json!(200),
+            serde_json::json!("422"),
+            serde_json::json!(-1),
+            serde_json::json!(70000),
+            serde_json::json!([422]),
+        ] {
+            let decoded: UpstreamError = serde_json::from_value(serde_json::json!({
+                "message": "explanation", "http_status": status,
+            }))
+            .unwrap();
+            assert!(!decoded.metadata_valid());
+            assert_eq!(decoded.http_status_value(), None);
+        }
+        let legacy: UpstreamError = serde_json::from_value(serde_json::json!({
+            "message": "explanation", "code": "7",
+        }))
+        .unwrap();
+        assert!(legacy.metadata_valid());
+        assert_eq!(legacy.http_status_value(), None);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("http_status")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn oversized_or_malformed_upstream_metadata_stays_invalid_across_the_wire() {
+        let oversized = "x".repeat(UpstreamError::MAX_METADATA_BYTES + 1);
+        for payload in [
+            UpstreamError::new("explanation").error_type(&oversized),
+            UpstreamError::new("explanation").code(&oversized),
+            UpstreamError::new("explanation").family(&oversized),
+            UpstreamError::new("explanation").mark_incomplete_metadata(),
+        ] {
+            assert!(!payload.metadata_valid());
+            let decoded: UpstreamError =
+                serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap();
+            assert!(!decoded.metadata_valid());
+            assert_eq!(decoded.error_type_name(), None);
+            assert_eq!(decoded.code_value(), None);
+            assert_eq!(decoded.family_name(), None);
+        }
+        for metadata in [
+            serde_json::json!(oversized),
+            serde_json::json!(["media_fetch"]),
+        ] {
+            let decoded: UpstreamError = serde_json::from_value(serde_json::json!({
+                "message": "explanation", "family": metadata,
+            }))
+            .unwrap();
+            assert!(!decoded.metadata_valid());
+            assert_eq!(decoded.family_name(), None);
+        }
+    }
+
+    #[test]
+    fn malformed_upstream_messages_do_not_reject_the_whole_error() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"message": null}),
+            serde_json::json!({"message": null, "http_status": 422}),
+            serde_json::json!({"message": false}),
+            serde_json::json!({"message": 17}),
+            serde_json::json!({"message": 1.5}),
+            serde_json::json!({"message": ["PRIVATE_MALFORMED_MESSAGE"]}),
+            serde_json::json!({"message": {"detail": "PRIVATE_MALFORMED_MESSAGE"}}),
+        ] {
+            let mut wire = serde_json::to_value(
+                DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .diagnostic("operator-only diagnostic")
+                    .build(),
+            )
+            .unwrap();
+            wire["upstream_error"] = payload;
+            let error: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(error.class(), ErrorClass::InvalidRequest);
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), "");
+            assert!(!upstream.metadata_valid());
+            assert_eq!(upstream.http_status_value(), None);
+            let encoded = serde_json::to_value(&error).unwrap();
+            assert!(!encoded.to_string().contains("PRIVATE_MALFORMED_MESSAGE"));
+            let decoded: DynamoError = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.upstream_error().unwrap().message(), "");
+            assert!(!decoded.upstream_error().unwrap().metadata_valid());
+        }
+    }
+
+    #[test]
+    fn valid_upstream_messages_accept_unknown_fields_and_source_types() {
+        for message in ["", "future engine explanation"] {
+            let upstream: UpstreamError = serde_json::from_value(serde_json::json!({
+                "message": message,
+                "error_type": "future_engine.NewError",
+                "future_metadata": {"message": ["unknown shape"]},
+            }))
+            .unwrap();
+            assert_eq!(upstream.message(), message);
+            assert_eq!(upstream.error_type_name(), Some("future_engine.NewError"));
+            assert!(upstream.metadata_valid());
+        }
+    }
+
+    #[test]
+    fn generic_wrappers_preserve_upstream_for_internal_and_non_internal_sources() {
+        for class in [ErrorClass::Internal, ErrorClass::InvalidRequest] {
+            let payload = UpstreamError::new("unfamiliar engine failure")
+                .error_type("new_engine.FutureError");
+            let source = DynamoError::builder()
+                .class(class)
+                .upstream_error(payload.clone())
+                .build();
+            let wrapped = anyhow::Error::new(source).context("Dynamo operation wrapper");
+            let converted = DynamoError::from(wrapped.as_ref());
+            assert_eq!(converted.class(), class);
+            assert_eq!(converted.upstream_error(), Some(&payload));
+            let decoded: DynamoError =
+                serde_json::from_value(serde_json::to_value(converted).unwrap()).unwrap();
+            assert_eq!(decoded.upstream_error(), Some(&payload));
+            assert!(decoded.source().is_some());
+        }
+    }
+
+    #[test]
+    fn invalid_identity_discards_upstream_and_does_not_hoist_a_valid_cause() {
+        let source = || {
+            DynamoError::builder()
+                .upstream_error(UpstreamError::new("source explanation"))
+                .build()
+        };
+        let invalid = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.rate_limited").unwrap())
+            .upstream_error(UpstreamError::new("invalid explanation"))
+            .public_message("invalid public replacement")
+            .cause(source())
+            .build();
+        assert_eq!(invalid.reason().as_str(), "runtime.invalid_error");
+        assert!(invalid.upstream_error.is_none());
+        assert!(invalid.public_details().is_none());
+        let wrapped = anyhow::Error::new(invalid).context("outer wrapper");
+        assert!(
+            DynamoError::from(wrapped.as_ref())
+                .upstream_error()
+                .is_none()
+        );
+
+        for (class, reason) in [
+            ("InvalidRequest", "request.rate_limited"),
+            ("Internal", "runtime.invalid_error"),
+        ] {
+            let invalid: DynamoError = serde_json::from_value(serde_json::json!({
+                "class": class, "reason": reason,
+                "upstream_error": {"message": "invalid explanation"},
+                "public": {"type": "message", "message": "invalid public"},
+                "caused_by": source(),
+            }))
+            .unwrap();
+            assert!(invalid.upstream_error.is_none());
+            assert!(invalid.public_details().is_none());
+            let wire = serde_json::to_value(&invalid).unwrap();
+            assert!(wire.get("upstream_error").is_none());
+            let redecoded: DynamoError = serde_json::from_value(wire).unwrap();
+            assert!(redecoded.upstream_error().is_none());
+        }
     }
 
     #[test]
@@ -1538,10 +2024,11 @@ mod tests {
             class: ErrorClass::InvalidRequest,
             reason: ErrorReason::new("request.rate_limited").unwrap(),
             diagnostic: Some(Diagnostic::new("private details")),
-            public: Some(PublicDetails::RateLimit {
+            public: Some(Box::new(PublicDetails::RateLimit {
                 limit: Some(10),
                 remaining: Some(0),
-            }),
+            })),
+            upstream_error: None,
             retry_hint: None,
         };
 
@@ -1662,6 +2149,7 @@ mod tests {
             reason: ErrorReason::new("request.rate_limited").unwrap(),
             diagnostic: None,
             public: None,
+            upstream_error: None,
             retry_hint: None,
         };
         assert_eq!(mismatched.error_type(), ErrorClass::Internal);

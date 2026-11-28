@@ -18,6 +18,7 @@ use dynamo_llm::local_model::runtime_config::{
 };
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    media_error::{EngineFlavor, MediaErrorContext},
 };
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -439,6 +440,7 @@ impl LLMEngine for SglangSidecarEngine {
         mut request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let media = MediaErrorContext::from_request(&request);
         let state = self
             .state
             .get()
@@ -521,7 +523,10 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::stream_status_to_dynamo("Generate", status));
+                    yield Err(media.tag(
+                        EngineFlavor::Sglang,
+                        client::stream_status_to_dynamo("Generate", status),
+                    ));
                     return;
                 }
             };
@@ -561,7 +566,10 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::stream_status_to_dynamo("Generate", status));
+                                yield Err(media.tag(
+                                    EngineFlavor::Sglang,
+                                    client::stream_status_to_dynamo("Generate", status),
+                                ));
                                 break;
                             }
                         };
@@ -575,7 +583,7 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                     Err(error) => {
-                                        yield Err(error);
+                                        yield Err(media.tag(EngineFlavor::Sglang, error));
                                         break;
                                     }
                                 }
@@ -583,7 +591,9 @@ impl LLMEngine for SglangSidecarEngine {
                             // SGLang ends a request's stream after its error item.
                             Some(pb::generate_stream_item::Item::Error(error)) => {
                                 let is_cancelled = ctx.is_stopped() || shutdown.is_cancelled();
-                                yield converter.stream_error(&error, is_cancelled);
+                                yield converter
+                                    .stream_error(&error, is_cancelled)
+                                    .map_err(|error| media.tag(EngineFlavor::Sglang, error));
                                 break;
                             }
                             None => {

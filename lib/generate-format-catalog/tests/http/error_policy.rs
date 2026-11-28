@@ -40,7 +40,8 @@ impl AsyncEngine<Input, Output, Error> for ErrorEngine {
 }
 
 // Literal outcomes from the two handlers at 5235cfc93d. Each row gives
-// dispatch, SGLang response-stream, and vLLM response-stream outcomes.
+// dispatch, SGLang response-stream, and vLLM response-stream outcomes. Private
+// worker diagnostics now use the generic message without changing status or metrics.
 #[tokio::test]
 async fn native_error_phase_and_nested_chain_compatibility() {
     use ErrorType::{Cancelled, Internal, Overload, Unavailable, Validation};
@@ -89,7 +90,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
             vec![Backend::InvalidArgument, Backend::Cancelled],
             [
                 (499, Cancelled, "request was cancelled"),
-                (400, Validation, "invalid params"),
+                (400, Validation, "Invalid request"),
                 (499, Cancelled, "request was cancelled"),
             ],
         ),
@@ -153,6 +154,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
                         .await
                         .unwrap();
                     let body = String::from_utf8(bytes.to_vec()).unwrap();
+                    assert!(!body.contains("invalid params"), "{kinds:?}: {body}");
                     let body = if streaming && after_dispatch {
                         body.lines()
                             .find_map(|line| line.strip_prefix("data: "))

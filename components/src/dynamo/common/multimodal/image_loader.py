@@ -33,6 +33,7 @@ from ..http.url_validator import (
     describe_media_source,
     validate_media_url,
 )
+from .batch_errors import make_media_batch_error
 from .media_source import decode_data_uri
 from .shared_image_cache import SharedImageCache, SharedImageCacheStats
 
@@ -632,6 +633,8 @@ class ImageLoader:
             ValueError: If any image fails client-side input validation (e.g.
                 a malformed data: URI — invalid base64, missing ;base64 marker,
                 or non-image MIME).
+            HttpError: If remaining failures include an HTTP fetch error;
+                aggregation preserves media provenance without assigning a status.
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
             ValueError: If a UUID-only slot is received without opting in
@@ -679,6 +682,7 @@ class ImageLoader:
         results = await asyncio.gather(*image_futures, return_exceptions=True)
         loaded_images: list[Image.Image | None] = []
         collective_exceptions = ""
+        failures: list[BaseException] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         value_error: ValueError | None = None
@@ -696,6 +700,7 @@ class ImageLoader:
                 # image-loading error.
                 if not isinstance(result, Exception):
                     raise result
+                failures.append(result)
                 source = describe_media_source(
                     media_item.get(URL_VARIANT_KEY, "decoded")
                 )
@@ -732,6 +737,9 @@ class ImageLoader:
             raise value_error
 
         if collective_exceptions:
-            raise Exception(collective_exceptions)
+            first_error = failures[0]
+            raise make_media_batch_error(
+                collective_exceptions, failures
+            ) from first_error
 
         return loaded_images

@@ -11,6 +11,7 @@ import pytest
 from dynamo.common.http import (
     HttpConfigurationError,
     HttpConnectionError,
+    HttpError,
     HttpStatusError,
     HttpTimeoutError,
 )
@@ -282,7 +283,11 @@ async def test_load_audio_batch_server_failure_is_not_client_error(
     with pytest.raises(Exception) as exc_info:
         await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
 
-    assert type(exc_info.value) is Exception
+    if failure == "vllm_missing":
+        assert type(exc_info.value) is Exception
+    else:
+        assert type(exc_info.value) is HttpError
+        assert exc_info.value.__cause__ is failure
 
 
 @pytest.mark.asyncio

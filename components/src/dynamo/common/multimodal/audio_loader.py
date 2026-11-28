@@ -22,6 +22,7 @@ from dynamo.common.http.url_validator import (
     describe_media_source,
     validate_media_url,
 )
+from dynamo.common.multimodal.batch_errors import make_media_batch_error
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     audio_decoder_missing,
@@ -279,6 +280,7 @@ class AudioLoader:
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
+        failures: list[BaseException] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         decoder_error: MissingMediaDecoderError | None = None
@@ -287,6 +289,7 @@ class AudioLoader:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
+                failures.append(result)
                 source = describe_media_source(
                     media_item.get(URL_VARIANT_KEY, "decoded")
                 )
@@ -322,6 +325,9 @@ class AudioLoader:
             raise value_error
 
         if collective_exceptions:
-            raise Exception("".join(collective_exceptions))
+            first_error = failures[0]
+            raise make_media_batch_error(
+                "".join(collective_exceptions), failures
+            ) from first_error
 
         return loaded_audio

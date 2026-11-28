@@ -32,15 +32,15 @@ pub(super) fn classify(
     // (including a queue deadline) is 499; SSE has already committed HTTP 200.
     let cancelled = StatusCode::from_u16(499).unwrap();
     if request_deadline_exceeded(error) {
-        WorkerError::new(ErrorType::Cancelled, cancelled, "request deadline exceeded")
+        WorkerError::new_static(ErrorType::Cancelled, cancelled, "request deadline exceeded")
     } else if request_was_rejected(error) {
-        WorkerError::new(
+        WorkerError::new_sanitized(
             ErrorType::Overload,
             StatusCode::SERVICE_UNAVAILABLE,
             SanitizedError::Overloaded,
         )
     } else if request_was_unavailable(error) {
-        WorkerError::new(
+        WorkerError::new_sanitized(
             ErrorType::Unavailable,
             StatusCode::SERVICE_UNAVAILABLE,
             SanitizedError::Unavailable,
@@ -48,9 +48,9 @@ pub(super) fn classify(
     } else if let Some(message) = invalid {
         WorkerError::new(ErrorType::Validation, StatusCode::BAD_REQUEST, message)
     } else if request_was_cancelled(error) {
-        WorkerError::new(ErrorType::Cancelled, cancelled, SanitizedError::Cancelled)
+        WorkerError::new_sanitized(ErrorType::Cancelled, cancelled, SanitizedError::Cancelled)
     } else {
-        WorkerError::new(
+        WorkerError::new_sanitized(
             ErrorType::Internal,
             StatusCode::INTERNAL_SERVER_ERROR,
             SanitizedError::Internal,

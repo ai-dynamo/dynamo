@@ -3,6 +3,14 @@
 
 use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType, PublicDetails};
 
+pub(crate) use super::openai::backend_http_error_class;
+
+mod blocklist;
+
+#[cfg(test)]
+use blocklist::has_compiler_location;
+use blocklist::{ErrorFacts, is_blocked};
+
 /// Decoded context-length bounds shared by protocol renderers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextLengthDetails {
@@ -39,19 +47,97 @@ pub(crate) enum Protocol {
     Anthropic,
 }
 
-/// Render the client-visible message for a semantic error.
-///
-/// An explicit public message wins. Otherwise a context-length rejection is
-/// rendered in the protocol's own wording; every other class keeps the
-/// class-level fallback supplied by the caller.
+/// Client-visible fields selected together by the frontend disclosure policy.
+pub(crate) struct PublicErrorBody<'a> {
+    pub(crate) message: Option<String>,
+    pub(crate) details: Option<&'a PublicDetails>,
+    pub(crate) context_length: Option<ContextLengthDetails>,
+    /// Let renderers retain their selected status's fallback when content is masked.
+    pub(crate) blocked: bool,
+}
+
+/// Locate the outermost typed error for body-policy traversal.
+pub(crate) fn first_dynamo_error<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a DynamoError> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>() {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// Select response content once, independently of status, retry and accounting.
+/// Shared across protocols: forward captured content unless the frontend blocklist masks it.
+pub(crate) fn public_error_body(error: &DynamoError, protocol: Protocol) -> PublicErrorBody<'_> {
+    let mut public_message = None;
+    let mut upstream_message = None;
+    let mut details = None;
+    let mut rendered_context_length = None;
+    let mut facts = ErrorFacts::default();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = current {
+        if let Some(source) = cause.downcast_ref::<DynamoError>() {
+            // Deserialization retains diagnostic causes even after demoting an
+            // invalid identity. They must not restore outward-facing content.
+            if source.reason().as_str() == "runtime.invalid_error" {
+                facts.invalid_metadata = true;
+                break;
+            }
+            if public_message.is_none() {
+                public_message = source.public_message().map(str::to_owned);
+                if public_message.is_none() {
+                    public_message = match protocol {
+                        Protocol::OpenAi => context_length_public_message(source),
+                        Protocol::Anthropic => anthropic_context_length_public_message(source),
+                    };
+                    if public_message.is_some() {
+                        rendered_context_length = context_length_details(source);
+                    }
+                }
+            }
+            if details.is_none() {
+                details = source
+                    .public_details()
+                    .filter(|details| !matches!(details, PublicDetails::Message { .. }));
+            }
+            if let Some(upstream) = source.upstream_error()
+                && !upstream.message().trim().is_empty()
+            {
+                upstream_message.get_or_insert_with(|| upstream.message().to_owned());
+            }
+            facts.record(source);
+        }
+        current = cause.source();
+    }
+    // Authored replacements win; facts from every cause still drive blocking.
+    let candidate = public_message.or(upstream_message);
+    if is_blocked(&facts, candidate.as_deref()) {
+        let message = match dynamo_error::http::http_action_for_error(error) {
+            dynamo_error::http::ClientErrorAction::Respond { public_message, .. } => public_message,
+            dynamo_error::http::ClientErrorAction::NoDelivery => "Request cancelled",
+        };
+        return PublicErrorBody {
+            message: Some(message.to_string()),
+            details: None,
+            context_length: None,
+            blocked: true,
+        };
+    }
+    PublicErrorBody {
+        message: candidate,
+        details,
+        context_length: rendered_context_length,
+        blocked: false,
+    }
+}
+
+/// Return only the message selected by the shared body policy.
 pub(crate) fn public_message_for(error: &DynamoError, protocol: Protocol) -> Option<String> {
-    error
-        .public_message()
-        .map(str::to_owned)
-        .or_else(|| match protocol {
-            Protocol::OpenAi => context_length_public_message(error),
-            Protocol::Anthropic => anthropic_context_length_public_message(error),
-        })
+    public_error_body(error, protocol).message
 }
 
 /// Render the client-visible message for a context-length rejection.
@@ -226,6 +312,317 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preprocessor::media::{
+        IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE, PUBLIC_MEDIA_MESSAGES,
+    };
+    use dynamo_runtime::error::{BackendError, ErrorClass, UpstreamError};
+
+    #[test]
+    fn received_messages_forward_unless_a_public_replacement_exists() {
+        let upstream = UpstreamError::new("Unknown engine rejection: reduce batch size")
+            .error_type("engine.NewError");
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+            .upstream_error(upstream.clone())
+            .diagnostic("private RPC wrapper")
+            .build();
+        assert_eq!(
+            public_message_for(&error, Protocol::OpenAi).as_deref(),
+            Some(upstream.message())
+        );
+        for message in ["", " \n\t"] {
+            let empty = DynamoError::builder()
+                .upstream_error(UpstreamError::new(message))
+                .build();
+            assert_eq!(public_message_for(&empty, Protocol::OpenAi), None);
+        }
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(upstream.clone())
+            .public_message("A safe authored rejection")
+            .build();
+        assert_eq!(
+            public_message_for(&error, Protocol::Anthropic).as_deref(),
+            Some("A safe authored rejection")
+        );
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(upstream)
+            .public_details(PublicDetails::ContextLength {
+                limit: 10,
+                actual: Some(20),
+                prompt_tokens: None,
+            })
+            .build();
+        let body = public_error_body(&error, Protocol::OpenAi);
+        assert!(
+            body.message
+                .unwrap()
+                .contains("maximum context length is 10 tokens")
+        );
+        assert!(body.details.is_some());
+        let overridden = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .public_message("Authored replacement")
+            .cause(error)
+            .build();
+        let body = public_error_body(&overridden, Protocol::OpenAi);
+        assert_eq!(body.message.as_deref(), Some("Authored replacement"));
+        assert_eq!(body.context_length, None);
+    }
+
+    #[test]
+    fn malformed_received_message_decodes_and_masks_all_response_content() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(UpstreamError::new("received rejection"))
+            .public_details(PublicDetails::ContextLength {
+                limit: 10,
+                actual: Some(20),
+                prompt_tokens: None,
+            })
+            .build();
+        let valid_wire = serde_json::to_value(error).unwrap();
+        for message in [None, Some(serde_json::Value::Null), Some(7.into())] {
+            let mut wire = valid_wire.clone();
+            let upstream = wire["upstream_error"].as_object_mut().unwrap();
+            match message {
+                Some(message) => {
+                    upstream.insert("message".to_string(), message);
+                }
+                None => {
+                    upstream.remove("message");
+                }
+            }
+            let received: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(received.class(), ErrorClass::InvalidRequest);
+            for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                let body = public_error_body(&received, protocol);
+                assert!(body.blocked);
+                assert_eq!(body.message.as_deref(), Some("Invalid request"));
+                assert!(body.details.is_none());
+                assert!(body.context_length.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn rules_mask_all_response_content_and_public_copies() {
+        let cases = [
+            UpstreamError::new("http://private-host/path: refused").family("media_fetch"),
+            UpstreamError::new("socket 10.0.0.1 failed").family("transport"),
+            UpstreamError::new("handler has no attribute secret").family("python_programming"),
+            UpstreamError::new("wrapper [12:34:56] /project/cpp/schema.cc:83: source detail"),
+            UpstreamError::new(
+                "Guided decoding error: /project/cpp/json_schema_converter.cc:83: Unsupported type",
+            ),
+            UpstreamError::new("malformed source metadata").error_type("x".repeat(129)),
+        ];
+        for upstream in cases {
+            for public_copy in [false, true] {
+                let mut builder = DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .upstream_error(upstream.clone());
+                builder = if public_copy {
+                    builder.public_message(upstream.message())
+                } else {
+                    builder.public_details(PublicDetails::ContextLength {
+                        limit: 10,
+                        actual: Some(20),
+                        prompt_tokens: None,
+                    })
+                };
+                let error = builder.build();
+                let body = public_error_body(&error, Protocol::OpenAi);
+                // Compiler locations are checked on the selected candidate;
+                // authored context wording safely replaces a raw compiler log.
+                if !public_copy && has_compiler_location(upstream.message()) {
+                    assert!(body.message.unwrap().contains("maximum context length"));
+                    continue;
+                }
+                assert_eq!(body.message.as_deref(), Some("Invalid request"));
+                assert!(body.details.is_none());
+            }
+        }
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::Backend(BackendError::Disconnected))
+            .upstream_error(UpstreamError::new("RPC socket detail"))
+            .build();
+        assert_eq!(
+            public_message_for(&error, Protocol::OpenAi).as_deref(),
+            Some("Service temporarily unavailable")
+        );
+    }
+
+    #[test]
+    fn actual_http_responses_do_not_acquire_legacy_transport_obfuscation() {
+        for status in [502, 503, 504] {
+            for explicit_transport in [false, true] {
+                let mut upstream = UpstreamError::new("engine is temporarily busy")
+                    .error_type("sglang.http.Response")
+                    .http_status(status);
+                if explicit_transport {
+                    upstream = upstream.family("transport");
+                }
+                let error = DynamoError::builder()
+                    .error_type(DynamoErrorType::Backend(BackendError::CannotConnect))
+                    .upstream_error(upstream)
+                    .public_details(PublicDetails::RateLimit {
+                        limit: Some(10),
+                        remaining: Some(0),
+                    })
+                    .build();
+                for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                    let body = public_error_body(&error, protocol);
+                    assert_eq!(
+                        body.message.as_deref(),
+                        Some(if explicit_transport {
+                            "Service temporarily unavailable"
+                        } else {
+                            "engine is temporarily busy"
+                        })
+                    );
+                    assert_eq!(body.details.is_none(), explicit_transport);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn media_rule_preserves_only_existing_fixed_replacements() {
+        for message in [
+            "Unsupported video media",
+            "Image exceeds the decoded pixel limit",
+            IMAGE_FETCH_FORBIDDEN_MESSAGE,
+            IMAGE_FETCH_NOT_FOUND_MESSAGE,
+        ] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .upstream_error(UpstreamError::new("unsafe remote reason").family("media_fetch"))
+                .public_message(message)
+                .build();
+            assert_eq!(
+                public_message_for(&error, Protocol::OpenAi).as_deref(),
+                Some(message)
+            );
+        }
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .upstream_error(UpstreamError::new("fetch URL leaked").family("media_fetch"))
+            .public_message(format!("{IMAGE_FETCH_FORBIDDEN_MESSAGE} private-host"))
+            .build();
+        assert_eq!(
+            public_message_for(&error, Protocol::OpenAi).as_deref(),
+            Some("Invalid request")
+        );
+    }
+
+    #[test]
+    fn requests_failures_mask_urls_and_keep_only_fixed_media_replacements() {
+        let received =
+            "403 Client Error for url: https://PRIVATE_FETCH_URL/image?token=PRIVATE_TOKEN";
+        for kind in [
+            "requests.exceptions.HTTPError",
+            "requests.exceptions.ConnectionError",
+            "requests.exceptions.Timeout",
+        ] {
+            for replacement in [None, Some(received), Some("An authored fetch replacement")] {
+                let mut builder = DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .upstream_error(
+                        UpstreamError::new(received)
+                            .error_type(kind)
+                            .http_status(403),
+                    )
+                    .public_details(PublicDetails::ContextLength {
+                        limit: 10,
+                        actual: Some(20),
+                        prompt_tokens: None,
+                    });
+                if let Some(message) = replacement {
+                    builder = builder.public_message(message);
+                }
+                let error = builder.build();
+                for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                    let body = public_error_body(&error, protocol);
+                    assert_eq!(body.message.as_deref(), Some("Invalid request"));
+                    assert!(body.details.is_none());
+                    assert!(body.context_length.is_none());
+                }
+            }
+        }
+        for replacement in PUBLIC_MEDIA_MESSAGES {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .upstream_error(
+                    UpstreamError::new(received).error_type("requests.exceptions.HTTPError"),
+                )
+                .public_message(*replacement)
+                .build();
+            for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                assert_eq!(
+                    public_message_for(&error, protocol).as_deref(),
+                    Some(*replacement)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pil_image_decode_addresses_mask_only_the_known_selected_diagnostic() {
+        let received =
+            "Could not decode image: cannot identify image file <_io.BytesIO object at 0xfc123a>";
+        for public_copy in [false, true] {
+            let mut builder = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .upstream_error(UpstreamError::new(received).error_type("builtins.ValueError"))
+                .public_details(PublicDetails::SizeLimit {
+                    limit: 10,
+                    actual: Some(20),
+                });
+            if public_copy {
+                builder = builder.public_message(received);
+            }
+            let error = builder.build();
+            for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                let body = public_error_body(&error, protocol);
+                assert_eq!(body.message.as_deref(), Some("Invalid request"));
+                assert!(body.details.is_none());
+                assert!(body.context_length.is_none());
+            }
+        }
+        for selected in [
+            "Image could not be decoded; send a supported image.",
+            "Could not decode image: cannot identify image file <_io.BytesIO object at 0xnot_hex>",
+            "Could not decode image: cannot identify image file <_io.BytesIO object at 0x>",
+            "Could not decode image: cannot identify image file <_io.BytesIO object at 0xfc123a",
+            "User supplied <_io.BytesIO object at 0xfc123a> as text",
+            "Could not decode image: use /models/input.png",
+        ] {
+            for authored_override in [false, true] {
+                let mut builder = DynamoError::builder()
+                    .class(ErrorClass::InvalidRequest)
+                    .upstream_error(
+                        UpstreamError::new(if authored_override {
+                            received
+                        } else {
+                            selected
+                        })
+                        .error_type("builtins.ValueError"),
+                    );
+                if authored_override {
+                    builder = builder.public_message(selected);
+                }
+                let error = builder.build();
+                for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+                    assert_eq!(
+                        public_message_for(&error, protocol).as_deref(),
+                        Some(selected)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn context_length_messages_refuse_a_count_below_the_limit() {

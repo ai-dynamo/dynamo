@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Error, Result, anyhow as error};
+use anyhow::{Error, Result};
 use pyo3::prelude::*;
 
 use crate::{CancellationToken, DistributedRuntime, engine::*, to_pyerr};
@@ -201,6 +201,31 @@ struct HttpError {
     message: String,
 }
 
+/// Keep raw HTTP status ownership while carrying disclosure facts outside the source chain.
+fn map_http_async_error(error: Error) -> Error {
+    let Some(exception) = error.downcast_ref::<PyErr>() else {
+        return error;
+    };
+    Python::attach(|py| {
+        if let Ok(HttpError { code, message }) = exception.value(py).extract() {
+            let captured = crate::errors::preserve_python_error_content(
+                py,
+                exception,
+                crate::errors::build_http_like_error(code, message.clone()),
+            );
+            // An anyhow context remains downcastable without becoming a typed
+            // source node that could override main's raw HttpError status path.
+            return Error::new(dynamo_error::http::HttpError {
+                code,
+                message: message.replace(['\r', '\n'], ""),
+            })
+            .context(captured);
+        }
+        let mapped = dynamo_runtime::error::DynamoError::msg(format!("Python Error: {exception}"));
+        crate::errors::preserve_python_error_content(py, exception, mapped).into()
+    })
+}
+
 #[async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for HttpAsyncEngine
 where
@@ -208,28 +233,6 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0.generate(request).await {
-            Ok(res) => Ok(res),
-
-            // Inspect the error - if it was an HttpError from Python, extract the code and message
-            // and return the rust version of HttpError
-            Err(e) => {
-                if let Some(py_err) = e.downcast_ref::<PyErr>() {
-                    Python::attach(|py| {
-                        // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
-                        // implement the exception in Python and assume that it's an HttpError if the code and message
-                        // are present.
-                        if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
-                            // SSE panics if there are carriage returns or newlines
-                            let message = message.replace(['\r', '\n'], "");
-                            return Err(dynamo_error::http::HttpError { code, message })?;
-                        }
-                        Err(error!("Python Error: {}", py_err))
-                    })
-                } else {
-                    Err(e)
-                }
-            }
-        }
+        self.0.generate(request).await.map_err(map_http_async_error)
     }
 }

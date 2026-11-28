@@ -4477,7 +4477,7 @@ async fn test_reject_media_disabled_preserves_backend_422_through_http_middlewar
     let engine = Arc::new(scripted_chat_engine::ScriptedChatEngine::new([Err(
         HttpError {
             code: 422,
-            message: "private backend diagnostic".into(),
+            message: "backend validation explanation".into(),
         }
         .into(),
     )]));
@@ -4494,7 +4494,7 @@ async fn test_reject_media_disabled_preserves_backend_422_through_http_middlewar
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["message"], "Unprocessable Entity");
+    assert_eq!(body["message"], "backend validation explanation");
     assert_eq!(body["code"], 422);
     assert_eq!(svc.engine.take_requests().await.len(), 1);
     svc.shutdown().await;

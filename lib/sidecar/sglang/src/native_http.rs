@@ -7,11 +7,14 @@ use std::{io, time::Duration};
 
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext, LLMEngineOutput,
-    PreprocessedRequest,
+    PreprocessedRequest, UpstreamError,
 };
 use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use dynamo_sglang_generate::{Inspected, PAYLOAD_KEY, inspect};
-use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
+use dynamo_sidecar_common::{
+    GrpcEndpoint, HttpEndpoint,
+    media_error::{EngineFlavor, MediaErrorContext},
+};
 use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
 use serde_json::{Map, Value};
@@ -37,6 +40,35 @@ pub(crate) struct NativeRequest {
     prefill_handoff: Option<Value>,
     /// Return prefill's final native response for the frontend to join.
     keep_prefill_output: bool,
+}
+
+/// Read only native media fields and their supported scalar/list/ref URL shapes.
+fn native_media_context(body: &Value) -> MediaErrorContext {
+    let mut context = MediaErrorContext::default();
+    for field in ["image_data", "video_data", "audio_data"]
+        .iter()
+        .filter_map(|field| body.get(field))
+    {
+        let groups = field
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(field));
+        for group in groups {
+            let items = group
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(std::slice::from_ref(group));
+            for item in items {
+                if let Some(source) = item
+                    .as_str()
+                    .or_else(|| item.get("url").and_then(Value::as_str))
+                {
+                    context = context.with_url(source);
+                }
+            }
+        }
+    }
+    context
 }
 
 /// Rebuild the installed SGLang version's request from the opaque frontend
@@ -325,11 +357,10 @@ impl NativeHttp {
             return Ok(response);
         }
 
-        let detail = response
-            .text()
-            .await
-            .unwrap_or_else(|error| format!("could not read error response: {error}"));
-        Err(response_error(status, detail))
+        match response.text().await {
+            Ok(detail) => Err(response_error(status, detail)),
+            Err(error) => Err(response_body_read_error(status, error)),
+        }
     }
 
     pub(crate) fn generate(
@@ -339,6 +370,8 @@ impl NativeHttp {
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
+            let media = native_media_context(&request.body);
+            let media_error = |error| media.tag(EngineFlavor::Sglang, error);
             let is_prefill = request.is_prefill;
             let keep_prefill_output = request.keep_prefill_output;
             let mut prefill_handoff = request.prefill_handoff;
@@ -372,7 +405,7 @@ impl NativeHttp {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(error);
+                    yield Err(media_error(error));
                     return;
                 }
             };
@@ -412,7 +445,7 @@ impl NativeHttp {
                 let response = match response {
                     Ok(response) => response,
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(media_error(error));
                         return;
                     }
                 };
@@ -422,7 +455,7 @@ impl NativeHttp {
                 // whether or not this request was cancelled.
                 if let Some(error) = response.get("error") {
                     abort_guard.request_id = None;
-                    yield Err(coded_error(error));
+                    yield Err(media_error(coded_error(error)));
                     return;
                 }
                 // Prefill's raw HTTP payload is forwarded only on request.
@@ -433,7 +466,7 @@ impl NativeHttp {
                         finish.get("type").and_then(Value::as_str)
                 {
                     abort_guard.request_id = None;
-                    yield Err(protocol::terminal_failure(kind, finish));
+                    yield Err(media_error(protocol::terminal_failure(kind, finish)));
                     return;
                 }
                 // The router counts decode output from token_ids; clients get the
@@ -442,7 +475,7 @@ impl NativeHttp {
                 let Inspected { mut output, terminal, has_output } = match inspect(response, is_prefill) {
                     Ok(inspected) => inspected,
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(media_error(error));
                         return;
                     }
                 };
@@ -485,7 +518,15 @@ fn coded_error(error: &Value) -> DynamoError {
         .and_then(Value::as_u64)
         .and_then(|code| u32::try_from(code).ok())
         .unwrap_or(0);
-    engine_error(message, code)
+    let mut mapped = engine_error(message, code);
+    if error.get("message").and_then(Value::as_str).is_none() {
+        mapped.upstream_error = None;
+    } else if let Some(kind) = error.get("type").and_then(Value::as_str)
+        && let Some(upstream) = mapped.upstream_error.take()
+    {
+        mapped.upstream_error = Some(Box::new(upstream.error_type(kind)));
+    }
+    mapped
 }
 
 /// A failure SGLang reported with `message` and HTTP status `code`.
@@ -505,9 +546,42 @@ fn response_error(status: StatusCode, detail: String) -> DynamoError {
         .and_then(|body| body.pointer("/error/message"))
         .and_then(Value::as_str)
     {
-        Some(message) => engine_error(message, u32::from(status.as_u16())),
+        Some(message) => {
+            let mut mapped = engine_error(message, u32::from(status.as_u16()));
+            let mut upstream = mapped
+                .upstream_error
+                .take()
+                .map(|upstream| *upstream)
+                .unwrap_or_else(|| UpstreamError::new(message));
+            if let Some(kind) = body
+                .as_ref()
+                .and_then(|body| body.pointer("/error/type"))
+                .and_then(Value::as_str)
+            {
+                upstream = upstream.error_type(kind);
+            }
+            mapped.upstream_error = Some(Box::new(upstream.http_status(status.as_u16())));
+            mapped
+        }
         None => status_error(status, detail),
     }
+}
+
+/// Keep local body-read diagnostics private while retaining status classification.
+fn response_body_read_error(status: StatusCode, error: reqwest::Error) -> DynamoError {
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return authentication_error("/generate", status);
+    }
+    let mut mapped = status_error(status, format!("could not read error response: {error}"));
+    // No engine body was received; a reqwest diagnostic can contain its URL.
+    mapped.upstream_error = Some(Box::new(
+        UpstreamError::new("")
+            .error_type("reqwest.Error")
+            .code(status.as_u16().to_string())
+            .http_status(status.as_u16())
+            .family("transport"),
+    ));
+    mapped
 }
 
 fn response_stream(
@@ -558,13 +632,18 @@ async fn next_response(
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
-    if error.is_timeout() {
+    let upstream = UpstreamError::new(error.to_string())
+        .error_type("reqwest.Error")
+        .family("transport");
+    let mut mapped = if error.is_timeout() {
         client::connection_timeout(format!("SGLang /generate HTTP request timed out: {error}"))
     } else if error.is_connect() {
         client::cannot_connect(format!("could not connect to SGLang /generate: {error}"))
     } else {
         client::protocol_error(format!("SGLang /generate HTTP request failed: {error}"))
-    }
+    };
+    mapped.upstream_error = Some(Box::new(upstream));
+    mapped
 }
 
 fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
@@ -574,14 +653,20 @@ fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
 }
 
 fn status_error(status: StatusCode, detail: String) -> DynamoError {
+    let upstream = UpstreamError::new(&detail)
+        .error_type("sglang.http.Response")
+        .code(status.as_u16().to_string())
+        .http_status(status.as_u16());
     let message = format!("SGLang /generate returned HTTP {status}: {detail}");
-    if status.is_client_error() {
+    let mut mapped = if status.is_client_error() {
         client::invalid_arg(message)
     } else if matches!(status.as_u16(), 502..=504) {
         client::cannot_connect(message)
     } else {
         client::protocol_error(message)
-    }
+    };
+    mapped.upstream_error = Some(Box::new(upstream));
+    mapped
 }
 
 #[cfg(test)]
@@ -601,16 +686,102 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn native_media_context_uses_only_supported_media_source_fields() {
+        for body in [
+            json!({"image_data": "https://media.invalid/a"}),
+            json!({"video_data": [{"url": "https://media.invalid/a", "fps": 1}]}),
+            json!({"audio_data": [[null, "https://media.invalid/a"]]}),
+        ] {
+            let error = protocol::coded_error(
+                "Generate",
+                "media fetch: GET https://media.invalid/a: refused",
+                400,
+            );
+            let tagged = native_media_context(&body).tag(EngineFlavor::Sglang, error);
+            assert_eq!(
+                tagged.upstream_error().unwrap().family_name(),
+                Some("media_fetch")
+            );
+            assert_eq!(
+                tagged.error_type(),
+                dynamo_backend_common::ErrorType::Backend(BackendError::InvalidArgument)
+            );
+        }
+        for body in [
+            json!({"sampling_params": {"user": "https://media.invalid/a"}}),
+            json!({"image_data": "data:image/png;base64,aHR0cHM6Ly8="}),
+            json!({"image_data": {"text": "https://media.invalid/a"}}),
+        ] {
+            let error = protocol::coded_error(
+                "Generate",
+                "media fetch: GET https://media.invalid/a: refused",
+                400,
+            );
+            let tagged = native_media_context(&body).tag(EngineFlavor::Sglang, error);
+            assert_eq!(tagged.upstream_error().unwrap().family_name(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_fetch_errors_retain_media_provenance_in_http_and_sse() {
+        let message = "media fetch: GET https://PRIVATE_MEDIA/a: connection refused";
+        for (status, body, prefill) in [
+            (
+                "400 Bad Request",
+                json!({"error": {"message": message, "code": 400}}).to_string(),
+                false,
+            ),
+            (
+                "200 OK",
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"error": {"message": message, "code": 400}})
+                ),
+                false,
+            ),
+            (
+                "200 OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({"meta_info": {"finish_reason": {"type": "abort", "status_code": 400, "message": message}}})
+                ),
+                true,
+            ),
+        ] {
+            let (port, server) = serve_once(body, status).await;
+            let mut request = native_request(prefill);
+            request.body["image_data"] = json!("https://PRIVATE_MEDIA/a");
+            let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let stream = native_http(port).generate(request, ctx, CancellationToken::new());
+            let outputs: Vec<_> = stream.collect().await;
+            let mut errors = outputs.into_iter().filter_map(Result::err);
+            let error = errors.next().unwrap();
+            assert_eq!(
+                error.upstream_error().unwrap().family_name(),
+                Some("media_fetch")
+            );
+            assert_eq!(
+                error.error_type(),
+                dynamo_backend_common::ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert_eq!(error.upstream_error().unwrap().message(), message);
+            assert!(errors.next().is_none());
+            server.await.unwrap();
+        }
+    }
     use tokio::sync::watch;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, build_http_client, request, response_error,
+        EngineFlavor, NativeHttp, NativeRequest, authentication_error, build_http_client,
+        native_media_context, request, response_error,
     };
     use crate::client::{AbortRpc, client_from_channel};
     use crate::discovery::{EngineInfo, engine_info, parse_discovery};
     use crate::proto as pb;
-    use crate::protocol::Target;
+    use crate::protocol::{self, Target};
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
 
@@ -682,6 +853,16 @@ mod tests {
     }
 
     async fn serve_once(body: String, status: &str) -> (u16, tokio::task::JoinHandle<()>) {
+        let content_length = body.len();
+        serve_with_content_length(body, status, content_length).await
+    }
+
+    /// A shorter body than declared forces reqwest's real response-read failure.
+    async fn serve_with_content_length(
+        body: String,
+        status: &str,
+        content_length: usize,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let status = status.to_string();
@@ -690,8 +871,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let _ = socket.read(&mut request).await.unwrap();
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+                "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body}"
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
@@ -1052,7 +1232,7 @@ mod tests {
             (503, BackendError::Unknown),
         ] {
             let failure = format!(
-                "data: {{\"error\":{{\"message\":\"engine failure\",\"code\":{code}}}}}\n\ndata: [DONE]\n\n"
+                "data: {{\"error\":{{\"message\":\"engine failure\",\"code\":{code},\"type\":\"EngineFailure\"}}}}\n\ndata: [DONE]\n\n"
             );
             // Prefill must fail fast instead of waiting for a terminal frame.
             for is_prefill in [false, true] {
@@ -1079,6 +1259,10 @@ mod tests {
                     "{error}"
                 );
                 assert!(stream.next().await.is_none());
+                let upstream = error.upstream_error().unwrap();
+                assert_eq!(upstream.message(), "engine failure");
+                assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
+                assert_eq!(upstream.error_type_name(), Some("EngineFailure"));
                 server.await.unwrap();
             }
         }
@@ -1087,8 +1271,9 @@ mod tests {
     /// SGLang answers a body it cannot parse or decode, or a header override
     /// it rejects, with an HTTP error status and its error object instead of a
     /// stream, even for a streaming request. That maps like an error frame,
-    /// with the HTTP status as the code. A body that is not SGLang's error
-    /// object keeps the private status error.
+    /// with the HTTP status as the code. An unrecognized body keeps its local
+    /// status-error classification; the frontend decides disclosure of the
+    /// captured body and HTTP status.
     #[tokio::test]
     async fn http_rejections_fail_like_error_frames() {
         let message = "invalid type: string \"x\", expected f32";
@@ -1097,7 +1282,9 @@ mod tests {
             ("503 Service Unavailable", BackendError::Unknown),
         ] {
             let code: u16 = status[..3].parse().unwrap();
-            let rejection = json!({"error": {"message": message, "code": code}}).to_string();
+            let rejection =
+                json!({"error": {"message": message, "code": code, "type": "ValidationError"}})
+                    .to_string();
             let (port, server) = serve_once(rejection, status).await;
             let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
             let mut stream =
@@ -1111,11 +1298,15 @@ mod tests {
                 "{error}"
             );
             assert!(stream.next().await.is_none());
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), message);
+            assert_eq!(upstream.error_type_name(), Some("ValidationError"));
+            assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
             server.await.unwrap();
         }
 
-        // A 502..=504 body that is not SGLang's, such as a proxy's, stays a
-        // transport failure.
+        // A 502..=504 body that is not SGLang's, such as a proxy's, keeps its
+        // transport classification while retaining the actual HTTP response.
         for (body, status, expected) in [
             (
                 "bad request",
@@ -1128,6 +1319,7 @@ mod tests {
                 BackendError::CannotConnect,
             ),
         ] {
+            let code: u16 = status[..3].parse().unwrap();
             let (port, server) = serve_once(body.to_string(), status).await;
             let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
             let mut stream =
@@ -1140,6 +1332,35 @@ mod tests {
             );
             assert_eq!(error.public_message(), None);
             assert!(stream.next().await.is_none());
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), body);
+            assert_eq!(upstream.http_status_value(), Some(code));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_error_body_read_failures_keep_private_transport_provenance() {
+        for (status, expected) in [
+            ("400 Bad Request", BackendError::InvalidArgument),
+            ("500 Internal Server Error", BackendError::Unknown),
+            ("502 Bad Gateway", BackendError::CannotConnect),
+            ("503 Service Unavailable", BackendError::CannotConnect),
+            ("504 Gateway Timeout", BackendError::CannotConnect),
+        ] {
+            let code: u16 = status[..3].parse().unwrap();
+            let (port, server) =
+                serve_with_content_length("PRIVATE_TRUNCATED_BODY".into(), status, 4096).await;
+            let error = native_http(port).open(json!({})).await.unwrap_err();
+            assert_eq!(error.error_type(), ErrorType::Backend(expected), "{status}");
+            assert!(error.message().contains("could not read error response"));
+            assert_eq!(error.public_message(), None);
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), "");
+            assert_eq!(upstream.error_type_name(), Some("reqwest.Error"));
+            assert_eq!(upstream.family_name(), Some("transport"));
+            assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
+            assert_eq!(upstream.http_status_value(), Some(code));
             server.await.unwrap();
         }
     }
@@ -1568,6 +1789,33 @@ mod tests {
     }
 
     #[test]
+    fn actual_http_status_is_distinct_from_engine_body_codes() {
+        for code in [408, 415, 418, 422, 431, 503, 529] {
+            let status = StatusCode::from_u16(code).unwrap();
+            for body in [
+                "received engine explanation".to_string(),
+                json!({"error": {"message": "received engine explanation", "code": 7}}).to_string(),
+            ] {
+                let mapped = response_error(status, body);
+                assert_eq!(
+                    mapped.upstream_error().unwrap().http_status_value(),
+                    Some(code)
+                );
+                assert_eq!(
+                    mapped.upstream_error().unwrap().message(),
+                    "received engine explanation"
+                );
+            }
+        }
+        let body_code = super::protocol::coded_error("Generate", "engine error", 7);
+        assert_eq!(body_code.upstream_error().unwrap().code_value(), Some("7"));
+        assert_eq!(
+            body_code.upstream_error().unwrap().http_status_value(),
+            None
+        );
+    }
+
+    #[test]
     fn authentication_failures_are_not_client_input_errors() {
         for error in [
             authentication_error("/health", StatusCode::UNAUTHORIZED),
@@ -1581,6 +1829,7 @@ mod tests {
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
             );
+            assert!(error.upstream_error().is_none());
         }
         assert_eq!(
             response_error(StatusCode::BAD_REQUEST, "bad request".to_string()).error_type(),

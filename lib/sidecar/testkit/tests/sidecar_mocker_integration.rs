@@ -23,8 +23,8 @@ mod support;
 use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
 use support::{
-    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, Rejection, SidecarFixture,
-    WireFixture,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, MediaErrorCase, MediaErrorFixture,
+    ProcessFixture, Rejection, SidecarFixture, WireFixture,
 };
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
@@ -637,6 +637,183 @@ async fn native_rejection<F: WireFixture>(max_tokens: u32) -> DynamoError {
     error
 }
 
+/// Replay the converted native wire error through HTTP/SSE in a separate frontend harness.
+fn capture_media_error<F: MediaErrorFixture>(
+    case: &MediaErrorCase,
+    context: &str,
+    on_stream: bool,
+    masked: bool,
+    error: &DynamoError,
+) {
+    let Some(directory) = std::env::var_os("DYNAMO_MEDIA_ERROR_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let phase = if on_stream { "stream" } else { "opening" };
+    let artifact = serde_json::json!({
+        "schema_version": 1,
+        "backend": F::NAME,
+        "case": case.name,
+        "context": context,
+        "phase": phase,
+        "masked": masked,
+        "has_remote_media": context.starts_with("remote_"),
+        "original_class": error.class().as_str(),
+        "native_code": case.code,
+        "error": error,
+        "scope": "Real sidecar conversion against a controlled native gRPC peer; no model inference",
+    });
+    let path = directory.join(format!("{}-{}-{context}-{phase}.json", F::NAME, case.name));
+    std::fs::write(path, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
+}
+
+fn media_error_request(context: &str) -> PreprocessedRequest {
+    use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+
+    let mut request = request("mocker-model", vec![1, 2, 3], 3);
+    let media = match context {
+        "remote_url" => Some(MultimodalData::Url(
+            "https://media.example/image.png".parse().unwrap(),
+        )),
+        "remote_raw_url" => Some(MultimodalData::RawUrl(
+            "https://media.example/image.png".into(),
+        )),
+        "data_uri" => Some(MultimodalData::RawUrl(
+            "data:image/png;base64,aW1hZ2U=".into(),
+        )),
+        "no_media" => None,
+        _ => panic!("unknown media fixture context"),
+    };
+    if let Some(media) = media {
+        request.multi_modal_data = Some(std::collections::HashMap::from([(
+            "image_url".into(),
+            vec![media],
+        )]));
+    }
+    request
+}
+
+async fn converted_media_error<F: MediaErrorFixture>(
+    fixture: &F,
+    engine: &F::Engine,
+    control: &Controller<F::Protocol>,
+    case: &MediaErrorCase,
+    context: &str,
+    on_stream: bool,
+    masked: bool,
+) {
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    fixture.fail_media_request(ctx.id(), case.code, case.message, on_stream);
+    let outputs = collect(
+        engine,
+        media_error_request(context),
+        GenerateContext::new(ctx, None),
+    )
+    .await;
+    let kind = if case.name == "validation" {
+        BackendError::InvalidArgument
+    } else {
+        F::FETCH_KIND
+    };
+    let error = failure(outputs, &[], kind);
+    assert_eq!(error.error_type(), ErrorType::Backend(kind));
+    assert_eq!(error.retry_hint(), None);
+    let upstream = error.upstream_error().expect("native details are retained");
+    assert_eq!(upstream.message(), case.message);
+    assert_eq!(upstream.family_name(), masked.then_some("media_fetch"));
+    assert_eq!(upstream.http_status_value(), None);
+    assert_eq!(
+        upstream.code_value(),
+        Some(match case.code {
+            3 => "InvalidArgument",
+            9 => "FailedPrecondition",
+            13 => "Internal",
+            _ => panic!("unexpected pinned native code"),
+        })
+    );
+    capture_media_error::<F>(case, context, on_stream, masked, &error);
+    bounded(
+        "native media error remote drop",
+        handle.wait(Event::Dropped),
+    )
+    .await;
+    fixture.scheduler_idle().await;
+    healthy(fixture, engine, control).await;
+}
+
+async fn engine_media_fetch_errors<F: MediaErrorFixture>() {
+    let control = Controller::<F::Protocol>::default();
+    // A local model directory avoids a vLLM routing-config fetch at startup.
+    let model = tempfile::tempdir().unwrap();
+    std::fs::write(model.path().join("config.json"), r#"{"model_type":"mock"}"#).unwrap();
+    let config = FixtureConfig {
+        model: model.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let mut fixture = F::start(control.clone(), config).await;
+    fixture.advertise_media();
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    for on_stream in [false, true] {
+        for (index, case) in F::FETCH_FAILURES.iter().enumerate() {
+            let context = if index % 2 == 0 {
+                "remote_url"
+            } else {
+                "remote_raw_url"
+            };
+            converted_media_error(&fixture, &engine, &control, case, context, on_stream, true)
+                .await;
+        }
+        let validation = MediaErrorCase {
+            name: "validation",
+            code: 3,
+            message: F::VALIDATION_MESSAGE,
+        };
+        converted_media_error(
+            &fixture,
+            &engine,
+            &control,
+            &validation,
+            "remote_url",
+            on_stream,
+            false,
+        )
+        .await;
+        // The same native-looking text without remote media must not acquire
+        // media provenance merely because its wording resembles a fetch error.
+        for context in ["no_media", "data_uri"] {
+            converted_media_error(
+                &fixture,
+                &engine,
+                &control,
+                &F::FETCH_FAILURES[0],
+                context,
+                on_stream,
+                false,
+            )
+            .await;
+        }
+    }
+    finish(&mut fixture, &engine).await;
+}
+
+#[tokio::test]
+async fn vllm_engine_media_fetch_errors_retain_provenance_and_recover() {
+    engine_media_fetch_errors::<support::vllm::Fixture>().await;
+}
+
+#[tokio::test]
+async fn sglang_engine_media_fetch_errors_retain_provenance_and_recover() {
+    engine_media_fetch_errors::<support::sglang::Fixture>().await;
+}
+
+#[tokio::test]
+async fn trtllm_engine_media_fetch_errors_retain_provenance_and_recover() {
+    engine_media_fetch_errors::<support::trtllm::Fixture>().await;
+}
+
 #[tokio::test]
 async fn vllm_native_rejection_recovers_on_same_engine() {
     let error = bounded(
@@ -650,6 +827,9 @@ async fn vllm_native_rejection_recovers_on_same_engine() {
             .to_string()
             .contains("max_new_tokens must not exceed 1000000")
     );
+    let upstream = error.upstream_error().expect("native gRPC text survives");
+    assert_eq!(upstream.message(), "max_new_tokens must not exceed 1000000");
+    assert_eq!(upstream.code_value(), Some("InvalidArgument"));
 }
 
 #[tokio::test]
@@ -666,6 +846,14 @@ async fn sglang_native_rejection_recovers_on_same_engine() {
         "{message}"
     );
     assert!(message.contains("(code 400)"), "{message}");
+    let upstream = error.upstream_error().expect("native stream text survives");
+    assert!(
+        upstream
+            .message()
+            .contains("maximum context length of 32768 tokens")
+    );
+    assert!(!upstream.message().starts_with("Generate:"));
+    assert_eq!(upstream.code_value(), Some("400"));
 }
 
 /// Another worker would refuse the request the same way, so the sidecar
@@ -683,6 +871,12 @@ async fn lpx_native_rejection_is_the_first_stream_item() {
             .to_string()
             .contains("max_tokens 1000001 exceeds the Mocker limit of 1000000")
     );
+    let upstream = error.upstream_error().expect("native gRPC text survives");
+    assert_eq!(
+        upstream.message(),
+        "max_tokens 1000001 exceeds the Mocker limit of 1000000"
+    );
+    assert_eq!(upstream.code_value(), Some("InvalidArgument"));
 }
 
 #[tokio::test]
@@ -1021,6 +1215,12 @@ async fn trtllm_native_rejection_recovers_on_same_engine() {
             .contains("exceeds the Mocker limit of 1000000"),
         "{error}"
     );
+    let upstream = error.upstream_error().expect("native gRPC text survives");
+    assert_eq!(
+        upstream.message(),
+        "max_tokens 1000001 exceeds the Mocker limit of 1000000"
+    );
+    assert_eq!(upstream.code_value(), Some("InvalidArgument"));
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@ PASSTHROUGH_MODEL_NAME = "test-http-status-prop-passthrough"
 PASSTHROUGH_ENDPOINT_PATH = "test.http_status_prop.generate_passthrough"
 EXPECTED_STATUS = 415
 BACKEND_MESSAGE = "unsupported-media-via-wire"
-EXPECTED_MESSAGE = "Unsupported Media Type"
+EXPECTED_TYPE = "Unsupported Media Type"
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -105,11 +105,10 @@ def test_http_status_propagates_through_wire(services: int) -> None:
     )
     assert response.status_code == EXPECTED_STATUS, response.text
     assert response.json() == {
-        "message": EXPECTED_MESSAGE,
-        "type": EXPECTED_MESSAGE,
+        "message": BACKEND_MESSAGE,
+        "type": EXPECTED_TYPE,
         "code": EXPECTED_STATUS,
     }
-    assert BACKEND_MESSAGE not in response.text
 
 
 @pytest.mark.timeout(120)

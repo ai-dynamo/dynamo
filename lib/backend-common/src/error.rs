@@ -18,4 +18,4 @@
 //!     .build());
 //! ```
 
-pub use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+pub use dynamo_runtime::error::{BackendError, DynamoError, ErrorType, UpstreamError};

@@ -12,6 +12,14 @@ pub const IMAGE_FETCH_FORBIDDEN_MESSAGE: &str = "Image download returned HTTP 40
 /// Client-safe recovery advice for a missing image.
 pub const IMAGE_FETCH_NOT_FOUND_MESSAGE: &str = "Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.";
 
+/// Fixed recovery messages retained by frontend policy and legacy Python projections.
+pub const PUBLIC_MEDIA_MESSAGES: &[&str] = &[
+    "Unsupported video media",
+    IMAGE_FETCH_FORBIDDEN_MESSAGE,
+    IMAGE_FETCH_NOT_FOUND_MESSAGE,
+    "Image exceeds the decoded pixel limit",
+];
+
 use anyhow::{Context, Result};
 use dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage;
 

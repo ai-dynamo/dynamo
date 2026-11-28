@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::time::{Instant, sleep_until, timeout_at};
 
-use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_backend_common::{BackendError, DynamoError, ErrorType, UpstreamError};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
     connection_timeout,
@@ -413,10 +413,18 @@ impl TrtllmClient {
         // unspecified status is protocol drift.
         match pb::AbortStatus::try_from(response.status) {
             Ok(pb::AbortStatus::Aborted) | Ok(pb::AbortStatus::AlreadyFinished) => Ok(()),
-            _ => Err(protocol_error(format!(
-                "TensorRT-LLM returned an unexpected abort status: {}",
-                response.message
-            ))),
+            _ => {
+                let mut error = protocol_error(format!(
+                    "TensorRT-LLM returned an unexpected abort status: {}",
+                    response.message
+                ));
+                error.upstream_error = Some(Box::new(
+                    UpstreamError::new(response.message)
+                        .error_type("openengine.v1.AbortResponse")
+                        .code(response.status.to_string()),
+                ));
+                Err(error)
+            }
         }
     }
 }
@@ -425,9 +433,16 @@ impl TrtllmClient {
 // window. Keep this classification local: inference RPC retry policy is separate.
 fn metadata_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     if status.code() == tonic::Code::ResourceExhausted {
+        let mut upstream = UpstreamError::new(status.message())
+            .error_type("grpc.Status")
+            .code(format!("{:?}", status.code()));
+        if std::error::Error::source(&status).is_some() {
+            upstream = upstream.family("transport");
+        }
         DynamoError::builder()
             .error_type(ErrorType::WorkerOverloaded)
             .message(format!("{rpc}: {} ({:?})", status.message(), status.code()))
+            .upstream_error(upstream)
             .build()
     } else {
         status_to_dynamo(rpc, status)

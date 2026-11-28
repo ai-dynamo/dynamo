@@ -13,6 +13,7 @@ use dynamo_backend_common::{
     GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
     MetricsBindings, MetricsCtx, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
+use dynamo_sidecar_common::media_error::{EngineFlavor, MediaErrorContext};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
@@ -530,6 +531,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                 "subagent affinity requires a stable child session ID",
             ));
         }
+        let media_error_context = MediaErrorContext::from_request(&request);
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -574,7 +576,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     target_dp_rank,
                     parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
                 ).await
-            } => Some(result?),
+            } => Some(result.map_err(|error| media_error_context.tag(EngineFlavor::Trtllm, error))?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -607,7 +609,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    yield Err(error);
+                                    yield Err(media_error_context.tag(EngineFlavor::Trtllm, error));
                                     break;
                                 }
                             },
@@ -618,7 +620,10 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::stream_status_to_dynamo("Generate", status));
+                                yield Err(media_error_context.tag(
+                                    EngineFlavor::Trtllm,
+                                    client::stream_status_to_dynamo("Generate", status),
+                                ));
                                 break;
                             }
                         }

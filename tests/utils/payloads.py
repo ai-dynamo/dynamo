@@ -163,6 +163,59 @@ class HttpErrorPayload(BasePayload):
 
 
 @dataclass
+class PublicErrorPayload(HttpErrorPayload):
+    """Check an observed public error contract and scan the entire body for private details."""
+
+    expected_message: str = field(kw_only=True)
+    expected_error_code: int = field(kw_only=True)
+
+    def validate(self, response: Any, content: str) -> None:
+        assert (
+            response.status_code == self.expected_status_code
+        ), f"Expected HTTP {self.expected_status_code}, got {response.status_code}: {content}"
+        if self.body.get("stream") is True and self.expected_status_code == 200:
+            content_type = response.headers.get("content-type", "").split(";", 1)[0]
+            assert (
+                content_type.strip().lower() == "text/event-stream"
+            ), f"Expected an SSE response, got {content_type!r}: {content}"
+            errors = [
+                chunk["error"]
+                for chunk in parse_sse_json_chunks(content)
+                if "error" in chunk
+            ]
+            assert (
+                len(errors) == 1
+            ), f"Expected exactly one SSE error frame, got {len(errors)}: {content}"
+            error = errors[0]
+        else:
+            document = json.loads(content)
+            assert isinstance(document, dict), f"Expected an error object: {content}"
+            error = document.get("error", document)
+
+        assert isinstance(error, dict), f"Expected an error object: {content}"
+        assert (
+            error.get("code") == self.expected_error_code
+        ), f"Expected error code {self.expected_error_code}, got {error.get('code')!r}: {content}"
+        assert (
+            error.get("message") == self.expected_message
+        ), f"Expected message {self.expected_message!r}, got {error.get('message')!r}: {content}"
+        for token in (
+            "127.0.0.1",
+            "media.invalid",
+            "Connection refused",
+            "Errno",
+            "Max retries",
+            "NameResolution",
+            "_io.BytesIO",
+            "object at 0x",
+            ".cc:",
+        ):
+            assert (
+                token.casefold() not in content.casefold()
+            ), f"Private detail {token!r} appeared in the response body: {content}"
+
+
+@dataclass
 class HttpCancellationPayload(BasePayload):
     """Disconnect an HTTP stream after its first content, before completion.
 

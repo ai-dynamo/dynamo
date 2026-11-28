@@ -686,5 +686,15 @@ fn in_band_errors_map_by_code_and_retryability() {
             error.to_string().contains("lpx-test engine error: boom"),
             "{error}"
         );
+        let upstream = error.upstream_error().unwrap();
+        assert_eq!(upstream.message(), "boom");
+        assert_eq!(
+            upstream.code_value(),
+            Some((code as i32).to_string().as_str())
+        );
+        assert_eq!(
+            upstream.error_type_name(),
+            Some("openengine.v1.EngineError")
+        );
     }
 }

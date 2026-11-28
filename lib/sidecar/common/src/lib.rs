@@ -10,6 +10,7 @@ mod args;
 mod endpoint;
 mod error;
 mod json;
+pub mod media_error;
 mod run;
 mod transport;
 

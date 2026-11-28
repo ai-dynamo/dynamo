@@ -165,9 +165,16 @@ fn user_stop_tokens_are_preserved_and_system_stop_tokens_are_hidden() {
 #[test]
 fn terminal_errors_preserve_backend_category_and_details() {
     for (status, expected) in [
+        (Some(7), BackendError::Unknown),
         (Some(400), BackendError::InvalidArgument),
+        (Some(408), BackendError::InvalidArgument),
+        (Some(418), BackendError::InvalidArgument),
+        (Some(422), BackendError::InvalidArgument),
+        (Some(431), BackendError::InvalidArgument),
         (Some(499), BackendError::InvalidArgument),
         (Some(500), BackendError::Unknown),
+        (Some(503), BackendError::Unknown),
+        (Some(529), BackendError::Unknown),
         (None, BackendError::Unknown),
     ] {
         let abort = meta_with_finish(FinishKind::Abort(Box::new(pb::FinishAbort {
@@ -196,6 +203,19 @@ fn terminal_errors_preserve_backend_category_and_details() {
                 "status_code={}",
                 status.map_or("unknown".to_string(), |value| value.to_string())
             )));
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), "generation failed");
+            assert_eq!(upstream.error_type_name(), Some("NativeError"));
+            assert_eq!(
+                upstream.code_value(),
+                status.map(|code| code.to_string()).as_deref()
+            );
+            assert_eq!(
+                upstream.http_status_value(),
+                status
+                    .and_then(|code| u16::try_from(code).ok())
+                    .filter(|code| (400..=599).contains(code))
+            );
         }
     }
     let error = terminal_from_meta(
@@ -207,6 +227,7 @@ fn terminal_errors_preserve_backend_category_and_details() {
     .unwrap_err();
     assert!(error.to_string().contains("SGLang generation failed"));
     assert!(error.to_string().contains("err_type=unknown"));
+    assert!(error.upstream_error().is_none());
     assert_protocol_error(error);
 }
 
@@ -436,11 +457,18 @@ fn prefill_reports_only_its_terminal_without_tokens() {
 #[test]
 fn stream_error_items_map_http_codes_to_backend_errors() {
     for (code, expected) in [
+        (7, BackendError::Unknown),
         (400, BackendError::InvalidArgument),
+        (408, BackendError::InvalidArgument),
+        (415, BackendError::InvalidArgument),
+        (418, BackendError::InvalidArgument),
+        (422, BackendError::InvalidArgument),
+        (431, BackendError::InvalidArgument),
         // A deliberate engine rejection, not a transport failure to retry.
         (429, BackendError::InvalidArgument),
         (499, BackendError::Cancelled),
         (503, BackendError::Unknown),
+        (529, BackendError::Unknown),
     ] {
         let error = stream_error_to_dynamo(&stream_error(code, "native failure"));
         assert_eq!(error.error_type(), ErrorType::Backend(expected), "{code}");
@@ -449,8 +477,36 @@ fn stream_error_items_map_http_codes_to_backend_errors() {
         assert!(detail.contains(&format!("code {code}")), "{detail}");
         // Engine messages are not echoed to the client.
         assert_eq!(error.public_message(), None);
+        let upstream = error.upstream_error().unwrap();
+        assert_eq!(upstream.message(), "native failure");
+        assert_eq!(upstream.code_value(), Some(code.to_string().as_str()));
+        assert_eq!(
+            upstream.http_status_value(),
+            u16::try_from(code)
+                .ok()
+                .filter(|code| (400..=599).contains(code))
+        );
     }
     assert_protocol_error(stream_error_to_dynamo(&pb::GenerateStreamError::default()));
+}
+
+#[test]
+fn stream_error_retains_the_native_error_type_without_diagnostic_prefix() {
+    let error = stream_error_to_dynamo(&pb::GenerateStreamError {
+        error: Some(pb::ErrorBody {
+            message: "unfamiliar engine failure".into(),
+            code: 599,
+            r#type: Some("NewEngineError".into()),
+            ..Default::default()
+        }),
+        index: None,
+    });
+    assert_protocol_error(error.clone());
+    let upstream = error.upstream_error().unwrap();
+    assert_eq!(upstream.message(), "unfamiliar engine failure");
+    assert_eq!(upstream.error_type_name(), Some("NewEngineError"));
+    assert_eq!(upstream.code_value(), Some("599"));
+    assert!(error.message().starts_with("Generate:"));
 }
 
 #[test]

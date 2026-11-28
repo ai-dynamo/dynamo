@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_backend_common::{BackendError, DynamoError, ErrorType, UpstreamError};
 
 #[derive(Debug)]
 pub enum SidecarStartupError {
@@ -96,7 +96,12 @@ pub fn cancelled(message: impl Into<String>) -> DynamoError {
 }
 
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    status_to_dynamo_parts(rpc, status.message(), status.code())
+    status_to_dynamo_parts(
+        rpc,
+        status.message(),
+        status.code(),
+        std::error::Error::source(&status).is_some(),
+    )
 }
 
 #[cfg(feature = "tonic-v14")]
@@ -105,6 +110,7 @@ pub fn status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError
         rpc,
         status.message(),
         tonic::Code::from_i32(status.code() as i32),
+        std::error::Error::source(&status).is_some(),
     )
 }
 
@@ -143,22 +149,54 @@ pub fn stream_status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> Dyna
         return disconnected(rpc, status.message(), code);
     }
     if status.code() == tonic_v14::Code::Unknown && status.message().starts_with(MISSING_TRAILER) {
-        return stream_incomplete(format!("{rpc}: {} ({code:?})", status.message()));
+        let mut error = stream_incomplete(format!("{rpc}: {} ({code:?})", status.message()));
+        error.upstream_error = Some(Box::new(grpc_upstream(status.message(), code, true)));
+        return error;
     }
-    status_to_dynamo_parts(rpc, status.message(), code)
-}
-
-fn disconnected(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
-    backend(
-        BackendError::Disconnected,
-        format!("{rpc}: stream broke: {message} ({code:?})"),
+    status_to_dynamo_parts(
+        rpc,
+        status.message(),
+        code,
+        std::error::Error::source(&status).is_some(),
     )
 }
 
-fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+fn disconnected(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+    let mut error = backend(
+        BackendError::Disconnected,
+        format!("{rpc}: stream broke: {message} ({code:?})"),
+    );
+    error.upstream_error = Some(Box::new(grpc_upstream(message, code, true)));
+    error
+}
+
+/// Capture gRPC text and code before wrapping, retaining local transport provenance.
+fn grpc_upstream(message: &str, code: tonic::Code, transport: bool) -> UpstreamError {
+    let upstream = UpstreamError::new(message)
+        .error_type("grpc.Status")
+        .code(format!("{code:?}"));
+    if transport {
+        upstream.family("transport")
+    } else {
+        upstream
+    }
+}
+
+// Share class mapping across tonic versions while keeping RPC context diagnostic-only.
+fn status_to_dynamo_parts(
+    rpc: &str,
+    message: &str,
+    code: tonic::Code,
+    transport: bool,
+) -> DynamoError {
+    let upstream = grpc_upstream(message, code, transport);
     let message = format!("{rpc}: {message} ({code:?})");
     if code == tonic::Code::Unimplemented {
-        return typed(ErrorType::NotImplemented, message);
+        return DynamoError::builder()
+            .error_type(ErrorType::NotImplemented)
+            .message(message)
+            .upstream_error(upstream)
+            .build();
     }
 
     let kind = match code {
@@ -172,7 +210,11 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(kind, message)
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(kind))
+        .message(message)
+        .upstream_error(upstream)
+        .build()
 }
 
 #[cfg(test)]
@@ -217,6 +259,11 @@ mod tests {
             assert_eq!(error.error_type(), ErrorType::Backend(expected));
             assert!(error.to_string().contains("Test: failure"));
             assert!(error.to_string().contains(&format!("{code:?}")));
+            let upstream = error.upstream_error().expect("received status is retained");
+            assert_eq!(upstream.message(), "failure");
+            assert_eq!(upstream.error_type_name(), Some("grpc.Status"));
+            assert_eq!(upstream.code_value(), Some(format!("{code:?}").as_str()));
+            assert_eq!(upstream.family_name(), None);
             #[cfg(feature = "tonic-v14")]
             {
                 let v14 = crate::error::status_to_dynamo_v14(
@@ -225,6 +272,7 @@ mod tests {
                 );
                 assert_eq!(v14.error_type(), error.error_type());
                 assert_eq!(v14.to_string(), error.to_string());
+                assert_eq!(v14.upstream_error(), error.upstream_error());
             }
         }
     }
@@ -237,6 +285,7 @@ mod tests {
         );
         assert_eq!(error.error_type(), ErrorType::NotImplemented);
         assert!(error.to_string().contains("Test: failure (Unimplemented)"));
+        assert_eq!(error.upstream_error().unwrap().message(), "failure");
 
         #[cfg(feature = "tonic-v14")]
         {
@@ -257,6 +306,10 @@ mod tests {
         )));
         let error = stream_status_to_dynamo("Test", broken);
         assert_eq!(
+            error.upstream_error().unwrap().family_name(),
+            Some("transport")
+        );
+        assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::Disconnected)
         );
@@ -265,6 +318,30 @@ mod tests {
         // Sent by the engine: no transport source, so the regular mapping.
         let sent = stream_status_to_dynamo("Test", tonic::Status::unknown("engine failure"));
         assert_eq!(sent.error_type(), ErrorType::Backend(BackendError::Unknown));
+        assert_eq!(sent.upstream_error().unwrap().message(), "engine failure");
+        assert_eq!(sent.upstream_error().unwrap().family_name(), None);
+    }
+
+    #[test]
+    fn unary_transport_status_retains_its_source_family() {
+        let status =
+            tonic::Status::from_error(Box::new(std::io::Error::other("local socket detail")));
+        let error = status_to_dynamo("Test", status);
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::Unknown)
+        );
+        assert_eq!(
+            error.upstream_error().unwrap().family_name(),
+            Some("transport")
+        );
+        assert!(
+            !error
+                .upstream_error()
+                .unwrap()
+                .message()
+                .starts_with("Test:")
+        );
     }
 
     /// Produced by tonic's own decoder, so a tonic upgrade that changes the
@@ -294,10 +371,14 @@ mod tests {
             .message()
             .await
             .expect_err("a 200 stream without trailers fails");
+        let error = crate::error::stream_status_to_dynamo_v14("Test", status);
         assert_eq!(
-            crate::error::stream_status_to_dynamo_v14("Test", status).error_type(),
+            error.error_type(),
             ErrorType::Backend(BackendError::StreamIncomplete)
         );
+        let upstream = error.upstream_error().unwrap();
+        assert_eq!(upstream.family_name(), Some("transport"));
+        assert!(upstream.message().starts_with(super::MISSING_TRAILER));
     }
 
     #[cfg(feature = "tonic-v14")]

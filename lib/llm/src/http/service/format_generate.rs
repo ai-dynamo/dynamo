@@ -106,8 +106,18 @@ fn stream_error(
         kind: error_type,
         status,
         message,
-    } = format.worker_error(error, ErrorPhase::Stream { cancelled: false });
+        ..
+    } = worker_error(format, error, ErrorPhase::Stream { cancelled: false });
     (error_type, format.error_body(status, &message).to_string())
+}
+
+// Formats own lifecycle and status policy; the frontend applies disclosure for every plugin.
+fn worker_error(
+    format: &SharedFormat,
+    error: &(dyn std::error::Error + 'static),
+    phase: ErrorPhase,
+) -> crate::generate_format::WorkerError {
+    format.worker_error(error, phase).with_client_policy(error)
 }
 
 fn adapt_openai_error(format: &SharedFormat, response: super::openai::ErrorResponse) -> Response {
@@ -504,7 +514,8 @@ impl Dispatch {
                     kind: mut error_type,
                     status,
                     message,
-                } = format.worker_error(error.as_ref(), ErrorPhase::Dispatch);
+                    ..
+                } = worker_error(&format, error.as_ref(), ErrorPhase::Dispatch);
                 if request_context.is_killed() || status == CANCELLED {
                     return cancelled(&mut inflight_guard);
                 }
@@ -552,7 +563,9 @@ impl Dispatch {
                         kind: error_type,
                         status,
                         message,
-                    } = format.worker_error(
+                        ..
+                    } = worker_error(
+                        &format,
                         &error,
                         ErrorPhase::Stream {
                             cancelled: request_context.is_killed() || engine_context.is_killed(),
@@ -585,3 +598,114 @@ impl Dispatch {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod worker_body_policy_tests {
+    use super::*;
+    use crate::generate_format::{GenerateFormat, WorkerError};
+    use dynamo_runtime::error::{ErrorClass, UpstreamError};
+
+    struct FormatWithLegacyDiagnostic;
+
+    struct FormatWithCancellation;
+
+    impl GenerateFormat for FormatWithCancellation {
+        fn name(&self) -> &str {
+            "cancel-policy-test"
+        }
+
+        fn capability(&self) -> &'static str {
+            "cancel-policy-test"
+        }
+
+        fn open(&self, _: ClientRequest<'_>) -> Result<Opened, ClientError> {
+            unreachable!("this test exercises dispatch error policy")
+        }
+
+        fn worker_error(
+            &self,
+            _: &(dyn std::error::Error + 'static),
+            _: ErrorPhase,
+        ) -> WorkerError {
+            WorkerError::new(ErrorType::Cancelled, CANCELLED, "local cancellation")
+        }
+    }
+
+    impl GenerateFormat for FormatWithLegacyDiagnostic {
+        fn name(&self) -> &str {
+            "policy-test"
+        }
+
+        fn capability(&self) -> &'static str {
+            "policy-test"
+        }
+
+        fn open(&self, _: ClientRequest<'_>) -> Result<Opened, ClientError> {
+            unreachable!("this test exercises only worker error rendering")
+        }
+
+        fn worker_error(
+            &self,
+            _: &(dyn std::error::Error + 'static),
+            _: ErrorPhase,
+        ) -> WorkerError {
+            WorkerError::new(
+                ErrorType::Validation,
+                StatusCode::IM_A_TEAPOT,
+                "PRIVATE_PLUGIN_DETAIL",
+            )
+        }
+    }
+
+    #[test]
+    fn plugin_error_messages_use_frontend_policy_in_every_phase() {
+        let format: SharedFormat = Arc::new(FormatWithLegacyDiagnostic);
+        for (family, expected) in [
+            (None, "engine explanation"),
+            (Some("media_fetch"), "Invalid request"),
+        ] {
+            let mut upstream = UpstreamError::new("engine explanation");
+            if let Some(family) = family {
+                upstream = upstream.family(family);
+            }
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .upstream_error(upstream)
+                .build();
+            for phase in [
+                ErrorPhase::Dispatch,
+                ErrorPhase::Stream { cancelled: false },
+                ErrorPhase::Stream { cancelled: true },
+            ] {
+                let selected = worker_error(&format, &error, phase);
+                assert_eq!(selected.status, StatusCode::IM_A_TEAPOT);
+                assert_eq!(selected.kind, ErrorType::Validation);
+                assert_eq!(selected.message, expected);
+            }
+            let (kind, body) = stream_error(&format, &error);
+            assert_eq!(kind, ErrorType::Validation);
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["error"]["message"], expected);
+            assert!(!body.to_string().contains("PRIVATE_PLUGIN_DETAIL"));
+        }
+    }
+
+    #[test]
+    fn source_http_status_keeps_format_owned_status_and_cancellation() {
+        let format: SharedFormat = Arc::new(FormatWithLegacyDiagnostic);
+        let cancelled: SharedFormat = Arc::new(FormatWithCancellation);
+        for status in [422, 499, 503] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .upstream_error(UpstreamError::new("source HTTP response").http_status(status))
+                .build();
+            let selected = worker_error(&format, &error, ErrorPhase::Dispatch);
+            assert_eq!(selected.status, StatusCode::IM_A_TEAPOT);
+            assert_eq!(selected.kind, ErrorType::Validation);
+            assert_eq!(
+                worker_error(&cancelled, &error, ErrorPhase::Dispatch).status,
+                CANCELLED
+            );
+        }
+    }
+}

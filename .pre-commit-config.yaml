@@ -273,6 +273,13 @@ repos:
       additional_dependencies: [pytest, pyyaml]
       pass_filenames: false
       always_run: true
+    - id: sidecar-media-error-pins
+      name: Check reviewed sidecar media-error engine and protocol pins
+      entry: python3 tests/dependencies/test_sidecar_media_error_pins.py
+      language: python
+      additional_dependencies: [packaging, pytest, pyyaml, tomli]
+      pass_filenames: false
+      files: ^(pyproject\.toml|Cargo\.toml|container/context\.yaml|lib/sidecar/.*\.rs|tests/dependencies/test_sidecar_media_error_pins\.py|\.pre-commit-config\.yaml)$
     - id: os-upgrade-list
       name: Check the OS package refresh lists carry the required packages
       entry: python3 tests/dependencies/test_os_upgrade_list.py

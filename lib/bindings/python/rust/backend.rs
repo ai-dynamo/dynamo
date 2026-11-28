@@ -41,7 +41,9 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
+use crate::errors::{
+    http_like_error_to_dynamo, preserve_python_error_content, py_exception_to_backend_error,
+};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1713,7 +1715,7 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             if backend == BackendError::InvalidArgument {
                 builder = builder.public_message(message);
             }
-            return builder.build();
+            return preserve_python_error_content(py, &err, builder.build());
         }
 
         if let Some(error) = http_like_error_to_dynamo(py, &err) {
@@ -1721,10 +1723,11 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         }
 
         if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            return DynamoError::builder()
+            let mapped = DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::EngineShutdown))
                 .message("engine shutting down")
                 .build();
+            return preserve_python_error_content(py, &err, mapped);
         }
 
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
@@ -1746,9 +1749,10 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::Unknown
         };
 
-        DynamoError::builder()
+        let mapped = DynamoError::builder()
             .error_type(ErrorType::Backend(backend))
             .message(err.to_string())
-            .build()
+            .build();
+        preserve_python_error_content(py, &err, mapped)
     })
 }

@@ -10,6 +10,7 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_image_payload_cached_tokens,
 )
+from tests.utils.payload_builder import media_error_payload, public_error_payload
 from tests.utils.payloads import CachedTokensChatPayload
 
 
@@ -91,7 +92,64 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=22.0,
                 requested_sglang_kv_tokens=8192,
                 delayed_start=10,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        # Unreachable URLs and invalid image data exercise
+                        # SGLang's Python loader without frontend decoding.
+                        followup_payloads=[
+                            *[
+                                media_error_payload(
+                                    image_url,
+                                    expected_status_code=200 if stream else error_code,
+                                    expected_error_code=error_code,
+                                    expected_message=message,
+                                    stream=stream,
+                                )
+                                for image_url, error_code, message in (
+                                    # Port 1 is an intentionally failing input URL,
+                                    # not a fixed port for a test service.
+                                    (
+                                        "http://127.0.0.1:1/x.png",
+                                        500,
+                                        "Internal server error",
+                                    ),
+                                    (
+                                        "http://media.invalid/x.png",
+                                        500,
+                                        "Internal server error",
+                                    ),
+                                    (
+                                        "data:image/png;base64,bm90IGFuIGltYWdl",
+                                        400,
+                                        "Invalid request",
+                                    ),
+                                )
+                                for stream in (False, True)
+                            ],
+                            # A normal disaggregated validation message stays public.
+                            *[
+                                public_error_payload(
+                                    {
+                                        **make_image_payload(["green"]).body,
+                                        "n": 2,
+                                        "temperature": 1.0,
+                                        "max_tokens": 8,
+                                    },
+                                    expected_status_code=400,
+                                    expected_error_code=400,
+                                    expected_message=(
+                                        "SGLang disaggregated serving supports only n=1. "
+                                        "Use aggregated serving or send separate n=1 requests."
+                                    ),
+                                    stream=stream,
+                                )
+                                for stream in (False, True)
+                            ],
+                            make_image_payload(["green"]),
+                        ],
+                    )
+                ],
             ),
         },
     ),
