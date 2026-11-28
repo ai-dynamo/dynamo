@@ -39,7 +39,12 @@ class StaticSecretAuth(AuthValidator):
         # bypass the gateway entirely). An operator who configured a
         # secret mapping to "" would let any gateway caller pass that
         # subject check against in-process plugins.
-        for secret_index, (_secret, subject) in enumerate(secrets.items()):
+        #
+        # Secrets are kept as UTF-8 bytes, see ``validate``. A JSON config can
+        # still carry a lone surrogate such as "\ud800", which has no UTF-8
+        # form, so that is rejected here rather than on every request.
+        self._secrets: dict[bytes, str] = {}
+        for secret_index, (secret, subject) in enumerate(secrets.items()):
             if not subject:
                 raise ValueError(
                     "StaticSecretAuth: empty subject is not allowed for "
@@ -48,16 +53,29 @@ class StaticSecretAuth(AuthValidator):
                     "bytes are intentionally omitted from this error to "
                     "avoid leaking secret material into startup logs.)"
                 )
-        self._secrets: dict[str, str] = dict(secrets)
+            try:
+                self._secrets[secret.encode()] = subject
+            except UnicodeEncodeError:
+                raise ValueError(
+                    "StaticSecretAuth: secret entry at index "
+                    f"{secret_index} cannot be encoded as UTF-8. (Token "
+                    "bytes are intentionally omitted from this error to "
+                    "avoid leaking secret material into startup logs.)"
+                ) from None
 
     async def validate(self, token: str) -> AuthIdentity:
         if not token:
             raise AuthError("static_secret: empty token")
         # Constant-time comparison avoids leaking "first N chars matched"
         # via timing. Python dict lookup is fast-path but not constant;
-        # for N small secrets, iterating + compare_digest is fine.
+        # for N small secrets, iterating + compare_digest is fine. Compare
+        # bytes: on str, compare_digest raises TypeError for non-ASCII
+        # input, which would escape the callers' ``except AuthError``.
+        # surrogatepass keeps a lone surrogate from raising here too; its
+        # bytes are not valid UTF-8, so they never equal a configured secret.
+        token_bytes = token.encode("utf-8", "surrogatepass")
         for secret, subject in self._secrets.items():
-            if hmac.compare_digest(token, secret):
+            if hmac.compare_digest(token_bytes, secret):
                 return AuthIdentity(source="static_secret", subject=subject)
         raise AuthError("static_secret: token not in trusted set")
 
