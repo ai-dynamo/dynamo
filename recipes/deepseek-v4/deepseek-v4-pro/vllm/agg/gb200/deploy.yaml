@@ -135,6 +135,8 @@ spec:
               # TRT-LLM fused allreduce + RMSNorm kernel for the cross-node TP
               # group. If FlashInfer fails to allocate the workspace at startup
               # vLLM logs a non-fatal warning and falls back to the non-fused path.
+              # --no-numa-bind: vLLM 0.34.0 auto NUMA binding races across concurrent TP
+              # workers; drop once https://github.com/vllm-project/vllm/issues/67851 is fixed.
               exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
@@ -152,4 +154,5 @@ spec:
                 --attention-config '{"indexer_kv_dtype":"mxfp4"}' \
                 --moe-backend deep_gemm_mega_moe \
                 --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
+                --no-numa-bind \
                 --no-enable-flashinfer-autotune
