@@ -34,6 +34,8 @@ use crate::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
 // The check that one role's plugins fit together reports this.
 pub use dynamo_scheduler::PluginConfigError;
+// One role's booking-time hint stage, for a host that books outside the selection core.
+pub use dynamo_scheduler::host::RoleHintStage;
 
 // The policy-file entries the registry resolves plugins from, and the environment variables
 // that select a role's policy.
@@ -70,6 +72,23 @@ pub fn check_role(
     config: &KvRouterConfig,
 ) -> Result<WorkerInputs, PluginConfigError> {
     dynamo_scheduler::check_role(
+        role,
+        selection,
+        hint_policies,
+        config.supports_kv_transfer_chain_retention(),
+    )
+}
+
+/// Resolve one role's booking-time hint stage for a host that selects and books workers itself,
+/// such as offline replay. Rejects what [`check_role`] rejects, and the stage's
+/// [`RoleHintStage::prepare_inputs`] is what [`check_role`] returns.
+pub fn role_hint_stage(
+    role: WorkerType,
+    selection: &WorkerSelectionPolicy,
+    hint_policies: RoleHintPolicies,
+    config: &KvRouterConfig,
+) -> Result<RoleHintStage, PluginConfigError> {
+    RoleHintStage::resolve(
         role,
         selection,
         hint_policies,

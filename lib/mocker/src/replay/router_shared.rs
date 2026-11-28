@@ -16,7 +16,7 @@ use dynamo_kv_hints::{
 use dynamo_kv_indexer::host::RouterHintSourceMetadata;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::host::{RoleHintStage, RouterPluginRegistryHostExt};
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::{
@@ -290,6 +290,9 @@ pub(super) struct ReplayRole {
     /// reads them, or one of the role's hint policies does. A default hint policy counts
     /// here although it starts no index: it uses the one the selection reads.
     pub(super) computes_copy_sources: bool,
+    /// The role's hint stage, which decides whether a booked copy source becomes a fetch, as
+    /// the live router's booking decides it.
+    pub(super) hint_stage: RoleHintStage,
 }
 
 /// Check one replay worker pool's role as the live router does at startup
@@ -312,10 +315,12 @@ pub(super) fn replay_role(
             .required_worker_inputs()
             .contains(WorkerInputs::KV_COPY)
     });
-    let inputs = selector.check_role(worker_type, hint_policies, config)?;
+    let hint_stage = selector.role_hint_stage(worker_type, hint_policies, config)?;
+    let inputs = hint_stage.prepare_inputs();
     Ok(ReplayRole {
         inputs,
         computes_copy_sources: inputs.contains(WorkerInputs::KV_COPY) || hints_read_copy_sources,
+        hint_stage,
     })
 }
 

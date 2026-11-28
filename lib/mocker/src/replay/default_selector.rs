@@ -79,16 +79,20 @@ impl DefaultWorkerSelector {
     }
     /// Handle that reads and updates this selector's runtime parameters from another owner.
     ///
-    /// The worker inputs whose resources a router starts for `role`: this selector's, plus
-    /// those of the role's configured hint policies. Rejects what the live router's setup
-    /// rejects ([`dynamo_kv_router::plugins::host::check_role`]).
-    pub fn check_role(
+    /// The booking-time hint stage a router runs for `role` with this selector. Its
+    /// `prepare_inputs` are the worker inputs whose resources the router starts: this
+    /// selector's, plus those of the role's configured hint policies. Rejects what the live
+    /// router's setup rejects ([`dynamo_kv_router::plugins::host::check_role`]).
+    pub fn role_hint_stage(
         &self,
         role: WorkerType,
         hint_policies: dynamo_kv_router::plugins::host::RoleHintPolicies,
         config: &dynamo_kv_router::config::KvRouterConfig,
-    ) -> Result<WorkerInputs, dynamo_kv_router::plugins::host::PluginConfigError> {
-        dynamo_kv_router::plugins::host::check_role(
+    ) -> Result<
+        dynamo_kv_router::plugins::host::RoleHintStage,
+        dynamo_kv_router::plugins::host::PluginConfigError,
+    > {
+        dynamo_kv_router::plugins::host::role_hint_stage(
             role,
             &self.policy.lock(),
             hint_policies,

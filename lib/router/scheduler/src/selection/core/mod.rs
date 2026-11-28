@@ -65,6 +65,7 @@ mod workers;
 
 use reservations::ReservationIndex;
 
+pub use hint::RoleHintStage;
 pub use operation::{
     LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
     SelectionRun, SessionBinding,

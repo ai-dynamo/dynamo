@@ -460,7 +460,9 @@ pub(in crate::replay) fn derive_decode_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisim_core::replay::{ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec};
+    use aisim_core::replay::{
+        KvHints, ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec,
+    };
 
     use crate::common::protocols::DirectRequest;
     use crate::replay::ReplayRouterMode;
@@ -701,65 +703,125 @@ mod tests {
         assert_eq!(decode.router.kv_event_lag_ms, 25.0);
     }
 
+    /// The `kv_fetch` threshold cases: the `worker_selection` entry the role runs (`None` for
+    /// `testdata/kv_fetch_policy.yaml`), the target prompt's blocks the target already holds in
+    /// G1, and the hint it gets. Worker 1 holds all 8 blocks in G2, so the copy adds the rest.
+    /// `kv_fetch` sends a best-effort copy only when it adds `min_additional_blocks`; a copy the
+    /// `kvcr` selection committed to is always sent.
+    fn kv_fetch_threshold_cases() -> [(Option<&'static str>, usize, Option<KvHints>); 4] {
+        use super::super::tests::fetch_hint;
+        let threshold = "    type: dynamo-default-cost-fn\n    hints: [{type: kv_fetch, parameters: {min_additional_blocks: 2}}]\n";
+        let committed = "    type: kvcr\n    parameters: {shared_cache_multiplier: 0.5}\n    hints: [{type: kv_fetch, parameters: {min_additional_blocks: 2}}]\n";
+        [
+            (None, 0, fetch_hint(1)),
+            (Some(threshold), 7, None),
+            (Some(threshold), 6, fetch_hint(1)),
+            (Some(committed), 7, fetch_hint(1)),
+        ]
+    }
+
+    /// `role`'s `worker_selection` entry in a policy file, and a config that reads it. Keep the
+    /// file until the router is built.
+    fn role_policy(
+        role: &str,
+        entry: Option<&str>,
+    ) -> (Option<tempfile::NamedTempFile>, KvRouterConfig) {
+        use super::super::tests::with_kv_fetch_hints;
+        let Some(entry) = entry else {
+            return (None, with_kv_fetch_hints(KvRouterConfig::default()));
+        };
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy.path(),
+            format!("worker_selection:\n  {role}:\n{entry}"),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        (Some(policy), config)
+    }
+
     #[test]
     fn only_prefill_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
-            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
-            with_kv_fetch_hints,
+            kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g1, target_prefix_in_g2,
+            topology,
         };
-        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
+        for (entry, local_blocks, hint) in kv_fetch_threshold_cases() {
+            let (_policy, config) = role_policy("prefill", entry);
+            let args = MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}}))
+                .unwrap();
+            let mut composition = KvReplayComposition::disaggregated(
+                args.clone(),
+                args,
+                2,
+                2,
+                Some(config),
+                None,
+                None,
+            );
+            let (mut prefill, mut decode) = composition
+                .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
+                .unwrap();
 
-        let args =
-            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
-        let mut composition =
-            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, hinted, None, None);
-        let (mut prefill, mut decode) = composition
-            .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
-            .unwrap();
+            occupy_worker_1(&mut prefill, 0);
+            let mut events = vec![target_prefix_in_g2(1, 0)];
+            if local_blocks > 0 {
+                events.push(target_prefix_in_g1(0, local_blocks));
+            }
+            prefill.router.on_kv_events(events).unwrap();
+            let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
+            assert_eq!(
+                (placed.scheduler_id, placed.kv_hints),
+                (0, hint),
+                "{entry:?} with {local_blocks} local blocks"
+            );
 
-        occupy_worker_1(&mut prefill, 0);
-        prefill
-            .router
-            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
-            .unwrap();
-        let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
-        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
-
-        // Decode workers accept hints too, but replay feeds no decode-pool KV events to
-        // the decode router, so it computes no copy sources. Decode balances the two
-        // targets over both workers, so one lands away from worker 1's G2 prefix unhinted.
-        assert!(!decode.router.indexer.retain_kv_transfer_chain);
-        decode
-            .router
-            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
-            .unwrap();
-        let placed = [1, 2].map(|uuid| place_now(&mut decode, &kv_fetch_target(uuid), 0.0));
-        assert!(placed.iter().any(|placement| placement.scheduler_id == 0));
-        assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
+            // Decode workers accept hints too, but replay feeds no decode-pool KV events to
+            // the decode router, so it computes no copy sources. Decode balances the two
+            // targets over both workers, so one lands away from worker 1's G2 prefix unhinted.
+            assert!(!decode.router.indexer.retain_kv_transfer_chain);
+            decode
+                .router
+                .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+                .unwrap();
+            let placed = [1, 2].map(|uuid| place_now(&mut decode, &kv_fetch_target(uuid), 0.0));
+            assert!(placed.iter().any(|placement| placement.scheduler_id == 0));
+            assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
+        }
     }
 
     #[test]
     fn aggregated_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
-            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
-            with_kv_fetch_hints,
+            kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g1, target_prefix_in_g2,
+            topology,
         };
-        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
+        for (entry, local_blocks, hint) in kv_fetch_threshold_cases() {
+            let (_policy, config) = role_policy("aggregated", entry);
+            let args = MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}}))
+                .unwrap();
+            let mut composition =
+                KvReplayComposition::aggregated(args, 2, Some(config), None, None);
+            let mut placement = composition
+                .create_aggregated_placement(1, topology(2, 1, true))
+                .unwrap();
 
-        let args =
-            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
-        let mut composition = KvReplayComposition::aggregated(args, 2, hinted, None, None);
-        let mut placement = composition
-            .create_aggregated_placement(1, topology(2, 1, true))
-            .unwrap();
-
-        occupy_worker_1(&mut placement, 0);
-        placement
-            .router
-            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
-            .unwrap();
-        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
-        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+            occupy_worker_1(&mut placement, 0);
+            let mut events = vec![target_prefix_in_g2(1, 0)];
+            if local_blocks > 0 {
+                events.push(target_prefix_in_g1(0, local_blocks));
+            }
+            placement.router.on_kv_events(events).unwrap();
+            let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+            assert_eq!(
+                (placed.scheduler_id, placed.kv_hints),
+                (0, hint),
+                "{entry:?} with {local_blocks} local blocks"
+            );
+        }
     }
 
     fn retune_router_config() -> KvRouterConfig {
