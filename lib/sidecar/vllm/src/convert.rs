@@ -13,6 +13,7 @@ use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_
 use serde::Deserialize;
 
 use crate::client;
+use crate::connectors::{KvConnectorProtocol, NixlConnectorProtocol, RequestHandoff};
 use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
 
 /// Payload names and peer, used only to name the source in codec errors.
@@ -73,10 +74,27 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
     request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
+#[cfg(test)]
 pub(crate) fn build_generate_request(
+    request: PreprocessedRequest,
+    request_id: String,
+    mode: DisaggregationMode,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    build_generate_request_with_handoff(
+        request,
+        request_id,
+        mode,
+        &NixlConnectorProtocol,
+        &RequestHandoff::None,
+    )
+}
+
+pub(crate) fn build_generate_request_with_handoff(
     mut request: PreprocessedRequest,
     request_id: String,
     mode: DisaggregationMode,
+    connector: &dyn KvConnectorProtocol,
+    handoff: &RequestHandoff,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
@@ -234,7 +252,15 @@ pub(crate) fn build_generate_request(
         bad_words_token_ids,
         allowed_token_ids,
     } = take_sampling_extensions(&mut extra_args)?;
-    let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
+    let kv = build_kv_parameters(
+        extra_args,
+        prefill_result,
+        encoder_result,
+        cache_salt,
+        mode,
+        connector,
+        handoff,
+    )?;
 
     Ok(pb::GenerateRequest {
         request_id,
@@ -1123,6 +1149,8 @@ fn build_kv_parameters(
     encoder_result: Option<serde_json::Value>,
     cache_salt: Option<String>,
     mode: DisaggregationMode,
+    connector: &dyn KvConnectorProtocol,
+    handoff: &RequestHandoff,
 ) -> Result<pb::KvCacheParameters, DynamoError> {
     let mut extra = match extra_args {
         None => None,
@@ -1167,6 +1195,7 @@ fn build_kv_parameters(
                 "do_remote_decode".to_string(),
                 serde_json::Value::Bool(true),
             );
+            connector.inject_prefill_params(handoff, &mut params);
             Some(serde_json::Value::Object(params))
         }
         DisaggregationMode::Decode => {
@@ -1320,6 +1349,11 @@ pub(crate) struct ResponseState {
     multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
     mode: DisaggregationMode,
+    /// This request's KV connector and its per-request handoff state. The
+    /// handoff is only ever non-None for prefill requests whose connector
+    /// resolved an identity at startup.
+    connector: Arc<dyn KvConnectorProtocol>,
+    handoff: RequestHandoff,
     /// The prefill leg's prefix-cache hit count, when it reported one.
     prefill_cached_tokens: Option<u32>,
     output_logprobs: Option<u32>,
@@ -1340,6 +1374,8 @@ impl ResponseState {
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             mode,
+            connector: Arc::new(NixlConnectorProtocol),
+            handoff: RequestHandoff::None,
             prefill_cached_tokens: request
                 .prefill_result
                 .as_ref()
@@ -1359,6 +1395,16 @@ impl ResponseState {
                 .clone()
                 .unwrap_or_default(),
         }
+    }
+
+    pub(crate) fn with_handoff(
+        mut self,
+        connector: Arc<dyn KvConnectorProtocol>,
+        handoff: RequestHandoff,
+    ) -> Self {
+        self.connector = connector;
+        self.handoff = handoff;
+        self
     }
 
     pub(crate) fn reported_completion_tokens(&self) -> u32 {
@@ -1532,10 +1578,15 @@ impl ResponseState {
             self.attach_prompt_data(&mut mapped);
             return Ok(Some(mapped));
         }
-        mapped.disaggregated_params = finish
+        let engine_params = finish
             .kv_transfer_params
-            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS).map(Box::new))
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
             .transpose()?;
+
+        mapped.disaggregated_params = self
+            .connector
+            .prefill_terminal_params(&self.handoff, engine_params)
+            .map(Box::new);
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",

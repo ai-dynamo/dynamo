@@ -5,6 +5,7 @@
 
 mod args;
 mod client;
+mod connectors;
 mod convert;
 mod engine;
 mod lora;

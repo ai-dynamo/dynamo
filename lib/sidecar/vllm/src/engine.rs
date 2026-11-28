@@ -24,9 +24,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
+use crate::connectors::{
+    KvConnectorProtocol, NixlConnectorProtocol, RequestHandoff, ResolvedConnector,
+    make_kv_connector,
+};
 use crate::convert::{
-    ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    request_has_multimodal_input, require_proto_0_6_controls,
+    ResponseState, build_generate_request_with_handoff, consume_reasoning_parser_args,
+    data_parallel_rank, request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -51,6 +55,10 @@ pub struct VllmSidecarEngine {
     /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
     /// they exclude the reasoning phase; set by `from_discovered`.
     engine_gates_reasoning: bool,
+    /// The engine's KV-connector PD strategy, chosen by `--kv-connector`.
+    connector: Arc<dyn KvConnectorProtocol>,
+    /// The connector identity resolved in `start`.
+    resolved: OnceCell<ResolvedConnector>,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
@@ -81,6 +89,8 @@ impl VllmSidecarEngine {
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
             engine_gates_reasoning: false,
+            connector: Arc::new(NixlConnectorProtocol),
+            resolved: OnceCell::new(),
         }
     }
 
@@ -246,6 +256,13 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        engine.connector = make_kv_connector(
+            &args.kv_connector,
+            mode,
+            args.mooncake_bootstrap_host,
+            args.mooncake_bootstrap_port,
+        )?
+        .into();
         // TODO: Remove this version check and default to `true` once the sidecar drops vLLM < 0.33.
         let structural_tag = args
             .sidecar
@@ -309,6 +326,25 @@ impl VllmSidecarEngine {
     pub(crate) fn with_hot_swap_requested(mut self, requested: bool) -> Self {
         self.is_hot_swap_requested = requested;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_connector(mut self, connector: Arc<dyn KvConnectorProtocol>) -> Self {
+        self.connector = connector;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_resolved_connector(
+        mut self,
+        connector: Arc<dyn KvConnectorProtocol>,
+        resolved: ResolvedConnector,
+    ) -> Result<Self, DynamoError> {
+        self.connector = connector;
+        self.resolved
+            .set(resolved)
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
+        Ok(self)
     }
 
     async fn native_inventory(&self) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
@@ -830,6 +866,21 @@ impl LLMEngine for VllmSidecarEngine {
         self.client
             .set(client)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
+        // Tests may inject an already-resolved identity to skip the network
+        // query against a fake bootstrap server.
+        if self.resolved.get().is_none() {
+            let resolved = self.connector.resolve(startup_deadline).await?;
+            if !matches!(resolved, ResolvedConnector::None) {
+                tracing::info!(
+                    connector = self.connector.name(),
+                    ?resolved,
+                    "Resolved the engine's KV connector identity"
+                );
+            }
+            self.resolved
+                .set(resolved)
+                .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
+        }
         tracing::info!(
             endpoint = %self.endpoint,
             connections = connection_count,
@@ -894,9 +945,25 @@ impl LLMEngine for VllmSidecarEngine {
                 "max_thinking_tokens requires vLLM to run a reasoning parser",
             ));
         }
-        let mut state = ResponseState::new(&request, self.mode);
+
+        let handoff = if self.mode.is_prefill() {
+            match self.resolved.get() {
+                Some(resolved) => self.connector.new_request(resolved),
+                None => RequestHandoff::None,
+            }
+        } else {
+            RequestHandoff::None
+        };
+        let mut state = ResponseState::new(&request, self.mode)
+            .with_handoff(self.connector.clone(), handoff.clone());
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
-        let mut proto_request = build_generate_request(request, request_id, self.mode)?;
+        let mut proto_request = build_generate_request_with_handoff(
+            request,
+            request_id,
+            self.mode,
+            self.connector.as_ref(),
+            &handoff,
+        )?;
         if checks_controls && !self.model.reports_proto_0_6() {
             require_proto_0_6_controls(&proto_request, self.model.proto_version())?;
         }
@@ -1745,6 +1812,77 @@ mod tests {
         let (engine, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
         assert!(!engine.engine_gates_reasoning);
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn mooncake_prefill_requires_a_bootstrap_host() {
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let base = [
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-connector",
+            "MooncakeConnector",
+        ];
+        let missing = Args::try_parse_from(base).unwrap();
+        let error = VllmSidecarEngine::from_discovered(missing, model.clone(), None)
+            .err()
+            .expect("Mooncake prefill without a bootstrap host must fail");
+        assert!(
+            error.to_string().contains("--mooncake-bootstrap-host"),
+            "{error}"
+        );
+
+        let with_host = Args::try_parse_from(
+            base.into_iter()
+                .chain(["--mooncake-bootstrap-host", "10.0.0.1"]),
+        )
+        .unwrap();
+        let (engine, _) = VllmSidecarEngine::from_discovered(with_host, model, None).unwrap();
+        assert_eq!(engine.connector.name(), "MooncakeConnector");
+    }
+
+    #[test]
+    fn unknown_kv_connector_is_rejected() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-connector",
+            "NotAConnector",
+        ])
+        .unwrap();
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args, model, None)
+            .err()
+            .expect("an unknown connector must fail");
+        assert!(
+            error.to_string().contains("unsupported --kv-connector"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mooncake_connector_is_ignored_outside_prefill_mode() {
+        for mode in ["aggregated", "decode"] {
+            let args = Args::try_parse_from([
+                "sidecar",
+                "--grpc-endpoint",
+                "127.0.0.1:12345",
+                "--disaggregation-mode",
+                mode,
+                "--kv-connector",
+                "MooncakeConnector",
+            ])
+            .unwrap();
+            let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+            let (engine, _) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
+            assert_eq!(engine.connector.name(), "NixlConnector", "{mode}");
+        }
     }
 
     #[test]
