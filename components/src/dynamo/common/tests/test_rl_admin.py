@@ -173,6 +173,7 @@ def test_lora_load_request_rejects_non_string_fields() -> None:
         {"lora_name": ["a"], "source": {"uri": "file:///x"}},
         {"lora_name": "a", "source": {"uri": {}}},
         {"lora_name": "a", "source": {"uri": ["file:///x"]}},
+        {"lora_name": "a", "source": {"uri": "file:///x"}, "load_inplace": "true"},
     ):
         try:
             require_lora_load_request(req)

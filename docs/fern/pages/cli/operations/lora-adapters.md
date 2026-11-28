@@ -406,6 +406,12 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
   </Step>
 </Steps>
 
+## Replace a Loaded Adapter
+
+Loading a name that is already loaded keeps the current adapter. Set `DYN_LORA_HOTSWAP_ENABLED=true` on the worker to replace it with the new `source.uri` instead. A swap waits for the adapter's in-flight requests to finish, then resets the prefix cache.
+
+RL trainers that update the adapter every step under live traffic can add `"load_inplace": true` to the load request. The weights are then replaced right away, under the same LoRA ID: in-flight requests continue on the new weights, and the prefix cache is kept, so send a per-version `cache_salt` with each request to keep cached prefixes from mixing versions. This is supported on vLLM workers.
+
 ## KV Cache-Aware LoRA Routing
 
 This section describes the validated vLLM path. KV-aware routing with SGLang LoRA remains experimental because the combined path is not end-to-end validated.
