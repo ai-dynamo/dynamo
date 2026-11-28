@@ -9,6 +9,7 @@ functions, no runtime needed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
@@ -106,8 +107,12 @@ class FakeScheduler:
         )
         self.back_fills: list[tuple[Optional[ReplicaKey], int]] = []
         self.completed_requests: list[tuple[str, int, int]] = []
+        self.request_ids: list[Optional[str]] = []
 
-    async def before_request(self, program_id, estimated_prompt_tokens=0):
+    async def before_request(
+        self, program_id, estimated_prompt_tokens=0, *, request_id=None
+    ):
+        self.request_ids.append(request_id)
         return self._decision
 
     async def assign_worker(self, program_id, replica, *, admission_epoch):
@@ -164,9 +169,10 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
     handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
     handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
 
-    context = object()
+    context = SimpleNamespace(id=lambda: "routed-request")
     await drive(handler, context=context)
     assert handler._kv_router.context is context
+    assert handler._scheduler.request_ids == ["routed-request"]
 
     sent = handler._kv_router.sent
     assert sent is not None

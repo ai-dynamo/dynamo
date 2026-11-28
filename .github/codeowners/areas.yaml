@@ -58,6 +58,7 @@ areas:
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
+  - components/src/dynamo/duru_router/
   - lib/kv-events/
   - lib/kv-events/src/zmq_wire/
   - lib/router/
