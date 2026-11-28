@@ -9,6 +9,7 @@ use crate::load::{
 use dynamo_runtime::metrics::prometheus_names::{
     clamp_u64_to_i64, frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
 };
+use dynamo_runtime::metrics::scrape::ScrapeCoalescer;
 use dynamo_runtime::{
     config::environment_names::llm::metrics as env_metrics,
     engine::Data,
@@ -2669,6 +2670,8 @@ impl ServingLoadCollector {
 struct MetricsHandlerState {
     registry: Registry,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+    /// Overlapping scrapes share one render, with or without a DRT.
+    scrapes: ScrapeCoalescer,
 }
 
 /// Build the route that serves `registry` in the Prometheus text format, and return it
@@ -2687,6 +2690,7 @@ pub fn scrape_router(
     let metrics_state = MetricsHandlerState {
         registry,
         drt_metrics,
+        scrapes: ScrapeCoalescer::new(),
     };
 
     let route = Router::new()
@@ -2709,19 +2713,31 @@ impl MetricsHandlerState {
     }
 }
 
-/// Renders on the blocking pool: the gather runs update callbacks, some of
-/// which take the Python GIL.
+/// Renders on the blocking pool, since the gather runs update callbacks, some
+/// of which take the Python GIL. Concurrent scrapes share one render rather
+/// than each gathering the whole tree; a panicking render is logged at error
+/// by the coalescer.
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    match tokio::task::spawn_blocking(move || state.render()).await {
-        Ok(Ok(metrics)) => return (StatusCode::OK, metrics).into_response(),
-        Ok(Err(error)) => tracing::warn!(%error, "Failed to encode metrics"),
-        Err(error) => tracing::error!(%error, "metrics render panicked"),
+    let render_state = state.clone();
+    match state.scrapes.render(move || render_state.render()).await {
+        Ok(metrics) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            metrics,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to encode metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to encode metrics",
+            )
+                .into_response()
+        }
     }
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Failed to encode metrics",
-    )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -4516,8 +4532,95 @@ mod tests {
             let state = MetricsHandlerState {
                 registry: local,
                 drt_metrics: Some(drt.clone()),
+                scrapes: ScrapeCoalescer::new(),
             };
             (state, attachment)
+        }
+
+        /// Concurrent scrapes share one render instead of each gathering the
+        /// whole tree on the blocking pool. Mirrors the system-status server's
+        /// `scrapes_queue_on_the_gate_and_share_the_next_render`.
+        #[test]
+        fn concurrent_scrapes_share_one_render() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                // A DRT-tree callback that reports each render start and blocks
+                // until the test releases it.
+                let drt = MetricsRegistry::new();
+                let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+                let (release, release_rx) = std::sync::mpsc::channel::<()>();
+                let release_rx = std::sync::Mutex::new(release_rx);
+                drt.add_expfmt_callback(Arc::new(move || {
+                    let _ = started_tx.send(());
+                    release_rx.lock().unwrap().recv().expect("release");
+                    Ok("engine_metric 1\n".to_string())
+                }));
+                let local = Registry::new();
+                counter(&local, "dynamo_frontend_requests_total");
+                let (state, _attachment) = attached(local, &drt);
+                let state = Arc::new(state);
+                let handler = || {
+                    let state = state.clone();
+                    Box::pin(async move {
+                        let response = handler_metrics(State(state)).await.into_response();
+                        assert_eq!(response.status(), StatusCode::OK);
+                        axum::body::to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .expect("body")
+                    })
+                };
+
+                // The first scrape is rendering when two more arrive. Polling
+                // each to Pending samples its arrival and parks it on the gate
+                // before the first render is released, so both arrivals precede
+                // the second render.
+                let within = std::time::Duration::from_secs(5);
+                let first = tokio::spawn(handler());
+                tokio::time::timeout(within, started.recv())
+                    .await
+                    .expect("first render started")
+                    .expect("started");
+                let mut second = handler();
+                let mut third = handler();
+                assert!(futures::poll!(second.as_mut()).is_pending());
+                assert!(futures::poll!(third.as_mut()).is_pending());
+                let second = tokio::spawn(second);
+                let third = tokio::spawn(third);
+
+                // The second scrape renders once the first finishes; the third
+                // arrived before that render started and shares it.
+                release.send(()).unwrap();
+                tokio::time::timeout(within, first)
+                    .await
+                    .expect("first scrape finished")
+                    .expect("first scrape");
+                tokio::time::timeout(within, started.recv())
+                    .await
+                    .expect("second render started")
+                    .expect("started");
+                release.send(()).unwrap();
+                let second = tokio::time::timeout(within, second)
+                    .await
+                    .expect("second scrape finished")
+                    .expect("second scrape");
+                let third = tokio::time::timeout(within, third)
+                    .await
+                    .expect("third scrape finished")
+                    .expect("third scrape");
+                assert_eq!(second, third);
+                let text = std::str::from_utf8(&second).unwrap();
+                assert!(text.contains("engine_metric 1"), "{text}");
+                assert!(text.contains("dynamo_frontend_requests_total"), "{text}");
+                assert!(
+                    started.try_recv().is_err(),
+                    "the third scrape must share the second render, not start its own"
+                );
+            });
         }
 
         /// A frontend family whose type conflicts with a DRT family of the same
