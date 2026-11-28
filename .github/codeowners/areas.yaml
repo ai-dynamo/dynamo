@@ -224,6 +224,7 @@ areas:
   - lib/sidecar/SUPPORT_NOTES.md
   - lib/sidecar/common/
   - lib/sidecar/testkit/
+  - lib/sidecar/tilert/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -1215,6 +1216,10 @@ shared:
   - backend-sglang
   - sidecar
 - glob: lib/sidecar/testkit/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/tilert/
   owners:
   - runtime
   - sidecar
