@@ -29,6 +29,7 @@ from .common import (
     UNKNOWN,
     Component,
     dedupe_by_name_version,
+    normalize_cyclonedx_licenses,
     read_harvested_license,
     spdx_license_text,
 )
@@ -36,43 +37,6 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "rust"
-
-
-def _normalize_license(licenses_field: list[dict] | None) -> str:
-    """Render a CycloneDX `licenses[]` array to a single SPDX expression.
-
-    CycloneDX 1.5/1.6 each license entry is one of:
-      {"license": {"id": "MIT"}}
-      {"license": {"name": "Some Custom License"}}
-      {"expression": "MIT OR Apache-2.0"}
-
-    Multiple entries are joined with " AND ".
-    """
-    if not licenses_field:
-        return UNKNOWN
-
-    parts: list[str] = []
-    for entry in licenses_field:
-        if "expression" in entry:
-            parts.append(entry["expression"])
-        elif "license" in entry:
-            inner = entry["license"]
-            if "id" in inner:
-                parts.append(inner["id"])
-            elif "name" in inner:
-                # Custom license name; surface as LicenseRef-* so policy
-                # validation treats it as a deliberate non-SPDX entry.
-                parts.append(f"LicenseRef-{inner['name'].replace(' ', '-')}")
-            else:
-                continue
-        else:
-            continue
-
-    if not parts:
-        return UNKNOWN
-    if len(parts) == 1:
-        return parts[0]
-    return " AND ".join(f"({p})" if " " in p else p for p in parts)
 
 
 def _component_from_sbom_entry(
@@ -85,7 +49,7 @@ def _component_from_sbom_entry(
         logger.debug("Skipping component with missing name/version: %r", entry)
         return None
 
-    spdx = _normalize_license(entry.get("licenses"))
+    spdx = normalize_cyclonedx_licenses(entry.get("licenses"))
     if spdx == UNKNOWN:
         # Fall back to license_overrides.yaml when the SBOM didn't carry
         # a license field (sgl-model-gateway and other sglang-internal
