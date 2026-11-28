@@ -229,6 +229,7 @@ pub(crate) fn request_metrics(
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
         replay: None,
+        routing_hashes: None,
         finish_reason_metadata: None,
     }
 }
@@ -250,19 +251,13 @@ pub(crate) fn build_agent_context_trace_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
+    request_model: String,
+    x_request_id: Option<String>,
 ) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
-    let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-        .and_then(|c| c.x_request_id)
-        .or_else(|| {
-            context
-                .get::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
-                .ok()
-                .map(|v| v.as_ref().clone())
-        });
     Some(AgentContextTraceState {
         agent_context,
-        request_model: common_request.model.clone(),
+        request_model,
         request_tracker: tracker.clone(),
         x_request_id,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
