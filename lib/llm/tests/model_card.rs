@@ -251,6 +251,7 @@ fn dual_cards_keep_hf_fallback_changes_in_admission_and_cache_identity() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn dual_tokenizer_metadata_urls_download_and_relocate_both_artifacts() {
     let dir = mistral_model::model_dir(true, "v15", &["low", "high"]);
     let mut card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
@@ -272,6 +273,114 @@ async fn dual_tokenizer_metadata_urls_download_and_relocate_both_artifacts() {
         .collect();
     assert!(filenames.iter().any(|name| name == "tekken.json"));
     assert!(filenames.iter().any(|name| name == "tokenizer.json"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn download_config_uses_matching_hf_snapshot_without_moving_main() -> anyhow::Result<()> {
+    use std::fs;
+
+    const REPO: &str = "test-org/two-revisions";
+    let temp = tempdir()?;
+    let cache = temp.path().join("hub");
+    let repo = cache.join("models--test-org--two-revisions");
+    let full_revision = "a".repeat(40);
+    let full = repo.join("snapshots").join(&full_revision);
+    let metadata = repo.join("snapshots").join("b".repeat(40));
+    let main_ref = repo.join("refs/main");
+    fs::create_dir_all(main_ref.parent().unwrap())?;
+    fs::write(&main_ref, &full_revision)?;
+
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(format!("{HF_PATH}/config.json"))?)?;
+    let tokenizer = fs::read(format!("{HF_PATH}/tokenizer.json"))?;
+    for (snapshot, eos) in [(&full, 2), (&metadata, 3)] {
+        fs::create_dir_all(snapshot)?;
+        let mut config = config.clone();
+        config["eos_token_id"] = eos.into();
+        fs::write(snapshot.join("config.json"), serde_json::to_vec(&config)?)?;
+        let mut tokenizer = tokenizer.clone();
+        tokenizer.extend(std::iter::repeat_n(b'\n', eos));
+        fs::write(snapshot.join("tokenizer.json"), tokenizer)?;
+        fs::write(
+            snapshot.join("preprocessor_config.json"),
+            serde_json::json!({"eos_token_id":eos}).to_string(),
+        )?;
+    }
+    fs::write(full.join("pytorch_model.bin"), b"weights")?;
+    fs::write(full.join("special_tokens_map.json"), b"{}")?;
+
+    let mut worker = ModelDeploymentCard::load_from_disk(&metadata, None)?;
+    worker.move_to_url(&format!("hf://{REPO}/"))?;
+    let card: ModelDeploymentCard = serde_json::from_value(serde_json::to_value(worker)?)?;
+
+    for no_shared_storage in [false, true] {
+        let home = tempdir()?;
+        temp_env::async_with_vars(
+            [
+                ("HOME", home.path().to_str()),
+                ("HF_HUB_CACHE", cache.to_str()),
+                ("HF_HUB_OFFLINE", Some("1")),
+                (
+                    "MODEL_EXPRESS_NO_SHARED_STORAGE",
+                    no_shared_storage.then_some("1"),
+                ),
+                ("MODEL_EXPRESS_URL", Some("http://127.0.0.1:0")),
+            ],
+            async {
+                let mut frontend = card.clone();
+                frontend.download_config(None).await?;
+                let local = frontend.local_dir();
+                assert_eq!(
+                    frontend.resolved_model_info()?.unwrap().eos_token_ids(),
+                    vec![3]
+                );
+                for name in ["tokenizer.json", "preprocessor_config.json"] {
+                    assert_eq!(fs::read(local.join(name))?, fs::read(metadata.join(name))?);
+                }
+                assert!(!local.join("special_tokens_map.json").exists());
+                assert_eq!(fs::read_to_string(&main_ref)?, full_revision);
+                for ignore_weights in [true, false] {
+                    assert_eq!(dynamo_llm::hub::from_hf(REPO, ignore_weights).await?, full);
+                }
+
+                if no_shared_storage {
+                    let blobs = home.path().join(".cache/dynamo/mdc/blobs");
+                    let blob_for = |name: &str| {
+                        let files = card.iter_metadata_files();
+                        let (file, _) = files
+                            .iter()
+                            .find(|(file, _)| file.basename() == Some(name))
+                            .unwrap();
+                        blobs.join(file.checksum().hash())
+                    };
+                    let config_blob = blob_for("config.json");
+                    let tokenizer_blob = blob_for("tokenizer.json");
+                    let config = fs::read(&config_blob)?;
+                    let tokenizer = fs::read(&tokenizer_blob)?;
+                    // Rebuild the resolved directory using only verified blobs.
+                    fs::remove_dir_all(&local)?;
+                    fs::remove_dir_all(&metadata)?;
+                    card.clone().download_config(None).await?;
+                    assert_eq!(fs::read(local.join("config.json"))?, config);
+                    assert_eq!(fs::read(local.join("tokenizer.json"))?, tokenizer);
+                    assert!(!local.join("preprocessor_config.json").exists());
+                    assert!(!local.join("special_tokens_map.json").exists());
+
+                    let wrong_config = fs::read(full.join("config.json"))?;
+                    assert_eq!(wrong_config.len(), config.len());
+                    fs::write(&config_blob, wrong_config)?;
+                    assert!(card.clone().download_config(None).await.is_err());
+                    fs::write(&config_blob, config)?;
+                    fs::remove_file(tokenizer_blob)?;
+                    assert!(card.clone().download_config(None).await.is_err());
+                }
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[test]
