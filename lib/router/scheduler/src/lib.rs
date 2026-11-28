@@ -9,6 +9,8 @@
 //! below.
 
 mod config;
+#[cfg(test)]
+mod domain_owner;
 mod filter;
 mod hint_policy;
 pub mod host;
