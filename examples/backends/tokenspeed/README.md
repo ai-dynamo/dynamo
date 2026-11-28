@@ -215,18 +215,13 @@ worker IDs, overlap scores, timings, and a `passed` result.
 - Prefill generates one token for the native handoff. Decode retains the client's
   generation budget.
 - `--kv-events-config '{"enable_kv_cache_events":true}'` enables native cache
-  mutation events. Prefix caching must remain enabled. KV events require attention
-  DP=1. With attention DP > 1, turn them off on the workers and the router.
-  `launch_disagg.sh` enables them by default, so set `KV_EVENTS_CONFIG` for the
-  workers and pass `--no-router-kv-events` to the frontend:
-
-  ```bash
-  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
-    bash examples/backends/tokenspeed/launch_disagg.sh prefill --data-parallel-size 4
-  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
-    bash examples/backends/tokenspeed/launch_disagg.sh decode --data-parallel-size 4
-  bash examples/backends/tokenspeed/launch_disagg.sh frontend --no-router-kv-events
-  ```
+  mutation events. Prefix caching must remain enabled. With attention DP > 1 on
+  one node, each rank publishes on the endpoint's port plus its rank, so give a
+  `tcp://*:PORT` endpoint (or none; the worker then picks free ports). Attention
+  DP > 1 across nodes does not support KV events yet: set
+  `KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}'` for the workers
+  (`launch_disagg.sh` enables events by default) and pass
+  `--no-router-kv-events` to the frontend.
 
   A non-KV router mode also works.
 - With attention DP > 1, the worker registers its DP size, and a KV-mode router

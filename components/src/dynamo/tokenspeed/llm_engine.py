@@ -58,7 +58,7 @@ from dynamo.tokenspeed.disagg import (
     runtime_disaggregated_endpoint,
 )
 from dynamo.tokenspeed.kv_events import (
-    kv_event_source,
+    kv_event_sources,
     kv_events_config_dict,
     kv_events_enabled,
 )
@@ -103,7 +103,7 @@ class TokenspeedLLMEngine(LLMEngine):
         # Attention-DP ranks, one engine each.
         self._dp_size = attention_dp_size(server_args)
         self._bootstrap_endpoint: tuple[str, int] | None = None
-        self._kv_source: ZmqSource | None = None
+        self._kv_sources: list[ZmqSource] = []
         self._kv_event_dir: tempfile.TemporaryDirectory | None = None
         self._model_max_len: int | None = None
         # The connected tokenspeed_engine.Frontend.
@@ -254,17 +254,20 @@ class TokenspeedLLMEngine(LLMEngine):
         )
         if not kv_events_enabled(config):
             return []
-        if not config.get("endpoint"):
+        if not config.get("endpoint") and self._dp_size > 1:
+            # Rank r binds the port plus r, and an IPC path takes no offset.
+            config["endpoint"] = f"tcp://*:{_free_port_run(self._dp_size)}"
+        elif not config.get("endpoint"):
             self._kv_event_dir = tempfile.TemporaryDirectory(
                 prefix="dynamo-tokenspeed-"
             )
             config["endpoint"] = f"ipc://{self._kv_event_dir.name}/kv-events"
-        self._kv_source = kv_event_source(config)
+        self._kv_sources = kv_event_sources(config, self._dp_size)
         self.server_args.kv_events_config = json.dumps(config)
         return ["--kv-events-config", self.server_args.kv_events_config]
 
     async def kv_event_sources(self) -> list[KvEventSource]:
-        return [self._kv_source] if self._kv_source is not None else []
+        return list(self._kv_sources)
 
     async def is_quiescent(self) -> bool | None:
         """A prefill engine finishes a request only once its KV reached the
@@ -560,7 +563,7 @@ class TokenspeedLLMEngine(LLMEngine):
         finally:
             self.frontend = None
             self._bootstrap_endpoint = None
-            self._kv_source = None
+            self._kv_sources = []
             if self._kv_event_dir is not None:
                 self._kv_event_dir.cleanup()
                 self._kv_event_dir = None
@@ -870,6 +873,30 @@ def _tcp_address(host: str, port: int) -> str:
     except ValueError:
         pass  # A hostname.
     return f"tcp://{host}:{port}"
+
+
+def _free_port_run(count: int) -> int:
+    """A port that, with the ``count - 1`` after it, is free on every interface.
+    shortcut: another process may take a port before the engine binds it; the
+    engine then fails at start-up, so retry or pass an explicit endpoint."""
+    for _ in range(64):
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            base = probe.getsockname()[1]
+        if base + count > 65536:
+            continue
+        held = []
+        try:
+            for port in range(base + 1, base + count):
+                held.append(socket.socket())
+                held[-1].bind(("", port))
+            return base
+        except OSError:
+            continue
+        finally:
+            for sock in held:
+                sock.close()
+    raise RuntimeError(f"No run of {count} free ports for TokenSpeed KV events")
 
 
 def _start_launcher(argv: list[str]) -> subprocess.Popen:
