@@ -40,6 +40,10 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
+// Retry of registration writes that etcd rejects with `too many requests`.
+const THROTTLED_WRITE_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const THROTTLED_WRITE_MAX_BACKOFF: Duration = Duration::from_secs(2);
+const THROTTLED_WRITE_RETRY_BUDGET: Duration = Duration::from_secs(30);
 const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_LEASE_TTL_SECS: u64 = 30;
@@ -269,8 +273,14 @@ impl Client {
                 TxnOp::get(key, None), // Key exists, get its info
             ]);
 
-        // Execute the transaction
-        let result = self.connector.get_client().kv_client().txn(txn).await?;
+        // Running the create again is safe: a rejected attempt was not applied, and an applied
+        // one makes the retry return the existing version.
+        let result = Self::retry_throttled(&self.runtime.primary_token(), "create", || {
+            let mut kv_client = self.connector.get_client().kv_client();
+            let txn = txn.clone();
+            async move { kv_client.txn(txn).await }
+        })
+        .await?;
 
         // Created
         if result.succeeded() {
@@ -464,13 +474,16 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<DeleteOptions>,
     ) -> Result<u64> {
-        self.connector
-            .get_client()
-            .kv_client()
-            .delete(key, options)
-            .await
-            .map(|del_response| del_response.deleted() as u64)
-            .map_err(|err| err.into())
+        let key = key.into();
+        // Registration cleanup and conflict rollback delete during the same write storm that
+        // throttles creates; a delete is safe to repeat.
+        Self::retry_throttled(&self.runtime.primary_token(), "delete", || {
+            let mut kv_client = self.connector.get_client().kv_client();
+            let (key, options) = (key.clone(), options.clone());
+            async move { kv_client.delete(key, options).await }
+        })
+        .await
+        .map(|del_response| del_response.deleted() as u64)
     }
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
@@ -602,7 +615,7 @@ impl Client {
 
                         tokio::select! {
                             _ = cancel_token.cancelled() => return,
-                            _ = tokio::time::sleep(Self::watch_retry_backoff(retry_backoff)) => {}
+                            _ = tokio::time::sleep(Self::retry_backoff(retry_backoff)) => {}
                         }
                         retry_backoff =
                             retry_backoff.saturating_mul(2).min(WATCH_RETRY_MAX_BACKOFF);
@@ -635,7 +648,7 @@ impl Client {
                                 biased;
                                 _ = cancel_token.cancelled() => return,
                                 _ = tx.closed() => return,
-                                _ = tokio::time::sleep(Self::watch_retry_backoff(stream_backoff)) => {}
+                                _ = tokio::time::sleep(Self::retry_backoff(stream_backoff)) => {}
                             }
                             stream_backoff =
                                 stream_backoff.saturating_mul(2).min(WATCH_RETRY_MAX_BACKOFF);
@@ -762,7 +775,77 @@ impl Client {
         })
     }
 
-    fn watch_retry_backoff(current: Duration) -> Duration {
+    /// etcd rejects a request with `too many requests` while its apply backlog is over its
+    /// limit; waiting clears it. `database space exceeded` has the same code but does not clear.
+    fn is_too_many_requests(err: &etcd_client::Error) -> bool {
+        matches!(
+            err,
+            etcd_client::Error::GRpcStatus(status)
+                if status.code() == tonic::Code::ResourceExhausted
+                    && status.message().contains("too many requests")
+        )
+    }
+
+    /// Runs `operation` again, with jittered exponential backoff, while etcd rejects it with
+    /// `too many requests`, for up to [`THROTTLED_WRITE_RETRY_BUDGET`] or until `token` is
+    /// cancelled. Every other error is returned at once.
+    async fn retry_throttled<T, F, Fut>(
+        token: &CancellationToken,
+        operation_name: &str,
+        mut operation: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, etcd_client::Error>>,
+    {
+        let started = Instant::now();
+        let mut backoff = THROTTLED_WRITE_INITIAL_BACKOFF;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let err = match operation().await {
+                Ok(value) => return Ok(value),
+                Err(err) if Self::is_too_many_requests(&err) => err,
+                Err(err) => return Err(err.into()),
+            };
+
+            let elapsed = started.elapsed();
+            let delay = Self::retry_backoff(backoff);
+            if elapsed + delay > THROTTLED_WRITE_RETRY_BUDGET {
+                anyhow::bail!(
+                    "etcd {operation_name} still throttled after {attempts} attempts in {elapsed:?}: {err}"
+                );
+            }
+            if attempts == 1 {
+                tracing::warn!(
+                    error = %err,
+                    operation = operation_name,
+                    retry_in = ?delay,
+                    "etcd is throttling requests; retrying"
+                );
+            } else {
+                tracing::debug!(
+                    error = %err,
+                    operation = operation_name,
+                    attempts,
+                    retry_in = ?delay,
+                    "etcd is still throttling requests; retrying"
+                );
+            }
+
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    anyhow::bail!("etcd {operation_name} cancelled while etcd was throttling requests");
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+            backoff = backoff.saturating_mul(2).min(THROTTLED_WRITE_MAX_BACKOFF);
+        }
+    }
+
+    /// A random backoff in `[current / 2, current]`.
+    fn retry_backoff(current: Duration) -> Duration {
         let max_ms = u64::try_from(current.as_millis()).unwrap_or(u64::MAX);
         let min_ms = (max_ms / 2).max(1);
         let jitter_range = max_ms.saturating_sub(min_ms).saturating_add(1);
@@ -1425,6 +1508,89 @@ mod unit_tests {
 
         let err = anyhow::anyhow!("missing header during watch resync");
         assert!(!Client::is_etcd_connection_error(&err));
+    }
+
+    const TOO_MANY_REQUESTS: &str = "etcdserver: too many requests";
+
+    fn grpc_error(code: tonic::Code, message: &str) -> etcd_client::Error {
+        etcd_client::Error::GRpcStatus(tonic::Status::new(code, message))
+    }
+
+    /// Runs `retry_throttled` with an operation that fails with `errors` in turn, then
+    /// succeeds. Returns the result and the number of calls.
+    async fn retry_with(
+        token: &CancellationToken,
+        errors: impl IntoIterator<Item = etcd_client::Error>,
+    ) -> (Result<()>, usize) {
+        let mut errors = errors.into_iter();
+        let mut calls = 0;
+        let result = Client::retry_throttled(token, "create", || {
+            calls += 1;
+            let next = errors.next();
+            async move { next.map_or(Ok(()), Err) }
+        })
+        .await;
+        (result, calls)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_too_many_requests_until_success() {
+        let throttled = || grpc_error(tonic::Code::ResourceExhausted, TOO_MANY_REQUESTS);
+        let (result, calls) =
+            retry_with(&CancellationToken::new(), [throttled(), throttled()]).await;
+        result.unwrap();
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn returns_other_errors_without_retry() {
+        for error in [
+            grpc_error(
+                tonic::Code::ResourceExhausted,
+                "etcdserver: mvcc: database space exceeded",
+            ),
+            grpc_error(tonic::Code::Unavailable, TOO_MANY_REQUESTS),
+        ] {
+            let (result, calls) = retry_with(&CancellationToken::new(), [error]).await;
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stops_retrying_when_the_budget_runs_out() {
+        let started = Instant::now();
+        let (result, calls) = retry_with(
+            &CancellationToken::new(),
+            std::iter::repeat_with(|| {
+                grpc_error(tonic::Code::ResourceExhausted, TOO_MANY_REQUESTS)
+            }),
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("still throttled") && error.contains("too many requests"),
+            "unexpected error: {error}"
+        );
+        assert!(calls > 2 && calls < 64, "unexpected attempt count {calls}");
+        assert!(started.elapsed() <= THROTTLED_WRITE_RETRY_BUDGET);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stops_retrying_when_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let (result, calls) = retry_with(
+            &token,
+            std::iter::repeat_with(|| {
+                grpc_error(tonic::Code::ResourceExhausted, TOO_MANY_REQUESTS)
+            }),
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(calls, 1);
     }
 }
 
