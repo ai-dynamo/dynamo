@@ -106,6 +106,8 @@ spec:
           command:
           - /bin/bash
           - -lc
+          # Prefill uses the same MTP method as decode: since vLLM 0.28 the NIXL
+          # handshake rejects a pair where only one side runs an MTP/EAGLE speculator.
           args:
           - |
             set -Eeuo pipefail
@@ -130,6 +132,10 @@ spec:
               --tokenizer-mode deepseek_v4 \
               --dyn-tool-call-parser deepseek_v4 \
               --dyn-reasoning-parser deepseek_v4 \
+              --speculative-config '{
+                  "method": "mtp",
+                  "num_speculative_tokens": 2
+                }' \
               --no-async-scheduling \
               --enable-prefix-caching \
               --kv-transfer-config '{

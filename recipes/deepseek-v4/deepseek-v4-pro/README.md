@@ -18,13 +18,13 @@ Shared operational details — [workloads](../README.md#optimization-targets), [
 
 ### Agentic (vLLM)
 
-Prefill/decode parallelism + spec-decode differ in disaggregated variants (`prefill / decode`).
+Prefill/decode parallelism + spec-decode differ in disaggregated variants (`prefill / decode`). Disaggregated prefill and decode must use the same MTP/EAGLE speculative method; vLLM's NIXL handshake rejects a pair where only one side has it.
 
 | Variant | GPUs | Prefill / Decode | MoE backend | Spec. decode | `max_model_len` | Disagg fabric |
 |---|---|---|---|---|---|---|
 | [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 8× B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 | 1,048,576 | — |
 | [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) ‡ | 8× H200 | TP8 + EP | MARLIN | none | 86,016 | — |
-| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 16× B200 (1P·1D) | TP8+EP / TP8+EP | FLASHINFER_TRTLLM | none / MTP-2 | 1,048,576 | NIXL GDR ¹ |
+| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 16× B200 (1P·1D) | TP8+EP / TP8+EP | FLASHINFER_TRTLLM | MTP-2 / MTP-2 | 1,048,576 | NIXL GDR ¹ |
 | [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) ‡ | 32× H200 (1P·3D) | TP8+EP / TP8+EP | MARLIN | none | 86,016 | NIXL GDR ¹ |
 
 B200 = `nvidia/DeepSeek-V4-Pro-NVFP4` (1M ctx); H200 = `deepseek-ai/DeepSeek-V4-Pro` (public FP8, 86k cap). Common: FP8 KV, block 256, KV-aware routing, prefix caching. Modality: text; reasoning + tool calling supported.
@@ -56,7 +56,7 @@ All Day-0 variants use prebuilt NGC images ³. The GB200 disagg variant ships a 
 
 ## Performance
 
-Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature, **Agentic (MoonTrace) workload** — Pro was not benchmarked on the Custom/synthetic cell. Workload definition: [Optimization targets](../README.md#optimization-targets).
+Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature, **Agentic (MoonTrace) workload** — Pro was not benchmarked on the Custom/synthetic cell. Workload definition: [Optimization targets](../README.md#optimization-targets). The `disagg-b200-agentic` numbers were measured with MTP-2 on decode only, before prefill also ran MTP-2, and have not been re-measured.
 
 > **Disaggregated floor-picks require the per-rank NIC mapping (GDR).** These disagg numbers were measured with GDR (per-rank affine NIC); to reproduce them, set **both** NIC env vars per [Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated). Without them, KV transfer falls back to host-staging and won't reach these figures (see §Per-rank NIC mapping).
 
