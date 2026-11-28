@@ -108,7 +108,6 @@ impl CompletionEcho {
     /// positions before the generated ones. Generated `text_offset`s move past the
     /// echoed text.
     pub fn prepend_to(self, choice: &mut dynamo_protocols::types::Choice) {
-        let echoed_len = self.text.len() as u32;
         choice.text.insert_str(0, &self.text);
         let Some(mut logprobs) = self.logprobs else {
             return;
@@ -117,12 +116,7 @@ impl CompletionEcho {
             logprobs.tokens.extend(generated.tokens);
             logprobs.token_logprobs.extend(generated.token_logprobs);
             logprobs.top_logprobs.extend(generated.top_logprobs);
-            logprobs.text_offset.extend(
-                generated
-                    .text_offset
-                    .into_iter()
-                    .map(|offset| offset + echoed_len),
-            );
+            logprobs.text_offset.extend(generated.text_offset);
         }
         choice.logprobs = Some(logprobs);
     }
