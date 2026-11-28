@@ -430,11 +430,6 @@ def _validate_mla_dcp_decode_backend(
     )
 
 
-def _has_cli_flag(args: list[str], flag: str) -> bool:
-    """Return True when a CLI flag is present in '--flag val' or '--flag=val' form."""
-    return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
-
-
 def _get_last_cli_flag_value(args: list[str], flag: str) -> Optional[str]:
     """Return the last CLI flag value from '--flag val' or '--flag=val' form."""
     prefix = f"{flag}="
