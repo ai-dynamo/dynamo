@@ -78,6 +78,8 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
   </Tab>
 </Tabs>
 
+Dynamo also reads `x-session-affinity` as `session_id` when neither `X-Dynamo-Session-ID` nor an agent-native root session header has a nonblank value.
+
 <Warning>
 Session identity is passive metadata. Sending a session ID does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE=1` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately. To keep a session on one worker, see [Maintain session affinity](session-affinity.md).
 </Warning>
