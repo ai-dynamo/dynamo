@@ -198,13 +198,14 @@ this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 
 **Change:** A worker restored from a snapshot uses the `DYN_RESPONSE_PLANE` of the restore Pod,
 or the runtime default when that Pod does not set it. The snapshot compatibility hash therefore
-no longer includes `DYN_RESPONSE_PLANE`.
+leaves `DYN_RESPONSE_PLANE` out of each container's environment. With ordered environment
+variables, a container keeps it in the hash when that container's command, arguments, or another
+hashed variable refers to it.
 
 **Affected:** Checkpointed worker, prefill, and decode components whose checkpoint target container
-or init containers set `DYN_RESPONSE_PLANE`. Their hash changes unless the variable is still part
-of it: with ordered environment variables, the hash keeps `DYN_RESPONSE_PLANE` when the
-container's command, arguments, or another hashed environment value refers to it. Components that
-do not set it keep the same hash.
+or init containers set `DYN_RESPONSE_PLANE`. The hash changes if any of those containers drops the
+variable from the hash, even when another container keeps it. Components that do not set it keep
+the same hash.
 
 **Action:** For a service that restores an existing PodSnapshot through `checkpointRef`, check the
 restore after the upgrade. If it fails the hash check, capture a new PodSnapshot with the upgraded
