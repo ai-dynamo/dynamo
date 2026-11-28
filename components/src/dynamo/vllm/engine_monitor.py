@@ -30,6 +30,8 @@ class VllmEngineMonitor:
         engine_client: AsyncLLM,
         shutdown_event: asyncio.Event | None = None,
     ):
+        self._monitor_task: asyncio.Task | None = None
+        self._stats_task: asyncio.Task | None = None
         if not isinstance(runtime, DistributedRuntime):
             raise ValueError(
                 f"{self.__class__.__name__} requires an instance of DistributedRuntime."
@@ -50,9 +52,18 @@ class VllmEngineMonitor:
             f"{self.__class__.__name__} initialized and health check task started."
         )
 
+    def stop(self) -> None:
+        """Cancel background monitoring without shutting down the engine.
+
+        Safe to call repeatedly, including after partial initialization. Tasks
+        finish when the event loop next handles cancellation.
+        """
+        for task in (self._monitor_task, self._stats_task):
+            if task is not None and not task.done():
+                task.cancel()
+
     def __del__(self):
-        self._monitor_task.cancel()
-        self._stats_task.cancel()
+        self.stop()
 
     def _shutdown_engine(self):
         """
