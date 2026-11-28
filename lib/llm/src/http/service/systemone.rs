@@ -27,7 +27,7 @@ use super::{
     service_v2,
 };
 use crate::{
-    discovery::{SystemOneExecutionSelection, SystemOneSelectionError},
+    discovery::{SystemOneEngine, SystemOneExecutionSelection, SystemOneSelectionError},
     generate_format::{Bound, ClientRequest, GenerateExchange, Worker},
     protocols::{
         Annotated,
@@ -51,6 +51,8 @@ use dynamo_http_server::{
 mod abort;
 #[path = "systemone/backend_error.rs"]
 mod backend_error;
+#[path = "systemone/pooling.rs"]
+mod pooling;
 #[path = "systemone/response.rs"]
 mod response;
 pub(super) use response::attach_request_ids;
@@ -84,6 +86,28 @@ struct PreparedBranch {
     prompt_ids: Vec<u32>,
     label_ids: Vec<u32>,
     native: Option<serde_json::Value>,
+}
+
+enum PreparedExecution {
+    Causal(Vec<PreparedBranch>),
+    Pooling(Vec<pooling::PreparedPoolingBatch>),
+}
+
+impl PreparedExecution {
+    fn work_summary(&self) -> (usize, usize, usize) {
+        match self {
+            Self::Causal(branches) => (
+                branches.len(),
+                branches.iter().map(|b| b.prompt_ids.len()).sum(),
+                branches.iter().map(|b| b.label_ids.len()).sum(),
+            ),
+            Self::Pooling(batches) => (
+                batches.len(),
+                batches.iter().map(|b| b.token_ids.len()).sum(),
+                batches.iter().map(|b| b.markers.len()).sum(),
+            ),
+        }
+    }
 }
 
 struct StartedBranch {
@@ -306,15 +330,24 @@ async fn handle_request(
     let selection_for_preflight = selection.clone();
     let request = Arc::new(request);
     let preflight_request = request.clone();
-    let (branches, admission_permit) = match tokio::time::timeout_at(
+    let (prepared, admission_permit) = match tokio::time::timeout_at(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
-                &preflight_request,
-                &selection_for_preflight,
-                max_input_tokens,
-            )
+            match selection_for_preflight.backend {
+                ScoringBackend::VllmPooling => pooling::prepare_batches(
+                    &preflight_request,
+                    &selection_for_preflight,
+                    max_input_tokens,
+                )
+                .map(PreparedExecution::Pooling),
+                ScoringBackend::Sglang | ScoringBackend::Vllm => prepare_branches(
+                    &preflight_request,
+                    &selection_for_preflight,
+                    max_input_tokens,
+                )
+                .map(PreparedExecution::Causal),
+            }
         }),
     )
     .await
@@ -345,12 +378,8 @@ async fn handle_request(
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
-    );
+    let (work_batches, work_prompt_tokens, work_labels) = prepared.work_summary();
+    metrics.observe_systemone_work(metric_model, work_batches, work_prompt_tokens, work_labels);
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
@@ -368,15 +397,26 @@ async fn handle_request(
         cancellation_labels,
     )
     .await;
-    let task = tokio::spawn(dispatch(
-        selection,
-        branches,
-        request_id.clone(),
-        parent_context.clone(),
-        admission_permit,
-        metrics,
-        request,
-    ));
+    let task = match prepared {
+        PreparedExecution::Causal(branches) => tokio::spawn(dispatch(
+            selection,
+            branches,
+            request_id.clone(),
+            parent_context.clone(),
+            admission_permit,
+            metrics,
+            request,
+        )),
+        PreparedExecution::Pooling(batches) => tokio::spawn(pooling::dispatch(
+            selection,
+            batches,
+            request_id.clone(),
+            parent_context.clone(),
+            admission_permit,
+            metrics,
+            request,
+        )),
+    };
     let response = response::dispatch_with_deadline(task, deadline, parent_context, dialect).await;
     connection_handle.disarm();
     response
@@ -485,6 +525,9 @@ fn prepare_branches(
                 build_native_score_request(&prompt_ids, &label_ids, "validation")
             }
             ScoringBackend::Vllm => causal_scoring_request(&prompt_ids, &label_ids, "validation"),
+            ScoringBackend::VllmPooling => {
+                unreachable!("pooling decisions use prepare_pooling_batches")
+            }
         }
         .map_err(|cause| {
             tracing::error!(error = %cause, "failed to build System One native request");
@@ -603,12 +646,27 @@ async fn dispatch(
             .map(|(total, next)| total + next as u64);
         outcomes.push(result.answer);
     }
-    let mut response =
-        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
-            Ok(body) => Json(body).into_response(),
-            Err(cause) => decision_error(cause),
-        };
-    attach_request_ids(&mut response, &request_id);
+    finish_decision_response(
+        &request,
+        &selection.canonical_model,
+        &outcomes,
+        &usage,
+        &request_id,
+    )
+}
+
+fn finish_decision_response(
+    request: &CanonicalRequest,
+    model: &str,
+    outcomes: &[QuestionOutcome],
+    usage: &Usage,
+    request_id: &str,
+) -> Response {
+    let mut response = match project_response(request, model, outcomes, usage) {
+        Ok(body) => Json(body).into_response(),
+        Err(cause) => decision_error(cause),
+    };
+    attach_request_ids(&mut response, request_id);
     response.headers_mut().insert(
         HeaderName::from_static("x-dynamo-systemone-version"),
         HeaderValue::from_static("1"),
@@ -690,7 +748,15 @@ async fn run_branch(
         branch_context.kill();
         return Err(DispatchError::cancelled());
     }
-    let stream = run_until_killed(parent_context.as_ref(), selection.engine.generate(context))
+    let generate_engine = match &selection.engine {
+        SystemOneEngine::Generate(engine) => engine,
+        SystemOneEngine::Pooling(_) => {
+            return Err(DispatchError::malformed(
+                "pooling engine cannot execute causal scoring branch",
+            ));
+        }
+    };
+    let stream = run_until_killed(parent_context.as_ref(), generate_engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
         .map_err(|cause| backend_error::classify(cause.as_ref()))?;
@@ -813,6 +879,9 @@ async fn finish_branch(
                 parent_context.clone(),
             )
             .await
+        }
+        ScoringBackend::VllmPooling => {
+            unreachable!("pooling decisions use dispatch_pooling")
         }
     };
     if parent_context.is_killed() {

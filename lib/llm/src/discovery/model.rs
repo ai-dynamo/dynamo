@@ -93,14 +93,32 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) tower_connector_lora_enabled: bool,
 }
 
+/// Underlying inference engine selected for one decision execution.
+#[derive(Clone)]
+pub(crate) enum SystemOneEngine {
+    Generate(GenerateStreamingEngine),
+    Pooling(OpenAIPoolingStreamingEngine),
+}
+
+impl SystemOneEngine {
+    #[cfg(test)]
+    pub(crate) fn as_generate(&self) -> Option<&GenerateStreamingEngine> {
+        match self {
+            Self::Generate(engine) => Some(engine),
+            Self::Pooling(_) => None,
+        }
+    }
+}
+
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
     pub(crate) backend: crate::protocols::systemone::ScoringBackend,
     pub(crate) canonical_model: String,
-    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) engine: SystemOneEngine,
     pub(crate) card: ModelDeploymentCard,
     pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
+    pub(crate) pooling_config: Option<crate::protocols::systemone::PoolingDecisionConfig>,
     pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
     pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
 }
@@ -132,11 +150,15 @@ impl SystemOneExecutionSelection {
     }
 
     pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
-        // Both qualified profiles provide vocabulary logprobs and measured cache reads.
-        // Tokenizer-specific candidate limits are checked during preflight.
+        let max_candidates = self
+            .pooling_config
+            .as_ref()
+            .map_or_else(|| self.backend.max_candidates(), |cfg| cfg.num_classes());
+        // Qualified causal profiles provide measured cache reads; noncausal pooling
+        // classifiers perform no KV-cache reads (verified zero).
         dynamo_decisions::Capabilities {
             max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: self.backend.max_candidates(),
+            max_candidates,
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,
@@ -829,8 +851,8 @@ impl Model {
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         self.select_worker_set_with_worker_count(
             |ws| {
-                let backend = ws.card().systemone_backend()?;
-                if required_candidates > backend.max_candidates() {
+                let max_candidates = ws.card().systemone_max_candidates()?;
+                if required_candidates > max_candidates {
                     return None;
                 }
                 self.systemone_execution_inputs(ws)
@@ -840,8 +862,8 @@ impl Model {
         .or_else(|| {
             let has_capable_profile = self.worker_sets.load().values().any(|ws| {
                 ws.card()
-                    .systemone_backend()
-                    .is_some_and(|backend| required_candidates <= backend.max_candidates())
+                    .systemone_max_candidates()
+                    .is_some_and(|max| required_candidates <= max)
             });
             if has_capable_profile {
                 return None;
@@ -872,12 +894,24 @@ impl Model {
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
         let backend = card.systemone_backend()?;
+        let (engine, pooling_config) = match backend {
+            crate::protocols::systemone::ScoringBackend::VllmPooling => (
+                SystemOneEngine::Pooling(worker_set.pooling_engine.clone()?),
+                Some(card.pooling_decision_config()?),
+            ),
+            crate::protocols::systemone::ScoringBackend::Sglang
+            | crate::protocols::systemone::ScoringBackend::Vllm => (
+                SystemOneEngine::Generate(worker_set.generate_engine.clone()?),
+                None,
+            ),
+        };
         Some(SystemOneExecutionSelection {
             backend,
             canonical_model: self.name.clone(),
-            engine: worker_set.generate_engine.clone()?,
+            engine,
             card: card.clone(),
             preprocessor: worker_set.systemone_preprocessor.clone()?,
+            pooling_config,
             admitted_ids: worker_set.decision_admissions().cloned(),
             lifecycle_cancellation: worker_set.lifecycle_cancellation(),
         })
@@ -1666,7 +1700,7 @@ mod tests {
         model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
         let selection_a = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
-            &selection_a.engine,
+            selection_a.engine.as_generate().unwrap(),
             worker_set_a.generate_engine.as_ref().unwrap()
         ));
         assert!(Arc::ptr_eq(
@@ -1680,7 +1714,7 @@ mod tests {
         workers_b.send(vec![2]).unwrap();
         let selection_b = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
-            &selection_b.engine,
+            selection_b.engine.as_generate().unwrap(),
             worker_set_b.generate_engine.as_ref().unwrap()
         ));
         assert!(Arc::ptr_eq(
@@ -1877,7 +1911,7 @@ mod tests {
         model.add_worker_set("ns-b".to_string(), available.clone());
         let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
-            &selection.engine,
+            selection.engine.as_generate().unwrap(),
             available.generate_engine.as_ref().unwrap()
         ));
         admitted_tx.send(vec![1, 2]).unwrap();
@@ -1894,7 +1928,7 @@ mod tests {
         assert_eq!(workers.decision_worker_count(), 0);
         let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
-            &selection.engine,
+            selection.engine.as_generate().unwrap(),
             available.generate_engine.as_ref().unwrap()
         ));
         runtime.shutdown();

@@ -6,7 +6,7 @@ mod model;
 pub(crate) mod readiness;
 pub use model::Model;
 pub(crate) use model::{
-    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+    GenerateEngineSelection, SystemOneEngine, SystemOneExecutionSelection, SystemOneSelectionError,
 };
 
 pub mod kv_source_membership;

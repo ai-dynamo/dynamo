@@ -1249,6 +1249,12 @@ pub struct ModelDeploymentCard {
     /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
     #[serde(skip, default)]
     tokenizer_id_bound: OnceLock<Option<usize>>,
+
+    /// Special-token strings captured when this card loads its tokenizer.
+    /// Shared via `Arc` so clones created before `tokenizer()` runs (e.g. inside
+    /// `WorkerSet::new`) observe the populated list once loaded.
+    #[serde(skip, default)]
+    special_tokens: Arc<OnceLock<Vec<String>>>,
 }
 
 pub use crate::lora::LoraInfo;
@@ -1365,6 +1371,25 @@ impl ModelDeploymentCard {
         self.systemone_backend().is_some()
     }
 
+    pub(crate) fn pooling_decision_config(
+        &self,
+    ) -> Option<crate::protocols::systemone::PoolingDecisionConfig> {
+        let value = self
+            .runtime_config
+            .runtime_data
+            .get(crate::local_model::runtime_config::VLLM_POOLING_DECISION_V1)?;
+        crate::protocols::systemone::PoolingDecisionConfig::from_runtime_value(value)
+    }
+
+    pub(crate) fn systemone_max_candidates(&self) -> Option<usize> {
+        match self.systemone_backend()? {
+            crate::protocols::systemone::ScoringBackend::VllmPooling => {
+                self.pooling_decision_config().map(|cfg| cfg.num_classes())
+            }
+            backend => Some(backend.max_candidates()),
+        }
+    }
+
     pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
         use crate::local_model::runtime_config::{
             VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -1382,12 +1407,18 @@ impl ModelDeploymentCard {
             && self
                 .runtime_config
                 .supports_runtime_capability(VLLM_CAUSAL_DECISION_V1);
-        let backend = match (sglang, vllm) {
-            (true, false) => ScoringBackend::Sglang,
-            (false, true) => ScoringBackend::Vllm,
+        let vllm_pooling = self.model_input == ModelInput::Text
+            && self.model_type.supports_pooling()
+            && self.pooling_decision_config().is_some();
+        let backend = match (sglang, vllm, vllm_pooling) {
+            (true, false, false) => ScoringBackend::Sglang,
+            (false, true, false) => ScoringBackend::Vllm,
+            (false, false, true) => ScoringBackend::VllmPooling,
             _ => return None,
         };
-        (self.runtime_config.max_num_seqs == Some(1)
+        let serial_ok =
+            backend == ScoringBackend::VllmPooling || self.runtime_config.max_num_seqs == Some(1);
+        (serial_ok
             && self.runtime_config.data_parallel_size == 1
             && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
             && self.needs.is_empty()
@@ -1534,6 +1565,13 @@ impl ModelDeploymentCard {
                     match backend {
                         crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
                         crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
+                        crate::protocols::systemone::ScoringBackend::VllmPooling => {
+                            append_runtime_contract_checksum(
+                                &mut bytes_to_hash,
+                                &self.runtime_config,
+                                crate::local_model::runtime_config::VLLM_POOLING_DECISION_V1,
+                            );
+                        }
                     }
                 }
 
@@ -1714,6 +1752,11 @@ impl ModelDeploymentCard {
         self.tokenizer_id_bound.get().copied()
     }
 
+    /// Special-token strings captured when this card loaded its tokenizer.
+    pub(crate) fn special_tokens(&self) -> &[String] {
+        self.special_tokens.get().map_or(&[], Vec::as_slice)
+    }
+
     pub(crate) fn embedding_tokenizer_with_options(
         &self,
         options: crate::tokenizers::TokenizerOptions,
@@ -1801,11 +1844,9 @@ impl ModelDeploymentCard {
                 }
 
                 // Hold onto specials before any move of `hf`.
-                let specials: Vec<String> = if cache_enabled {
-                    extract_hf_special_tokens(&hf)
-                } else {
-                    Vec::new()
-                };
+                let specials = extract_hf_special_tokens(&hf);
+                self.special_tokens.get_or_init(|| specials.clone());
+                let specials = if cache_enabled { specials } else { Vec::new() };
 
                 // Merge already applied above; just wrap. Embedding
                 // tokenizers use the HF post-processor to apply BOS/EOS when
@@ -1932,6 +1973,7 @@ impl ModelDeploymentCard {
                 self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
+                self.special_tokens.get_or_init(|| specials.clone());
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
                     let shared_cache = shared_tokenizer_cache();
@@ -2418,6 +2460,7 @@ impl ModelDeploymentCard {
             extra_files,
             checksum: OnceLock::new(),
             tokenizer_id_bound: OnceLock::new(),
+            special_tokens: Arc::new(OnceLock::new()),
         })
     }
 }
