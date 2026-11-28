@@ -1234,15 +1234,18 @@ shared:
   owners:
   - runtime
   - sidecar
-- glob: tests/deploy/
-  owners:
-  - ops
-  - operator
 - glob: tests/deploy/test_dynamocheckpoint.py
   owners:
-  - ops
   - operator
   - gms
+- glob: tests/deploy/test_vcluster_kubectl.py
+  owners:
+  - ops
+  - operator
+- glob: tests/deploy/vcluster_utils.py
+  owners:
+  - ops
+  - operator
 - glob: tests/fault_tolerance/cancellation/utils.py
   owners:
   - fault-tolerance
