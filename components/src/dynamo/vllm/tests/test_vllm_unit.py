@@ -136,6 +136,38 @@ def test_kv_event_block_size_falls_back_to_cache_config():
     assert get_configured_kv_event_block_size(vllm_config) == 16
 
 
+@pytest.mark.parametrize(
+    ("scheduling_options", "expected_budget"),
+    [
+        ({}, 256),
+        ({"max_num_scheduled_tokens": None}, 256),
+        ({"max_num_scheduled_tokens": 64}, 64),
+        ({"max_num_scheduled_tokens": 256}, 256),
+        ({"max_num_scheduled_tokens": 512}, 256),
+    ],
+    ids=["missing", "none", "smaller", "equal", "larger"],
+)
+def test_get_engine_cache_info_publishes_effective_token_budget(
+    scheduling_options, expected_budget
+):
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config=None,
+            cache_config=SimpleNamespace(num_gpu_blocks=16, block_size=16),
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=128,
+                max_num_batched_tokens=256,
+                **scheduling_options,
+            ),
+        )
+    )
+
+    info = _load_vllm_main().get_engine_cache_info(engine)
+
+    assert info["max_num_batched_tokens"] == expected_budget
+    assert info["max_num_seqs"] == 128
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"

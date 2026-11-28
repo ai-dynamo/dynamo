@@ -1147,9 +1147,17 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "kv_event_block_size": kv_event_block_size,
         }
 
+        scheduler_config = engine.vllm_config.scheduler_config
+        batched_tokens = scheduler_config.max_num_batched_tokens
+        # Older vLLM versions may not expose a separate scheduling limit.
+        scheduled_tokens = getattr(scheduler_config, "max_num_scheduled_tokens", None)
         scheduler_values = {
-            "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
-            "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
+            "max_num_seqs": scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": (
+                batched_tokens
+                if scheduled_tokens is None
+                else min(batched_tokens, scheduled_tokens)
+            ),
         }
 
         logging.debug(f"Cache config values: {cache_values}")
