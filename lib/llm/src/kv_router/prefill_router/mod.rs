@@ -404,6 +404,17 @@ impl Drop for PrefillRouter {
     }
 }
 
+/// Without a prefill hop one worker runs the whole request, so route it as aggregated.
+/// A retry would otherwise keep the phase its failed attempt left, and its decode worker
+/// would be picked and recorded as a prefill worker.
+async fn route_whole_request(request: &PreprocessedRequest) {
+    if let Some(tracker) = &request.tracker
+        && tracker.phase() != RequestPhase::Aggregated
+    {
+        drop(tracker.set_phase(RequestPhase::Aggregated).await);
+    }
+}
+
 #[async_trait]
 impl
     Operator<
@@ -474,6 +485,7 @@ impl
                 // target was ever set (aggregated-capable deployment) or every prefill
                 // worker left (target cleared): route directly to the backend.
                 ActivationSnapshot::Pending | ActivationSnapshot::Untargeted => {
+                    route_whole_request(&req).await;
                     return next.generate(context.map(|_| req)).await;
                 }
             }
@@ -591,6 +603,8 @@ impl
                     ));
                 }
                 ActivationSnapshot::Untargeted => {
+                    drop(prefill_phase_barrier);
+                    route_whole_request(&req).await;
                     return next.generate(context.map(|_| req)).await;
                 }
             },
@@ -1119,12 +1133,19 @@ mod tests {
             ActivationSnapshot::Untargeted
         ));
 
+        // A retry whose failed attempt left the tracker in `Prefill` runs as aggregated.
+        let tracker = Arc::new(RequestTracker::new());
+        drop(tracker.set_phase(RequestPhase::Prefill).await);
+        let mut request = inference_request();
+        request.tracker = Some(tracker.clone());
+
         let host = Arc::new(CountingDecodeHost::default());
         router
-            .generate(SingleIn::new(inference_request()), host.clone())
+            .generate(SingleIn::new(request), host.clone())
             .await
             .expect("no target means plain passthrough");
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.phase(), RequestPhase::Aggregated);
     }
 
     #[tokio::test]
@@ -1144,6 +1165,37 @@ mod tests {
             .await
             .expect("a deactivated router passes through");
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn target_cleared_mid_flight_routes_as_aggregated() {
+        // The request passes the activation gate, then the last prefill worker leaves
+        // while it waits to enter `Prefill`, so it reaches the binding-load passthrough.
+        let router = fresh_decode_router();
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        let tracker = Arc::new(RequestTracker::new());
+        let barrier = tracker.set_phase(RequestPhase::Decode).await;
+        let mut request = inference_request();
+        request.tracker = Some(tracker.clone());
+
+        let host = Arc::new(CountingDecodeHost::default());
+        let in_flight = tokio::spawn({
+            let router = router.clone();
+            let host = host.clone();
+            async move { router.generate(SingleIn::new(request), host).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        mark_target_pending(&router);
+        router.set_target(None);
+        drop(barrier);
+        in_flight.await.unwrap().unwrap();
+
+        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.phase(), RequestPhase::Aggregated);
     }
 
     #[tokio::test]
