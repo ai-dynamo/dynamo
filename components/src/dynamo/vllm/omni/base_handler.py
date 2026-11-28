@@ -191,14 +191,6 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
                 return message.get("content")
         return None
 
-    def _extract_extra_body(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract extra_body parameters from the request.
-
-        The extra_body is passed through by the OpenAI client and contains
-        model-specific parameters (e.g. diffusion sampling params).
-        """
-        return request.get("extra_body", {}) or {}
-
     def _build_sampling_params(self, request: Dict[str, Any]) -> SamplingParams:
         """Build sampling params using shared handler utility."""
         return build_sampling_params(
