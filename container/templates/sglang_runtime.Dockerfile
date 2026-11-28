@@ -491,6 +491,11 @@ RUN set -eux; \
     python3 -c 'import soundfile, torchaudio; from PIL import Image'
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# Dynamo does not use the inherited legacy router.
+RUN uv pip uninstall sglang-router
+{% endif %}
+
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
