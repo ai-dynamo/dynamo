@@ -69,7 +69,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 ## Model discovery and namespace
 
 <ParamField path="--namespace" type="string" default="dynamo">
-  Dynamo namespace that scopes service discovery. All components in a deployment must share the same namespace to find each other. If `DYN_NAMESPACE_WORKER_SUFFIX` is also set, `-{suffix}` is automatically appended to the resolved value to support multiple worker pools serving the same model.
+  Dynamo namespace that scopes service discovery. All components in a deployment must share the same namespace to find each other. One exception: a frontend whose namespace is `dynamo`, empty, or unset discovers models from every namespace. See [Model discovery](frontend-configuration.mdx#model-discovery) for the frontend's exact, global, and prefix scoping. If `DYN_NAMESPACE_WORKER_SUFFIX` is also set, `-{suffix}` is automatically appended to the resolved value to support multiple worker pools serving the same model.
 
   On Kubernetes the operator sets this automatically to `{k8s_namespace}-{dgd_name}`; override only deliberately.
 

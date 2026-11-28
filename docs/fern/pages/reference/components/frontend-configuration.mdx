@@ -654,13 +654,23 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
 ## Model discovery
 
 <ParamField path="--namespace" type="string" default="null">
-  Exact namespace for model discovery scoping.
+  Dynamo namespace for model discovery scoping. Any value other than `dynamo` limits discovery to
+  workers in exactly that namespace. The value `dynamo` is the reserved global namespace: it
+  discovers models from every namespace, the same as leaving the option unset or empty. To
+  isolate a frontend, use a namespace other than `dynamo`. `--namespace-prefix` takes precedence
+  when both are set.
 
   Environment variable: `DYN_NAMESPACE`
 </ParamField>
 
 <ParamField path="--namespace-prefix" type="string" default="null">
-  Namespace prefix for discovery (for example, `ns` matches `ns`, `ns-abc123`). Takes precedence over `--namespace`.
+  Namespace prefix for discovery (for example, `ns` matches `ns`, `ns-abc123`). Takes precedence
+  over `--namespace`. A prefix of `dynamo` discovers models from every namespace. An empty value
+  counts as unset. When `DYN_NAMESPACE_PREFIX_STRICT` is truthy (`1`, `true`, `on`, or `yes`),
+  any prefix other than `dynamo` matches only the namespace that equals it and the operator's
+  worker-generation namespaces (`<prefix>-` followed by eight lowercase hexadecimal characters,
+  or `<prefix>-legacy`). Other values, such as `false`, keep plain prefix matching. The prefix
+  `dynamo` still discovers every namespace in strict mode.
 
   Environment variable: `DYN_NAMESPACE_PREFIX`
 </ParamField>
