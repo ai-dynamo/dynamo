@@ -1,0 +1,185 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install and Set Up Slime with Dynamo
+subtitle: Install the operators, then stage the model and dataset on a shared volume
+---
+
+## Prerequisites
+
+- A [Kubernetes](https://kubernetes.io/docs/setup/) cluster with NVIDIA GPU nodes and three free GPUs: one for each of the two SGLang engines and one for the trainer. The trainer's node also needs 16 CPUs and 200 GiB of memory free.
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/docs/intro/install/)
+
+If your GPU nodes have taints, add matching tolerations to every Pod template that requests a GPU: the setup Job on this page, both DynamoGraphDeployment (DGD) workers, and the Ray head.
+
+## Install the Operators
+
+<Steps toc={true}>
+  <Step title="Install the Dynamo Kubernetes Platform" id="install-the-dynamo-kubernetes-platform">
+
+Follow [Install Dynamo on Kubernetes](../../../kubernetes/installation/install-dynamo.md). The guide also covers the GPU Operator that provides the `nvidia.com/gpu` resource. The Slime and Dynamo images use CUDA 13, so the GPU nodes need NVIDIA driver 580 or later. These pages were validated with platform version 1.6.1.
+
+  </Step>
+  <Step title="Install KubeRay" id="install-kuberay">
+
+KubeRay runs the Slime trainer as a `RayJob`. Follow [Install KubeRay](../../../kubernetes/installation/install-kuberay.mdx). These pages were validated with KubeRay 1.7.1.
+
+  </Step>
+  <Step title="Verify the installation" id="verify-the-installation">
+
+```bash
+kubectl get crd dynamographdeployments.nvidia.com rayjobs.ray.io
+```
+
+```text
+NAME                                CREATED AT
+dynamographdeployments.nvidia.com   2026-07-01T15:17:29Z
+rayjobs.ray.io                      2026-07-09T18:47:32Z
+```
+
+  </Step>
+</Steps>
+
+## Stage the Model and Dataset
+
+<Steps toc={true}>
+  <Step title="Choose a shared StorageClass" id="choose-a-shared-storageclass">
+
+The trainer and the SGLang engines share one volume for the model, the dataset, and each weight update, so it needs the `ReadWriteMany` access mode. List the StorageClasses in your cluster:
+
+```bash
+kubectl get storageclass
+```
+
+Pick one whose provisioner supports `ReadWriteMany`. Set it and the namespace that the rest of these pages use:
+
+```bash
+export NAMESPACE=slime-dynamo
+export STORAGE_CLASS=<rwx-storage-class>
+```
+
+  </Step>
+  <Step title="Create the namespace and shared volume" id="create-the-namespace-and-shared-volume">
+
+Create the namespace and a 100 GiB claim on the StorageClass. The setup Job, the trainer, and both SGLang engines mount this claim at `/data`:
+
+```bash
+kubectl create namespace "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slime-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 100Gi
+EOF
+```
+
+Depending on the StorageClass, the claim can stay `Pending` until the setup Job mounts it.
+
+  </Step>
+  <Step title="Prepare the model and dataset" id="prepare-the-model-and-dataset">
+
+Run a one-time Job in the Slime image. It does three things:
+
+1. Downloads the `Qwen/Qwen3-0.6B` checkpoint and the `zhuzilin/gsm8k` dataset from Hugging Face.
+2. Converts the checkpoint to the `torch_dist` format that Megatron-LM loads. The conversion needs the model architecture, which `scripts/models/qwen3-0.6B.sh` in the Slime image defines as `MODEL_ARGS`, a list of Megatron-LM flags. Megatron-LM builds the model on a GPU, so the Job requests one.
+3. Creates the directory that receives weight updates.
+
+The SGLang engines serve the Hugging Face checkpoint, and the trainer starts from the converted one.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: slime-setup
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: slimerl/slime:nightly-dev-20261027a-cu130
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              hf download Qwen/Qwen3-0.6B --local-dir /data/models/Qwen3-0.6B
+              hf download --repo-type dataset zhuzilin/gsm8k --local-dir /data/datasets/gsm8k
+              cd /root/slime
+              source scripts/models/qwen3-0.6B.sh
+              PYTHONPATH=/root/Megatron-LM:/root/slime torchrun --standalone --nproc-per-node 1 \
+                tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
+                --hf-checkpoint /data/models/Qwen3-0.6B \
+                --save /data/models/Qwen3-0.6B_torch_dist
+              mkdir -p /data/weight-updates
+              ls /data/datasets /data/models
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: slime-data
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: slime-data
+          persistentVolumeClaim:
+            claimName: slime-data
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+EOF
+```
+
+The model and the dataset are public, so the downloads need no token. For a gated model, create a Secret with your Hugging Face token and expose it to the Job as `HF_TOKEN`.
+
+Wait for the Job to finish, then read the end of its log:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=condition=complete job/slime-setup --timeout=30m
+kubectl logs -n "$NAMESPACE" job/slime-setup --tail=6
+```
+
+The Slime image is about 18 GB, so a fresh node spends most of the time pulling it. The downloads and the conversion take about 2 minutes. The log ends with the directory listing:
+
+```text
+/data/datasets:
+gsm8k
+
+/data/models:
+Qwen3-0.6B
+Qwen3-0.6B_torch_dist
+```
+
+  </Step>
+</Steps>
+
+## Included in the Images
+
+You don't build, install, or clone Slime, Megatron-LM, SGLang, or Ray. The images that these pages use already include them:
+
+- The Slime image, `slimerl/slime:nightly-dev-20261027a-cu130`, has Slime 0.4.0 at `/root/slime`, Megatron-LM at `/root/Megatron-LM`, SGLang 0.5.21, PyTorch 2.13, and Ray 2.59.0. KubeRay runs `ray job submit` from this image, so you don't need Ray on your workstation.
+- The Dynamo 1.6.1 `dynamo-frontend` image runs the Dynamo frontend, and the 1.6.1 `sglang-runtime` image has SGLang 0.5.21 and the Dynamo SGLang sidecar.
+
+These pages were validated with these images on Azure Kubernetes Service (AKS) with Kubernetes 1.34, H100 80 GB GPUs, and an Azure Managed Lustre volume for shared storage.
+
+Clone [Slime](https://github.com/THUDM/slime) only to change Slime itself, and use a revision that includes [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272).
+
+## Next Steps
+
+[Serve inference with Dynamo](serve-inference.mdx) to start the SGLang engines that generate Slime's rollouts.
