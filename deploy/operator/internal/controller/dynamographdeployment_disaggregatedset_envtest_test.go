@@ -48,17 +48,33 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		reconciler := newEnvtestDSReconcilers()
 
 		By("creating the initial DisaggregatedSet")
-		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		pending, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(pending.Status.Components["prefill"].RuntimeNamespace).To(BeEmpty())
+		Expect(pending.Status.Components["decode"].RuntimeNamespace).To(BeEmpty())
 		initialDS := fetchTypedDisaggregatedSet(ctx, current)
 		initialRevision := disaggregatedsetutils.ComputeRevision(initialDS.Spec.Roles)
 		Expect(initialDS.Spec.Roles).To(HaveLen(2))
+
+		By("publishing the completed worker namespace without changing any workload")
+		markDisaggregatedSetReady(ctx, current)
+		ready, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(ready.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		workerHash := initialDS.Spec.Roles[0].Spec.LeaderWorkerTemplate.WorkerTemplate.Labels[consts.KubeLabelDynamoWorkerHash]
+		Expect(workerHash).NotTo(BeEmpty())
+		runtimeNamespace := current.Namespace + "-" + current.Name + "-" + workerHash
+		Expect(ready.Status.Components["prefill"].RuntimeNamespace).To(Equal(runtimeNamespace))
+		Expect(ready.Status.Components["decode"].RuntimeNamespace).To(Equal(runtimeNamespace))
+		current = persistWorkloadProgramStatus(ctx, current, ready.Status)
+		Expect(fetchTypedDisaggregatedSet(ctx, current).Spec).To(Equal(initialDS.Spec))
 
 		By("updating graph-level metadata and reconciling again")
 		current.Spec.Labels["e2e.dynamo/metadata"] = "updated"
 		current.Spec.Annotations["e2e.dynamo/metadata"] = "updated"
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
-		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		pending, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(pending.Status.Components["prefill"].RuntimeNamespace).To(Equal(runtimeNamespace))
+		Expect(pending.Status.Components["decode"].RuntimeNamespace).To(Equal(runtimeNamespace))
 		updatedDS := fetchTypedDisaggregatedSet(ctx, current)
 		updatedRevision := disaggregatedsetutils.ComputeRevision(updatedDS.Spec.Roles)
 		Expect(updatedRevision).NotTo(Equal(initialRevision))
@@ -70,6 +86,17 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			Expect(role.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels).To(HaveKeyWithValue("e2e.dynamo/metadata", "updated"))
 			Expect(role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations).To(HaveKeyWithValue("e2e.dynamo/metadata", "updated"))
 		}
+
+		By("switching both published bindings only after the updated revision completes")
+		markDisaggregatedSetReady(ctx, current)
+		ready, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(ready.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		updatedHash := updatedDS.Spec.Roles[0].Spec.LeaderWorkerTemplate.WorkerTemplate.Labels[consts.KubeLabelDynamoWorkerHash]
+		Expect(updatedHash).NotTo(Equal(workerHash))
+		updatedNamespace := current.Namespace + "-" + current.Name + "-" + updatedHash
+		Expect(ready.Status.Components["prefill"].RuntimeNamespace).To(Equal(updatedNamespace))
+		Expect(ready.Status.Components["decode"].RuntimeNamespace).To(Equal(updatedNamespace))
+		Expect(fetchTypedDisaggregatedSet(ctx, current).Spec).To(Equal(updatedDS.Spec))
 	})
 
 	It("coalesces sequential restart across both DS roles and completes", func() {

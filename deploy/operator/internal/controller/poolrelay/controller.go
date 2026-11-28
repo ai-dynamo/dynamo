@@ -23,7 +23,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -56,13 +55,12 @@ var errOwnershipConflict = errors.New("Relay resource ownership conflict")
 
 type reconciler struct {
 	client.Client
-	scheme         *runtime.Scheme
-	defaultBackend configv1alpha1.DiscoveryBackend
+	scheme *runtime.Scheme
 }
 
 // Setup registers the one-DGD Relay controller and its DGD dependency watch.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), defaultBackend: config.Discovery.Backend}
+	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme()}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoPoolRelay{}).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
@@ -110,13 +108,6 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if !dgd.DeletionTimestamp.IsZero() {
 		return r.withdraw(ctx, &relay, "DGDTerminating", "The named DGD is terminating")
 	}
-	supported, err := supportsPodDiscovery(&dgd, r.defaultBackend)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolve DGD discovery settings: %w", err)
-	}
-	if !supported {
-		return r.withdraw(ctx, &relay, "UnsupportedDiscovery", "The named DGD must use Kubernetes pod-mode discovery")
-	}
 	for _, component := range dgd.Spec.Components {
 		if !component.GlobalDynamoNamespace {
 			continue
@@ -128,12 +119,25 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay cannot isolate frontend load in the shared global Dynamo namespace")
 		}
 	}
-	namespaces := sourceNamespaces(&dgd)
-	if len(namespaces) == 0 {
+	namespaces, complete := sourceNamespaces(&dgd)
+	if complete && len(namespaces) == 0 {
 		return r.withdraw(ctx, &relay, "NoWorkers", "The named DGD has no worker components")
 	}
-	if slices.Contains(namespaces, v1beta1.ComputeDynamoNamespace(true, dgd.Namespace, dgd.Name)) {
+	if slices.Contains(namespaces, commonconsts.GlobalDynamoNamespace) {
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
+	}
+
+	// Preserve the last published resources until every worker binding exists.
+	if !complete {
+		before := relay.DeepCopy()
+		meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
+			Type: "Ready", Status: metav1.ConditionUnknown, Reason: "RuntimeNamespacePending",
+			Message: "Waiting for published worker runtime namespaces", ObservedGeneration: relay.Generation,
+		})
+		if !equality.Semantic.DeepEqual(before.Status, relay.Status) {
+			return ctrl.Result{}, r.Status().Update(ctx, &relay)
+		}
+		return ctrl.Result{}, nil
 	}
 
 	resources, desiredDeployment, err := render(&relay, namespaces)
@@ -175,87 +179,6 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
-}
-
-func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend configv1alpha1.DiscoveryBackend) (bool, error) {
-	// Grove uses the DGD's own backend. Component PodTemplates can override
-	// graph defaults, so inspect the templates after normal DGD propagation.
-	if commoncontroller.GetDiscoveryBackend(defaultBackend, dgd.Annotations) != configv1alpha1.DiscoveryBackendKubernetes {
-		return false, nil
-	}
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-		if !dynamo.IsWorkerComponent(string(component.ComponentType)) && component.ComponentType != v1beta1.ComponentTypeFrontend {
-			continue
-		}
-		templates, err := dynamo.EffectiveDGDComponentTemplates(dgd, component)
-		if err != nil {
-			return false, err
-		}
-		for _, template := range templates {
-			discovery := dynamo.NewDiscoveryContext(defaultBackend, template.Annotations)
-			var runtime *corev1.Container
-			for i := range template.Spec.Containers {
-				if template.Spec.Containers[i].Name == commonconsts.MainContainerName {
-					runtime = &template.Spec.Containers[i]
-				}
-			}
-			for i := range template.Spec.InitContainers {
-				if template.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
-					runtime = &template.Spec.InitContainers[i]
-				}
-			}
-			if runtime != nil {
-				hasBackend, hasMode := false, false
-
-				// Resolve known semantic aliases; runtime inputs remain unsupported.
-				if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
-					backend, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, commonconsts.DynamoDiscoveryBackendEnvVar)
-					hasBackend = exists
-					if exists {
-						if !backend.Known {
-							return false, nil
-						}
-						discovery.Backend = configv1alpha1.DiscoveryBackend(backend.Value)
-					}
-					mode, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, "DYN_KUBE_DISCOVERY_MODE")
-					hasMode = exists
-					if exists {
-						if !mode.Known {
-							return false, nil
-						}
-						discovery.Mode = configv1alpha1.KubeDiscoveryMode(mode.Value)
-					}
-				} else {
-					// Preserve the legacy raw reader and its duplicate handling.
-					for _, item := range runtime.Env {
-						switch item.Name {
-						case commonconsts.DynamoDiscoveryBackendEnvVar:
-							hasBackend = true
-							if item.ValueFrom != nil {
-								return false, nil
-							}
-							discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
-						case "DYN_KUBE_DISCOVERY_MODE":
-							hasMode = true
-							if item.ValueFrom != nil {
-								return false, nil
-							}
-							discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
-						}
-					}
-				}
-				// Explicit env values override envFrom; missing keys could still come from it.
-				if len(runtime.EnvFrom) != 0 && (!hasBackend || !hasMode) {
-					return false, nil
-				}
-			}
-			if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes || discovery.Mode != configv1alpha1.KubeDiscoveryModePod {
-				return false, nil
-			}
-		}
-	}
-	return true, nil
 }
 
 // withdraw removes the publication endpoint before reporting an unresolved source.
@@ -433,8 +356,11 @@ func (r *reconciler) setStatus(ctx context.Context, relay *v1alpha1.DynamoPoolRe
 	return nil
 }
 
-func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
+// sourceNamespaces reads published worker bindings; dgd must not be nil.
+// The boolean reports whether every declared worker has a binding.
+func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) ([]string, bool) {
 	unique := map[string]struct{}{}
+	complete := true
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
@@ -442,7 +368,8 @@ func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 		}
 		namespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace
 		if namespace == "" {
-			namespace = dgd.GetDynamoNamespaceForComponent(component)
+			complete = false
+			continue
 		}
 		unique[namespace] = struct{}{}
 	}
@@ -451,7 +378,7 @@ func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 		namespaces = append(namespaces, namespace)
 	}
 	slices.Sort(namespaces)
-	return namespaces
+	return namespaces, complete
 }
 
 type sourcesDocument struct {
@@ -497,7 +424,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	labels := map[string]string{"app.kubernetes.io/name": "pool-relay", "nvidia.com/relay-uid": string(relay.UID)}
 	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace, Labels: labels}
 
-	// Listen for frontend load in the DGD's base runtime namespace even when Grove workers use suffixed namespaces.
+	// Preserve the Relay's base namespace for identity and frontend load, without a worker hash.
 	runtimeNamespace := v1beta1.ComputeDynamoNamespace(false, relay.Namespace, relay.Name)
 
 	// Runtime-managed values cannot be replaced by transport configuration.

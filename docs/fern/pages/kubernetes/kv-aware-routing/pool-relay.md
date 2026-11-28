@@ -82,6 +82,21 @@ reconciliation. If `Ready` is False, inspect the condition reason with
 `kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
 serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
 
+Ensure the target workers use Kubernetes pod-mode discovery. The controller does not infer discovery
+compatibility from DGD annotations, environment variables, commands, or PodTemplates. If the Relay
+does not discover workers, check the workers' discovery settings and the published source namespaces.
+
+The controller reads worker namespaces from `status.components.<name>.runtimeNamespace` and follows
+status-only namespace changes through the source file without rolling Relay Pods. The Relay's own
+`DYN_NAMESPACE` keeps the existing base namespace derived from its Kubernetes namespace and name,
+without a worker hash. This also provides the namespace for frontend load collection, whether or
+not the DGD declares a frontend. Frontend status is not required or inspected.
+
+If a required worker runtime namespace has not been published, `Ready` is Unknown with
+reason `RuntimeNamespacePending`. Existing resources, the source file, and the endpoint remain
+unchanged until the bindings are available. The controller does not derive missing worker namespaces
+from resource names or worker hashes. The shared global Dynamo namespace remains unsupported.
+
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The
 operator supplies the main command, listener ports and probes, source volume, service account,

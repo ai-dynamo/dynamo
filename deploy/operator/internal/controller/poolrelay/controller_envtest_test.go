@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -64,7 +65,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		ObjectMeta: relayMeta,
 		Spec:       relaySpec("east"),
 	}
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: apiClient, scheme: scheme}
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
 	var firstResourceVersion string
 	for attempt := range 2 {
@@ -231,6 +232,35 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+
+	t.Log("Wait for runtime bindings without guessing from the DGD spec")
+	if err := wait.PollUntilContextTimeout(ctx, 25*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+		var pending v1alpha1.DynamoPoolRelay
+		if err := apiClient.Get(ctx, key, &pending); err != nil {
+			return false, err
+		}
+		for _, condition := range pending.Status.Conditions {
+			if condition.Type == "Ready" && condition.Reason == "RuntimeNamespacePending" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, serviceKey, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Relay published without a runtime namespace: %v", err)
+	}
+
+	t.Log("A DGD status-only update wakes the Relay dependency watch")
+	dgd.Status = v1beta1.DynamoGraphDeploymentStatus{
+		ObservedGeneration: dgd.Generation,
+		State:              v1beta1.DGDStatePending,
+		Components:         map[string]v1beta1.ComponentReplicaStatus{"decode": {ComponentKind: v1beta1.ComponentKindDeployment, RuntimeNamespace: "published-worker"}},
+	}
+	if err := apiClient.Status().Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var service corev1.Service
