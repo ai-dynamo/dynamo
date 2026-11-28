@@ -21,6 +21,7 @@ from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -63,21 +64,21 @@ from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import (
-    Config,
-    _uses_dynamo_connector,
-    configure_rl_logprobs_mode,
-    parse_args_with_model_fetch,
-)
+from .args import Config, configure_rl_logprobs_mode, parse_args_with_model_fetch
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_max_logprobs,
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
+from .decision_execution import (
+    publish_vllm_decision_capability,
+    qualify_vllm_decision_runtime,
+)
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -118,6 +119,7 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY = "llguidance_lark_grammar"
 
 
 async def close_configured_artifact_runtime() -> None:
@@ -187,6 +189,50 @@ def configure_muse_structural_tag_reasoning(
         config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
     ):
         vllm_config.structured_outputs_config.enable_in_reasoning = True
+
+
+def pin_guidance_for_tekken_checkpoints(vllm_config: VllmConfig) -> None:
+    """Send every structured-output request of a Tekken checkpoint to llguidance.
+
+    dynamo.frontend constrains Mistral tool calls and replies with a lark grammar
+    that only llguidance accepts. Under `auto`, vLLM sends that grammar to
+    `guidance` but a regex to `xgrammar`, and an engine keeps the backend of its
+    first structured-output request, so the other kind is rejected. llguidance
+    serves every constraint kind for Tekken tokenizers. An explicit backend is
+    left as configured.
+    """
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if structured_outputs_config.backend != "auto":
+        return
+    model_config = vllm_config.model_config
+    if not any_pattern_in_repo_files(
+        model_name_or_path=str(model_config.tokenizer),
+        allow_patterns=["tekken.json"],
+        revision=model_config.tokenizer_revision,
+    ):
+        return
+    structured_outputs_config.backend = "guidance"
+    logger.info(
+        "Using the guidance structured-output backend for this Tekken checkpoint, "
+        "so Mistral grammars and other constraints share one backend"
+    )
+
+
+def publish_vllm_llguidance_lark_grammar(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether every lark `guided_decoding.grammar` reaches llguidance.
+
+    Only an explicit `guidance` backend guarantees that: `auto` picks a backend
+    per request, and the engine rejects a request whose backend differs from the
+    first one. `pin_guidance_for_tekken_checkpoints` selects `guidance` for the
+    Tekken checkpoints whose grammars need it.
+    """
+    backend = vllm_config.structured_outputs_config.backend
+    runtime_config.set_engine_specific(
+        LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
+        json.dumps(backend == "guidance"),
+    )
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -524,8 +570,6 @@ def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
-    consolidator_enabled: bool = False,
-    consolidator_port: Optional[int] = 5558,
 ) -> Optional[list[KvEventPublisher]]:
     """
     list[KvEventPublisher] | None
@@ -535,8 +579,6 @@ def setup_kv_event_publisher(
         config: Worker configuration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
-        consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
-        consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
         List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -567,21 +609,14 @@ def setup_kv_event_publisher(
     video_token_id = _resolve_video_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
-        if consolidator_enabled:
-            # TODO: Use different port for each dp_rank once KVBM supports DP
-            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
-            )
-        else:
-            # Each dp_rank publishes to a different port
-            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-                config.engine_args.kv_events_config.endpoint,
-                data_parallel_rank=dp_rank,
-            ).replace("*", "127.0.0.1")
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
-            )
+        # Each dp_rank publishes to a different port
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=dp_rank,
+        ).replace("*", "127.0.0.1")
+        logger.info(
+            f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+        )
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
@@ -766,27 +801,9 @@ def setup_vllm_engine(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     configure_muse_structural_tag_reasoning(config, vllm_config)
+    pin_guidance_for_tekken_checkpoints(vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
-
-    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
-    consolidator_endpoints = None
-    if _uses_dynamo_connector(config.engine_args):
-        try:
-            from kvbm.vllm_integration.consolidator_config import (
-                get_consolidator_endpoints,
-            )
-
-            consolidator_endpoints = get_consolidator_endpoints(vllm_config)
-        except Exception as e:
-            logger.warning(
-                f"KVBM connector is enabled but failed to get consolidator endpoints: {e}. "
-                "Continuing without KV event consolidation. "
-                "Ensure 'kvbm' package is installed if this feature is needed."
-            )
-    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
-    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
-    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     # Pass runtime-only worker identity to InstrumentedScheduler via the
     # environment so it does not perturb vLLM's config hash.
@@ -820,6 +837,8 @@ def setup_vllm_engine(
     factory = []
     if stat_logger:
         factory.append(stat_logger)
+
+    qualify_vllm_decision_runtime(vllm_config, config)
 
     # Time engine initialization
     start_time = time.time()
@@ -959,6 +978,7 @@ async def register_vllm_model(
         runtime_config, model_input, worker_type, config.enable_multimodal
     )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
@@ -976,18 +996,28 @@ async def register_vllm_model(
         vllm_config.lora_config
         and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
     )
-    if publish_engine_generate_capability(
+    native_generate_supported = publish_engine_generate_capability(
         runtime_config,
         model_input,
         model_type,
         worker_type,
         tower_connector_lora_enabled,
-    ):
+    )
+    if native_generate_supported:
         logging.info("Published vLLM engine-native generate capability")
+    publish_vllm_decision_capability(
+        runtime_config,
+        model_input,
+        worker_type,
+        config,
+        native_generate_supported=native_generate_supported,
+        needs=needs,
+    )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
         )
+        publish_vllm_max_logprobs(runtime_config, vllm_config.model_config)
 
     # Get runtime configuration from vLLM engine
     logging.info(

@@ -299,6 +299,7 @@ impl Request {
 
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1016,6 +1017,7 @@ mod context_length_validation {
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1096,13 +1098,22 @@ mod context_length_validation {
             "error message should tell user what to do, got: {}",
             dynamo_err.message()
         );
-        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
-            dynamo_err.public_details()
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength {
+            limit,
+            actual,
+            prompt_tokens,
+        }) = dynamo_err.public_details()
         else {
             panic!("context overflow should expose structured length details");
         };
         assert_eq!(*limit, 5);
         assert!(actual.is_some_and(|actual| actual > *limit));
+        assert_eq!(*prompt_tokens, *actual);
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not overwrite ContextLength details with a public message"
+        );
     }
 
     #[tokio::test]
@@ -1186,6 +1197,22 @@ mod context_length_validation {
             )),
             "error message should state the requested token budget, got: {}",
             dynamo_err.message()
+        );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength {
+            limit,
+            actual,
+            prompt_tokens,
+        }) = dynamo_err.public_details()
+        else {
+            panic!("total-overflow rejection must expose structured length details");
+        };
+        assert_eq!(*limit, (prompt_len + 10) as u64);
+        assert_eq!(*actual, Some((prompt_len + 11) as u64));
+        assert_eq!(*prompt_tokens, Some(prompt_len as u64));
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not replace ContextLength details with a public message"
         );
     }
 
@@ -1398,6 +1425,7 @@ mod embedding_without_chat_template {
             .unwrap();
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,

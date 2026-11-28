@@ -46,14 +46,14 @@ def register():
     [
         ("kimi_k3", False, True, True, True, [163588, 39964, 163589], True),
         (None, False, True, True, True, [163588], False),
-        ("kimi_k3", True, True, True, True, [163588], False),
-        ("kimi_k3", False, False, True, True, [163588], False),
-        ("kimi_k3", False, True, False, True, [163588], False),
-        ("kimi_k3", False, True, True, False, [163588], False),
-        ("kimi_k3", False, True, True, True, [], False),
+        ("kimi_k3", True, True, True, True, [163588], None),
+        ("kimi_k3", False, False, True, True, [163588], None),
+        ("kimi_k3", False, True, False, True, [163588], None),
+        ("kimi_k3", False, True, True, False, [163588], None),
+        ("kimi_k3", False, True, True, True, [], None),
     ],
 )
-def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+def test_structural_tag_reasoning_policy_advertises_gate_availability(
     register,
     parser,
     skip_tokenizer_init,
@@ -91,9 +91,10 @@ def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
     )
 
     key = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (key in runtime_config.runtime_data) is expected
-    if expected:
-        assert json.loads(runtime_config.runtime_data[key]) is True
+    if expected is None:
+        assert key not in runtime_config.runtime_data
+    else:
+        assert json.loads(runtime_config.runtime_data[key]) is expected
 
 
 @pytest.mark.parametrize(
@@ -497,6 +498,52 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
 
 
 @pytest.mark.parametrize(
+    "extra_config, expected",
+    [
+        ({}, 256),
+        ({"prefetch_threshold": 1024}, 1024),
+        # SGLang never loads less than one page.
+        ({"prefetch_threshold": 0}, 64),
+    ],
+)
+def test_mooncake_runtime_data_publishes_prefetch_threshold(
+    register, monkeypatch, extra_config, expected
+):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name="model",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["prefetch_threshold"] == expected
+
+
+def test_mooncake_runtime_data_names_keys_by_attention_tp_rank(register, monkeypatch):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        served_model_name="model",
+        page_size=64,
+        tp_size=8,
+        attn_dp_size=4,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["tp_size"] == 2
+
+
+@pytest.mark.parametrize(
     "filename, content",
     [
         ("extra.json", '{"extra_backend_tag": "équipe"}'),
@@ -612,6 +659,7 @@ def test_mooncake_runtime_data_describes_the_direct_linker(register):
     # The linker names keys after model_path, HiCache after served_model_name.
     assert data["key_prefix"] == "Org-Model"
     assert data["page_size"] == 256
+    assert data["prefetch_threshold"] is None
 
     # The linker's own config flag wins over the deprecated HiCache extra config.
     linker_with_config = SimpleNamespace(

@@ -83,6 +83,26 @@ type HardwareSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+
+	// Interconnect describes the links between candidate workers. Like gpu, it makes the
+	// hardware object nonempty, so admission still discovers omitted GPU fields.
+	// +optional
+	Interconnect *InterconnectSpec `json:"interconnect,omitempty"`
+}
+
+// InterconnectSpec describes the links that move data between candidate workers.
+type InterconnectSpec struct {
+	// KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that
+	// one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU
+	// value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's
+	// engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation
+	// (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+	// describes how candidates use it, including link sharing. When omitted, no bandwidth is
+	// lowered and AISimulate's default applies, which models the transfer as instantaneous.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	KVTransferBandwidthGBps *float64 `json:"kvTransferBandwidthGBps,omitempty"`
 }
 
 // KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.
@@ -328,7 +348,11 @@ type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
-	// field. The dgdr_run member must remain an object, and its operator-owned
+	// field. The exact `{"$null":true}` alias is valid only as an object-field value
+	// outside arrays; all other uses of $null are rejected on every write.
+	// Use the alias with client-side kubectl apply, which removes native nulls;
+	// kubectl create and server-side apply preserve them. A null document supplies
+	// no overrides. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
 	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
@@ -524,6 +548,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)",message="nonempty status must use the representation selected by spec"
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+// Available without a feature gate. This API is not feature complete.
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

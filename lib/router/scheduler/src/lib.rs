@@ -8,7 +8,6 @@
 //! (`dynamo-kv-router`) sit above it; the five stages, protocol, kv-hashing, and kv-hints sit
 //! below.
 
-mod classifier_rows;
 mod config;
 mod filter;
 mod hint_policy;
@@ -19,7 +18,6 @@ mod local;
 mod overlap;
 mod overlap_refresh;
 mod overlap_summary;
-mod policy;
 mod prefill_load;
 mod protocols;
 mod queue;
@@ -36,8 +34,7 @@ pub mod test_utils;
 
 pub use config::{
     CacheHitWeights, PolicyProfileSource, RouterConfig, RouterConfigError, RouterConfigOverride,
-    RouterConfigOverrideBuilder, RouterConfigOverrideBuilderError, RouterPrefillLoadModel,
-    Validated,
+    RouterPrefillLoadModel, Validated,
 };
 pub use filter::{RoutingEligibility, WorkerEligibilityError};
 pub use hint_policy::{
@@ -60,7 +57,6 @@ pub use overlap_refresh::{
     refresh_overlap, should_refresh_overlap,
 };
 pub use overlap_summary::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
-pub use policy::{FcfsPolicy, LcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
@@ -85,10 +81,10 @@ pub use selection::input::{
 };
 pub use selection::types::REQUEST_BODY_LIMIT_BYTES;
 pub use selection::{
-    CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
-    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse,
-    OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, PromptView,
-    ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
+    HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse, OutputBlockRequest,
+    OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, PromptView, ReadyResponse,
+    ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, SelectionCacheConfig, SelectionCore, SelectionError, SelectionHost,
     SelectionInputTrigger, SelectionPartition, SelectionScheduler, SelectionSessionContext,
     SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord, WorkerCatalogSource,

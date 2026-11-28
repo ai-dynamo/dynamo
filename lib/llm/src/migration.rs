@@ -12,7 +12,6 @@ use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics,
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
@@ -25,6 +24,7 @@ use crate::{
     },
     session_affinity::explicit_target,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
@@ -795,6 +795,11 @@ where
             {
                 release.release().await;
             }
+            if attempt > 0
+                && let Some(tracker) = self.request.tracker.as_ref()
+            {
+                tracker.begin_retry();
+            }
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -1052,11 +1057,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
@@ -1102,7 +1107,7 @@ mod tests {
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         for &(error_type, reason) in &[
             (ErrorType::Cancelled, "request.cancelled"),
@@ -1172,7 +1177,7 @@ mod tests {
     #[test]
     fn pre_stream_validation_refusal_is_not_a_transport_failure() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         for error_type in [
             ErrorType::InvalidArgument,
@@ -3775,6 +3780,85 @@ mod tests {
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(cached_tokens(&usage), Some(3));
         assert_eq!(reasoning_tokens(&usage), Some(4));
+    }
+
+    /// Records its worker on the shared tracker as routing does. The first attempt fails,
+    /// either at dispatch or after one token.
+    struct RoutedWorkerEngine {
+        calls: AtomicU32,
+        fail_at_dispatch: bool,
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, anyhow::Error>
+        for RoutedWorkerEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            // The replacement has no rank, so the failed worker's rank must not carry over.
+            let (worker, rank) = if first { (1, Some(3)) } else { (2, None) };
+            let tracker = request.tracker.as_ref().unwrap();
+            tracker.record_worker(worker, rank, "decode");
+
+            let failure = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("worker died")
+                .build();
+            if first && self.fail_at_dispatch {
+                return Err(failure.into());
+            }
+            let mut responses = vec![create_mock_output(worker as u32)];
+            if first {
+                responses.push(Annotated::from_err(failure));
+            }
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(responses)),
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_attributes_each_chunk_to_the_worker_that_produced_it() {
+        for fail_at_dispatch in [false, true] {
+            let tracker = Arc::new(RequestTracker::new());
+            let mut request = create_mock_request(4);
+            request.tracker = Some(tracker.clone());
+            let mut manager = RetryManager::build(
+                Arc::new(Controller::default()),
+                BTreeMap::new(),
+                request,
+                Arc::new(RoutedWorkerEngine {
+                    calls: AtomicU32::new(0),
+                    fail_at_dispatch,
+                }),
+                1,
+                None,
+                Arc::new(TEST_MODEL.to_string()),
+                Arc::new(Metrics::new()),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let mut seen = Vec::new();
+            while let Some(response) = manager.next().await {
+                let produced_by = u64::from(response.data.unwrap().token_ids[0]);
+                let info = tracker.get_worker_info().unwrap();
+                assert_eq!(info.decode_worker_id, Some(produced_by));
+                assert_eq!(info.prefill_worker_id, Some(produced_by));
+                let rank = (produced_by == 1).then_some(3);
+                assert_eq!(info.decode_dp_rank, rank);
+                assert_eq!(info.prefill_dp_rank, rank);
+                seen.push(produced_by);
+            }
+            let expected: &[u64] = if fail_at_dispatch { &[2] } else { &[1, 2] };
+            assert_eq!(seen, expected);
+        }
     }
 
     #[tokio::test]

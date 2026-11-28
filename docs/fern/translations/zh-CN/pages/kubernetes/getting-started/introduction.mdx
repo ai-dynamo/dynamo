@@ -34,11 +34,10 @@ Dynamo 的基础能力最初面向分离式服务，随后扩展到用于多模�
 
 ### 模块化且深度集成的生态系统
 
-Dynamo 旨在降低生产环境中替换现有技术栈的负担。它以 Rust crates 和 pip wheels 的形式提供模块化、独立组件。例如，Dynamo 用于调度（Dynamo）、内存管理（KV Block Manager）和数据传输（NIXL）的三项基础能力都可以独立安装：
+Dynamo 旨在降低生产环境中替换现有技术栈的负担。它以 Rust crates 和 pip wheels 的形式提供模块化、独立组件。例如，Dynamo 用于调度（Dynamo）和数据传输（NIXL）的基础能力都可以独立安装：
 
 ```bash
 pip install ai-dynamo
-pip install kvbm
 pip install nixl
 ```
 
@@ -52,7 +51,6 @@ Dynamo 生态系统包含以下额外的模块化组件，并会随着时间继�
 | **调度** | Dynamo | 面向 GenAI 工作负载的推理服务 |
 | **路由** | Router | 利用 KV 缓存命中率和 KV 缓存负载进行智能路由。将添加更多算法（例如 agentic routing） |
 | **数据传输** | [NIXL](https://github.com/ai-dynamo/nixl) | GPU 与分层存储之间的点对点数据传输（G1：GPU，G2：CPU，G3：SSD，G4：远程） |
-| **内存** | KVBM (KV Block Manager) | 使用可自定义的淘汰策略，跨内存层级（G1-G4）管理 KV 缓存 |
 | **扩缩容 / 云** | Planner | 在给定 SLA 约束（TTFT 和 TPOT）下，实时自动调优 prefill 和 decode 的性能 |
 | | [Grove](https://github.com/ai-dynamo/grove) | 支持 Kubernetes 多节点分离式服务所需的 gang scheduling 和拓扑感知 |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | 通过缓存模型权重并经由 NIXL 将其传输到其他 GPU，快速加载模型权重。未来也将用于容错 |
@@ -77,7 +75,7 @@ Dynamo ***不是为供应商锁定而设计的***。Dynamo 旨在赋能更广泛
 | :--- | :--- |
 | 推理引擎 | SGLang、TensorRT-LLM、vLLM |
 | Kubernetes | Inference gateway |
-| 内存管理 | Dynamo KV Block Manager、[LMCache](../../../../../pages/cli/kv-cache-offloading/overview.mdx)、[SGLang HiCache](../../../../../pages/developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md)、[FlexKV](../../../../../pages/cli/kv-cache-offloading/overview.mdx) |
+| 内存管理 | [LMCache](../../../../../pages/cli/kv-cache-offloading/overview.mdx)、[SGLang HiCache](../../../../../pages/developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md)、[FlexKV](../../../../../pages/cli/kv-cache-offloading/overview.mdx) |
 | 网络和存储 | Mooncake、DOCA NetIO、GDS、POSIX、S3、3FS（[通过 NIXL 支持](https://github.com/ai-dynamo/nixl)） |
 | Multi-HW | Intel XPU、AMD |
 

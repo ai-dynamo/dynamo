@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
 pub(crate) mod tool_call_merge;
@@ -118,6 +119,11 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(skip)]
     #[schema(ignore)]
     pub responses_tools: Option<super::responses::ResponsesToolContext>,
+
+    /// Full catalog for rendering when Chat Completions limits callable tools.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub chat_template_tools: Option<std::sync::Arc<[dynamo_protocols::types::ChatCompletionTool]>>,
 
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
@@ -796,12 +802,24 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        self.validate_with_max_top_logprobs(validate::MAX_TOP_LOGPROBS)
+    }
+}
+
+impl NvCreateChatCompletionRequest {
+    /// [`ValidateRequest::validate`], with `top_logprobs` checked against
+    /// `max_top_logprobs` (the serving model's limit) instead of the OpenAI
+    /// limit.
+    pub fn validate_with_max_top_logprobs(
+        &self,
+        max_top_logprobs: u8,
+    ) -> Result<(), anyhow::Error> {
         // Direct Rust callers must obey the same custom-format admission and
         // tool-choice contract as HTTP, without changing their replay payload.
         if self.inner.has_custom_tools() {
             let mut normalized = self.clone();
             normalized.inner.normalize_custom_tools()?;
-            return ValidateRequest::validate(&normalized);
+            return normalized.validate_with_max_top_logprobs(max_top_logprobs);
         }
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
@@ -814,7 +832,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
-        validate::validate_top_logprobs(self.inner.top_logprobs)?;
+        validate::validate_max_logprobs("Top_logprobs", self.inner.top_logprobs, max_top_logprobs)?;
         // `max_tokens` is deprecated but still accepted as a fallback for
         // `max_completion_tokens`, so it must be validated too.
         #[allow(deprecated)]

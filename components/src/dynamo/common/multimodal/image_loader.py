@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES, UUID_ONLY_VARIANT_KEY
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
-UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
 
@@ -387,6 +387,8 @@ class ImageLoader:
                 e.status,
                 describe_media_source(image_url),
             )
+            if message := IMAGE_FETCH_ERROR_MESSAGES.get(e.status):
+                raise HttpStatusError(400, message, image_url) from e
             raise
         except HttpTimeoutError as e:
             logger.error(

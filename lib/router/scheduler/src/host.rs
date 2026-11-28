@@ -16,7 +16,7 @@ pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{
     PotentialLoad, RouterEventSink, RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
-pub use crate::queue::{ClassQueueStats, RuntimePolicyControl};
+pub use crate::queue::{ClassQueueStats, RuntimePolicyControl, classify_inputs, dispatch_head_of};
 pub use crate::replication::{
     AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
     ReplicaSyncConfig, SchedulerLoadSink,
@@ -29,7 +29,7 @@ pub use crate::selection::core::{
 };
 pub use crate::selection::ingress::{KvEventIngress, LocalIndexIngress};
 pub use crate::selection::input::{PromptRequest, PromptView};
-pub use crate::selection::membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
+pub use crate::selection::membership::{CatalogReconciler, WorkerCatalogSource};
 pub use crate::selection::pending::SelectionCacheConfig;
 /// The service request and response DTOs a host or the composed router's HTTP server hands in
 /// and gets back.
@@ -45,7 +45,9 @@ pub use crate::selection::types::{SelectionWorkerConfig, WorkerCatalogRecord, Wo
 pub use crate::selector::DefaultWorkerSelector;
 /// The synchronous selection entry a host or a replay harness drives directly, and the
 /// reference selector tests compare against.
-pub use crate::selector::{WorkerCapacityExt, WorkerSelectionInput, WorkerSelector};
+pub use crate::selector::{
+    WorkerCapacityExt, WorkerInfoExt, WorkerSelectionInput, WorkerSelector, worker_input_rows,
+};
 pub use crate::shared_cache::SharedKvCache;
 pub use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};
 pub use crate::tracking_hash::{TrackingHashConfig, TrackingHashContext};

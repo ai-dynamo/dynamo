@@ -29,6 +29,47 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
 }
 
 #[test]
+fn causal_scoring_request_survives_the_native_format_boundary() {
+    let native = dynamo_llm::protocols::systemone::causal_scoring_request(
+        &[1, 2, 3],
+        &[20, 10],
+        "request-cache-scope",
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&native).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body: &body,
+            headers: &headers,
+            default_request_id: "scoring-request",
+        })
+        .unwrap();
+    opened.validation.unwrap();
+    let bound = (opened.bind)(&routing_metadata(16, false, None)).unwrap();
+    let request = bound.request;
+    assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+    assert_eq!(request.stop_conditions.max_tokens, Some(1));
+    let routing = request.routing.unwrap();
+    assert_eq!(routing.expected_output_tokens, Some(1));
+    assert_eq!(
+        routing.cache_namespace.as_deref(),
+        Some("request-cache-scope")
+    );
+    let envelope = &request.extra_args.unwrap()["vllm_tito"];
+    assert_eq!(
+        envelope["sampling_params"]["logprob_token_ids"],
+        json!([20, 10])
+    );
+    assert_eq!(envelope["sampling_params"]["max_tokens"], 1);
+    assert_eq!(envelope["cache_salt"], "request-cache-scope");
+}
+
+#[test]
 fn model_alias_is_canonicalized_only_when_the_client_supplies_a_model() {
     for model in [None, Some("public-alias")] {
         let mut body = json!({"token_ids":[1], "sampling_params":{}});

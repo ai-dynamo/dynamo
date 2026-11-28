@@ -6,9 +6,11 @@
 //!
 //! - [`services::selection`]: `SelectionService` and `SelectionServiceBuilder`, the composed
 //!   router an embedding host or the standalone service runs.
-//! - [`plugins`]: the plugin registry (`RouterPluginRegistry`, `RouterPlugins`) and the
-//!   worker-selection and request-classifier contracts; [`plugins::prelude`] is the single
-//!   import a statically linked plugin needs.
+//! - [`plugins`]: the plugin registry (`RouterPluginRegistry`) and the worker-selection and
+//!   request-classifier plugin APIs; a statically linked plugin needs one import,
+//!   `plugins::worker_selection` or `plugins::request_classifier`. [`plugins::experimental`]
+//!   holds the APIs with no compatibility promise, and [`plugins::host`] what a routing host
+//!   names.
 //! - [`config`]: the flat `KvRouterConfig` with its CLI, environment, and policy-file parsers,
 //!   converted once into the kernel's validated configuration; [`scheduling::policy_config`]
 //!   is the YAML policy file and its resolver.
@@ -40,20 +42,19 @@ pub use compat::DefaultWorkerSelector;
 pub use compat::{
     ActiveSequencesMultiWorker, AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask,
     BranchShardedIndexer, ClusterId, ConcurrentRadixTreeCompressed, ConditionalDisaggPolicyKind,
-    DEFAULT_ROUTING_GROUP, FcfsPolicy, KvCacheEventError, KvRouterConfig, KvSchedulerError,
+    DEFAULT_ROUTING_GROUP, KvCacheEventError, KvRouterConfig, KvSchedulerError,
     KvTransferEnforcement, LocalBlockHash, LocalScheduler, LogicalNode, LoraWorkerFilter,
     LowerTierContinuation, LowerTierIndexer, NodeId, NoopSequencePublisher, OverlapScores,
     PositionalIndexer, PotentialLoad, PrefillLoadEstimator, PrefillTokenDeltas, RadixTree,
     ReplicaWorkerPolicy, RequestId, RouterConfigOverride, RouterEvent, RouterEventSink,
-    RouterPrefillLoadModel, RouterQueuePolicy, RouterSchedulingPolicy, RoutingPartitionId,
-    RoutingPartitionRef, SchedulerQueue, SchedulingPolicy, SchedulingRequest, SchedulingResponse,
-    SequenceError, SequencePublisher, SequenceRequest, SequenceSubscriber, SessionContext,
-    SessionId, SessionPrefixIndexError, SessionPrefixIndexer, SessionResidencyOwner,
-    SharedCacheBackend, SharedCacheHits, SharedCacheType, SharedKvCache, SyncIndexer,
-    ThreadPoolIndexer, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerConfigLike, WorkerId, WorkerLoadProjection, WorkerSelectionInput,
-    WorkerSelectionInputTrigger, WorkerSelectionPolicyError, WorkerSelector, WorkerType,
-    WsptPolicy, approx, compute_block_hash_for_seq, concurrent_radix_tree_compressed,
+    RouterPrefillLoadModel, RouterQueuePolicy, RoutingPartitionId, RoutingPartitionRef,
+    SchedulerQueue, SchedulingRequest, SchedulingResponse, SequenceError, SequencePublisher,
+    SequenceRequest, SequenceSubscriber, SessionContext, SessionId, SessionPrefixIndexError,
+    SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend, SharedCacheHits,
+    SharedCacheType, SharedKvCache, SyncIndexer, ThreadPoolIndexer, TrackingHashAlgorithm,
+    TrackingHashContext, TrackingHashScope, WorkerConfigLike, WorkerId, WorkerLoadProjection,
+    WorkerSelectionInput, WorkerSelectionInputTrigger, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerType, approx, compute_block_hash_for_seq, concurrent_radix_tree_compressed,
     conditional_disagg, identity, indexer, kv_hints, multi_worker_sequence, nested_map, protocols,
     queue, radix_tree, recovery, selector, sequence, sequences, session_prefix_index, worker_type,
     zmq_wire,

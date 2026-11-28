@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.common.snapshot import restore_context
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     write_snapshot_restore_context,
 )
 from dynamo.vllm import snapshot
+from dynamo.vllm.handlers import VllmEnginePauseController
 from dynamo.vllm.publisher import StatLoggerFactory
 
 pytestmark = [
@@ -54,6 +56,78 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
     assert config.engine_args.enable_sleep_mode is True
 
 
+class _CheckpointLifecycleEngine:
+    """vLLM 0.34's lifecycle: prepare refuses a sleeping engine and drains."""
+
+    def __init__(self):
+        self.sleeping = False
+        self.state = "running"
+        self.worker_calls = []
+
+    async def pause_generation(self):
+        pass
+
+    async def release_kv_cache_memory(self):
+        self.sleeping = True
+
+    async def sleep(self):
+        self.sleeping = True
+
+    async def collective_rpc(self, method):
+        self.worker_calls.append(method)
+
+    async def checkpoint_prepare(self):
+        if self.sleeping:
+            return "Preparing for a checkpoint requires an awake engine"
+        self.state = "preparing"
+        return None
+
+    async def checkpoint_state(self):
+        state = self.state
+        if state == "preparing":
+            self.state, self.sleeping = "prepared", True
+        return state, None
+
+    async def checkpoint_restore(self):
+        self.state, self.sleeping = "running", False
+
+    async def wake_up(self):
+        pass
+
+    async def resume_generation(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pause_prepares_checkpoint_on_awake_engine(monkeypatch):
+    poll_delay = AsyncMock()
+    monkeypatch.setattr(snapshot.asyncio, "sleep", poll_delay)
+    engine = _CheckpointLifecycleEngine()
+    controller = VllmEnginePauseController(
+        snapshot._ReleaseOnlyKvCache(engine), prepare_for_process_checkpoint=True
+    )
+
+    assert await controller.pause(None) is True
+    assert engine.state == "prepared"
+    poll_delay.assert_awaited_once_with(0.05)
+    assert await controller.resume() is True
+    assert engine.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_gms_snapshot_pause_prepares_workers_after_sleep():
+    engine = _CheckpointLifecycleEngine()
+    controller = VllmEnginePauseController(
+        snapshot._GmsCheckpoint(engine), prepare_for_process_checkpoint=True
+    )
+
+    assert await controller.pause(None) is True
+    assert engine.sleeping
+    assert engine.worker_calls == ["checkpoint_prepare"]
+    assert await controller.resume() is True
+    assert engine.worker_calls == ["checkpoint_prepare", "checkpoint_restore"]
+
+
 @pytest.mark.parametrize(
     "restore_pod_name, expected",
     [
@@ -63,6 +137,8 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
 )
 def test_restore_served_model_name(monkeypatch, tmp_path, restore_pod_name, expected):
     monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+    # Read the legacy context instead of the test runner's real ancestors.
+    monkeypatch.setattr(restore_context, "_PROC_ROOT", tmp_path / "proc")
     if restore_pod_name is None:
         monkeypatch.delenv("DYN_SERVED_MODEL_NAME", raising=False)
     else:

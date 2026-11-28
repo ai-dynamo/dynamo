@@ -393,15 +393,25 @@ async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
         assert "https://example.com/img.png" in exc_info.value.url
 
 
-async def test_http_status_error_propagated(loader: ImageLoader) -> None:
-    """HTTP 4xx/5xx should propagate as HttpStatusError."""
-    error = HttpStatusError(404, "Not Found", "https://example.com/img.png")
+@pytest.mark.parametrize("status", [403, 404, 503])
+async def test_http_status_error_propagated(loader: ImageLoader, status: int) -> None:
+    url = "https://example.com/img.png?signature=SECRET"
+    error = HttpStatusError(status, "private origin details: SECRET", url)
     mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(HttpStatusError) as exc_info:
-            await loader.load_image("https://example.com/img.png")
-        assert exc_info.value.status == 404
-        assert exc_info.value is error
+            await loader.load_image(url)
+    raised = exc_info.value
+    if status == 503:
+        assert raised.status == status
+        assert raised is error
+    else:
+        assert raised.status == 400
+        assert raised.__cause__ is error
+        assert raised.url == url
+        assert raised.message.startswith(f"Image download returned HTTP {status}.")
+        assert "resend the image data before retrying" in raised.message
+        assert "SECRET" not in raised.message
 
 
 @pytest.mark.parametrize(

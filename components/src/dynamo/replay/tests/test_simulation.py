@@ -25,6 +25,8 @@ from aisim.sweeper.replay import (
     ReplaySpec,
 )
 
+from dynamo.llm import AisPerfConfig
+from dynamo.mocker.config import performance_config
 from dynamo.replay import (
     PlannerReplayDetails,
     ReplayReport,
@@ -33,6 +35,7 @@ from dynamo.replay import (
 )
 from dynamo.replay import api as replay_api
 from dynamo.replay import run_trace_replay, simulation
+from tests.utils.ais_perf_model import AGGREGATED_ENTRY, IDENTITY
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -855,6 +858,8 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_live_warmup=supported,
         supports_agentic_profile=supported,
         supports_state_cache=supported,
+        supports_weka_client=supported,
+        supports_weka_chat_template=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -867,6 +872,8 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_live_warmup is supported
     assert capabilities.supports_agentic_profile is supported
     assert capabilities.supports_state_cache is supported
+    assert capabilities.supports_weka_client is supported
+    assert capabilities.supports_weka_chat_template is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 
@@ -892,10 +899,14 @@ def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
     # A depth written as aic_nextn or nextn is refused with host offload by a
     # general check, before the agentic G2 check that refuses the other form.
+    # Each pattern is the start of the AISim message from its own check, so a
+    # refusal from the other check fails the test.
     refusal = (
-        "requires speculative decoding disabled"
+        "^agentic host offload requires canonical mtp speculation"
+        " or speculative decoding disabled"
         if alias == "speculation"
-        else "requires canonical mtp speculation"
+        else "^native_host_offload with speculative decoding"
+        " requires canonical mtp speculation"
     )
     with pytest.raises(ValueError, match=refusal):
         capabilities.require_compatible(spec)
@@ -1015,7 +1026,12 @@ def _write_weka_trace(path, block_size):
 
 @pytest.mark.timeout(30)
 def test_agentic_replay_matches_the_engine_stack(tmp_path):
-    """Live warmup on a hybrid (state-cache) engine replays as on the engine stack."""
+    """An AgentX workload on a state-cache engine replays behind the KV router as on
+    the engine stack.
+
+    The engine stack has no router hook. With one worker, the KV router must leave
+    every per-request record unchanged apart from its own overlap scores.
+    """
 
     block_size = 64
     trace = tmp_path / "agentic.jsonl"
@@ -1040,6 +1056,14 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path):
             "load_type": "trace_timestamps",
             "trace_format": "weka",
             "trace_path": str(trace),
+            "weka_client": "agentx",
+            "weka_chat_template": {
+                "request_tokens": 5,
+                "user_tokens": 7,
+                "assistant_tokens": 6,
+                "tail_tokens": 2,
+                "append_tail_tokens": 1,
+            },
             "agentic_lanes": 8,
             "agentic_snapshot": {"seed": 42},
             "agentic_warmup": True,
@@ -1054,18 +1078,71 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path):
         },
         goal={"target": "throughput"},
     )
+    routed = replace(
+        spec,
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        # prefix_match_unit does not export KV events, so the
+                        # router keeps its approximate index, as in production.
+                        config={
+                            "router_mode": "kv_router",
+                            "router_config": {"use_kv_events": False},
+                        },
+                    ),
+                )
+            )
+        },
+    )
     requirements = ReplayOutputRequirements(capture_per_request=True)
-    dynamo, engine = (
-        factory().create(0).run(spec, output_requirements=requirements)
-        for factory in (
-            simulation.DynamoReplayRunnerFactory,
-            simulation.EngineReplayRunnerFactory,
-        )
+    dynamo = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(0)
+        .run(routed, output_requirements=requirements)
+    )
+    engine = (
+        simulation.EngineReplayRunnerFactory()
+        .create(0)
+        .run(spec, output_requirements=requirements)
     )
 
+    # Only the router's own scores differ: the engine stack routes without
+    # scoring, so it reports no overlap.
+    router_scores = {
+        "reported_overlap_tokens",
+        "selected_overlap_blocks",
+        "best_available_overlap_blocks",
+        "overlap_regret_blocks",
+    }
+
+    def without_router_scores(records):
+        return [
+            {
+                **record,
+                "routing_history": [
+                    {k: v for k, v in hop.items() if k not in router_scores}
+                    for hop in record["routing_history"]
+                ],
+            }
+            for record in records
+        ]
+
     records = dynamo.metadata["native_report"]["per_request"]
-    assert records == engine.metadata["native_report"]["per_request"]
+    assert without_router_scores(records) == without_router_scores(
+        engine.metadata["native_report"]["per_request"]
+    )
     assert len(records) > 100
+    # The router matched shared prefixes. Without the KV router (the hook not
+    # reaching native replay) the score is null and this fails.
+    assert any(
+        (hop["selected_overlap_blocks"] or 0) > 0
+        for record in records
+        for hop in record["routing_history"]
+    )
     assert dynamo.metadata["agentic_phases"] == engine.metadata["agentic_phases"]
     assert dynamo.metadata["agentic_phases"]["warmup_policy"] == "live_trajectory_v1"
     # Wall-clock rates differ between the runs.
@@ -1380,3 +1457,136 @@ def test_shared_g2_launch_rejects_unsupported_backend(backend):
                 "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
             }
         )
+
+
+@pytest.fixture
+def native_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each native replay call; the stand-in raises."""
+    calls: list[dict] = []
+
+    def record(*_args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", record)
+    return calls
+
+
+def _replay_with_router_hook(deployment, **hook_config) -> ReplaySpec:
+    config = {
+        "router_mode": "kv_router",
+        "router_config": {"router_prefill_load_model": "ais"},
+        **hook_config,
+    }
+    hook = RuntimeHookSpec(
+        provider="dynamo.router", kind="placement_policy", api_version=1, config=config
+    )
+    return ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+        adapters={"dynamo.router": AdapterReplaySpec(runtime_hooks=(hook,))},
+    )
+
+
+def _with_ais_perf_model(deployment, role: str) -> BackendDeploymentSpec:
+    """Return ``deployment`` with an AIS perf model on the engine of ``role``."""
+    name = "agg_engine_args" if role == "aggregated" else f"{role}_engine_args"
+    engine_args = {
+        **getattr(deployment, name),
+        # Given so that the launch config needs no model lookup.
+        "num_gpu_blocks": 1024,
+        "timing_model": {
+            "type": "external",
+            "provider": "ais",
+            "config": {**IDENTITY, "worker_type": role},
+        },
+    }
+    return replace(deployment, **{name: engine_args})
+
+
+# The engine whose perf model the router reads, in each deployment mode.
+_ROUTED_ENGINES = pytest.mark.parametrize(
+    ("deployment", "role"),
+    [(_agg_deployment(), "aggregated"), (_disagg_deployment(), "prefill")],
+    ids=["agg", "disagg"],
+)
+
+
+def test_router_hook_mapping_reaches_native_trace_call(native_calls) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment(), ais_perf_config=AGGREGATED_ENTRY
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    (call,) = native_calls
+    assert (
+        call["ais_perf_config"].to_dict()
+        == AisPerfConfig(config=AGGREGATED_ENTRY).to_dict()
+    )
+
+
+@_ROUTED_ENGINES
+def test_use_engine_marker_fills_router_config_from_engine(
+    deployment, role, native_calls
+) -> None:
+    deployment = _with_ais_perf_model(deployment, role)
+    replay = _replay_with_router_hook(
+        deployment, ais_perf_config=None, ais_perf_config_from_engine=True
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    (call,) = native_calls
+    router_config = call["ais_perf_config"].to_dict()
+    # What the deployment writes for the engine of that role.
+    written = {**IDENTITY, "worker_type": role}
+    assert {key: router_config[key] for key in written} == written
+    # The rest is the engine's config too.
+    engine_config = performance_config(
+        simulation.DynamoReplayRunner._engine_args(deployment, role)
+    )
+    assert router_config == AisPerfConfig(config=engine_config).to_dict()
+
+
+@_ROUTED_ENGINES
+def test_use_engine_marker_without_engine_perf_model_error(
+    deployment, role, native_calls
+) -> None:
+    replay = _replay_with_router_hook(deployment, ais_perf_config_from_engine=True)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^router\.ais_perf_model: \{use: engine\} needs an AIS perf model on "
+        f"the {role} engine; it has none$",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_calls == []
+
+
+@pytest.mark.parametrize(
+    ("hook_config", "error", "message"),
+    [
+        ({"ais_perf_config_from_engine": False}, TypeError, "must be true or absent"),
+        ({"ais_perf_config_from_engine": 1}, TypeError, "must be true or absent"),
+        (
+            {"ais_perf_config": AGGREGATED_ENTRY, "ais_perf_config_from_engine": True},
+            ValueError,
+            "has both ais_perf_config and ais_perf_config_from_engine",
+        ),
+    ],
+    ids=["false", "one", "with mapping"],
+)
+def test_use_engine_marker_must_be_true_and_without_mapping(
+    hook_config, error, message, native_calls
+) -> None:
+    replay = _replay_with_router_hook(_agg_deployment(), **hook_config)
+
+    with pytest.raises(error, match=message):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_calls == []

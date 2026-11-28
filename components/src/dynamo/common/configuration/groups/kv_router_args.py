@@ -650,6 +650,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Startup-only YAML configuration for shared router settings, "
                 "policy-class queues, per-role worker-selection policies, and hint policies. "
+                "On the frontend it needs no --router-mode: the file selects each "
+                "role's policy, and any --router-mode other than kv is an error. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
