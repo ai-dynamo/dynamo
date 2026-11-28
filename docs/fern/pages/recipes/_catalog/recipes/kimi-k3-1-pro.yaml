@@ -163,6 +163,80 @@ targets:
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3.1-pro/perf/perf.yaml
+- id: vllm-agg-b300
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - tp8
+  workload:
+    type: functional-validation
+    traffic: Experimental, functional-only
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-b300
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - tp8
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl
+  workload:
+    type: functional-validation
+    traffic: Experimental, functional-only
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-b300-multimodal
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - tp8
+  - multimodal
+  workload:
+    type: functional-validation
+    traffic: Experimental, functional-only
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-b300-multimodal
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - tp8
+  - disaggregated-prefill-decode
+  - multimodal
+  workload:
+    type: functional-validation
+    traffic: Experimental, functional-only
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml
+  expected_performance:
+    available: false
 - id: vllm-agg-vr200
   recommended: false
   hardware:
