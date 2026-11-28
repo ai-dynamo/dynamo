@@ -746,6 +746,7 @@ fn bind_native(
         .map_err(|error| anyhow::anyhow!(error.message))?;
     (opened.bind)(&Worker {
         model,
+        engine_info: &serde_json::Value::Null,
         kv_cache_block_size,
         lora_name: None,
         tower_connector_lora_enabled: false,

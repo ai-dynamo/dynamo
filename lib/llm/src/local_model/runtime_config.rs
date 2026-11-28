@@ -50,6 +50,11 @@ pub const DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY: &str = "direct_kv_events_endpo
 pub const DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY: &str =
     "direct_kv_events_idempotent_stores";
 
+/// Runtime-data key under which a worker advertises engine facts its
+/// `/generate` format needs, such as engine-side defaults. Absent on older
+/// workers.
+pub const GENERATE_ENGINE_INFO_RUNTIME_KEY: &str = "generate_engine_info";
+
 /// Runtime-data key indicating speculative decoding is configured by a backend.
 pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 
