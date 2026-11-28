@@ -195,4 +195,4 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 
 - [贡献指南](../../community/contributing/overview.md) -- 贡献代码的工作流
 - [示例](https://github.com/ai-dynamo/dynamo/tree/main/examples) -- 探索代码库
-- [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) -- 查找可以着手处理的任务
+- [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue) -- 查找可以着手处理的任务
