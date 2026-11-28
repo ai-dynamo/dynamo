@@ -20,6 +20,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import signal
 import socket
@@ -112,9 +113,12 @@ class TokenspeedLLMEngine(LLMEngine):
         self._encoder: Any = None
         self._request_cls: Any = None
         self._sampling_params_cls: Any = None
-        # Each in-flight request's state, by request id: the one place a
-        # request lives in the worker, removed when its generate() ends.
+        # Each in-flight request's state, by native request id: the one place
+        # a request lives in the worker, removed when its generate() ends.
         self._requests: dict[str, _Request] = {}
+        # The same states by public request id. A migrated retry keeps its
+        # public id and may run here beside the attempt it replaces.
+        self._dispatches: dict[str, list[_Request]] = {}
         self._background: set[asyncio.Task] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dispatcher: asyncio.Task | None = None
@@ -397,13 +401,20 @@ class TokenspeedLLMEngine(LLMEngine):
             # TokenSpeed runs a prefill request on rank room % dp_size, where
             # decode looks for its KV cache; the room already carries the rank.
             dp_rank = None
-        rid = context.id() or uuid.uuid4().hex
+        public_id = context.id() or uuid.uuid4().hex
+        # Each dispatch gets its own native rid, so a retry with the same
+        # public id neither shares output nor abort with the earlier attempt.
+        while True:
+            rid = f"{public_id}-{random.getrandbits(32):08x}"
+            if rid not in self._requests:
+                break
         frames = self._encode_request(
             rid, request.get("token_ids", []), sampling_params, bootstrap, dp_rank
         )
 
-        state = _Request()
+        state = _Request(rid, context)
         self._requests[rid] = state
+        self._dispatches.setdefault(public_id, []).append(state)
         finished = False
         try:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -451,8 +462,11 @@ class TokenspeedLLMEngine(LLMEngine):
                     finished = "finish_reason" in chunk
                     yield chunk
         finally:
-            if self._requests.get(rid) is state:
-                del self._requests[rid]
+            del self._requests[rid]
+            dispatches = self._dispatches[public_id]
+            dispatches.remove(state)
+            if not dispatches:
+                del self._dispatches[public_id]
             if state.ended is not None and not state.ended.done():
                 state.ended.set_result(None)
             if state.submitted and not finished and self._failure is None:
@@ -497,10 +511,20 @@ class TokenspeedLLMEngine(LLMEngine):
         """Forward the cancellation to the engine, whose final chunk then ends
         the request's stream, as vLLM's and TRT-LLM's handlers do. A request
         that already finished is left alone."""
-        rid = context.id()
-        state = self._requests.get(rid) if rid is not None else None
-        if state is None or state.cancelled:
+        # abort() gets a new Context wrapper, so match by id; only a stopped
+        # or killed attempt qualifies, which spares a live retry.
+        state = next(
+            (
+                state
+                for state in self._dispatches.get(context.id(), ())
+                if not state.cancelled
+                and (state.context.is_stopped() or state.context.is_killed())
+            ),
+            None,
+        )
+        if state is None:
             return
+        rid = state.rid
         state.cancelled = True
         # Before submission the engine does not hold the request yet;
         # generate() then aborts it, or skips submitting it, itself.
@@ -570,9 +594,19 @@ class _Request:
     """An in-flight request: the chunks the dispatcher delivered and the
     caller has not taken yet, and the future its generate() sleeps on."""
 
-    __slots__ = ("chunks", "waiter", "cancelled", "submitted", "ended")
+    __slots__ = (
+        "rid",
+        "context",
+        "chunks",
+        "waiter",
+        "cancelled",
+        "submitted",
+        "ended",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, rid: str, context: Context) -> None:
+        self.rid = rid
+        self.context = context
         self.chunks: list[Any] = []
         self.waiter: asyncio.Future | None = None
         self.cancelled = False
