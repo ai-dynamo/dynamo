@@ -280,14 +280,6 @@ _These flags configure the experimental diffusion pipeline (video and image gene
   Environment variable: `DYN_TRTLLM_TEACACHE_THRESH`
 </ParamField>
 
-<ParamField path="--torch-dtype" type="string" default="bfloat16">
-  Torch data type for diffusion model loading. `bfloat16` is recommended for Ampere and later GPUs.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>bfloat16</Badge> <Badge intent="note" minimal>float16</Badge> <Badge intent="note" minimal>float32</Badge></span>
-
-  Environment variable: `DYN_TRTLLM_TORCH_DTYPE`
-</ParamField>
-
 <ParamField path="--revision" type="string" default="null">
   HuggingFace Hub revision (branch name, tag, or full commit SHA) used when downloading the diffusion model. When unset, the default branch is used.
 

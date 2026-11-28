@@ -362,14 +362,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             diffusion_group,
-            flag_name="--torch-dtype",
-            env_var="DYN_TRTLLM_TORCH_DTYPE",
-            default="bfloat16",
-            choices=["bfloat16", "float16", "float32"],
-            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
-        )
-        add_argument(
-            diffusion_group,
             flag_name="--revision",
             env_var="DYN_TRTLLM_REVISION",
             default=None,
@@ -545,7 +537,6 @@ class DynamoTrtllmConfig(ConfigBase):
     default_num_images_per_prompt: int
     default_num_inference_steps: int
     default_guidance_scale: float
-    torch_dtype: str
     revision: Optional[str] = None
     enable_teacache: bool
     teacache_use_ret_steps: bool
