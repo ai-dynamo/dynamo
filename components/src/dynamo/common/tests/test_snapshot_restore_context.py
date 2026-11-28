@@ -260,6 +260,36 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
     assert config.engine_args.enable_sleep_mode is True
 
 
+@pytest.mark.parametrize("destination_plane", ["quic", None])
+@pytest.mark.parametrize("source", ["proxy", "legacy"])
+async def test_refresh_snapshot_restore_config_refreshes_response_plane(
+    monkeypatch, restore_proxy, source, destination_plane
+):
+    """The destination response plane replaces the captured one, or clears it."""
+    proxy, _ = restore_proxy
+    if source == "proxy":
+        destination_env = b""
+        if destination_plane is not None:
+            destination_env = f"DYN_RESPONSE_PLANE={destination_plane}\0".encode()
+        (proxy / "environ").write_bytes(destination_env)
+    else:
+        monkeypatch.setattr(os, "getppid", lambda: 0)
+        if destination_plane is not None:
+            monkeypatch.setenv("DYN_RESPONSE_PLANE", destination_plane)
+        write_snapshot_restore_context()
+    # Capture-time state after `--response-plane velo`: validate() exported it.
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+    config = SimpleNamespace(response_plane="velo")
+
+    def parse_config():
+        assert os.environ.get("DYN_RESPONSE_PLANE") == destination_plane
+        return restore_context.parse_snapshot_restore_runtime_config([])
+
+    await refresh_snapshot_restore_config(config, parse_config)
+
+    assert config.response_plane == destination_plane
+
+
 async def test_refresh_snapshot_restore_config_supports_async_parser(
     monkeypatch, tmp_path
 ):
