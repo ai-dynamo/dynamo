@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use dynamo_kv_router::plugins::request_classifier::*;
 use serde::Deserialize;
 
-use self::predictor::{Features, MAX_TOKENS, Predictor};
+use self::predictor::{Features, Predictor, backend_priority};
 
 const CLASSIFIER_TYPE: &str = "output_length_prediction";
 // Terminal events clear a request's row, so this only bounds memory if they stop arriving. A
@@ -73,10 +73,6 @@ fn session_key(session_id: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     session_id.hash(&mut hasher);
     hasher.finish()
-}
-
-fn backend_priority(predicted_tokens: f64) -> i32 {
-    -(predicted_tokens.clamp(0.0, MAX_TOKENS).round() as i32)
 }
 
 impl OutputLengthClassifier {

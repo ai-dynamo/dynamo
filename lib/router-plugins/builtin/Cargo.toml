@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "thunderagent_ledger"
 harness = false
+
+[[bench]]
+name = "output_length_replay"
+harness = false

@@ -394,6 +394,56 @@ In this example:
 - The first turns share prefix blocks `[0, 1]`; later turns add only their new input blocks
 - AIPerf adds each live assistant response to its session before sending the next turn
 
+## Native Output-Length Predictor Replay
+
+Use this CPU benchmark to compare the native output-length predictor with and
+without session history. Prepare the pinned Weka trace below. The preparation
+script checks its SHA-256, holds out entire episodes, and orders each episode's
+arrival and completion events. At the same rounded microsecond, completions
+precede arrivals. The native replay takes the prepared event file as input and
+learns a reply only on its completion event.
+
+```bash
+curl -fLO https://huggingface.co/datasets/semianalysisai/cc-traces-weka-with-subagents-060526/resolve/8a5df339ba3c31a48dd79a2f5ceb81e08679266b/traces.jsonl
+out=$(mktemp -d)
+python3 benchmarks/router/output_length_replay.py prepare \
+  --trace traces.jsonl --output "$out/input"
+
+for arm in history no-history; do
+  cargo bench --locked -p dynamo-router-policies --bench output_length_replay -- \
+    replay "$out/input/events.tsv" "$arm" "$out/$arm.tsv" "$out/$arm.json"
+  cargo bench --locked -p dynamo-router-policies --bench output_length_replay -- \
+    churn 80000 "$arm" "$out/churn-$arm.json"
+done
+
+python3 benchmarks/router/output_length_replay.py score \
+  --requests "$out/input/requests.tsv" --history "$out/history.tsv" \
+  --no-history "$out/no-history.tsv" --output "$out/score.json"
+```
+
+The replay fits each model on the training episodes, then holds its fitted
+ridge or tree model fixed during held-out scoring. It continues to learn session
+history from completed held-out replies. Each mode trains and scores with the
+same history setting. The no-history mode supplies no session key in either
+phase.
+
+The scorer reports token MAE and the classifier's priority order for requests
+with overlapping waits for first output within the same episode and model. It
+reports strict inversions, ties, and correct orderings separately, plus the
+transition between those outcomes for each pair across the two modes. The
+overlap uses API timestamps as an offline proxy for competition. Queue TTFT and
+actual throughput require a serving experiment.
+
+On Linux, each mode reports thread CPU P50 and P99 for the predictor and its
+completion-feedback call, plus final process RSS and lifetime peak RSS. The CPU
+samples cover the native calls during held-out replay and include timer overhead.
+Timing differences include differences in the models fitted with each setting.
+RSS covers the process including its models and replay harness. Run modes in
+separate processes on the same CPU set and alternate their order for timing
+comparisons. `churn` feeds one predictor
+unique session keys to exercise table eviction. Eviction samples are reported
+separately because rare scans can fall outside the ordinary feedback P99.
+
 ## Benchmarking Results
 
 We benchmarked the Dynamo KV Router against a baseline round-robin routing strategy to evaluate the performance benefits of cache-aware routing. The experiments were conducted using deepseek-ai/DeepSeek-R1-Distill-Llama-8B on 8 L40S GPUs under aggregated serving, with the following configuration:
