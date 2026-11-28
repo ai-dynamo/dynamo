@@ -265,11 +265,7 @@ impl KvEventSender {
 /// queued before it.
 ///
 /// NOTE: this only orders mutations already in this queue. Routing decisions
-/// (`routing_rx`) are applied after pending mutations (#18519), and
-/// `WorkerRegistry::deregister` cancels a listener without waiting for it to exit,
-/// so the rest of an in-flight batch can still land after the removal (#18518).
-/// TODO(#18518): await listener exit in `WorkerRegistry::deregister`, or fence stale
-/// events by worker generation.
+/// (`routing_rx`) are applied after pending mutations (#18519).
 fn apply_mutation(
     trie: &mut RadixTree,
     approximate_lru_lane: &mut ApproximateLruLane,

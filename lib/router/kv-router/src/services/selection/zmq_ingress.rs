@@ -183,10 +183,7 @@ impl KvEventIngress for ZmqDirectIngress {
 /// No listeners for `record` (events disabled or a remote primary): drop what
 /// an approximate or side index recorded for the worker.
 async fn remove_worker_from_index(registry: &WorkerRegistry, record: &WorkerCatalogRecord) {
-    if let Some(indexer) = registry
-        .get_indexer(&record.key())
-        .map(|entry| entry.indexer.clone())
-    {
-        indexer.remove_worker(record.worker_id).await;
-    }
+    registry
+        .remove_worker_blocks(record.worker_id, &record.key())
+        .await;
 }
