@@ -50,10 +50,6 @@ static V1_REASONING_PARSER_NAMES: LazyLock<Vec<&'static str>> =
 // logic will not run. The aggregator.rs (non-streaming) half is parser-agnostic
 // and keeps working on both paths — only the streaming side needs porting.
 /// Map Dynamo tool-parser names onto the corresponding v2 registry family.
-#[cfg(test)]
-pub(crate) const V2_FAMILIES: &[&str] =
-    &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
-
 fn v2_family(parser: &str) -> Option<&'static str> {
     match parser {
         "qwen3_coder" => Some("qwen3_coder"),
@@ -218,10 +214,6 @@ fn validate_parser_version_for_mode(
 /// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
 pub(crate) fn supports_family(family: &str) -> bool {
     v2_family(family).is_some()
-}
-
-pub fn unified_family_names() -> &'static [&'static str] {
-    &super::unified_parser::FAMILY_NAMES
 }
 
 /// Resolve the configured family through the shared generation and pair policy.

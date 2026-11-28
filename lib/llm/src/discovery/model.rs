@@ -14,12 +14,12 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
-use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
+use crate::router_config::LoadThresholdConfig;
 
 use crate::types::{
     RealtimeBidirectionalEngine,
@@ -96,7 +96,7 @@ pub(crate) struct GenerateEngineSelection {
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
-    pub(crate) backend: crate::protocols::systemone::ScoringBackend,
+    pub(crate) backend: crate::model_card::ScoringBackend,
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
     pub(crate) card: ModelDeploymentCard,
@@ -1701,10 +1701,7 @@ mod tests {
         });
         model.add_worker_set("ns".into(), workers);
         let selected = model.get_systemone_execution_selection(2).unwrap();
-        assert_eq!(
-            selected.backend,
-            crate::protocols::systemone::ScoringBackend::Sglang
-        );
+        assert_eq!(selected.backend, crate::model_card::ScoringBackend::Sglang);
     }
 
     #[test]

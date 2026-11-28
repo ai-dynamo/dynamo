@@ -28,6 +28,7 @@ pub mod kserve_test {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::model_type::{ModelInput, ModelType};
     use dynamo_llm::protocols::tensor;
+    use dynamo_llm::tensor_model;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
@@ -1228,17 +1229,17 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             name: "tensor".to_string(),
-            inputs: vec![tensor::TensorMetadata {
+            inputs: vec![tensor_model::TensorMetadata {
                 name: "input".to_string(),
-                data_type: tensor::DataType::Int32,
+                data_type: tensor_model::DataType::Int32,
                 shape: vec![3],
                 parameters: Default::default(),
             }],
-            outputs: vec![tensor::TensorMetadata {
+            outputs: vec![tensor_model::TensorMetadata {
                 name: "output".to_string(),
-                data_type: tensor::DataType::Bool,
+                data_type: tensor_model::DataType::Bool,
                 shape: vec![-1],
                 parameters: Default::default(),
             }],
@@ -1328,7 +1329,7 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             triton_model_config: Some(buf.clone()),
             ..Default::default()
         });
@@ -1375,17 +1376,17 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             name: "tensor".to_string(),
-            inputs: vec![tensor::TensorMetadata {
+            inputs: vec![tensor_model::TensorMetadata {
                 name: "input".to_string(),
-                data_type: tensor::DataType::Int32,
+                data_type: tensor_model::DataType::Int32,
                 shape: vec![1],
                 parameters: Default::default(),
             }],
-            outputs: vec![tensor::TensorMetadata {
+            outputs: vec![tensor_model::TensorMetadata {
                 name: "output".to_string(),
-                data_type: tensor::DataType::Bool,
+                data_type: tensor_model::DataType::Bool,
                 shape: vec![-1],
                 parameters: Default::default(),
             }],
@@ -1422,7 +1423,7 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             triton_model_config: Some(vec![1, 2, 3, 4, 5]),
             ..Default::default()
         });
@@ -1535,17 +1536,17 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             name: "tensor".to_string(),
-            inputs: vec![tensor::TensorMetadata {
+            inputs: vec![tensor_model::TensorMetadata {
                 name: "input".to_string(),
-                data_type: tensor::DataType::Bytes,
+                data_type: tensor_model::DataType::Bytes,
                 shape: vec![1],
                 parameters: Default::default(),
             }],
-            outputs: vec![tensor::TensorMetadata {
+            outputs: vec![tensor_model::TensorMetadata {
                 name: "output".to_string(),
-                data_type: tensor::DataType::Bool,
+                data_type: tensor_model::DataType::Bool,
                 shape: vec![-1],
                 parameters: Default::default(),
             }],
@@ -1955,17 +1956,17 @@ pub mod kserve_test {
         let mut tensor_card = ModelDeploymentCard::with_name_only("test_tensor_model");
         tensor_card.model_type = ModelType::TensorBased;
         tensor_card.model_input = ModelInput::Tensor;
-        tensor_card.tensor_model_config = Some(tensor::TensorModelConfig {
+        tensor_card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             name: "test_tensor_model".to_string(),
-            inputs: vec![tensor::TensorMetadata {
+            inputs: vec![tensor_model::TensorMetadata {
                 name: "input".to_string(),
-                data_type: tensor::DataType::Int32,
+                data_type: tensor_model::DataType::Int32,
                 shape: vec![1],
                 parameters: Default::default(),
             }],
-            outputs: vec![tensor::TensorMetadata {
+            outputs: vec![tensor_model::TensorMetadata {
                 name: "output".to_string(),
-                data_type: tensor::DataType::Int32,
+                data_type: tensor_model::DataType::Int32,
                 shape: vec![1],
                 parameters: Default::default(),
             }],
@@ -2097,17 +2098,17 @@ pub mod kserve_test {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
-        card.tensor_model_config = Some(tensor::TensorModelConfig {
+        card.tensor_model_config = Some(tensor_model::TensorModelConfig {
             name: "tensor".to_string(),
-            inputs: vec![tensor::TensorMetadata {
+            inputs: vec![tensor_model::TensorMetadata {
                 name: "input".to_string(),
-                data_type: tensor::DataType::Int32,
+                data_type: tensor_model::DataType::Int32,
                 shape: vec![1],
                 parameters: Default::default(),
             }],
-            outputs: vec![tensor::TensorMetadata {
+            outputs: vec![tensor_model::TensorMetadata {
                 name: "output".to_string(),
-                data_type: tensor::DataType::Bool,
+                data_type: tensor_model::DataType::Bool,
                 shape: vec![-1],
                 parameters: Default::default(),
             }],

@@ -2840,7 +2840,7 @@ mod tests {
                     None,
                     false,
                     dynamo_parsers_v2::UnifiedParserStartingState::Response,
-                    unified_parser::MISTRAL_UNIFIED_FAMILY,
+                    crate::parser_family::MISTRAL_UNIFIED_FAMILY,
                 );
                 futures::pin_mut!(parsed);
                 let mut events = Vec::new();

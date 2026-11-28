@@ -701,7 +701,7 @@ impl DeltaAggregator {
         let is_mistral = super::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
-        ) == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
+        ) == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY);
         for choice in aggregator.choices.values_mut() {
             if choice.tool_call_chunks.is_empty() {
                 continue;
@@ -836,7 +836,7 @@ impl DeltaAggregator {
                             }
                         }
                     }
-                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                    Err(error) if family == crate::parser_family::BEAM_UNIFIED_FAMILY => {
                         return Err(DynamoError::builder()
                             .class(dynamo_runtime::error::ErrorClass::Internal)
                             .diagnostic(format!("Invalid Beam tool output: {error}"))
@@ -3079,7 +3079,7 @@ mod tests {
                     None,
                     false,
                     dynamo_parsers_v2::UnifiedParserStartingState::Response,
-                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                    crate::parser_family::MISTRAL_UNIFIED_FAMILY,
                 );
 
                 let response = DeltaAggregator::apply_with_tool_terminal_policy(
@@ -3155,7 +3155,7 @@ mod tests {
             None,
             false,
             dynamo_parsers_v2::UnifiedParserStartingState::Response,
-            super::super::unified_parser::KIMI_K2_UNIFIED_FAMILY,
+            crate::parser_family::KIMI_K2_UNIFIED_FAMILY,
         )
         .collect::<Vec<_>>()
         .await;

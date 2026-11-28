@@ -9,11 +9,11 @@ use image::metadata::Orientation;
 use image::{ColorType, DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
 use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
+use crate::media_config::{ImageDecoder, ImageDecoderLimits};
 use backends::{
     BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
     ImageDecodeRequest, PixelFormat, image_reader_backend, turbojpeg_backend,
@@ -21,94 +21,9 @@ use backends::{
 
 mod backends;
 
-const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
-const ENABLE_LIBJPEG_ENV: &str = "DYN_MM_ENABLE_LIBJPEG";
 // CI-only guard: an enabled JPEG test must exercise TurboJPEG, never its fallback.
 const REQUIRE_LIBJPEG_TURBO_TEST_ENV: &str = "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST";
 static LIBJPEG_TURBO_UNAVAILABLE_WARNING: Once = Once::new();
-
-fn default_enable_libjpeg() -> bool {
-    let value = std::env::var(ENABLE_LIBJPEG_ENV).ok();
-    libjpeg_enabled(value.as_deref())
-}
-
-fn libjpeg_enabled(value: Option<&str>) -> bool {
-    value
-        .and_then(dynamo_runtime::config::parse_bool_opt)
-        .unwrap_or(true)
-}
-
-/// Image decoder limits - can only be set via server config, not runtime kwargs.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ImageDecoderLimits {
-    #[serde(default)]
-    pub max_image_width: Option<u32>,
-    #[serde(default)]
-    pub max_image_height: Option<u32>,
-    /// Maximum allowed total allocation of the decoder in bytes
-    #[serde(default)]
-    pub max_alloc: Option<u64>,
-}
-
-impl Default for ImageDecoderLimits {
-    fn default() -> Self {
-        Self {
-            max_image_width: None,
-            max_image_height: None,
-            max_alloc: Some(DEFAULT_MAX_ALLOC),
-        }
-    }
-}
-
-impl ImageDecoderLimits {
-    fn validate_output(&self, width: u32, height: u32, channels: usize) -> Result<usize> {
-        if self.max_image_width.is_some_and(|limit| width > limit)
-            || self.max_image_height.is_some_and(|limit| height > limit)
-        {
-            anyhow::bail!("Image dimensions exceed configured limits: {width}x{height}");
-        }
-
-        let nbytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(channels as u64))
-            .ok_or_else(|| {
-                anyhow::anyhow!("Image allocation size overflow for dimensions: {width}x{height}")
-            })?;
-        if let Some(limit) = self.max_alloc
-            && nbytes > limit
-        {
-            anyhow::bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
-        }
-        usize::try_from(nbytes)
-            .map_err(|_| anyhow::anyhow!("Image allocation does not fit in usize: {nbytes} bytes"))
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ImageDecoder {
-    #[serde(default)]
-    pub(crate) limits: ImageDecoderLimits,
-    /// Frontend-local backend selection; never part of model or request configuration.
-    #[serde(skip, default = "default_enable_libjpeg")]
-    #[schema(ignore)]
-    pub(crate) enable_libjpeg: bool,
-    /// Copied from [`super::MediaDecoder::apply_exif_orientation`] by the media loader.
-    #[serde(skip)]
-    #[schema(ignore)]
-    pub(crate) apply_exif_orientation: bool,
-}
-
-impl Default for ImageDecoder {
-    fn default() -> Self {
-        Self {
-            limits: ImageDecoderLimits::default(),
-            enable_libjpeg: default_enable_libjpeg(),
-            apply_exif_orientation: false,
-        }
-    }
-}
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -139,7 +54,7 @@ impl Decoder for ImageDecoder {
 
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
-        self.warn_if_libjpeg_unavailable();
+        warn_if_libjpeg_unavailable(self);
 
         let format = image::guess_format(&bytes)?;
         let request = ImageDecodeRequest {
@@ -285,32 +200,24 @@ fn decoded_image_to_media_data(image: DecodedImage) -> Result<DecodedMediaData> 
     Ok(decoded)
 }
 
-impl ImageDecoder {
-    #[doc(hidden)]
-    pub fn with_libjpeg_for_benchmark(mut self, enabled: bool) -> Self {
-        self.enable_libjpeg = enabled;
-        self
-    }
-
-    pub(crate) fn warn_if_libjpeg_unavailable(&self) {
-        if self.enable_libjpeg
-            && turbojpeg_backend().availability() == BackendAvailability::Unavailable
-        {
-            LIBJPEG_TURBO_UNAVAILABLE_WARNING.call_once(|| {
-                if std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some() {
-                    tracing::warn!(
-                        "libjpeg-turbo image decoding is required by \
-                         {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but libturbojpeg could not be loaded; \
-                         JPEG requests will fail"
-                    );
-                } else {
-                    tracing::warn!(
-                        "libjpeg-turbo image decoding is enabled, but libturbojpeg could not be \
-                         loaded; falling back to image::ImageReader for JPEG inputs"
-                    );
-                }
-            });
-        }
+pub(crate) fn warn_if_libjpeg_unavailable(decoder: &ImageDecoder) {
+    if decoder.enable_libjpeg
+        && turbojpeg_backend().availability() == BackendAvailability::Unavailable
+    {
+        LIBJPEG_TURBO_UNAVAILABLE_WARNING.call_once(|| {
+            if std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some() {
+                tracing::warn!(
+                    "libjpeg-turbo image decoding is required by \
+                     {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but libturbojpeg could not be loaded; \
+                     JPEG requests will fail"
+                );
+            } else {
+                tracing::warn!(
+                    "libjpeg-turbo image decoding is enabled, but libturbojpeg could not be \
+                     loaded; falling back to image::ImageReader for JPEG inputs"
+                );
+            }
+        });
     }
 }
 
@@ -318,6 +225,7 @@ impl ImageDecoder {
 mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
+    use crate::media_config::DEFAULT_IMAGE_MAX_ALLOC as DEFAULT_MAX_ALLOC;
     use crate::preprocessor::media::jpeg_turbo;
     use image::{DynamicImage, ImageBuffer};
     use rstest::rstest;
@@ -638,32 +546,6 @@ mod tests {
         assert_eq!(merged.limits.max_alloc, Some(1024));
         assert!(!merged.enable_libjpeg);
         assert!(merged.apply_exif_orientation);
-    }
-
-    // parse_bool_opt owns the accepted spellings; this locks the default-on
-    // behavior and explicit opt-out used by the frontend-local setting.
-    #[test]
-    fn test_libjpeg_defaults_on_unless_explicitly_disabled() {
-        assert!(libjpeg_enabled(None));
-        assert!(libjpeg_enabled(Some("")));
-        assert!(libjpeg_enabled(Some("invalid")));
-        assert!(!libjpeg_enabled(Some("0")));
-    }
-
-    #[test]
-    fn test_libjpeg_selection_is_not_media_config() {
-        let config =
-            serde_json::to_value(ImageDecoder::default().with_libjpeg_for_benchmark(false))
-                .unwrap();
-        assert!(config.get("enable_libjpeg").is_none());
-
-        let decoder: ImageDecoder = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(decoder.enable_libjpeg, default_enable_libjpeg());
-
-        let error =
-            serde_json::from_value::<ImageDecoder>(serde_json::json!({"enable_libjpeg": false}))
-                .unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

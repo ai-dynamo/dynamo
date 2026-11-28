@@ -635,8 +635,8 @@ mod tests {
 
     use dynamo_http_server::metrics::Metrics;
     use dynamo_llm::discovery::{ModelManager, ModelWatcher};
-    use dynamo_llm::entrypoint::RouterConfig;
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_llm::router_config::RouterConfig;
     use dynamo_llm::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
     };

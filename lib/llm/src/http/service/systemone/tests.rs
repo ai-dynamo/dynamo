@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::protocols::systemone::ScoringBackend;
+use crate::model_card::ScoringBackend;
 use async_trait::async_trait;
 use axum::{body::to_bytes, http::StatusCode, response::Response};
 use base64::Engine as _;

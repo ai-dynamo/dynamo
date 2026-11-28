@@ -29,8 +29,9 @@ use dynamo_http_server::{
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
-    NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor, TensorMetadata,
+    NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor,
 };
+use crate::tensor_model::{self, TensorMetadata};
 
 use crate::grpc::service::kserve::inference;
 use crate::grpc::service::kserve::inference::DataType;
@@ -183,28 +184,28 @@ pub async fn tensor_response_stream(
 pub fn kserve_param_to_dynamo(
     key: &str,
     param: &inference::InferParameter,
-) -> Result<tensor::ParameterValue, Status> {
+) -> Result<tensor_model::ParameterValue, Status> {
     param
         .parameter_choice
         .as_ref()
         .ok_or_else(|| Status::invalid_argument(format!("Parameter '{}' has no value", key)))
         .map(|choice| match choice {
-            ParameterChoice::BoolParam(v) => tensor::ParameterValue::Bool(*v),
-            ParameterChoice::Int64Param(v) => tensor::ParameterValue::Int64(*v),
-            ParameterChoice::StringParam(v) => tensor::ParameterValue::String(v.clone()),
-            ParameterChoice::DoubleParam(v) => tensor::ParameterValue::Double(*v),
-            ParameterChoice::Uint64Param(v) => tensor::ParameterValue::Uint64(*v),
+            ParameterChoice::BoolParam(v) => tensor_model::ParameterValue::Bool(*v),
+            ParameterChoice::Int64Param(v) => tensor_model::ParameterValue::Int64(*v),
+            ParameterChoice::StringParam(v) => tensor_model::ParameterValue::String(v.clone()),
+            ParameterChoice::DoubleParam(v) => tensor_model::ParameterValue::Double(*v),
+            ParameterChoice::Uint64Param(v) => tensor_model::ParameterValue::Uint64(*v),
         })
 }
 
 /// Convert Dynamo ParameterValue to KServe InferParameter
-pub fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::InferParameter {
+pub fn dynamo_param_to_kserve(param: &tensor_model::ParameterValue) -> inference::InferParameter {
     let parameter_choice = match param {
-        tensor::ParameterValue::Bool(v) => ParameterChoice::BoolParam(*v),
-        tensor::ParameterValue::Int64(v) => ParameterChoice::Int64Param(*v),
-        tensor::ParameterValue::String(v) => ParameterChoice::StringParam(v.clone()),
-        tensor::ParameterValue::Double(v) => ParameterChoice::DoubleParam(*v),
-        tensor::ParameterValue::Uint64(v) => ParameterChoice::Uint64Param(*v),
+        tensor_model::ParameterValue::Bool(v) => ParameterChoice::BoolParam(*v),
+        tensor_model::ParameterValue::Int64(v) => ParameterChoice::Int64Param(*v),
+        tensor_model::ParameterValue::String(v) => ParameterChoice::StringParam(v.clone()),
+        tensor_model::ParameterValue::Double(v) => ParameterChoice::DoubleParam(*v),
+        tensor_model::ParameterValue::Uint64(v) => ParameterChoice::Uint64Param(*v),
     };
 
     inference::InferParameter {
@@ -216,7 +217,7 @@ pub fn dynamo_param_to_kserve(param: &tensor::ParameterValue) -> inference::Infe
 #[allow(clippy::result_large_err)]
 fn convert_kserve_to_dynamo_params(
     kserve_params: &std::collections::HashMap<String, inference::InferParameter>,
-) -> Result<tensor::Parameters, Status> {
+) -> Result<tensor_model::Parameters, Status> {
     kserve_params
         .iter()
         .map(|(k, v)| kserve_param_to_dynamo(k, v).map(|param_value| (k.clone(), param_value)))
@@ -225,7 +226,7 @@ fn convert_kserve_to_dynamo_params(
 
 /// Convert Dynamo Parameters to KServe parameter map
 fn convert_dynamo_to_kserve_params(
-    dynamo_params: &tensor::Parameters,
+    dynamo_params: &tensor_model::Parameters,
 ) -> std::collections::HashMap<String, inference::InferParameter> {
     dynamo_params
         .iter()
@@ -280,7 +281,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             let mut tensor = Tensor {
                 metadata: TensorMetadata {
                     name: input.name.clone(),
-                    data_type: tensor::DataType::from_str(&input.datatype)
+                    data_type: tensor_model::DataType::from_str(&input.datatype)
                         .map_err(|err| Status::invalid_argument(err.to_string()))?,
                     shape: input.shape.clone(),
                     parameters: tensor_parameters,
@@ -314,42 +315,46 @@ impl tensor::Tensor {
         contents: &inference::InferTensorContents,
     ) -> Result<(), Status> {
         self.data = match self.metadata.data_type {
-            tensor::DataType::Bool => tensor::FlattenTensor::Bool(contents.bool_contents.clone()),
-            tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
+            tensor_model::DataType::Bool => {
+                tensor::FlattenTensor::Bool(contents.bool_contents.clone())
+            }
+            tensor_model::DataType::Uint8 => tensor::FlattenTensor::Uint8(
                 contents.uint_contents.iter().map(|&x| x as u8).collect(),
             ),
-            tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
+            tensor_model::DataType::Uint16 => tensor::FlattenTensor::Uint16(
                 contents.uint_contents.iter().map(|&x| x as u16).collect(),
             ),
-            tensor::DataType::Uint32 => {
+            tensor_model::DataType::Uint32 => {
                 tensor::FlattenTensor::Uint32(contents.uint_contents.clone())
             }
-            tensor::DataType::Uint64 => {
+            tensor_model::DataType::Uint64 => {
                 tensor::FlattenTensor::Uint64(contents.uint64_contents.clone())
             }
-            tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
+            tensor_model::DataType::Int8 => tensor::FlattenTensor::Int8(
                 contents.int_contents.iter().map(|&x| x as i8).collect(),
             ),
-            tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
+            tensor_model::DataType::Int16 => tensor::FlattenTensor::Int16(
                 contents.int_contents.iter().map(|&x| x as i16).collect(),
             ),
-            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(contents.int_contents.clone()),
-            tensor::DataType::Int64 => {
+            tensor_model::DataType::Int32 => {
+                tensor::FlattenTensor::Int32(contents.int_contents.clone())
+            }
+            tensor_model::DataType::Int64 => {
                 tensor::FlattenTensor::Int64(contents.int64_contents.clone())
             }
 
-            tensor::DataType::Float32 => {
+            tensor_model::DataType::Float32 => {
                 tensor::FlattenTensor::Float32(contents.fp32_contents.clone())
             }
 
-            tensor::DataType::Float64 => {
+            tensor_model::DataType::Float64 => {
                 tensor::FlattenTensor::Float64(contents.fp64_contents.clone())
             }
 
-            tensor::DataType::Bytes => {
+            tensor_model::DataType::Bytes => {
                 tensor::FlattenTensor::Bytes(contents.bytes_contents.clone())
             }
-            tensor::DataType::Float16 | tensor::DataType::BFloat16 => {
+            tensor_model::DataType::Float16 | tensor_model::DataType::BFloat16 => {
                 return Err(Status::invalid_argument(format!(
                     "FP16/BF16 tensors must be sent via `raw_input_contents`; \
                      `InferTensorContents` has no typed field for half-precision (input '{}')",
@@ -453,25 +458,25 @@ impl tensor::Tensor {
         // Here we assume little endianess for all types as the KServe protocol doesn't
         // specify the endianness while it should have.
         match self.metadata.data_type {
-            tensor::DataType::Bool => Ok(tensor::FlattenTensor::Bool(
+            tensor_model::DataType::Bool => Ok(tensor::FlattenTensor::Bool(
                 raw_input.iter().map(|&b| b != 0).collect(),
             )),
-            tensor::DataType::Uint8 => Ok(tensor::FlattenTensor::Uint8(
+            tensor_model::DataType::Uint8 => Ok(tensor::FlattenTensor::Uint8(
                 raw_input.chunks_exact(1).map(|chunk| chunk[0]).collect(),
             )),
-            tensor::DataType::Uint16 => Ok(tensor::FlattenTensor::Uint16(
+            tensor_model::DataType::Uint16 => Ok(tensor::FlattenTensor::Uint16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
             )),
-            tensor::DataType::Uint32 => Ok(tensor::FlattenTensor::Uint32(
+            tensor_model::DataType::Uint32 => Ok(tensor::FlattenTensor::Uint32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
             )),
-            tensor::DataType::Uint64 => Ok(tensor::FlattenTensor::Uint64(
+            tensor_model::DataType::Uint64 => Ok(tensor::FlattenTensor::Uint64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -482,25 +487,25 @@ impl tensor::Tensor {
                     })
                     .collect(),
             )),
-            tensor::DataType::Int8 => Ok(tensor::FlattenTensor::Int8(
+            tensor_model::DataType::Int8 => Ok(tensor::FlattenTensor::Int8(
                 raw_input
                     .chunks_exact(1)
                     .map(|chunk| chunk[0] as i8)
                     .collect(),
             )),
-            tensor::DataType::Int16 => Ok(tensor::FlattenTensor::Int16(
+            tensor_model::DataType::Int16 => Ok(tensor::FlattenTensor::Int16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
             )),
-            tensor::DataType::Int32 => Ok(tensor::FlattenTensor::Int32(
+            tensor_model::DataType::Int32 => Ok(tensor::FlattenTensor::Int32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
             )),
-            tensor::DataType::Int64 => Ok(tensor::FlattenTensor::Int64(
+            tensor_model::DataType::Int64 => Ok(tensor::FlattenTensor::Int64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -511,25 +516,25 @@ impl tensor::Tensor {
                     })
                     .collect(),
             )),
-            tensor::DataType::Float16 => Ok(tensor::FlattenTensor::Float16(
+            tensor_model::DataType::Float16 => Ok(tensor::FlattenTensor::Float16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| f16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
             )),
-            tensor::DataType::BFloat16 => Ok(tensor::FlattenTensor::BFloat16(
+            tensor_model::DataType::BFloat16 => Ok(tensor::FlattenTensor::BFloat16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| bf16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
             )),
-            tensor::DataType::Float32 => Ok(tensor::FlattenTensor::Float32(
+            tensor_model::DataType::Float32 => Ok(tensor::FlattenTensor::Float32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
             )),
-            tensor::DataType::Float64 => Ok(tensor::FlattenTensor::Float64(
+            tensor_model::DataType::Float64 => Ok(tensor::FlattenTensor::Float64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -540,7 +545,7 @@ impl tensor::Tensor {
                     })
                     .collect(),
             )),
-            tensor::DataType::Bytes => Err(Status::internal(format!(
+            tensor_model::DataType::Bytes => Err(Status::internal(format!(
                 "Unexpected BYTES type in non-bytes branch for input '{}'",
                 self.metadata.name
             ))),
@@ -749,24 +754,22 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelStreamInferResp
     }
 }
 
-impl tensor::DataType {
-    pub fn to_kserve(&self) -> i32 {
-        match *self {
-            tensor::DataType::Bool => DataType::TypeBool as i32,
-            tensor::DataType::Uint8 => DataType::TypeUint8 as i32,
-            tensor::DataType::Uint16 => DataType::TypeUint16 as i32,
-            tensor::DataType::Uint32 => DataType::TypeUint32 as i32,
-            tensor::DataType::Uint64 => DataType::TypeUint64 as i32,
-            tensor::DataType::Int8 => DataType::TypeInt8 as i32,
-            tensor::DataType::Int16 => DataType::TypeInt16 as i32,
-            tensor::DataType::Int32 => DataType::TypeInt32 as i32,
-            tensor::DataType::Int64 => DataType::TypeInt64 as i32,
-            tensor::DataType::Float16 => DataType::TypeFp16 as i32,
-            tensor::DataType::BFloat16 => DataType::TypeBf16 as i32,
-            tensor::DataType::Float32 => DataType::TypeFp32 as i32,
-            tensor::DataType::Float64 => DataType::TypeFp64 as i32,
-            tensor::DataType::Bytes => DataType::TypeString as i32,
-        }
+pub fn data_type_to_kserve(data_type: &tensor_model::DataType) -> i32 {
+    match *data_type {
+        tensor_model::DataType::Bool => DataType::TypeBool as i32,
+        tensor_model::DataType::Uint8 => DataType::TypeUint8 as i32,
+        tensor_model::DataType::Uint16 => DataType::TypeUint16 as i32,
+        tensor_model::DataType::Uint32 => DataType::TypeUint32 as i32,
+        tensor_model::DataType::Uint64 => DataType::TypeUint64 as i32,
+        tensor_model::DataType::Int8 => DataType::TypeInt8 as i32,
+        tensor_model::DataType::Int16 => DataType::TypeInt16 as i32,
+        tensor_model::DataType::Int32 => DataType::TypeInt32 as i32,
+        tensor_model::DataType::Int64 => DataType::TypeInt64 as i32,
+        tensor_model::DataType::Float16 => DataType::TypeFp16 as i32,
+        tensor_model::DataType::BFloat16 => DataType::TypeBf16 as i32,
+        tensor_model::DataType::Float32 => DataType::TypeFp32 as i32,
+        tensor_model::DataType::Float64 => DataType::TypeFp64 as i32,
+        tensor_model::DataType::Bytes => DataType::TypeString as i32,
     }
 }
 
@@ -778,7 +781,7 @@ impl DataType {
     /// (`TYPE_FP32`). That is the config spelling, not the wire spelling the
     /// `datatype` field carries. Stripping the `TYPE_` prefix is not enough
     /// either: `TYPE_STRING` is `BYTES` on the wire, the same pairing
-    /// [`tensor::DataType::to_kserve`] already encodes in the other direction.
+    /// [`data_type_to_kserve`] already encodes in the other direction.
     pub fn oip_name(&self) -> Option<&'static str> {
         Some(match self {
             DataType::TypeInvalid => return None,
@@ -811,51 +814,6 @@ pub fn kserve_metadata_shape(dims: &[i64], max_batch_size: i32) -> Vec<i64> {
         std::iter::once(-1).chain(dims.iter().copied()).collect()
     } else {
         dims.to_vec()
-    }
-}
-
-impl std::fmt::Display for tensor::DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            tensor::DataType::Bool => write!(f, "BOOL"),
-            tensor::DataType::Uint8 => write!(f, "UINT8"),
-            tensor::DataType::Uint16 => write!(f, "UINT16"),
-            tensor::DataType::Uint32 => write!(f, "UINT32"),
-            tensor::DataType::Uint64 => write!(f, "UINT64"),
-            tensor::DataType::Int8 => write!(f, "INT8"),
-            tensor::DataType::Int16 => write!(f, "INT16"),
-            tensor::DataType::Int32 => write!(f, "INT32"),
-            tensor::DataType::Int64 => write!(f, "INT64"),
-            tensor::DataType::Float16 => write!(f, "FP16"),
-            tensor::DataType::BFloat16 => write!(f, "BF16"),
-            tensor::DataType::Float32 => write!(f, "FP32"),
-            tensor::DataType::Float64 => write!(f, "FP64"),
-            tensor::DataType::Bytes => write!(f, "BYTES"),
-        }
-    }
-}
-
-impl FromStr for tensor::DataType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "BOOL" => Ok(tensor::DataType::Bool),
-            "UINT8" => Ok(tensor::DataType::Uint8),
-            "UINT16" => Ok(tensor::DataType::Uint16),
-            "UINT32" => Ok(tensor::DataType::Uint32),
-            "UINT64" => Ok(tensor::DataType::Uint64),
-            "INT8" => Ok(tensor::DataType::Int8),
-            "INT16" => Ok(tensor::DataType::Int16),
-            "INT32" => Ok(tensor::DataType::Int32),
-            "INT64" => Ok(tensor::DataType::Int64),
-            "FP16" => Ok(tensor::DataType::Float16),
-            "BF16" => Ok(tensor::DataType::BFloat16),
-            "FP32" => Ok(tensor::DataType::Float32),
-            "FP64" => Ok(tensor::DataType::Float64),
-            "BYTES" => Ok(tensor::DataType::Bytes),
-            _ => Err(anyhow::anyhow!("Invalid data type")),
-        }
     }
 }
 
@@ -909,14 +867,14 @@ mod tests {
             vec![
                 RequestedOutput {
                     name: "OUTPUT0".to_string(),
-                    parameters: tensor::Parameters::from([(
+                    parameters: tensor_model::Parameters::from([(
                         "classification".to_string(),
-                        tensor::ParameterValue::Int64(3),
+                        tensor_model::ParameterValue::Int64(3),
                     )]),
                 },
                 RequestedOutput {
                     name: "OUTPUT1".to_string(),
-                    parameters: tensor::Parameters::new(),
+                    parameters: tensor_model::Parameters::new(),
                 },
             ]
         );
@@ -985,9 +943,9 @@ mod tests {
     #[test]
     fn fp16_raw_path_byte_exact_roundtrip() {
         let mut t = tensor::Tensor {
-            metadata: tensor::TensorMetadata {
+            metadata: tensor_model::TensorMetadata {
                 name: "test".to_string(),
-                data_type: tensor::DataType::Float16,
+                data_type: tensor_model::DataType::Float16,
                 shape: vec![8],
                 parameters: Default::default(),
             },
@@ -1010,9 +968,9 @@ mod tests {
     #[test]
     fn bf16_raw_path_byte_exact_roundtrip() {
         let mut t = tensor::Tensor {
-            metadata: tensor::TensorMetadata {
+            metadata: tensor_model::TensorMetadata {
                 name: "test".to_string(),
-                data_type: tensor::DataType::BFloat16,
+                data_type: tensor_model::DataType::BFloat16,
                 shape: vec![4],
                 parameters: Default::default(),
             },
@@ -1032,9 +990,9 @@ mod tests {
         assert_eq!(response.raw_output_contents[0], BF16_GOLDEN_BYTES);
     }
 
-    fn assert_typed_input_rejects_and_hints_raw(dtype: tensor::DataType) {
+    fn assert_typed_input_rejects_and_hints_raw(dtype: tensor_model::DataType) {
         let mut t = tensor::Tensor {
-            metadata: tensor::TensorMetadata {
+            metadata: tensor_model::TensorMetadata {
                 name: "half_input".to_string(),
                 data_type: dtype,
                 shape: vec![0],
@@ -1053,14 +1011,17 @@ mod tests {
 
     #[test]
     fn typed_input_path_rejects_half_precision() {
-        for dtype in [tensor::DataType::Float16, tensor::DataType::BFloat16] {
+        for dtype in [
+            tensor_model::DataType::Float16,
+            tensor_model::DataType::BFloat16,
+        ] {
             assert_typed_input_rejects_and_hints_raw(dtype);
         }
     }
 
     fn assert_typed_output_rejects_and_hints_raw(data: tensor::FlattenTensor) {
         let t = tensor::Tensor {
-            metadata: tensor::TensorMetadata {
+            metadata: tensor_model::TensorMetadata {
                 name: "half_output".to_string(),
                 data_type: data.data_type(),
                 shape: vec![data.len() as i64],
@@ -1093,26 +1054,26 @@ mod tests {
     #[test]
     fn half_precision_dtype_wire_contract() {
         // Display
-        assert_eq!(tensor::DataType::Float16.to_string(), "FP16");
-        assert_eq!(tensor::DataType::BFloat16.to_string(), "BF16");
+        assert_eq!(tensor_model::DataType::Float16.to_string(), "FP16");
+        assert_eq!(tensor_model::DataType::BFloat16.to_string(), "BF16");
 
         // FromStr (inverse of Display)
         assert_eq!(
-            "FP16".parse::<tensor::DataType>().unwrap(),
-            tensor::DataType::Float16
+            "FP16".parse::<tensor_model::DataType>().unwrap(),
+            tensor_model::DataType::Float16
         );
         assert_eq!(
-            "BF16".parse::<tensor::DataType>().unwrap(),
-            tensor::DataType::BFloat16
+            "BF16".parse::<tensor_model::DataType>().unwrap(),
+            tensor_model::DataType::BFloat16
         );
 
-        // to_kserve — protobuf enum wire values.
+        // data_type_to_kserve — protobuf enum wire values.
         assert_eq!(
-            tensor::DataType::Float16.to_kserve(),
+            data_type_to_kserve(&tensor_model::DataType::Float16),
             inference::DataType::TypeFp16 as i32
         );
         assert_eq!(
-            tensor::DataType::BFloat16.to_kserve(),
+            data_type_to_kserve(&tensor_model::DataType::BFloat16),
             inference::DataType::TypeBf16 as i32
         );
     }
@@ -1124,29 +1085,29 @@ mod oip_datatype_tests {
 
     /// The two branches of `model_metadata` must name a datatype the same way.
     ///
-    /// The Dynamo branch emits `tensor::DataType`'s `Display`; the Triton branch
-    /// emits `oip_name`. `to_kserve` already pairs the two enums, so composing it
+    /// The Dynamo branch emits `tensor_model::DataType`'s `Display`; the Triton branch
+    /// emits `oip_name`. `data_type_to_kserve` already pairs the two enums, so composing it
     /// with `oip_name` has to land back on the same string. This is what fails if
     /// `oip_name` is ever written as "strip the `TYPE_` prefix": `TYPE_STRING`
     /// would become `STRING`, but the wire name is `BYTES`.
     #[test]
     fn both_metadata_branches_agree_on_every_datatype_name() {
         for dt in [
-            tensor::DataType::Bool,
-            tensor::DataType::Uint8,
-            tensor::DataType::Uint16,
-            tensor::DataType::Uint32,
-            tensor::DataType::Uint64,
-            tensor::DataType::Int8,
-            tensor::DataType::Int16,
-            tensor::DataType::Int32,
-            tensor::DataType::Int64,
-            tensor::DataType::Float32,
-            tensor::DataType::Float64,
-            tensor::DataType::Bytes,
+            tensor_model::DataType::Bool,
+            tensor_model::DataType::Uint8,
+            tensor_model::DataType::Uint16,
+            tensor_model::DataType::Uint32,
+            tensor_model::DataType::Uint64,
+            tensor_model::DataType::Int8,
+            tensor_model::DataType::Int16,
+            tensor_model::DataType::Int32,
+            tensor_model::DataType::Int64,
+            tensor_model::DataType::Float32,
+            tensor_model::DataType::Float64,
+            tensor_model::DataType::Bytes,
         ] {
-            let triton = DataType::try_from(dt.to_kserve())
-                .expect("to_kserve must yield a valid model_config DataType");
+            let triton = DataType::try_from(data_type_to_kserve(&dt))
+                .expect("data_type_to_kserve must yield a valid model_config DataType");
             let expected = dt.to_string();
             assert_eq!(
                 triton.oip_name(),

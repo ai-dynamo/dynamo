@@ -11,9 +11,9 @@ use crate::http::service::service_v2 as http_service;
 use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
-use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::{RequestTemplate, resolve_request_model};
+use crate::tensor_model::TensorModelConfig;
 use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm::metrics as env_metrics;
@@ -68,7 +68,8 @@ impl GrpcTuningConfig {
 use crate::grpc::service::dispatch_error_status;
 use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{
-    ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
+    ExtendedNvCreateTensorResponse, data_type_to_kserve, kserve_metadata_shape,
+    tensor_response_stream,
 };
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
@@ -848,7 +849,7 @@ impl GrpcInferenceService for KserveService {
                                 .iter()
                                 .map(|input| ModelInput {
                                     name: input.name.clone(),
-                                    data_type: input.data_type.to_kserve(),
+                                    data_type: data_type_to_kserve(&input.data_type),
                                     dims: input.shape.clone(),
                                     ..Default::default()
                                 })
@@ -858,7 +859,7 @@ impl GrpcInferenceService for KserveService {
                                 .iter()
                                 .map(|output| ModelOutput {
                                     name: output.name.clone(),
-                                    data_type: output.data_type.to_kserve(),
+                                    data_type: data_type_to_kserve(&output.data_type),
                                     dims: output.shape.clone(),
                                     ..Default::default()
                                 })

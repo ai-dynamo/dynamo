@@ -27,13 +27,13 @@ pub(super) enum ActivationSnapshot {
 }
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
-    entrypoint::RouterConfig,
     kv_router::{
         RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource,
         role_routing::{self, DecodeRouting},
     },
     model_card::ModelDeploymentCard,
     protocols::common::timing::WORKER_TYPE_PREFILL,
+    router_config::RouterConfig,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
@@ -665,6 +665,7 @@ mod tests {
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+    use crate::router_config::RouterConfig;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{

@@ -502,7 +502,7 @@ pub trait RawEngine: Send + Sync + 'static {
     ///
     /// Raw media engines leave this unset. Generic tensor engines may expose
     /// their KServe schema or a serialized Triton `ModelConfig`.
-    fn tensor_model_config(&self) -> Option<dynamo_llm::protocols::tensor::TensorModelConfig> {
+    fn tensor_model_config(&self) -> Option<dynamo_llm::tensor_model::TensorModelConfig> {
         None
     }
 }

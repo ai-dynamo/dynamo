@@ -10,7 +10,7 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
+    entrypoint::{ChatEngineFactoryCallback, EngineConfig, input::common},
     http::service::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
@@ -19,6 +19,7 @@ use crate::{
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
+    router_config::RouterConfig,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
@@ -487,8 +488,8 @@ mod tests {
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {
-        use crate::{entrypoint::RouterMode, local_model::LocalModelBuilder};
-        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+        use crate::local_model::LocalModelBuilder;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig, pipeline::RouterMode};
 
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(policy_file.path(), "request_classifier:\n  type: test\n").unwrap();

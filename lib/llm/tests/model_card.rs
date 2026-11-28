@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::common::checked_file::CheckedFile;
+use dynamo_llm::checked_file::CheckedFile;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use dynamo_llm::tokenizers::{

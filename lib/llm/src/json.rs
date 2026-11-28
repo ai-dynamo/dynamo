@@ -3,7 +3,7 @@
 
 /// Sorts object keys at every depth before serialization for checksums and fingerprints.
 /// Array order and scalar values, including number representations, stay unchanged.
-pub(crate) fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
+pub fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(values) => {
             values.iter_mut().for_each(canonicalize_json_object_keys);

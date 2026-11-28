@@ -13,10 +13,9 @@ use crate::local_model::runtime_config::{
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
 };
+use crate::parser_family::unified_family_names;
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::chat_completions::tool_parser_v2::{
-    is_beam_parser, unified_family_names,
-};
+use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
