@@ -1,0 +1,242 @@
+{
+  "DGD": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/current-worker-hash-v2": "e50efdec",
+        "nvidia.com/workload-provider": "grove"
+      },
+      "name": "test",
+      "namespace": "default"
+    },
+    "spec": {
+      "components": [
+        {
+          "name": "worker",
+          "podTemplate": {
+            "metadata": {
+              "annotations": {
+                "dynamo.nvidia.com/gpu-power-limit": "300",
+                "example.com/keep": "yes"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                  "name": "main"
+                }
+              ]
+            }
+          },
+          "replicas": 1,
+          "type": "worker"
+        }
+      ]
+    },
+    "status": {
+      "state": ""
+    }
+  },
+  "PCS": {
+    "metadata": {
+      "name": "test",
+      "namespace": "default",
+      "labels": {
+        "nvidia.com/dynamo-graph-deployment-name": "test"
+      }
+    },
+    "spec": {
+      "replicas": 1,
+      "template": {
+        "cliques": [
+          {
+            "name": "worker",
+            "labels": {
+              "nvidia.com/dynamo-component": "worker",
+              "nvidia.com/dynamo-component-type": "worker",
+              "nvidia.com/dynamo-graph-deployment-name": "test",
+              "nvidia.com/dynamo-namespace": "default-test",
+              "nvidia.com/dynamo-worker-hash": "e50efdec",
+              "nvidia.com/metrics-enabled": "true",
+              "nvidia.com/selector": "test-worker"
+            },
+            "annotations": {
+              "dynamo.nvidia.com/gpu-power-limit": "300",
+              "example.com/keep": "yes"
+            },
+            "spec": {
+              "roleName": "worker",
+              "podSpec": {
+                "volumes": [
+                  {
+                    "name": "shared-memory",
+                    "emptyDir": {
+                      "medium": "Memory",
+                      "sizeLimit": "8Gi"
+                    }
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "main",
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                    "command": [
+                      "/bin/sh",
+                      "-c"
+                    ],
+                    "ports": [
+                      {
+                        "name": "system",
+                        "containerPort": 9090,
+                        "protocol": "TCP"
+                      },
+                      {
+                        "name": "nixl",
+                        "containerPort": 19090,
+                        "protocol": "TCP"
+                      }
+                    ],
+                    "env": [
+                      {
+                        "name": "DYN_COMPONENT",
+                        "value": "worker"
+                      },
+                      {
+                        "name": "DYN_DISCOVERY_BACKEND",
+                        "value": "kubernetes"
+                      },
+                      {
+                        "name": "DYN_FORWARDPASS_METRIC_PORT",
+                        "value": "20380"
+                      },
+                      {
+                        "name": "DYN_HEALTH_CHECK_ENABLED",
+                        "value": "true"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE",
+                        "value": "default-test"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE_WORKER_SUFFIX",
+                        "value": "e50efdec"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAME",
+                        "value": "test"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                        "value": "default"
+                      },
+                      {
+                        "name": "DYN_SYSTEM_ENABLED",
+                        "value": "true"
+                      },
+                      {
+                        "name": "DYN_SYSTEM_PORT",
+                        "value": "9090"
+                      },
+                      {
+                        "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                        "value": "[\"generate\"]"
+                      },
+                      {
+                        "name": "NIXL_TELEMETRY_ENABLE",
+                        "value": "n"
+                      },
+                      {
+                        "name": "NIXL_TELEMETRY_EXPORTER",
+                        "value": "prometheus"
+                      },
+                      {
+                        "name": "NIXL_TELEMETRY_PROMETHEUS_PORT",
+                        "value": "19090"
+                      },
+                      {
+                        "name": "POD_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.name"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_NAMESPACE",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.namespace"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_UID",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.uid"
+                          }
+                        }
+                      }
+                    ],
+                    "resources": {},
+                    "volumeMounts": [
+                      {
+                        "name": "shared-memory",
+                        "mountPath": "/dev/shm"
+                      }
+                    ],
+                    "livenessProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 4,
+                      "periodSeconds": 5,
+                      "failureThreshold": 3
+                    },
+                    "readinessProbe": {
+                      "httpGet": {
+                        "path": "/health",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 4,
+                      "periodSeconds": 10,
+                      "failureThreshold": 3
+                    },
+                    "startupProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 5,
+                      "periodSeconds": 10,
+                      "failureThreshold": 720
+                    }
+                  }
+                ],
+                "restartPolicy": "Always",
+                "terminationGracePeriodSeconds": 60,
+                "securityContext": {
+                  "fsGroup": 1000
+                }
+              },
+              "replicas": 1,
+              "minAvailable": 1
+            }
+          }
+        ],
+        "cliqueStartupType": "CliqueStartupTypeAnyOrder",
+        "headlessServiceConfig": {
+          "publishNotReadyAddresses": true
+        }
+      }
+    },
+    "status": {
+      "updatedReplicas": 0,
+      "availableReplicas": 0
+    }
+  },
+  "UncappedHash": "9a789144",
+  "UncappedDCDDigest": "750ede47777cca9150a187f07024f1dbbfbe6b9a74c5b91945582d237ddc14f6",
+  "UncappedPCSDigest": "e74a46ba8931899b3c9af5b9f76829d53a5fcbe663ec3de3288fdf94857bc0b3"
+}

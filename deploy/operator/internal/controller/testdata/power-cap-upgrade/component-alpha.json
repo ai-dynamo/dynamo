@@ -1,0 +1,82 @@
+{
+  "DGD": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/current-worker-hash-v2": "e50efdec",
+        "nvidia.com/workload-provider": "component"
+      },
+      "name": "test",
+      "namespace": "default"
+    },
+    "spec": {
+      "components": [
+        {
+          "name": "worker",
+          "podTemplate": {
+            "metadata": {
+              "annotations": {
+                "dynamo.nvidia.com/gpu-power-limit": "300",
+                "example.com/keep": "yes"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                  "name": "main"
+                }
+              ]
+            }
+          },
+          "replicas": 1,
+          "type": "worker"
+        }
+      ]
+    },
+    "status": {
+      "state": ""
+    }
+  },
+  "DCD": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/dcd-spec": "{\"version\":1,\"spec\":{},\"rawJSON\":[{\"path\":\"serviceName\",\"nil\":true}]}"
+      },
+      "labels": {
+        "nvidia.com/dynamo-component": "worker",
+        "nvidia.com/dynamo-graph-deployment-name": "test",
+        "nvidia.com/dynamo-namespace": "default-test",
+        "nvidia.com/dynamo-worker-hash": "e50efdec"
+      },
+      "name": "test-worker-e50efdec",
+      "namespace": "default"
+    },
+    "spec": {
+      "name": "worker",
+      "podTemplate": {
+        "metadata": {
+          "annotations": {
+            "dynamo.nvidia.com/gpu-power-limit": "300",
+            "example.com/keep": "yes"
+          },
+          "labels": {
+            "nvidia.com/dynamo-worker-hash": "e50efdec"
+          }
+        },
+        "spec": {
+          "containers": [
+            {
+              "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+              "name": "main"
+            }
+          ]
+        }
+      },
+      "replicas": 1,
+      "type": "worker"
+    }
+  },
+  "UncappedHash": "9a789144",
+  "UncappedDCDDigest": "750ede47777cca9150a187f07024f1dbbfbe6b9a74c5b91945582d237ddc14f6",
+  "UncappedPCSDigest": "e74a46ba8931899b3c9af5b9f76829d53a5fcbe663ec3de3288fdf94857bc0b3"
+}

@@ -14,10 +14,10 @@ Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
      (nvmlDeviceSetPowerManagementLimit) or DCGM (dcgmConfigSet).
 
 Scope is opt-in: the agent only ever caps a GPU whose pod carries the
-dynamo.nvidia.com/gpu-power-limit annotation. That annotation is DGD-owned —
-authored on the worker component's podTemplate (by a human or the profiler)
-and stamped onto each worker pod by the operator at create time; the agent
-reads the live pod annotation and never depends on who wrote it. A GPU running
+dynamo.nvidia.com/gpu-power-limit annotation. For a runtime-managed DGD cap,
+the power controller copies the desired value from the worker configuration
+to the live Pod after creation. The agent reads the live annotation regardless
+of how it arrived. A GPU running
 only unannotated pods — a non-Dynamo workload, or a Dynamo worker not yet
 annotated — that the agent never capped is left at its hardware default and
 untouched. If the agent had previously capped that GPU and the opted-in pod is

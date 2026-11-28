@@ -330,6 +330,7 @@ func GenerateDynamoComponentsDeploymentsFromNormalized(
 	if err != nil {
 		return nil, err
 	}
+	managedCaps := DesiredWorkerPowerCaps(parentDGD)
 	for componentName, component := range components {
 		if component == nil {
 			return nil, fmt.Errorf("normalized component %q is nil", componentName)
@@ -345,6 +346,13 @@ func GenerateDynamoComponentsDeploymentsFromNormalized(
 		)
 		if err != nil {
 			return nil, err
+		}
+		// The same generated worker configuration feeds reconciliation and its hash.
+		if _, managed := managedCaps[componentName]; managed {
+			delete(dcd.Annotations, commonconsts.KubeAnnotationGPUPowerLimit)
+			for _, template := range ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+				delete(template.Annotations, commonconsts.KubeAnnotationGPUPowerLimit)
+			}
 		}
 		deployments[componentName] = dcd
 	}
@@ -2715,6 +2723,7 @@ type cliqueParams struct {
 	operatorConfig              *configv1alpha1.OperatorConfiguration
 	runtimeConfig               *controller_common.RuntimeConfig
 	componentName               string
+	runtimePowerCap             bool
 	checkpointInfo              *checkpoint.CheckpointInfo
 	isMultinode                 bool
 	usesPCSG                    bool
@@ -2766,9 +2775,15 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
+	// Drop managed caps after merging authored metadata into the worker template.
+	metadata := generatePodMetadata(p.component, p.dynamoDeployment, getDGDAlphaComponent(p.dynamoDeployment, p.componentName), p.componentName, p.discoveryContext)
+	if p.runtimePowerCap {
+		delete(metadata.Annotations, commonconsts.KubeAnnotationGPUPowerLimit)
+	}
+
 	// Decorate the completed ordinary template through shared clique assembly.
 	return buildCliqueFromTemplate(p, corev1.PodTemplateSpec{
-		ObjectMeta: generatePodMetadata(p.component, p.dynamoDeployment, getDGDAlphaComponent(p.dynamoDeployment, p.componentName), p.componentName, p.discoveryContext),
+		ObjectMeta: metadata,
 		Spec:       *podSpec,
 	})
 }
@@ -2978,6 +2993,7 @@ func GenerateGrovePodCliqueSet(
 		resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
 	)
 	existingRestartAnnotations := groveRestartAnnotations(existingPodCliqueSet)
+	managedCaps := DesiredWorkerPowerCaps(dynamoDeployment)
 	workerHash := ""
 	if workerHashSuffix {
 		workerHash, err = ComputeDGDWorkersSpecHash(dynamoDeployment)
@@ -2994,6 +3010,7 @@ func GenerateGrovePodCliqueSet(
 		component := sourceComponent.DeepCopy()
 		prepareGroveComponentForRendering(component, existingPodCliqueSet, workerHash)
 		componentName := component.ComponentName
+		_, runtimePowerCap := managedCaps[componentName]
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
@@ -3031,6 +3048,7 @@ func GenerateGrovePodCliqueSet(
 				operatorConfig:              operatorConfig,
 				runtimeConfig:               runtimeConfig,
 				componentName:               componentName,
+				runtimePowerCap:             runtimePowerCap,
 				checkpointInfo:              checkpointInfo,
 				isMultinode:                 isMultinode,
 				usesPCSG:                    usesPCSG,

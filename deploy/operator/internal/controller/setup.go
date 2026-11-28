@@ -10,6 +10,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
+	powercontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/power"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -93,6 +94,11 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
 	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
 		return err
+	}
+	// The power-cap controller queries the podcontroller.ComponentIndex Pod index
+	// that the DGD controller registers below.
+	if err := powercontroller.Setup(mgr, opts.Config, opts.RuntimeConfig); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeployment power-cap controller: %w", err)
 	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
