@@ -24,7 +24,11 @@ from dynamo.common.protocols.image_protocol import (
 )
 from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import get_fs, upload_to_fs
-from dynamo.common.utils.image_utils import encode_to_png_bytes
+from dynamo.common.utils.image_utils import (
+    IMAGE_OUTPUT_FORMATS,
+    encode_image_bytes,
+    normalize_image_output_options,
+)
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
@@ -135,7 +139,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         Handles VisualGenOutput from the pipeline:
         - video tensor → unsupported (raises error)
-        - image tensor → PNG
+        - image tensor → PNG, JPEG, or WebP, per the request's output_format
         - audio tensor → unsupported (raises error)
 
         Args:
@@ -153,6 +157,14 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         # Parse request
         req = parse_media_request(NvCreateImageRequest, request)
         nvext = req.nvext or ImageNvExt()
+        # Checked before the pipeline lock so a rejected request uses no GPU.
+        output_format = normalize_image_output_options(
+            req.output_format,
+            quality=req.quality,
+            background=req.background,
+            handler_name="Dynamo TensorRT-LLM image handler",
+        )
+        file_extension = IMAGE_OUTPUT_FORMATS[output_format][1]
 
         # Parse parameters
         width, height = self._parse_size(req.size)
@@ -203,6 +215,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         response_format = req.response_format or "url"
 
         # Encode media based on what the VisualGen returned
+        size: Optional[str] = None
         if output.image is not None:
             # VisualGenOutput.image is (B, H, W, C) uint8 since TRT-LLM rc9.
             images = output.image
@@ -212,16 +225,21 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             # Engine warns on batch mismatch; here we clamp to the caller's
             # requested count without padding or synthesizing.
             emit_count = min(images.shape[0], num_images_per_prompt)
+            # Every image in the (B, H, W, C) batch shares one size.
+            if emit_count > 0:
+                size = f"{images.shape[2]}x{images.shape[1]}"
 
             async def _encode_one(i: int) -> ImageData:
                 image_np = images[i].cpu().numpy()
                 logger.debug(
                     f"Request {request_id}: encoding image {i + 1}/{emit_count} "
-                    f"(shape={image_np.shape}) to PNG"
+                    f"(shape={image_np.shape}) to {output_format}"
                 )
-                image_bytes = await asyncio.to_thread(encode_to_png_bytes, image_np)
+                image_bytes = await asyncio.to_thread(
+                    encode_image_bytes, image_np, output_format
+                )
                 if response_format == "url":
-                    storage_path = f"images/{request_id}_{i}.png"
+                    storage_path = f"images/{request_id}_{i}.{file_extension}"
                     image_url = await upload_to_fs(
                         self.media_output_fs,
                         storage_path,
@@ -261,6 +279,8 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         response = NvImagesResponse(
             created=int(time.time()),
             data=data_items,
+            output_format=output_format,
+            size=size,
         )
 
         logger.debug(f"Request {request_id} completed in {inference_time:.2f}s")
