@@ -30,6 +30,9 @@ from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
+from dynamo._core import MooncakeClient as MooncakeClient
+from dynamo._core import MooncakeCommandError as MooncakeCommandError
+from dynamo._core import MooncakeControl as MooncakeControl
 from dynamo._core import (
     MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
 )

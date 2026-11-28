@@ -2823,10 +2823,87 @@ class KvStateAttachmentOwner:
     async def close(self) -> None:
         ...
 
+class MooncakeKeyResult(TypedDict):
+    key: str
+    error_code: int
+
+class MooncakePinResult(TypedDict):
+    key_results: list[MooncakeKeyResult]
+    unresolved_hashes: list[int]
+
+class MooncakeCommandError(RuntimeError):
+    """Earlier batches completed; failed-batch outcome may be unknown. No retries."""
+
+    completed_results: list[MooncakeKeyResult]
+    uncertain_keys: list[str]
+    unattempted_keys: list[str]
+    unresolved_hashes: list[int]
+
+class MooncakeClient:
+    """Mooncake admin HTTP connection; admin_endpoint must have a root URL path.
+
+    Match the active writer's tenant and Store. One router observes one tenant;
+    non-default tenants require Mooncake multi-tenant mode.
+    """
+
+    def __init__(self, admin_endpoint: str, tenant_id: str = "default") -> None: ...
+
+class MooncakeControl:
+    """Create with router.mooncake_control(client).
+
+    Commands deduplicate keys and send sequential batches of at most 4096 keys.
+    Inspect every per-key error_code (zero means success). Transport/protocol
+    failures raise MooncakeCommandError with completed and remaining work.
+    Cancellation also can leave the current batch's outcome unknown.
+    No automatic retries, renewal or session reference counting.
+    Pin resets TTL, including shortening it; zero TTL clears protection.
+    Policies coordinate shared-prefix deadlines across sessions and clients.
+    Observed keys do not prove a page has all components or is restorable.
+    """
+
+    async def pin_blocks(self, block_hashes: list[int], ttl_ms: int) -> list[MooncakeKeyResult]:
+        """Strict: reject empty input and any unresolved hash before HTTP."""
+        ...
+
+    async def unpin_blocks(self, block_hashes: list[int]) -> list[MooncakeKeyResult]:
+        """Unconditionally clear currently observed keys, skipping unresolved hashes.
+
+        Empty/fully unresolved selections return []. Does not delete object data
+        or consult session references. Lost observations leave pins until TTL.
+        """
+        ...
+
+    async def pin_session(self, session_id: str, ttl_ms: int) -> MooncakePinResult:
+        """Pin what resolves across the session's observed worker/Store chains.
+
+        unresolved_hashes lists blocks with no observed eligible object keys;
+        it does not identify partially observed component sets. A known session
+        with no resolved keys returns all hashes as unresolved without HTTP.
+        Unknown/empty sessions raise. Configuration/tenant/ambiguity errors raise.
+        """
+        ...
+
+    async def pin_session_frontier(self, session_id: str, frontier_hash: int, ttl_ms: int) -> MooncakePinResult:
+        """Best-effort pin of the inclusive root-to-current-frontier chain.
+
+        Absent, stale or foreign frontiers raise before HTTP.
+        """
+        ...
+
+    def get_session_blocks(self, session_id: str, frontier_hash: Optional[int] = None) -> list[list[int]]:
+        """Distinct root-first chains across owners/tiers; advisory, not a lease."""
+        ...
+
+    def get_session_mooncake_blocks(self, session_id: str, medium: str = "cpu") -> list[list[int]]:
+        """Only session-tagged Store lineage; medium is cpu or disk."""
+        ...
+
 class KvRouter:
-    """
-    A KV-aware router that performs intelligent routing based on KV cache overlap.
-    """
+    """A KV-aware router that selects workers based on cache overlap."""
+
+    def mooncake_control(self, client: MooncakeClient) -> MooncakeControl:
+        """Enable command key tracking, backfill current observations and create a controller."""
+        ...
 
     def __init__(
         self,

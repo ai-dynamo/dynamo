@@ -4,7 +4,7 @@
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use pythonize::{depythonize, pythonize};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use clap::Parser;
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
 };
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
@@ -2328,6 +2329,176 @@ async fn create_kv_router_from_endpoint(
     ))
 }
 
+/// Explicit Mooncake soft-pin commands for Python policy implementations.
+#[pyclass]
+#[derive(Clone)]
+pub(crate) struct MooncakeClient {
+    inner: llm_rs::kv_router::mooncake_client::MooncakeClient,
+}
+
+#[pymethods]
+impl MooncakeClient {
+    #[new]
+    #[pyo3(signature = (admin_endpoint, tenant_id="default"))]
+    fn new(admin_endpoint: &str, tenant_id: &str) -> PyResult<Self> {
+        Ok(Self {
+            inner: llm_rs::kv_router::mooncake_client::MooncakeClient::new(
+                admin_endpoint,
+                tenant_id,
+            )
+            .map_err(to_pyerr)?,
+        })
+    }
+}
+
+pyo3::create_exception!(
+    dynamo._core,
+    MooncakeCommandError,
+    pyo3::exceptions::PyRuntimeError
+);
+
+fn mooncake_into_py<'p, T, F>(py: Python<'p>, future: F) -> PyResult<Bound<'p, PyAny>>
+where
+    T: Serialize + Send + 'static,
+    F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    crate::future_into_py(py, async move {
+        let result = future.await;
+        Python::with_gil(|py| match result {
+            Ok(value) => pythonize(py, &value)
+                .map(|value| value.unbind())
+                .map_err(to_pyerr),
+            Err(error) => {
+                if let Some(batch) =
+                    error.downcast_ref::<llm_rs::kv_router::mooncake_client::MooncakeCommandError>()
+                {
+                    let exception = MooncakeCommandError::new_err(error.to_string());
+                    let value = exception.value(py);
+                    value.setattr(
+                        "completed_results",
+                        pythonize(py, &batch.completed_results).map_err(to_pyerr)?,
+                    )?;
+                    value.setattr("uncertain_keys", &batch.uncertain_keys)?;
+                    value.setattr("unattempted_keys", &batch.unattempted_keys)?;
+                    value.setattr("unresolved_hashes", &batch.unresolved_hashes)?;
+                    Err(exception)
+                } else {
+                    Err(to_pyerr(error))
+                }
+            }
+        })
+    })
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub(crate) struct MooncakeControl {
+    inner: llm_rs::kv_router::mooncake_client::MooncakeControl,
+}
+
+#[pymethods]
+impl MooncakeControl {
+    fn pin_blocks<'p>(
+        &self,
+        py: Python<'p>,
+        block_hashes: Vec<u64>,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            let hashes: Vec<_> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect();
+            control.pin_blocks(&hashes, ttl_ms).await
+        })
+    }
+
+    fn unpin_blocks<'p>(
+        &self,
+        py: Python<'p>,
+        block_hashes: Vec<u64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            let hashes: Vec<_> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect();
+            control.unpin_blocks(&hashes).await
+        })
+    }
+
+    fn pin_session<'p>(
+        &self,
+        py: Python<'p>,
+        session_id: String,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(
+            py,
+            async move { control.pin_session(&session_id, ttl_ms).await },
+        )
+    }
+
+    fn pin_session_frontier<'p>(
+        &self,
+        py: Python<'p>,
+        session_id: String,
+        frontier_hash: u64,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            control
+                .pin_session_frontier(
+                    &session_id,
+                    ExternalSequenceBlockHash(frontier_hash),
+                    ttl_ms,
+                )
+                .await
+        })
+    }
+
+    #[pyo3(signature = (session_id, frontier_hash=None))]
+    fn get_session_blocks(
+        &self,
+        session_id: &str,
+        frontier_hash: Option<u64>,
+    ) -> PyResult<Vec<Vec<u64>>> {
+        let chains = self
+            .inner
+            .get_session_blocks(session_id, frontier_hash.map(ExternalSequenceBlockHash))
+            .map_err(to_pyerr)?;
+        Ok(chains
+            .into_iter()
+            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
+            .collect())
+    }
+
+    #[pyo3(signature = (session_id, medium="cpu"))]
+    fn get_session_mooncake_blocks(
+        &self,
+        session_id: &str,
+        medium: &str,
+    ) -> PyResult<Vec<Vec<u64>>> {
+        let tier = match medium {
+            "cpu" => StorageTier::HostPinned,
+            "disk" => StorageTier::Disk,
+            _ => return Err(PyValueError::new_err("medium must be cpu or disk")),
+        };
+        let chains = self
+            .inner
+            .get_session_mooncake_blocks(session_id, tier)
+            .map_err(to_pyerr)?;
+        Ok(chains
+            .into_iter()
+            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
+            .collect())
+    }
+}
+
 #[pyclass]
 pub(crate) struct KvRouter {
     inner: Arc<RsRoutingHost>,
@@ -2888,6 +3059,17 @@ impl KvRouter {
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })
+        })
+    }
+
+    /// Create a store-specific controller with the router's observed cache and session index.
+    fn mooncake_control(&self, client: &MooncakeClient) -> PyResult<MooncakeControl> {
+        Ok(MooncakeControl {
+            inner: self
+                .inner
+                .kv_router()
+                .mooncake_control(client.inner.clone())
+                .map_err(to_pyerr)?,
         })
     }
 
