@@ -5,15 +5,38 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from types import ModuleType
 
 import pytest
 
 from dynamo.thunderagent_router.__main__ import _publish_sglang_generate_capability
-from dynamo.thunderagent_router.args import parse_args
+from dynamo.thunderagent_router.args import (
+    ThunderAgentArgGroup,
+    ThunderAgentRouterConfig,
+    parse_args,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+@pytest.mark.parametrize(
+    "include_timeout, extra_args, expected",
+    [(False, [], 1800.0), (True, ["--resume-timeout-seconds", "123"], 123.0)],
+)
+def test_resume_timeout_optional_registration(include_timeout, extra_args, expected):
+    class AdapterArgGroup(ThunderAgentArgGroup):
+        include_resume_timeout = include_timeout
+
+    parser = argparse.ArgumentParser()
+    AdapterArgGroup().add_arguments(parser)
+    args = parser.parse_args(["--endpoint", "dynamo.backend.generate", *extra_args])
+    config = ThunderAgentRouterConfig.from_cli_args(args)
+
+    config.validate()
+
+    assert config.to_thunderagent_config().resume_timeout_seconds == expected
 
 
 def test_sglang_generate_capability_is_opt_in() -> None:

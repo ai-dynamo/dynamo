@@ -202,6 +202,7 @@ core:
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
+  - 'components/src/dynamo/duru_router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'

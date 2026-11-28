@@ -135,6 +135,8 @@ def _inject_thunderagent_route_proof(
 
 
 class ThunderAgentRouterHandler:
+    scheduler_cls = ThunderAgentScheduler
+
     def __init__(
         self,
         runtime: DistributedRuntime,
@@ -169,7 +171,7 @@ class ThunderAgentRouterHandler:
         self._capacity = WorkerCapacityProvider(worker_endpoint, worker_client)
         self._capacity.start()
 
-        self._scheduler = ThunderAgentScheduler(
+        self._scheduler = self.scheduler_cls(
             capacity=self._capacity,
             config=self._config.to_thunderagent_config(),
         )
@@ -226,7 +228,8 @@ class ThunderAgentRouterHandler:
                 else None
             )
             first_chunk = True
-            async for chunk in await self._kv_router.generate_from_request(
+            await self._before_dispatch(preprocessed)
+            async for chunk in await self._generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
             ):
@@ -248,6 +251,7 @@ class ThunderAgentRouterHandler:
         decision = await self._scheduler.before_request(
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
+            request_id=context.id() if context is not None else None,
         )
         replica_pin = decision.assigned_replica_hint
         logger.debug(
@@ -306,7 +310,8 @@ class ThunderAgentRouterHandler:
             else None
         )
         try:
-            async for chunk in await self._kv_router.generate_from_request(
+            await self._before_dispatch(preprocessed)
+            async for chunk in await self._generate_from_request(
                 preprocessed,  # type: ignore[arg-type]
                 context=context,
             ):
@@ -378,6 +383,13 @@ class ThunderAgentRouterHandler:
                 replica_pin,
                 selected_worker_id,
             )
+
+    def _generate_from_request(self, request: dict[str, Any], *, context=None):
+        """Return the dispatch awaitable after synchronous request conversion."""
+        return self._kv_router.generate_from_request(request, context=context)
+
+    async def _before_dispatch(self, request: dict[str, Any]) -> None:
+        """Observe an admitted request immediately before backend dispatch."""
 
     async def status(self, request: Optional[dict[str, Any]] = None):
         scheduler_status = (
@@ -482,13 +494,21 @@ class ThunderAgentRouterHandler:
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime) -> None:
     config = parse_args()
+    await serve_router(runtime, config, ThunderAgentRouterHandler(runtime, config))
+
+
+async def serve_router(
+    runtime: DistributedRuntime,
+    config: ThunderAgentRouterConfig,
+    handler: ThunderAgentRouterHandler,
+) -> None:
+    """Register a router's model and serve its generate/status/metrics endpoints."""
     logger.info(
         "ThunderAgent Router starting (endpoint=%s, namespace=%s)",
         config.endpoint,
         config.namespace,
     )
 
-    handler = ThunderAgentRouterHandler(runtime, config)
     await handler.initialize()
 
     generate_endpoint = runtime.endpoint(
