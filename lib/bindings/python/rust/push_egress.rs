@@ -16,8 +16,9 @@
 //!
 //! Selected per handler by signature — [`handler_supports_push`] picks this
 //! path for a handler declaring a `response_sender` parameter, which in
-//! practice means the TRT-LLM `@push_egress_capable` decorator
-//! (`components/src/dynamo/trtllm/request_handlers/push_egress.py`). There is
+//! practice means the `@push_egress_capable` decorator
+//! (`components/src/dynamo/common/backend/push_egress.py`), carried by the
+//! TRT-LLM and vLLM text handlers. There is
 //! no environment variable: that decorator is the switch, so the two halves
 //! cannot disagree about which path an endpoint is on. Every other Python
 //! handler keeps the pull path verbatim.
