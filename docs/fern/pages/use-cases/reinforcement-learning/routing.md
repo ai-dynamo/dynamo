@@ -68,7 +68,7 @@ Configure the frontend that actually receives rollout traffic; do not launch a s
 | Framework | Setting | Boundary |
 |---|---|---|
 | verl native-router path | `actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode` | Set `thunderagent.enabled=false`; ThunderAgent owns a different scheduling path. |
-| NeMo RL managed backend | `policy.generation.dynamo_cfg.frontend_args.router_mode` | NeMo RL launches and owns the frontend. Change this field for the baseline. |
+| NeMo RL with `dynamo: true` | `policy.generation.dynamo_cfg.frontend_args.router_mode` | NeMo RL launches and owns the frontend. Change this field for the baseline. |
 
 When workers advertise router configuration, verify the effective worker-set values in the frontend logs. Worker settings can replace frontend defaults rather than merge with them.
 

@@ -31,7 +31,7 @@ ModelExpress startup loading and live RL refit have different interfaces. vLLM 0
 | ModelExpress inference peer | An already-updated, rank-compatible inference worker republishes the version for P2P staging | Experimental. Source selection is a transfer optimization, not proof that the source or target may serve. |
 | ModelExpress S3 artifact | Canonical full checkpoint or exact-base XOR delta is prepared locally and applied by the engine adapter | Experimental and S3-specific. The required base and artifact identity must match. |
 | verl | Recipe-owned Ray/ZMQ control and colocated CUDA IPC | Follow the recipe's trainer/rollout rank mapping. |
-| NeMo RL | Framework-owned NCCL sender and fixed worker URLs | Managed Slurm/Ray vLLM path only. |
+| NeMo RL | Framework-owned NCCL refit into NeMo RL's own vLLM engines | Dynamo serves the rollouts only; NeMo RL owns pause, refit, and resume. |
 | Dynamo vLLM from disk | `update_weights_from_disk` through each worker's `system_url` | Per-worker pause, apply, cache reset, and version; no fleet transaction. |
 | Dynamo vLLM distributed | Group lifecycle plus `update_weights_from_distributed` | Request body, rank map, and transport remain integration-specific. |
 | Dynamo SGLang | Fixed `/engine/control/update_weights_from_*` routes or allowlisted methods | The integration must obtain each SGLang system URL separately. |
@@ -136,7 +136,7 @@ Verify that every data-parallel shard receives the same trainer step, old cache 
 
 NeMo RL records a fixed vLLM fleet, creates one trainer-plus-inference NCCL world, drains generation, applies the checkpoint to every engine, clears cache state in a separate pause phase, and resumes only after the framework collects all results.
 
-This path prevents a dead or replaced worker from silently joining with initial weights, but it is not elastic and has no fleet-wide rollback. Keep the rollout phase gated after any worker, refit, cache, or resume failure. See [NeMo RL Integration](nemo-rl.md#policy-refit).
+This path prevents a dead or replaced worker from silently joining with initial weights, but it is not elastic and has no fleet-wide rollback. Keep the rollout phase gated after any worker, refit, cache, or resume failure. See [Train with NeMo RL on KubeRay](nemo-rl/train.mdx#check-that-the-engines-received-every-update).
 
 ## Keep Cache and Version State Correct
 

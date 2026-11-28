@@ -1,0 +1,113 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Slime Integration
+---
+
+import { SlimeClusterMap } from "@/components/SlimeClusterMap";
+import { SlimeIntegrationMap } from "@/components/SlimeIntegrationMap";
+import { SlimeRLLoop } from "@/components/SlimeRLLoop";
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<CardGroup cols={3}>
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
+    Install the Dynamo platform and KubeRay, then stage the model and dataset on a shared volume.
+  </Card>
+  <Card title="2. Serve Inference with Dynamo" icon="regular server" href="serve-inference.mdx">
+    Run two SGLang engines behind the Dynamo frontend in a DynamoGraphDeployment.
+  </Card>
+  <Card title="3. Train with Slime + KubeRay" icon="regular brain" href="train.mdx">
+    Run Slime's GRPO loop with Megatron-LM in a RayJob that sends its rollouts through Dynamo.
+  </Card>
+</CardGroup>
+
+## Overview
+
+<Warning title="Experimental">
+Integrations with external RL frameworks are under development/testing and subject to change.
+</Warning>
+
+[Slime](https://github.com/THUDM/slime) is a reinforcement learning framework that uses Megatron-LM for training and SGLang for inference through KubeRay. The Dynamo integration with Slime lets Dynamo handle the inference and rollouts, which is served through a DynamoGraphDeployment.
+
+### From the RL Loop to Slime + Dynamo
+
+<SlimeRLLoop />
+
+<llms-only>
+
+Reinforcement learning (RL) trains a model by letting it answer questions and adjusting its weights according to how good the answers were. Generating the answers is called a rollout. One round of the tutorial:
+
+1. Slime takes 8 problems from the GSM8K dataset and sends them to the SGLang engines, which generate 8 answers to each problem.
+2. Slime scores each answer with a rule-based math reward: 1 if the final answer is right, 0 if not.
+3. Megatron-LM trains one GRPO step on the 64 scored answers. GRPO compares the 8 answers to each problem and makes the above-average ones more likely and the rest less likely.
+4. Slime copies the new weights from Megatron-LM to every SGLang engine, which is called a weight sync, and the next round begins.
+
+| | Slime alone | Slime with Dynamo |
+|---|---|---|
+| SGLang engines | Ray actors that Slime starts in its Ray cluster | Pods that the Dynamo operator runs from a DynamoGraphDeployment |
+| Rollout routing | Slime's SGLang router | The Dynamo frontend, round-robin or KV-aware |
+| Weight sync | NCCL broadcast from the trainer's GPU to the engines' GPUs | Files on a shared volume that each engine loads, in the tutorial |
+| After the job | Deleted with the Ray cluster | Keep serving until you delete the DynamoGraphDeployment |
+| Loop, grading, training | Slime and Megatron-LM | Unchanged |
+
+</llms-only>
+
+### Where Each Part Runs
+
+<SlimeClusterMap />
+
+<llms-only>
+
+| Pod | Created by | Runs on | Processes |
+|---|---|---|---|
+| Dynamo operator, KubeRay operator | Helm, once per cluster | Any node, CPU only | The operators that create Pods for DynamoGraphDeployment and RayJob objects |
+| Frontend | Dynamo operator, from the DynamoGraphDeployment | Any node, CPU only | The Dynamo frontend, which routes the rollout requests |
+| `worker-0`, `worker-1` | Dynamo operator, from the DynamoGraphDeployment | A GPU node, one GPU each | An SGLang engine on the GPU and the Dynamo sidecar on CPU |
+| Ray head | KubeRay, from the RayJob | A GPU node, one GPU | The Slime driver on CPU and the Megatron-LM trainer on the GPU |
+| Submitter | KubeRay, from the RayJob | Any node, CPU only | `ray job submit`, which submits the job and streams its log |
+
+A Ray cluster is the set of Pods that KubeRay creates for a RayJob, here only the head Pod. Ray calls each of those Pods a node. The Ray job is Slime's training script, which runs on that Ray cluster. The Ray head and both SGLang workers mount the `slime-data` PersistentVolumeClaim at `/data`.
+
+</llms-only>
+
+### Putting It All Together
+
+The animation follows one round of the tutorial through these parts. It shows KV-aware routing, in which the frontend sends each request to the engine that already has more of its prompt in its KV cache, unless that engine is busier. The tutorial's DynamoGraphDeployment routes round-robin; [Routing](serve-inference.mdx#routing) covers the frontend and engine settings that KV-aware routing needs.
+
+<SlimeIntegrationMap />
+
+<llms-only>
+
+| Part | Managed by | What it does |
+|---|---|---|
+| Frontend and SGLang engine Pods | Dynamo operator, from a DynamoGraphDeployment | The frontend routes each rollout request to an engine, round-robin. Each engine generates and streams back tokens and log-probabilities. |
+| GRPO loop | Slime, with Megatron-LM | Sends the rollouts to the frontend, scores them, trains, writes the new weights to the shared volume, and has each engine load them through its own Service on port 30000. |
+| Ray cluster | KubeRay, from a RayJob | Runs Slime's training script on the Ray head Pod and deletes the cluster when the job ends. |
+| Shared volume at `/data` | The `slime-data` PersistentVolumeClaim that you create in Installation and Setup | Holds the model, the dataset, and each weight update. The engines and the Ray head Pod both mount it. |
+
+</llms-only>
+
+<Note title="Current limitations">
+- **Fixed engines.** Slime reads the engine addresses once, at startup. Adding or removing an engine means restarting the training job.
+- **Separate GPUs.** Training and inference use separate GPUs, three in the tutorial: one for each engine and one for the trainer. Slime's `--colocate` mode, which runs training and inference on the same GPUs, doesn't apply.
+- **No engine recovery.** If Kubernetes restarts or replaces an engine Pod, restart the training job. Slime doesn't recover the engine, and the new Pod loads the original model weights, not the trained ones.
+
+[Serve Inference with Dynamo](serve-inference.mdx#current-limitations) and [Train with Slime on KubeRay](train.mdx#current-limitations) list every limitation.
+</Note>
+
+## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
+
+This section will cover how to set up and use the Slime integration with an example of training Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm.
+
+The following replay shows a demo of this tutorial in action. The logs and output are abridged and wait times skipped to highlight the main steps.
+
+<TerminalDemo
+  src="../../../../assets/slime-rl-demo.cast"
+  title="Qwen3-0.6B · GRPO on GSM8K · 10 steps on 3 GPUs"
+  chrome="macos"
+  theme="fern-code"
+  cols={100}
+  rows={25}
+  idleTimeLimit={1.5}
+/>
+

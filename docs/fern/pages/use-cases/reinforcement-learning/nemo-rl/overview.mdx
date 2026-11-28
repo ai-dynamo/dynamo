@@ -1,0 +1,38 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: NeMo RL Integration
+---
+
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<Warning title="Experimental">
+Integrations with external RL frameworks are under development/testing and subject to change.
+</Warning>
+
+[NeMo RL](https://github.com/NVIDIA-NeMo/RL) is a post-training library that uses Megatron Core or Automodel for training and vLLM or SGLang for inference, with Ray to coordinate them. The Dynamo integration is a NeMo RL setting, `policy.generation.dynamo: true`, that lets Dynamo handle the inference and rollouts: NeMo RL starts a Dynamo frontend inside its own Ray job, and NeMo RL's vLLM engines register with it.
+
+## Tutorial: Train Qwen2.5-1.5B with NeMo RL + Dynamo
+
+This tutorial covers how to train Qwen2.5-1.5B to solve math problems through reinforcement learning on the OpenMathInstruct-2 dataset using the GRPO algorithm. The RL loop runs on NeMo RL through KubeRay, and Megatron Core trains the model on one GPU. NeMo RL usually sends rollout requests to its vLLM engines directly. With `dynamo: true`, it starts etcd, NATS, and a Dynamo frontend inside the same job instead, and its two vLLM engines register with the frontend, so every rollout request goes through Dynamo's KV-aware router. No DynamoGraphDeployment is involved.
+
+<CardGroup cols={2}>
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
+    Install KubeRay and build the NeMo RL image, then download the model and dataset to a shared volume.
+  </Card>
+  <Card title="2. Train with NeMo RL + KubeRay" icon="regular brain" href="train.mdx">
+    Run GRPO for 25 steps in a RayJob that starts its own Dynamo frontend for two vLLM engines.
+  </Card>
+</CardGroup>
+
+## Seeing it in action
+
+<TerminalDemo
+  src="../../../../assets/nemo-rl-demo.cast"
+  title="Qwen2.5-1.5B · GRPO on OpenMathInstruct-2 · 25 steps on 3 GPUs"
+  chrome="macos"
+  theme="fern-code"
+  cols={100}
+  rows={25}
+  idleTimeLimit={1.5}
+/>
