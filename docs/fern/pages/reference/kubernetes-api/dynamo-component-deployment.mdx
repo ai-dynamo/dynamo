@@ -35,6 +35,16 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Service Metadata
+
+For a standalone DCD, the operator propagates `metadata.labels` and the selected pod template's labels and annotations to its Service. Topology annotations on the DCD also propagate. Edits to the DCD's own metadata trigger reconciliation without a spec change. For a DCD managed by a DGD, authored Service labels come from the current child pod template, so a removed parent label is not restored from stale child object labels.
+
+The operator records the label and annotation keys it writes in the Service annotation `nvidia.com/dynamo-managed-service-metadata`. Later reconciles remove recorded keys that are no longer desired and preserve keys added by other controllers. Do not author this annotation, `nvidia.com/last-applied-hash`, or `nvidia.com/last-applied-generation`; the operator owns their values. If you used the inventory annotation for another purpose before upgrading, remove that annotation from the live Service before the first reconcile.
+
+Services created by an older operator have no inventory. The first reconcile after upgrade records the keys that are desired at that time. A key removed from the parent before that reconcile is not recorded and is not automatically pruned. Remove such stale keys from the Service manually. An invalid inventory is rebuilt without pruning on that reconcile.
+
+Kubernetes limits the total size of annotation keys and values to 262,144 bytes. If the inventory would exceed that limit, metadata edits on an existing Service are deferred and its prior inventory is kept. A new Service is created without the inventory, with room reserved for the operator's hash and generation annotations. Reduce the Service's annotation size to allow the next reconcile to record an inventory and apply deferred metadata edits. Keys removed before an inventory is recorded require manual cleanup.
+
 ## Spec reference
 
 The DCD spec contains `backendFramework`, general environment defaults in `env`, and the [shared component spec](#shared-component-spec) inlined at the same level.

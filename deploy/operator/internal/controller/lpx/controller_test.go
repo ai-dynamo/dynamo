@@ -1140,6 +1140,59 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	require.Equal(t, beforeModelService, modelService)
 }
 
+func TestLPXServiceMetadataConvergesAfterInputEdit(t *testing.T) {
+	t.Log("Reconcile an LPX workload with authored Service metadata and Kubernetes discovery")
+	ctx := t.Context()
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
+	dgd.Spec.Labels = map[string]string{"example.com/old-label": "old"}
+	dgd.Spec.Annotations = map[string]string{"example.com/old-note": "old"}
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	_, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	key := client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.ResourcePrefix + "-serve"}
+	service := &corev1.Service{}
+	require.NoError(t, r.Get(ctx, key, service))
+	require.Equal(t, "old", service.Labels["example.com/old-label"])
+	require.Equal(t, "old", service.Annotations["example.com/old-note"])
+	require.Contains(t, service.Annotations[commoncontroller.ManagedServiceMetadataAnnotation], "example.com/old-label")
+	selector, owners := service.Spec.Selector, service.OwnerReferences
+
+	t.Log("Add external metadata and publish a new input revision that replaces the authored keys")
+	service.Labels["external.example.com/keep"] = "label"
+	service.Annotations["external.example.com/keep"] = "annotation"
+	require.NoError(t, r.Update(ctx, service))
+	dgd.Spec.Labels = map[string]string{"example.com/new-label": "new"}
+	dgd.Spec.Annotations = map[string]string{"example.com/new-note": "new"}
+	updateTestDGD(t, r, child, dgd)
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+
+	t.Log("Verify the stable Service prunes removed keys and preserves external metadata, selectors and ownership")
+	service = &corev1.Service{}
+	require.NoError(t, r.Get(ctx, key, service))
+	require.NotContains(t, service.Labels, "example.com/old-label")
+	require.NotContains(t, service.Annotations, "example.com/old-note")
+	require.Equal(t, "new", service.Labels["example.com/new-label"])
+	require.Equal(t, "new", service.Annotations["example.com/new-note"])
+	require.Equal(t, "label", service.Labels["external.example.com/keep"])
+	require.Equal(t, "annotation", service.Annotations["external.example.com/keep"])
+	require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Equal(t, selector, service.Spec.Selector)
+	require.Equal(t, owners, service.OwnerReferences)
+
+	t.Log("Reconcile unchanged input without writing the Service again")
+	version := service.ResourceVersion
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	service = &corev1.Service{}
+	require.NoError(t, r.Get(ctx, key, service))
+	require.Equal(t, version, service.ResourceVersion)
+}
+
 func TestLPXRollingEngineHandoff(t *testing.T) {
 	const initialBuildID = "draft-build"
 	t.Log("Publish a speculative workload using its frozen child identity")

@@ -438,12 +438,14 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-worker-hash"]}'
     nvidia.com/last-applied-generation: '1'
     nvidia.com/last-applied-hash: 22ddf6345242ff5300edb96ab27615f5a3613ab77fa0e90ef104c3ee1de146a4
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-worker-hash: '86105660'
   name: workers-sglangdecode
   namespace: upgrade-1-4-0-sglang-1-5-custom
   ownerReferences:
@@ -481,12 +483,14 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-worker-hash"]}'
     nvidia.com/last-applied-generation: '1'
     nvidia.com/last-applied-hash: da9926ef6d84edec6631ae64b9254b7f52920f0b2e88d2cf48336e072fa46db6
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-worker-hash: '86105660'
   name: workers-sglangprefill
   namespace: upgrade-1-4-0-sglang-1-5-custom
   ownerReferences:

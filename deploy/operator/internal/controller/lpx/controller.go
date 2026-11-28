@@ -21,6 +21,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -549,10 +550,27 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 // reconcileRuntimeResources synchronizes additional resources for the LPX deployment.
 func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
 	for _, resource := range resources {
-		if _, _, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
+		// Record desired Service metadata before SyncResource stamps its bookkeeping annotations.
+		var desiredService *corev1.Service
+		if service, ok := resource.(*corev1.Service); ok {
+			desiredService = service.DeepCopy()
+			if err := commoncontroller.StampManagedServiceMetadata(service); err != nil {
+				return err
+			}
+		}
+
+		_, synced, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
 			return resource, false, nil
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+
+		// Services keep stable names across input revisions, so their metadata must also converge.
+		if service, ok := synced.(*corev1.Service); ok {
+			if _, err := commoncontroller.SyncManagedServiceMetadata(ctx, r, service, desiredService); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

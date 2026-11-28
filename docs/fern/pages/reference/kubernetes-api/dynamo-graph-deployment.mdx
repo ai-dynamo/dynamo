@@ -190,6 +190,8 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 
 <ParamField path="annotations" type="map[string]string">
   Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Values on the selected component or role `podTemplate` take precedence on conflict.
+
+  Grove component Services, Grove elastic-EP leader Services, Services created by child DCDs, and LPX serving Services reconcile authored labels and annotations through `nvidia.com/dynamo-managed-service-metadata`. Removed keys are pruned only after the operator has recorded them. Services that predate the inventory keep keys removed before their first reconcile after upgrade. The operator reserves the inventory, `nvidia.com/last-applied-hash`, and `nvidia.com/last-applied-generation` annotations. See [Service Metadata](dynamo-component-deployment.mdx#service-metadata) for upgrade cleanup and annotation size limits.
 </ParamField>
 
 <ParamField path="labels" type="map[string]string">

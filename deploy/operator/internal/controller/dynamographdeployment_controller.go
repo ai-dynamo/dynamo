@@ -300,7 +300,7 @@ func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			dgdPrimaryPredicate(),
+			workloadPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
