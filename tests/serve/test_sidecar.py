@@ -6,9 +6,10 @@
 import importlib.util
 import os
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
+import requests
 
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
@@ -196,6 +197,48 @@ class SidecarConfig(EngineConfig):
     port_env: dict[str, tuple[int, DynamoPortRange]] = field(default_factory=dict)
     # Upload the test LoRA adapter to MinIO before launch.
     needs_minio_lora: bool = False
+    # Run _split_kv_warmup_check during readiness.
+    warm_up_split_kv: bool = False
+
+
+# vLLM's FlashAttention-2 has only sm_80 code; newer GPUs JIT-compile it on first
+# use, stalling ~70 s. Warm up with the first routed request's shape.
+SPLIT_KV_WARMUP_PROMPT = "Pale lanterns drift over harbor water at dusk. " * 32
+SPLIT_KV_WARMUP_TOKENS = 128
+
+
+def _split_kv_warmup_check(port: int, model: str):
+    def _prefill_and_decode_past_128_kv_tokens(
+        remaining_timeout: float = 30.0,
+    ) -> bool:
+        # One attempt for the whole readiness budget: a timed-out retry could be
+        # routed to another engine and start a second cold compile there.
+        response = requests.post(
+            f"http://localhost:{port}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": SPLIT_KV_WARMUP_PROMPT}],
+                "max_tokens": SPLIT_KV_WARMUP_TOKENS,
+                "ignore_eos": True,
+                "temperature": 0,
+                "stream": False,
+            },
+            timeout=max(1.0, remaining_timeout),
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"split-KV warm-up got HTTP {response.status_code}: "
+                f"{response.text[:500]!r}"
+            )
+        usage = response.json().get("usage") or {}
+        if usage.get("completion_tokens") != SPLIT_KV_WARMUP_TOKENS:
+            raise RuntimeError(
+                f"split-KV warm-up expected {SPLIT_KV_WARMUP_TOKENS} completion "
+                f"tokens, got usage={usage!r}"
+            )
+        return True
+
+    return _prefill_and_decode_past_128_kv_tokens
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
@@ -210,6 +253,7 @@ sidecar_configs = {
     "vllm_aggregated": SidecarConfig(
         name="vllm_aggregated",
         directory=vllm_sidecar_dir,
+        warm_up_split_kv=True,
         script_name="agg.sh",
         marks=[
             pytest.mark.vllm,
@@ -239,6 +283,7 @@ sidecar_configs = {
     "vllm_aggregated_lora": SidecarConfig(
         name="vllm_aggregated_lora",
         directory=vllm_sidecar_dir,
+        warm_up_split_kv=True,
         script_name="agg_lora.sh",
         marks=[
             pytest.mark.vllm,
@@ -438,6 +483,7 @@ sidecar_configs = {
     "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",
         directory=vllm_sidecar_dir,
+        warm_up_split_kv=True,
         script_name="disagg.sh",
         gpu_env=_on_first_gpu("VLLM_PREFILL_GPU", "VLLM_DECODE_GPU"),
         marks=[
@@ -497,6 +543,7 @@ sidecar_configs = {
     "vllm_kv_router": SidecarConfig(
         name="vllm_kv_router",
         directory=vllm_sidecar_dir,
+        warm_up_split_kv=True,
         script_name="agg_kv_router.sh",
         gpu_env=_on_first_gpu("VLLM_WORKER1_GPU", "VLLM_WORKER2_GPU"),
         marks=[
@@ -542,6 +589,7 @@ sidecar_configs = {
     "vllm_disaggregated_kv_router": SidecarConfig(
         name="vllm_disaggregated_kv_router",
         directory=vllm_sidecar_dir,
+        warm_up_split_kv=True,
         script_name="disagg_kv_router.sh",
         gpu_env=_on_first_gpu(
             "VLLM_PREFILL1_GPU",
@@ -712,8 +760,19 @@ def test_serve_deployment(
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    config = sidecar_config_test
+    if config.warm_up_split_kv:
+        config = replace(
+            config,
+            health_check_funcs=[
+                *config.health_check_funcs,
+                _split_kv_warmup_check(
+                    int(dynamo_dynamic_ports.frontend_port), config.model
+                ),
+            ],
+        )
     run_serve_deployment(
-        sidecar_config_test,
+        config,
         request,
         ports=dynamo_dynamic_ports,
     )
