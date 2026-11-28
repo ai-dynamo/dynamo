@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 const (
@@ -18,13 +20,38 @@ const (
 	vllmMasterPortStride = 100
 )
 
+// ValidateColdStartFailover checks that snapshot-less intra-pod failover runs on
+// an engine that supports it. It applies exactly when rendering would call
+// buildColdStartFailoverPod. component and fldPath must not be nil.
+func ValidateColdStartFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+	// Snapshot-backed and inter-pod layouts are validated by their own rules.
+	if GetCheckpoint(component) != nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
+		return nil
+	}
+
+	// Resolve the backend exactly as rendering does, including command inference.
+	failoverPath := fldPath.Child("experimental", "failover")
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		return field.ErrorList{field.Forbidden(failoverPath, "Cold-start intra-pod failover requires a consistent vLLM backend")}
+	}
+	if !coldStartFailoverBackendSupported(backendFramework) {
+		return field.ErrorList{field.Forbidden(failoverPath, fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", backendFramework))}
+	}
+	return nil
+}
+
+func coldStartFailoverBackendSupported(backendFramework BackendFramework) bool {
+	return backendFramework == BackendFrameworkVLLM
+}
+
 // buildColdStartFailoverPod prepares snapshot-less failover, supported only for
 // vLLM with GMS V0. Engines initialize concurrently in shadow mode and need
 // separate collective/KV ports, unlike the restored snapshot engine pair.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
 func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, environment *podEnvironment) error {
 	// Reject other backends before changing the pod.
-	if backendFramework != BackendFrameworkVLLM {
+	if !coldStartFailoverBackendSupported(backendFramework) {
 		return fmt.Errorf("cold-start failover is currently supported only for vLLM (detected: %s)", backendFramework)
 	}
 	if err := buildFailoverEnginePair(podSpec, environment); err != nil {

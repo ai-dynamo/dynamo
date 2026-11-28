@@ -292,6 +292,25 @@ func getDeviceClassName(gmsSpec *v1beta1.GPUMemoryServiceSpec) string {
 	return dra.DefaultDeviceClassName
 }
 
+// ValidateInterPodGMSBackend checks that the inter-pod GMS layout runs on vLLM,
+// resolving the backend as rendering does. component and fldPath must not be nil.
+func ValidateInterPodGMSBackend(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+	if !component.IsInterPodGMSEnabled() {
+		return nil
+	}
+
+	modePath := fldPath.Child("experimental", "gpuMemoryService", "mode")
+	mode := component.Experimental.GPUMemoryService.Mode
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		return field.ErrorList{field.Invalid(modePath, mode, "the inter-pod GMS layout requires a consistent vLLM backend")}
+	}
+	if backendFramework != BackendFrameworkVLLM {
+		return field.ErrorList{field.Invalid(modePath, mode, fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", backendFramework))}
+	}
+	return nil
+}
+
 // gmsRCTName returns a deterministic ResourceClaimTemplate name for a given rank.
 func gmsRCTName(serviceName string, rank int32) string {
 	return fmt.Sprintf("%s-gpu-rank-%d", NormalizeKubeResourceName(serviceName), rank)

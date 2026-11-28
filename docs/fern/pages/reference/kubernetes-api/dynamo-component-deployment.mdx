@@ -438,7 +438,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
 <Indent>
   <ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
-    Selects the GMS deployment topology.
+    Selects the GMS deployment topology. In a DGD, `InterPod` supports only vLLM; admission resolves the engine from `backendFramework` or the `main` container's launcher.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
   </ParamField>
@@ -465,6 +465,8 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
 <ParamField path="failover" type="FailoverSpec">
   Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+
+  Supported engines depend on whether a checkpoint is enabled. `IntraPod` failover with an enabled `checkpoint` supports vLLM and SGLang. Without one (cold start), it supports only vLLM. Admission resolves the engine from `backendFramework` or from the `python -m dynamo.<backend>` launcher in the `main` container.
 </ParamField>
 
 <Indent>
