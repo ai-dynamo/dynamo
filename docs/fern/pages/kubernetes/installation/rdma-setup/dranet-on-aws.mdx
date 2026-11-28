@@ -1,0 +1,457 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DRANET (DRA-native EFA) on EKS
+subtitle: Topology-aware GPU + EFA allocation for disaggregated inference using Kubernetes Dynamic Resource Allocation, guaranteeing each worker's EFAs are co-located with its GPU on the same PCIe root.
+---
+
+This guide covers an alternative EFA setup for Dynamo on EKS using
+[DRANET](https://github.com/kubernetes-sigs/dranet) — the Kubernetes DRA-native network
+driver — instead of the [EFA device plugin](efa-on-aws.mdx). Both approaches provide
+GPU-Direct RDMA over EFA for KV cache transfer; with DRANET the GPU and its EFAs are
+requested together in one `ResourceClaim`, and the DRA scheduler guarantees they share a
+PCIe root complex, eliminating PCIe crossings on every KV cache transfer.
+
+For background on why RDMA matters for Dynamo disaggregated inference, see
+[RDMA Setup](overview.md). For the device plugin approach (no k8s version requirement,
+simpler setup), see [EFA on EKS](efa-on-aws.mdx).
+
+## When to Use This Guide
+
+| | Device plugin ([efa-on-aws.mdx](efa-on-aws.mdx)) | DRANET (this guide) |
+|---|---|---|
+| Kubernetes version | Any EKS version | **1.34+** |
+| GPU scheduling | `nvidia.com/gpu` device plugin | `gpu.nvidia.com` DRA driver |
+| EFA scheduling | `vpc.amazonaws.com/efa` | `efa.networking.k8s.aws` (DRA) |
+| GPU + EFA co-location | Topology-aware on EKS accelerated AL2023 AMIs; not guaranteed on custom AMIs or Bottlerocket | Declared in the claim with a `pcieRoot` constraint |
+| Requesting devices | Extended resources in `resources.limits` | `ResourceClaimTemplate` referenced from the pod |
+
+On AWS, the recommended node images are the EKS accelerated AMIs (AL2023 or Bottlerocket),
+which come configured out of the box to support DRA. See
+[Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html)
+for AWS's comparison of the device plugin and DRA. If you use a custom AMI, see the
+[appendix](#appendix-custom-amis).
+
+Choose DRANET when you are on k8s 1.34+ and want the GPU and its co-located EFAs
+allocated atomically through a single claim, expressed in a way the scheduler (and
+autoscalers that understand DRA) can reason about. On p5.48xlarge each H100 GPU shares a
+PCIe root complex with exactly 4 EFA NICs; assigning a worker's EFAs from a different PCIe
+root adds a PCIe crossing to every KV cache transfer.
+
+## Prerequisites
+
+**Supported GPU instance types** — a subset of the EFA-capable instances; EFA is
+available on other instance families as well (see
+[efa-on-aws.mdx](efa-on-aws.mdx) and the Amazon EC2 accelerated computing documentation):
+
+| Instance family                | GPU              | EFAs per node | Aggregate EFA bandwidth | Arch   |
+|-------------------------------|-----------------|--------------|------------------------|--------|
+| `p5.48xlarge` / `p5e.48xlarge` | 8× H100 / H200   | 32           | 3.2 Tbps               | x86_64 |
+| `p5en.48xlarge`               | 8× H200          | 32           | 3.2 Tbps               | x86_64 |
+| `p6-b200.48xlarge`            | 8× B200          | see EC2 docs | 3.2 Tbps               | x86_64 |
+| `p6-b300.48xlarge`            | 8× B300          | 16 (1 GPU : 2 EFAs) | see EC2 docs    | x86_64 |
+| `g7e` (multi-GPU sizes)       | multiple GPUs per instance | see EC2 docs | see EC2 docs   | x86_64 |
+
+**Additional requirements beyond the device plugin setup:**
+
+- Kubernetes 1.34 or later
+- GPU driver ≥ 580 (required by the NVIDIA DRA driver)
+- NRI (Node Resource Interface) enabled in containerd on every GPU node. This is
+  already the case on EKS accelerated AMIs; for custom AMIs see the
+  [appendix](#appendix-custom-amis)
+- `vllm-runtime:<version>-efa`, `sglang-runtime:<version>-efa` or
+  `tensorrtllm-runtime:<version>-efa` container image (includes AWS EFA installer and NIXL
+  LIBFABRIC plugin)
+
+**Host kernel modules and GPU-Direct RDMA** are the same as the device plugin approach —
+see [Step 2 of efa-on-aws.mdx](efa-on-aws.mdx#step-2-verify-host-kernel-modules).
+
+## Architecture
+
+DRANET publishes each node's EFA NICs as a `ResourceSlice` with one device entry per EFA,
+annotated with `resource.kubernetes.io/pcieRoot`. The NVIDIA DRA GPU driver publishes a
+parallel `ResourceSlice` for GPUs with the same attribute. A `ResourceClaimTemplate` with
+a `matchAttribute: resource.kubernetes.io/pcieRoot` constraint instructs the DRA scheduler
+to pick one GPU and its co-located EFAs in a single atomic allocation.
+
+At container creation time, DRANET's NRI plugin injects only the allocated EFA NICs into
+the container: the `/dev/infiniband/uverbs*` character devices, which are the RDMA
+control-path devices the pod uses, for exactly the 4 allocated EFAs. libfabric sees only
+those 4 devices. Note that `/sys/class/infiniband/` inside the pod still lists all of the
+node's EFAs (32 on p5.48xlarge) — only the `/dev` nodes are restricted.
+
+**Why co-location matters for KV cache transfer performance.** GPU Direct RDMA (GDR)
+lets an EFA NIC DMA directly into and out of GPU HBM without staging through CPU memory.
+When the NIC and GPU share a PCIe root complex, this path is direct. When they do not,
+the DMA must traverse the inter-root or inter-NUMA interconnect, adding latency and
+reducing effective bandwidth. More importantly, when
+all eight GPU workers transfer KV cache simultaneously, co-location guarantees eight
+non-contending PCIe paths, with the effect compounding at high request concurrency and
+showing up primarily in tail latency rather than mean throughput.
+
+To measure the actual benefit for your workload, enable NIXL telemetry (see
+[Verification](#verification)) and compare `nixl_bytes_transferred` rate with and
+without co-location at your target concurrency.
+
+```
+PCIe Root pci0000:44            ← scheduler picks one root atomically
+  GPU  gpu-0  0000:53:00.0  NVIDIA H100 80GB HBM3
+  EFA  0000:4f:00.0  rdmap79s0   ─┐
+  EFA  0000:50:00.0  rdmap80s0   ─┤  injected as /dev/infiniband/uverbs{0-3}
+  EFA  0000:51:00.0  rdmap81s0   ─┤
+  EFA  0000:52:00.0  rdmap82s0   ─┘
+```
+
+<Steps toc={true}>
+<Step title="Install aws-dranet" id="step-1-install-aws-dranet">
+The `aws-dranet` DaemonSet discovers EFA interfaces on each node and publishes them as
+`ResourceSlice` objects with PCIe topology attributes.
+
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+helm install aws-dranet eks/aws-dranet --namespace kube-system
+```
+
+<Info>
+By default the chart's DaemonSet tolerates only the `CriticalAddonsOnly` taint
+(`tolerations: []` in the chart values). If your GPU nodes carry a taint such as
+`nvidia.com/gpu:NoSchedule`, `aws-dranet` will not be scheduled on them unless you add a
+matching toleration through the chart's `tolerations` value.
+</Info>
+
+<Info>
+If the EFA device plugin is also installed on these nodes, keep DRANET workloads on DRA
+claims only. The device plugin and DRANET are separate allocators that do not coordinate
+with each other, so do not run pods that request `vpc.amazonaws.com/efa` on the same
+nodes as pods that claim EFAs through DRA. Both were installed side by side on the
+cluster used to validate this guide, with workloads using only DRA claims.
+</Info>
+
+Wait for the DaemonSet to be ready on all GPU nodes:
+
+```bash
+kubectl rollout status daemonset/aws-dranet -n kube-system
+```
+
+Verify ResourceSlices are published and carry topology:
+
+```bash
+kubectl get resourceslices | grep dra.net
+# Expected: one slice per GPU node
+
+kubectl get resourceslices -o json | \
+  jq '.items[0].spec.devices[0] | {name, pcieRoot: .attributes."resource.kubernetes.io/pcieRoot"}'
+# Expected: {"name": "pci-0000-4f-00-0", "pcieRoot": {"string": "pci0000:44"}}
+```
+
+</Step>
+<Step title="Install the NVIDIA DRA GPU Driver" id="step-2-install-the-nvidia-dra-gpu-driver">
+The NVIDIA DRA driver for GPUs is maintained in the Kubernetes SIG repository
+[kubernetes-sigs/dra-driver-nvidia-gpu](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu).
+It publishes GPUs as `ResourceSlice` objects and **replaces** the `nvidia.com/gpu` device
+plugin; they cannot coexist on the same node.
+
+```bash
+# If you use the GPU Operator, disable its device plugin in the ClusterPolicy
+kubectl patch clusterpolicy cluster-policy --type=merge \
+  -p '{"spec":{"devicePlugin":{"enabled":false}}}'
+
+# Wait for device plugin pods to terminate
+until ! kubectl get daemonset nvidia-device-plugin-daemonset -n gpu-operator &>/dev/null; do
+  sleep 5; done
+
+helm install dra-driver-nvidia-gpu \
+  oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+  --version 0.5.1 \
+  --create-namespace \
+  --namespace dra-driver-nvidia-gpu \
+  --set gpuResourcesEnabledOverride=true \
+  --set nvidiaDriverRoot=/run/nvidia/driver
+```
+
+`nvidiaDriverRoot=/run/nvidia/driver` is for clusters where the GPU Operator manages the
+driver; omit it if the driver is installed on the host. See the
+[driver installation guide](https://dra-driver-nvidia-gpu.sigs.k8s.io/docs/install/) for
+the current version and all options.
+
+Verify GPU ResourceSlices are published:
+
+```bash
+kubectl get resourceslices | grep gpu.nvidia.com
+# Expected: one slice per GPU node, each with 8 GPU devices
+```
+
+</Step>
+<Step title="Container Image" id="step-3-container-image">
+Use the `-efa` image variant, which includes the AWS EFA installer (libfabric,
+aws-ofi-nccl) and the NIXL LIBFABRIC plugin. DRANET injects the EFA kernel device files
+(`/dev/infiniband/uverbs*`) into the container, and the `-efa` image provides the
+matching userspace stack.
+
+Pre-built images are published to NGC:
+
+```
+nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>-efa
+nvcr.io/nvidia/ai-dynamo/sglang-runtime:<version>-efa
+nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<version>-efa
+```
+
+To build your own, see [Step 3 of efa-on-aws.mdx](efa-on-aws.mdx#step-3-build-a-dynamo-efa-image) —
+the same `--make-efa` flag and `--target aws` apply.
+
+</Step>
+<Step title="Create a ResourceClaimTemplate" id="step-4-create-a-resourceclaimtemplate">
+Create a template in each namespace where workers will run. This one selects a Hopper
+(H100) GPU with a CEL expression, requests 4 EFAs, and uses a `matchAttribute` constraint
+so the DRA scheduler allocates the GPU and the EFAs from the same PCIe root:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: aws-h100-gpu-efa
+  namespace: <your-namespace>
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          count: 1
+          selectors:
+          - cel:
+              expression: |
+                device.attributes["gpu.nvidia.com"].architecture == "Hopper" &&
+                device.attributes["gpu.nvidia.com"].productName.contains("H100")
+      - name: efa
+        exactly:
+          deviceClassName: efa.networking.k8s.aws
+          count: 4          # 4 EFAs per H100 on p5.48xlarge
+      constraints:
+      - requests: ["gpu", "efa"]
+        matchAttribute: resource.kubernetes.io/pcieRoot
+```
+
+How it works:
+
+- The `gpu` request uses a CEL selector on the attributes the NVIDIA DRA driver publishes,
+  so the template matches the whole H100 family (`p5.48xlarge` and `p5.4xlarge`) and
+  nothing else. Because the GPU type is described declaratively, autoscalers that
+  understand DRA can use the claim to decide which nodes to provision. For Karpenter
+  support and its feature gates, see
+  [Manage NVIDIA GPU devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-nvidia.html).
+- The `efa` request asks for 4 EFAs, the number that share a PCIe root with one H100.
+- The `pcieRoot` constraint ties the two requests together: the scheduler only accepts an
+  allocation where the GPU and all 4 EFAs report the same `pcieRoot`.
+
+For other GPU families, change the CEL expression and the EFA count to match the
+instance's GPU-to-EFA ratio. For example, `p6-b300.48xlarge` has 8 GPUs and 16 EFAs, a
+1:2 ratio, so use `count: 2`.
+
+<Info>
+The 32-device-per-ResourceClaim limit means you cannot use `allocationMode: All`
+(all 32 node EFAs) together with a GPU in one claim. Use a fixed `count` — one PCIe root's
+allocation — which is also the right number for topology locality.
+</Info>
+
+</Step>
+<Step title="Configure the NIXL Backend and Worker Roles" id="step-5-configure-nixl-backend">
+NIXL backend selection is identical to the device plugin approach. See
+[Step 4 of efa-on-aws.mdx](efa-on-aws.mdx#step-4-configure-nixl-backend) for the
+rationale. For vLLM disaggregated inference, set each worker's role with
+`--disaggregation-mode` **and** select the LIBFABRIC backend for NIXL:
+
+```yaml
+# Decode worker
+- python3 -m dynamo.vllm --model <model>
+  --disaggregation-mode decode
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer",
+    "kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+
+# Prefill worker
+- python3 -m dynamo.vllm --model <model>
+  --disaggregation-mode prefill
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer",
+    "kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+```
+
+<Warning>
+`--disaggregation-mode` defaults to `agg`. Without it, both workers register as ordinary
+aggregated workers and the frontend round-robins requests between them: requests still
+succeed, but no KV cache is ever transferred between the workers, so the EFAs carry no
+traffic. See [Common Failure Modes](#common-failure-modes).
+</Warning>
+
+</Step>
+<Step title="Pod Resource Requests" id="step-6-pod-resource-requests">
+Reference the `ResourceClaimTemplate` in the pod spec and claim it from the container.
+The claim provides both the GPU and its co-located EFAs; no `vpc.amazonaws.com/efa`
+resource limit is needed.
+
+```yaml
+spec:
+  resourceClaims:
+  - name: gpu-efa
+    resourceClaimTemplateName: aws-h100-gpu-efa
+  containers:
+  - name: main
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>-efa
+    resources:
+      claims:
+      - name: gpu-efa
+    securityContext:
+      capabilities:
+        add: [IPC_LOCK]
+```
+
+To give a worker more than one GPU, add one claim per GPU. Each claim is allocated
+independently, so every GPU gets its own 4 co-located EFAs. This example allocates 2 GPUs
+and 8 EFAs, all correctly aligned:
+
+```yaml
+spec:
+  resourceClaims:
+  - name: gpu-efa-0
+    resourceClaimTemplateName: aws-h100-gpu-efa
+  - name: gpu-efa-1
+    resourceClaimTemplateName: aws-h100-gpu-efa
+  containers:
+  - name: main
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>-efa
+    resources:
+      claims:
+      - name: gpu-efa-0
+      - name: gpu-efa-1
+    securityContext:
+      capabilities:
+        add: [IPC_LOCK]
+```
+
+</Step>
+</Steps>
+
+## Verification
+
+Verification steps 1–5 from [efa-on-aws.mdx](efa-on-aws.mdx#verification) apply
+unchanged — check NIXL backend selection, plugin execution, GPU VRAM registration, NIXL
+telemetry metrics, and decode-side cache hit rate.
+
+Additionally verify DRANET-specific aspects:
+
+**Confirm the correct EFAs were allocated (co-located with the GPU):**
+
+```bash
+kubectl get resourceclaim -n <namespace> -o json | jq -r '
+  .items[] | "Claim: " + .metadata.name,
+  (.status.allocation.devices.results[] |
+    "  driver=" + .driver + " device=" + .device)
+'
+# Expected: one gpu.nvidia.com device and four dra.net devices per claim
+```
+
+**Confirm only the allocated EFAs are accessible inside the container:**
+
+```bash
+kubectl exec <worker-pod> -- ls /dev/infiniband/
+# Expected: 4 uverbs devices per claim (e.g., uverbs8 uverbs9 uverbs10 uverbs11),
+# or 8 for a pod that uses two claims. NOT 32.
+
+kubectl exec <worker-pod> -- /opt/amazon/efa/bin/fi_info -p efa | grep domain
+# Expected: domains only for the allocated EFAs (e.g., rdmap113s0-rdm and
+# rdmap113s0-dgrm for each of the 4 devices), none for the node's other EFAs
+```
+
+**Confirm the KV cache moves over the allocated EFAs.** The EFA hardware counters are
+not exposed in the pod's sysfs, so read them on the node, for example from a short-lived
+node debug pod:
+
+```bash
+kubectl debug node/<node-name> --image=busybox --profile=sysadmin -- sleep 3600
+kubectl exec <node-debugger-pod> -- sh -c '
+  for d in /host/sys/class/infiniband/rdmap*; do
+    c=$d/ports/1/hw_counters
+    echo "$(basename $d) rdma_read_bytes=$(cat $c/rdma_read_bytes) tx_bytes=$(cat $c/tx_bytes) rx_bytes=$(cat $c/rx_bytes)"
+  done'
+```
+
+A DRANET device `pci-0000-71-00-0` corresponds to `rdmap113s0` (PCI bus `0x71` = 113).
+Take a snapshot, send some requests with long prompts through the frontend, and take a
+second snapshot. NIXL pulls the KV cache with RDMA reads, so the signal is:
+
+- On the **decode** node, `rdma_read_bytes` and `rx_bytes` increase evenly across the
+  worker's 4 allocated EFAs.
+- On the **prefill** node, `tx_bytes` increases evenly across the worker's 4 allocated EFAs.
+- All other EFAs on the node stay at zero.
+
+`rdma_write_bytes` stays at zero in this flow; that is expected and not a failure.
+
+As a sanity check, the bytes moved should be close to the KV cache size of the prompts:
+`tokens × 2 × layers × kv_heads × head_dim × bytes_per_element`. For Llama-3.1-8B in bf16
+that is 128 KiB per token. In a test with three requests of about 4,450 uncached prompt
+tokens each (13,358 tokens total, about 1.75 GB), the decode worker's 4 EFAs recorded
+`rdma_read_bytes` of 438,304,768 each, 1.753 GB in total.
+
+**Visualize the PCIe topology on a node:**
+
+```bash
+# From the dynamo repo root
+./deploy/utils/dranet_topo.sh <node-name>
+```
+
+Example output confirming each GPU has 4 co-located EFAs on the same PCIe root:
+
+```
+PCIe Root: pci0000:44
+  GPU  gpu-0  0000:53:00.0  NVIDIA H100 80GB HBM3
+  EFA  pci-0000-4f-00-0  0000:4f:00.0  rdmap79s0  NUMA:0
+  EFA  pci-0000-50-00-0  0000:50:00.0  rdmap80s0  NUMA:0
+  EFA  pci-0000-51-00-0  0000:51:00.0  rdmap81s0  NUMA:0
+  EFA  pci-0000-52-00-0  0000:52:00.0  rdmap82s0  NUMA:0
+
+PCIe Root: pci0000:55
+  GPU  gpu-1  0000:64:00.0  NVIDIA H100 80GB HBM3
+  ...
+```
+
+## Common Failure Modes
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| TTFT ~100 s | Silent TCP fallback — NIXL backend not set | Verify [Step 5](#step-5-configure-nixl-backend) |
+| TTFT ~10 s, 1–5 GB/s | UCX host-staged (no GPU-Direct) | Switch to LIBFABRIC |
+| Requests succeed but EFA counters stay at 0; the frontend log shows round-robin over both workers and the prefill worker never receives transfers | `--disaggregation-mode` not set, so both workers run as aggregated workers | Set `--disaggregation-mode prefill` / `decode` ([Step 5](#step-5-configure-nixl-backend)) |
+| `aws-dranet` pods missing on GPU nodes | GPU nodes are tainted and the chart's default tolerations do not match | Add tolerations through the chart's `tolerations` value ([Step 1](#step-1-install-aws-dranet)) |
+
+## Appendix: Custom AMIs
+
+The EKS accelerated AMIs are the recommended images and need none of this. If you build
+your own AMI, DRANET additionally requires NRI (Node Resource Interface) to be enabled in
+containerd, so it can inject EFA devices into containers at creation time. Add the
+following block to `/etc/containerd/config.toml` on each GPU node, then restart containerd:
+
+```toml
+[plugins."io.containerd.nri.v1.nri"]
+  disable = false
+  socket_path = "/var/run/nri/nri.sock"
+  plugin_config_path = "/etc/nri/conf.d"
+  plugin_path = "/opt/nri/plugins"
+```
+
+```bash
+systemctl restart containerd
+```
+
+If the node uses the EKS bootstrap script, it regenerates the containerd config, so apply
+the NRI configuration in node userdata after the bootstrap script has run, not in the AMI
+itself.
+
+## References
+
+- [EFA on EKS (device plugin approach)](efa-on-aws.mdx) — alternative without k8s version requirement
+- [RDMA Setup Overview](overview.md)
+- [DRANET upstream project](https://github.com/kubernetes-sigs/dranet)
+- [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html)
+- [AWS — Manage NVIDIA GPU devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-nvidia.html)
+- [NVIDIA DRA driver for GPUs (kubernetes-sigs/dra-driver-nvidia-gpu)](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu)
