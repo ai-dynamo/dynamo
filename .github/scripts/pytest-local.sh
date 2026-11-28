@@ -131,8 +131,13 @@ echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
 case "${PARALLEL_MODE}" in
   auto)
+    # Cap CPU-stage workers; large runners otherwise start one per core.
+    if [[ -z "${MAX_VRAM_GIB:-}" && -z "${PYTEST_XDIST_AUTO_NUM_WORKERS:-}" ]]; then
+      cores=$(nproc)
+      export PYTEST_XDIST_AUTO_NUM_WORKERS=$(( cores < 16 ? cores : 16 ))
+    fi
     pytest_args=(-n auto)
-    echo "📊 Parallelization: auto (use all available cores)"
+    echo "📊 Parallelization: auto (${PYTEST_XDIST_AUTO_NUM_WORKERS:-all available cores} workers)"
     ;;
   none | 0)
     pytest_args=(-n 0)

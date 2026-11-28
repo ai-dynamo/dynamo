@@ -192,7 +192,8 @@ def _prepare_deployment(
     if worker_id.startswith("gw") and request.node.get_closest_marker("gpu_0") is None:
         worker_num = int(worker_id.removeprefix("gw"))
         if worker_num > 0:
-            stagger_s = worker_num * 15
+            # Bounded so the delay stays well inside per-test timeouts.
+            stagger_s = min(worker_num * 15, 120)
             logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
             time.sleep(stagger_s)
 
