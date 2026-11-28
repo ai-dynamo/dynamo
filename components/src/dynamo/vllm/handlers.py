@@ -51,6 +51,10 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 
 from dynamo._core import Context
+from dynamo.artifacts.vllm.hidden_states import (
+    HiddenStateProfile,
+    hidden_state_profile_from_vllm_config,
+)
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.health_check import is_probe
@@ -1033,6 +1037,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
     _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
     _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
+    artifact_hidden_state_profile: Optional[HiddenStateProfile] = None
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -1101,6 +1106,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
+        # Set when vLLM runs extract_hidden_states with its hidden-states
+        # connector; gates the generation-artifact `hidden_states` content.
+        self.artifact_hidden_state_profile = hidden_state_profile_from_vllm_config(
+            self.engine_client.vllm_config
+        )
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
@@ -3420,6 +3430,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 out, prompt_logprobs_payload
                             )
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        if artifact_session is not None:
+                            # Also on failed terminals, so close() deletes the file.
+                            artifact_session.observe_transfer(kv_transfer_params)
                         if kv_transfer_params is not None:
                             engine_data = out.setdefault("engine_data", {})
                             if isinstance(engine_data, dict):
@@ -3925,8 +3938,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             if prompt_ids is None or has_mm_data or has_external_encoder_result:
                 raise InvalidArgument("artifact capture requires an exact token prompt")
+            wants_hidden_states = "hidden_states" in requested_contents
             artifact_runtime = None
-            if artifact_settings.get("mode") != "inline_base64":
+            nixl_delivery = artifact_settings.get("mode") == "nixl_read"
+            object_store_delivery = (
+                not nixl_delivery and artifact_settings.get("mode") != "inline_base64"
+            )
+            if nixl_delivery:
+                from dynamo.artifacts.nixl import (
+                    NixlArtifactCapacityError,
+                    configured_nixl_artifact_server,
+                )
+
+                artifact_runtime = configured_nixl_artifact_server()
+                if artifact_runtime is None:
+                    raise InvalidArgument(
+                        "NIXL artifact delivery is not enabled on this worker"
+                    )
+            elif object_store_delivery:
                 # Object-store delivery needs opendal from the optional
                 # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
@@ -3963,26 +3992,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         max(1, sampling_params.logprobs or 0) if needs_logprobs else 1
                     ),
                     runtime=artifact_runtime,
+                    hidden_state_profile=self.artifact_hidden_state_profile,
                 )
             except CaptureCapacityError as exc:
                 raise WorkerOverloaded(str(exc)) from None
             except ValueError as exc:
-                if artifact_runtime is not None and isinstance(
-                    exc, ArtifactAuthorityClosed
-                ):
+                if object_store_delivery and isinstance(exc, ArtifactAuthorityClosed):
                     raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
             except RuntimeError as exc:
+                if nixl_delivery and isinstance(exc, NixlArtifactCapacityError):
+                    raise WorkerOverloaded(str(exc)) from None
                 # Storage policy rejects the requested destination before
                 # inference with a credential-safe message. A provider without
                 # conditional creation is a server fault and stays one.
                 if (
-                    artifact_runtime is not None
+                    object_store_delivery
                     and isinstance(exc, ArtifactStorageError)
                     and exc.code in ("invalid_target", "destination_denied", "expired")
                 ):
                     raise InvalidArgument(str(exc)) from None
                 raise
+            if wants_hidden_states:
+                # Ask the hidden-states connector to keep the completion's rows,
+                # not only the prompt's. Artifact capture is aggregated-only, so
+                # no disaggregation transfer parameters are in use here.
+                extra_args = sampling_params.extra_args or {}
+                existing = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) or {}
+                _update_kv_transfer_params(
+                    sampling_params, {**existing, "include_output_tokens": True}
+                )
 
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()

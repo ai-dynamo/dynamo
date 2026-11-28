@@ -74,6 +74,8 @@ from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_cont
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+# Same key and value shape as the vLLM worker's.
+HIDDEN_STATE_CAPTURE_RUNTIME_KEY = "hidden_state_capture"
 SGLANG_SYSTEMONE_SERIAL_V1 = "sglang_systemone_serial_v1"
 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
     "tool_call_structural_tag_reasoning_gate"
@@ -733,6 +735,28 @@ async def get_runtime_config(
             GATEWAY_WORKERS_KEY,
             json.dumps(effective_gateway_workers(server_args, dynamo_args)),
         )
+
+    # Layers are fixed at launch, so trainers read them here instead of per request.
+    # Capture is aggregated-only.
+    if (
+        engine is not None
+        and getattr(server_args, "enable_return_aux_hidden_states", False)
+        and getattr(server_args, "disaggregation_mode", "null") == "null"
+    ):
+        from dynamo.artifacts.sglang.capture import hidden_state_profile_from_sglang
+
+        profile = hidden_state_profile_from_sglang(
+            server_args,
+            getattr(getattr(engine, "tokenizer_manager", None), "model_config", None),
+        )
+        if profile is not None:
+            runtime_config.set_engine_specific(
+                HIDDEN_STATE_CAPTURE_RUNTIME_KEY, json.dumps(profile.runtime_data())
+            )
+            logging.info(
+                "Published SGLang hidden-state capture metadata: %s",
+                profile.runtime_data(),
+            )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)

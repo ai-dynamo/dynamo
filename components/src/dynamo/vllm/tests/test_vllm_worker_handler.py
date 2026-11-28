@@ -1102,6 +1102,252 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_generate_captures_hidden_states_from_connector_file(tmp_path):
+    torch = pytest.importorskip("torch")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+    from dynamo.artifacts.vllm.hidden_states import HiddenStateProfile
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.artifact_hidden_state_profile = HiddenStateProfile(
+        (2, 5), 4, "fp16", str(tmp_path.resolve())
+    )
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["hidden_states"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    path = tmp_path / "artifact-request.safetensors"
+    hidden = torch.arange(24, dtype=torch.float16).reshape(3, 2, 4)
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["kv_transfer_params"] = args[1].extra_args["kv_transfer_params"]
+        # The connector writes the file when the request finishes.
+        safetensors_torch.save_file(
+            {"hidden_states": hidden, "token_ids": torch.tensor([10, 11, 12])},
+            str(path),
+        )
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            kv_transfer_params={"hidden_states_path": str(path)},
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12, 13],
+                    logprobs=None,
+                    routed_experts=None,
+                    finish_reason="length",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert observed["kv_transfer_params"] == {"include_output_tokens": True}
+    artifact = chunks[-1]["engine_data"]["metadata_upload"]
+    assert artifact["contents"] == ["hidden_states"]
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
+    assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12, 13]
+    (component,) = choice.components
+    assert component.layer_ids == (2, 5)
+    assert component.hidden_states.data == hidden.reshape(3, 8).numpy().tobytes()
+    assert not path.exists()
+
+
+def _nixl_artifact_handler(request):
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    return handler
+
+
+def _nixl_artifact_request():
+    return {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "nixl_read",
+                    "contents": ["selected_logprobs"],
+                    "destination": {"kind": "nixl_read", "lease_seconds": 30},
+                }
+            }
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_nixl_artifact_request_fails_when_worker_has_no_server(monkeypatch):
+    from dynamo.artifacts import nixl as artifact_nixl
+
+    monkeypatch.setattr(artifact_nixl, "configured_nixl_artifact_server", lambda: None)
+    request = _nixl_artifact_request()
+    handler = _nixl_artifact_handler(request)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    with pytest.raises(mod.InvalidArgument, match="NIXL artifact delivery"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_nixl_artifact_receipt_reaches_engine_data(monkeypatch):
+    from dynamo.artifacts import nixl as artifact_nixl
+
+    submitted = {}
+
+    class FakeServer:
+        def validate(self, destination, mode):
+            assert mode == "nixl_read"
+
+        async def submit(self, data, contents, destination, *, mode):
+            submitted["bytes"] = data
+            return {"kind": "generation_artifact", "mode": mode, "state": "ready"}
+
+    monkeypatch.setattr(
+        artifact_nixl, "configured_nixl_artifact_server", lambda: FakeServer()
+    )
+    request = _nixl_artifact_request()
+    handler = _nixl_artifact_handler(request)
+
+    async def fake_generate(*args, **kwargs):
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[{12: Logprob(logprob=-0.2)}],
+                    routed_experts=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+    assert chunks[-1]["engine_data"]["metadata_upload"]["mode"] == "nixl_read"
+    assert submitted["bytes"].startswith(b"DYNEXP1\0")
+
+
+@pytest.mark.asyncio
+async def test_nixl_artifact_budget_exhaustion_is_overload(monkeypatch):
+    from dynamo.artifacts import nixl as artifact_nixl
+
+    class FullServer:
+        def validate(self, destination, mode):
+            raise artifact_nixl.NixlArtifactCapacityError("budget exhausted")
+
+    monkeypatch.setattr(
+        artifact_nixl, "configured_nixl_artifact_server", lambda: FullServer()
+    )
+    request = _nixl_artifact_request()
+    handler = _nixl_artifact_handler(request)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    with pytest.raises(mod.WorkerOverloaded, match="budget"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_hidden_state_request_fails_on_worker_without_extraction():
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["hidden_states"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    with pytest.raises(mod.InvalidArgument, match="extract_hidden_states"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
         "engine_finish_reason",

@@ -18,18 +18,64 @@ from typing import Any, Protocol, cast
 import numpy as np
 
 from dynamo.artifacts.vllm.format import (
+    CODEC_NONE,
+    CODEC_ZSTD,
+    MAX_CHUNK_BYTES,
+    MAX_HIDDEN_STATE_CHUNKS,
     GenerationArtifactChoice,
     GenerationArtifactView,
+    HiddenStateChunks,
+    HiddenStates,
     MoeRoutes,
     SelectedLogprobs,
     Tensor,
     TopKLogprobs,
+    chunk_hidden_states,
     compact_routes,
     encode_generation_artifact,
 )
+from dynamo.artifacts.vllm.hidden_states import (
+    DTYPE_BYTES,
+    HiddenStateFileError,
+    HiddenStateProfile,
+    discard_hidden_state_file,
+    hidden_state_path,
+    load_hidden_state_file,
+)
 from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 
-_CONTENTS = frozenset({"moe_routes", "selected_logprobs", "topk_logprobs"})
+_CONTENTS = frozenset(
+    {"hidden_states", "moe_routes", "selected_logprobs", "topk_logprobs"}
+)
+
+
+def _validated_content_options(options, contents, prompt_token_count):
+    """Return the hidden-state row start and chunk size (None: not chunked).
+
+    Rejects options no content defines.
+    """
+    if options is None:
+        return 0, None
+    if not isinstance(options, dict) or set(options) - set(contents):
+        raise ValueError("invalid artifact content_options")
+    if set(options) - {"hidden_states"}:
+        raise ValueError("artifact content_options are not defined for this content")
+    hidden = options.get("hidden_states", {})
+    if not isinstance(hidden, dict) or set(hidden) - {"token_start", "chunk_tokens"}:
+        raise ValueError("invalid hidden_states content_options")
+    start = hidden.get("token_start", 0)
+    if (
+        type(start) is not int
+        or type(prompt_token_count) is not int
+        or not 0 <= start <= prompt_token_count
+    ):
+        raise ValueError("invalid hidden_states token_start")
+    chunk_tokens = hidden.get("chunk_tokens")
+    if chunk_tokens is not None and (
+        type(chunk_tokens) is not int or not 1 <= chunk_tokens <= 1 << 20
+    ):
+        raise ValueError("invalid hidden_states chunk_tokens")
+    return start, chunk_tokens
 
 
 class CaptureCapacityError(ValueError):
@@ -47,6 +93,7 @@ class _DeliveryRuntime(Protocol):
         destination: dict[str, Any],
         *,
         mode: str,
+        parts: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -158,6 +205,12 @@ class VllmArtifactSession:
     candidates: list[list[int]]
     candidate_scores: list[list[float]]
     routes: MoeRoutes | None
+    hidden_profile: HiddenStateProfile | None
+    hidden_path: str | None
+    hidden_states: HiddenStates | HiddenStateChunks | None
+    hidden_token_start: int
+    hidden_chunk_tokens: int | None
+    hidden_parts: dict[str, bytes] | None
     error: bool
     _closed: bool
     budget: CaptureBudget
@@ -177,6 +230,7 @@ class VllmArtifactSession:
         logprob_width=1,
         budget=None,
         runtime=None,
+        hidden_state_profile=None,
     ):
         settings = _backend_metadata_upload_settings(request)
         if settings is None or "kind" not in settings:
@@ -185,7 +239,13 @@ class VllmArtifactSession:
             raise ValueError("unsupported metadata_upload.kind")
         if (request.get("stop_conditions") or {}).get("stop"):
             raise ValueError("artifact capture does not support frontend string stops")
-        if settings.keys() - {"kind", "contents", "mode", "destination"}:
+        if settings.keys() - {
+            "kind",
+            "contents",
+            "mode",
+            "destination",
+            "content_options",
+        }:
             raise ValueError("invalid artifact request fields")
         contents = settings.get("contents")
         if (
@@ -196,7 +256,7 @@ class VllmArtifactSession:
         ):
             raise ValueError("invalid artifact contents")
         mode = settings.get("mode")
-        if mode not in {"inline_base64", "object_store", "relay_store"}:
+        if mode not in {"inline_base64", "object_store", "relay_store", "nixl_read"}:
             raise ValueError("invalid artifact delivery mode")
         if mode == "inline_base64" and "destination" in settings:
             raise ValueError("inline artifact cannot contain destination")
@@ -218,12 +278,37 @@ class VllmArtifactSession:
             raise ValueError("invalid artifact token limits")
         if type(token_start) is not int or not 0 <= token_start <= prompt_token_count:
             raise ValueError("invalid artifact token_start")
+        hidden_token_start, hidden_chunk_tokens = _validated_content_options(
+            settings.get("content_options"), contents, prompt_token_count
+        )
+        destination = settings.get("destination")
+        chunk_prefix = isinstance(destination, dict) and "chunk_prefix" in destination
+        if hidden_chunk_tokens is not None:
+            # Chunks travel beside the object: as extra NIXL buffers, or as
+            # content-addressed objects under the request's chunk_prefix.
+            if mode == "object_store" and not chunk_prefix:
+                raise ValueError(
+                    "chunked hidden states require a managed_store chunk_prefix"
+                )
+            if mode not in {"object_store", "nixl_read"}:
+                raise ValueError(
+                    "chunked hidden states require object_store or nixl_read"
+                )
+        elif chunk_prefix:
+            raise ValueError("chunk_prefix requires hidden_states chunk_tokens")
         profile = _validated_router_profile(router_profile)
         if "moe_routes" in contents and (
             not route_capture_enabled or not router_profile
         ):
             raise ValueError(
                 "routed-expert capture and declared router profile are required"
+            )
+        if "hidden_states" in contents and not isinstance(
+            hidden_state_profile, HiddenStateProfile
+        ):
+            raise ValueError(
+                "hidden-state capture requires a worker launched with vLLM "
+                "extract_hidden_states and its hidden-states connector"
             )
         owned_settings = deepcopy(settings)
         if mode != "inline_base64":
@@ -245,6 +330,16 @@ class VllmArtifactSession:
         session.candidates = []
         session.candidate_scores = []
         session.routes = None
+        session.hidden_profile = (
+            hidden_state_profile if "hidden_states" in contents else None
+        )
+        session.hidden_path = None
+        session.hidden_states = None
+        session.hidden_token_start = hidden_token_start
+        session.hidden_chunk_tokens = (
+            hidden_chunk_tokens if session.hidden_profile is not None else None
+        )
+        session.hidden_parts = None
         session.error = False
         session._closed = False
         session.budget = budget or process_capture_budget()
@@ -259,16 +354,44 @@ class VllmArtifactSession:
             4 * ("selected_logprobs" in contents)
             + 12 * logprob_width * ("topk_logprobs" in contents)
         )
+        hidden_rows = extent - hidden_token_start
+        hidden_bytes = (
+            hidden_rows * session.hidden_profile.row_bytes
+            if session.hidden_profile is not None
+            else 0
+        )
+        chunked_bytes = 0
+        if session.hidden_chunk_tokens is not None:
+            row_bytes = cast(HiddenStateProfile, session.hidden_profile).row_bytes
+            chunk_tokens = session.hidden_chunk_tokens
+            if min(chunk_tokens, max(hidden_rows, 1)) * row_bytes > MAX_CHUNK_BYTES:
+                raise ValueError("hidden_states chunk_tokens exceed the chunk size")
+            if -(-hidden_rows // chunk_tokens) + 1 > MAX_HIDDEN_STATE_CHUNKS:
+                raise ValueError("hidden_states chunk_tokens yield too many chunks")
+            # Chunked rows live outside the object, so they don't count toward
+            # its size limit.
+            chunked_bytes, hidden_bytes = hidden_bytes, 0
         source_bound = (
             extent * 8
             + route_elements * 2
             + logprob_bytes
+            + hidden_bytes
             + 8192
             + len(session.profile) * 512
         )
-        session.reserved_bytes = route_elements * 16 + source_bound * 4
+        # Chunked rows: the connector file's bytes plus the chunk copies.
+        session.reserved_bytes = (
+            route_elements * 16 + source_bound * 4 + chunked_bytes * 2
+        )
         if source_bound > 64 << 20:
             raise ValueError("artifact exceeds supported worst-case size")
+        delivery_limit = getattr(runtime, "max_artifact_bytes", None)
+        if (
+            chunked_bytes
+            and type(delivery_limit) is int
+            and source_bound + chunked_bytes > delivery_limit
+        ):
+            raise ValueError("artifact exceeds the delivery capacity")
         if mode == "inline_base64" and source_bound * 4 // 3 + 4 > 1 << 20:
             raise ValueError("artifact exceeds inline worst-case size")
         session.budget.reserve(session.reserved_bytes)
@@ -352,14 +475,94 @@ class VllmArtifactSession:
             self.error = True
             self._discard()
 
+    def observe_transfer(self, kv_transfer_params):
+        """Record the connector's hidden-state file from the final engine output."""
+        if self.hidden_profile is None or self._closed:
+            return
+        try:
+            path = hidden_state_path(kv_transfer_params, self.hidden_profile)
+        except HiddenStateFileError:
+            self.error = True
+            self._discard()
+            return
+        if path is not None:
+            self.hidden_path = path
+
+    def _load_hidden_states(self):
+        """Read the connector file and bind it to the observed sequence. Blocking."""
+        path, self.hidden_path = self.hidden_path, None
+        if path is None:
+            raise ValueError("requested hidden states unavailable")
+        loaded = load_hidden_state_file(path)
+        profile = cast(HiddenStateProfile, self.hidden_profile)
+        if self.error or self.prompt is None:
+            raise ValueError("invalid artifact capture")
+        sequence = (*self.prompt, *self.tokens)
+        extent = len(sequence) - 1 if self.tokens else len(sequence)
+        rows, layers, hidden_size = loaded.shape
+        if (
+            rows != extent
+            or layers != len(profile.layer_ids)
+            or hidden_size != profile.hidden_size
+            or loaded.dtype != profile.dtype
+        ):
+            raise ValueError("hidden-state geometry differs from profile")
+        if loaded.token_ids != sequence[:extent]:
+            raise ValueError("hidden-state tokens differ from observed sequence")
+        start = self.hidden_token_start
+        if start > len(self.prompt):
+            raise ValueError("hidden-state token_start exceeds observed prompt")
+        # Keep rows [start, extent): a client that already holds a shared
+        # prompt's rows (for example, from one sample of a GRPO group) can skip
+        # resending them for every other sample.
+        row_bytes = layers * hidden_size * DTYPE_BYTES[loaded.dtype]
+        self._bind_hidden_rows(
+            start=start, rows=rows - start, data=loaded.data[start * row_bytes :]
+        )
+
+    def _bind_hidden_rows(self, *, start, rows, data):
+        """Store `rows` profile-shaped rows starting at position `start`."""
+        profile = cast(HiddenStateProfile, self.hidden_profile)
+        if self.hidden_chunk_tokens is not None:
+            component, self.hidden_parts = chunk_hidden_states(
+                token_start=start,
+                layer_ids=profile.layer_ids,
+                hidden_size=profile.hidden_size,
+                dtype=profile.dtype,
+                data=memoryview(data),
+                chunk_tokens=self.hidden_chunk_tokens,
+            )
+            self.hidden_states = component
+            return
+        self.hidden_states = HiddenStates(
+            start,
+            profile.layer_ids,
+            profile.hidden_size,
+            Tensor(
+                profile.dtype,
+                (rows, len(profile.layer_ids) * profile.hidden_size),
+                data,
+            ),
+        )
+
     def _view(self):
         if self.error or self.prompt is None:
             raise ValueError("invalid artifact capture")
-        components: list[MoeRoutes | SelectedLogprobs | TopKLogprobs] = []
+        components: list[
+            MoeRoutes
+            | SelectedLogprobs
+            | TopKLogprobs
+            | HiddenStates
+            | HiddenStateChunks
+        ] = []
         if "moe_routes" in self.contents:
             if self.routes is None:
                 raise ValueError("requested routes unavailable")
             components.append(self.routes)
+        if "hidden_states" in self.contents:
+            if self.hidden_states is None:
+                raise ValueError("requested hidden states unavailable")
+            components.append(self.hidden_states)
         if "selected_logprobs" in self.contents:
             components.append(
                 SelectedLogprobs(
@@ -393,8 +596,17 @@ class VllmArtifactSession:
     async def finalize(self, *, release_capture=True):
         encoding = None
         try:
+            if self.hidden_profile is not None:
+                # Waits for the connector's writer and reads the file off-loop.
+                encoding = asyncio.create_task(
+                    asyncio.to_thread(self._load_hidden_states)
+                )
+                await asyncio.shield(encoding)
+            # A NIXL read hands the consumer the object as is: skip zstd, which
+            # barely shrinks activations, so tensors sit at fixed offsets.
+            codec = CODEC_NONE if self.settings["mode"] == "nixl_read" else CODEC_ZSTD
             encoding = asyncio.create_task(
-                asyncio.to_thread(encode_generation_artifact, self._view())
+                asyncio.to_thread(encode_generation_artifact, self._view(), codec=codec)
             )
             encoded = await asyncio.shield(encoding)
             if self.settings["mode"] == "inline_base64":
@@ -408,12 +620,16 @@ class VllmArtifactSession:
                     "byte_count": encoded.byte_count,
                     "data_base64": base64.b64encode(encoded.data).decode("ascii"),
                 }
+            # Only chunked hidden states pass parts, so runtimes without chunk
+            # support keep their signature.
+            parts = {"parts": self.hidden_parts} if self.hidden_parts else {}
             try:
                 return await cast(_DeliveryRuntime, self.runtime).submit(
                     encoded.data,
                     sorted(self.contents),
                     self.settings["destination"],
                     mode=self.settings["mode"],
+                    **parts,
                 )
             except (ValueError, TypeError, RuntimeError, OSError, sqlite3.Error):
                 return {
@@ -454,6 +670,12 @@ class VllmArtifactSession:
         self._discard()
 
     def _discard(self):
+        if self.hidden_path is not None:
+            # The connector already finished this request; never leave its file.
+            discard_hidden_state_file(self.hidden_path)
+            self.hidden_path = None
+        self.hidden_states = None
+        self.hidden_parts = None
         self.routes = None
         self.prompt = None
         self.tokens = []

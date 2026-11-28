@@ -75,9 +75,171 @@ Before admitting a sample to training, verify:
 | Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
 | Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |
 | Large SGLang `meta_info` | `nvext.metadata_upload.url` on the OpenAI-compatible path | Uploaded out of band by an RL-enabled SGLang worker; the destination is trusted control input. |
+| Target-model hidden states | `hidden_states` content of a vLLM generation artifact | Requires a worker launched for hidden-state extraction. See [Capture Target Hidden States](#capture-target-hidden-states). |
 | Masks, rewards, advantages, tool or environment state, and trajectory objects | Not a generic Dynamo response contract | The framework derives, stores, validates, and accepts these values. |
 
 See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` request and response shapes.
+
+## Capture Target Hidden States
+
+Drafter training for speculative decoding, such as EAGLE-3, needs the target model's intermediate activations for each rollout token. A vLLM or SGLang worker can return them in the `hidden_states` content of a generation artifact, delivered inline or to object storage like the other artifact contents. The request and the artifact are the same on both backends; see [Capture on SGLang](#capture-on-sglang) for that backend's launch flags and limits.
+
+Launch a vLLM worker with vLLM's `extract_hidden_states` method and its hidden-states connector. The layer IDs are fixed at launch; a request cannot choose them.
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-8B \
+  --speculative-config '{"method": "extract_hidden_states", "num_speculative_tokens": 1,
+    "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [2, 18, 33]}}}' \
+  --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer",
+    "kv_connector_extra_config": {"shared_storage_path": "/var/lib/dynamo/hidden-states"}}'
+```
+
+The worker publishes the captured `layer_ids`, `hidden_size`, and `dtype` under the `hidden_state_capture` key of its runtime config, and rejects a launch whose connector disables `use_synchronization_lock` or enables `allow_custom_save_path`.
+
+Request the content through `nvext.metadata_upload`:
+
+```json
+{
+  "nvext": {
+    "metadata_upload": {
+      "kind": "generation_artifact",
+      "contents": ["hidden_states", "selected_logprobs"],
+      "mode": "object_store",
+      "destination": {"...": "..."}
+    }
+  }
+}
+```
+
+The artifact's `hidden_states` component holds one row per position that was a forward-pass input, starting at the component's `token_start` (the first prompt token by default). The completion's last token is never fed back, so it has no row. Each row concatenates the activations of `layer_ids` in order, `len(layer_ids) * hidden_size` values in the model dtype. Objects that carry hidden states use artifact format version 1.1; objects without them stay at version 1.0.
+
+To skip rows the trainer already holds, set `token_start` in `content_options`. For a GRPO group that shares one prompt, request the prompt rows once and skip them for the other samples:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "object_store",
+  "destination": {"...": "..."},
+  "content_options": {"hidden_states": {"token_start": 512}}
+}
+```
+
+`token_start` must be between 0 and the prompt length. A larger value fails the request before inference, and a value past the observed prompt returns `capture_invalid`; it is never clamped. The option reduces delivered bytes and capture memory, not the worker's own extraction work.
+
+`layer_ids` name the input of each decoder layer: ID `i` is the output of layer `i - 1`, and ID 0 is the embedding output. This is vLLM's convention for `eagle_aux_hidden_state_layer_ids`, and Dynamo reports SGLang captures the same way.
+
+### Capture on SGLang
+
+SGLang 0.5.23 can capture EAGLE-3 aux hidden states on a target model without loading a draft. Launch the worker with:
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-8B \
+  --enable-return-aux-hidden-states \
+  --speculative-algorithm EAGLE3 \
+  --return-aux-hidden-state-layer-ids 1 17 32 \
+  --chunked-prefill-size 16384
+```
+
+`--speculative-algorithm EAGLE3` only names the capture convention; SGLang loads no draft. Dynamo requires `--return-aux-hidden-state-layer-ids`, so it can publish the layers without loading the model. SGLang's IDs name layer outputs, so the worker above publishes `layer_ids` `[2, 18, 33]`, the same rows as the vLLM example. The worker publishes `hidden_state_capture` like a vLLM worker.
+
+What differs from vLLM:
+
+- Only the `hidden_states` content is supported on SGLang for now.
+- SGLang hands the rows to Dynamo as Python lists, which take about 18 times the memory of bf16 values while Dynamo converts them. Capture admission reserves for that, so a worker admits much shorter captures per byte of `DYNAMO_ARTIFACT_CAPTURE_BYTES` than vLLM does.
+- SGLang resends every row so far with each streamed output, so Dynamo asks it to stream a capturing request's tokens only at the first token and at the finish.
+- A prefix-cache hit returns no rows for cached positions. Dynamo limits the prefix match to `token_start` (through `logprob_start_len`), so a request that skips the prompt rows keeps full prefix reuse, and one that wants them recomputes the prompt.
+- SGLang keeps only the last chunk's rows of a chunked prefill. Set `--chunked-prefill-size` above the longest prompt you capture; otherwise those requests return `capture_invalid`.
+- A request SGLang retracted under memory pressure returns `capture_invalid`, because its rows may repeat.
+
+### Read the Artifact Directly over NIXL
+
+Instead of uploading to object storage, a worker can hold the encoded artifact in its own memory and let the trainer pull it once over NIXL. Nothing passes through the frontend or a storage service. Enable it on the worker with a byte budget for held artifacts:
+
+```bash
+DYNAMO_ARTIFACT_NIXL_BYTES=4294967296 python -m dynamo.vllm ...
+```
+
+`DYNAMO_ARTIFACT_NIXL_MAX_LEASE_SECONDS` (default `300`) caps how long a request may ask the worker to hold an artifact. Request the `nixl_read` mode with a lease:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "nixl_read",
+  "destination": {"kind": "nixl_read", "lease_seconds": 120}
+}
+```
+
+The receipt in `nvext.metadata_upload` carries `rdma_metadata`, `byte_count`, `sha256`, and `expires_at`. Read it with the helper, which pulls the bytes into a host or GPU tensor and checks the digest for host reads:
+
+```python
+from dynamo.artifacts.nixl import read_nixl_artifact
+from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+tensor = await read_nixl_artifact(receipt, device="cpu")
+artifact = decode_generation_artifact(tensor.numpy().tobytes())
+```
+
+The worker frees the buffer after one read or when the lease expires, whichever comes first. When held artifacts fill the budget, new `nixl_read` requests are rejected as overloaded before inference. Artifacts served this way are not compressed, so tensors sit at fixed offsets in the buffer.
+
+<Warning>
+The receipt's `rdma_metadata` is a capability: any NIXL agent that holds it can read the artifact until the lease ends. Deliver receipts only to trusted consumers on the same network as the workers.
+</Warning>
+
+### Store Long Captures as Chunks
+
+An artifact object is capped at 64 MiB. With three captured layers of a 4096-wide bfloat16 model, that is about 2,700 tokens of hidden states. For longer sequences, set `chunk_tokens` to store the rows outside the object as content-addressed chunks:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "object_store",
+  "destination": {
+    "kind": "managed_store",
+    "profile": "rollouts",
+    "object_key": "runs/r1/sample-7",
+    "chunk_prefix": "runs/r1/hidden-chunks"
+  },
+  "content_options": {"hidden_states": {"chunk_tokens": 256}}
+}
+```
+
+Chunk `k` holds sequence positions `k * chunk_tokens` up to `(k + 1) * chunk_tokens`, clipped to the captured rows, and each chunk is stored at `{chunk_prefix}/{sha256}`. Because chunks align to absolute positions, requests that share a prompt produce identical chunks for its full prompt chunks when vLLM serves those positions from its prefix cache, and the store keeps one copy. Use one `chunk_prefix` and one `chunk_tokens` across a GRPO group, or across a whole run, to share them. A worker checks whether each chunk already exists before writing it, verifies every chunk it writes or reuses, and writes the object only after all its chunks are stored. The ready receipt reports `chunk_count`, `chunk_bytes`, and `reused_chunk_bytes`.
+
+The artifact's `hidden_state_chunks` component lists each chunk's `rows`, `byte_count`, and `sha256`; such objects use artifact format version 1.2. Rebuild the rows with the helper, which checks every chunk against its digest:
+
+```python
+from dynamo.artifacts.vllm.format import assemble_hidden_states, decode_generation_artifact
+
+(component,) = decode_generation_artifact(object_bytes).choices[0].components
+rows = assemble_hidden_states(
+    component, lambda digest: store.read(f"runs/r1/hidden-chunks/{digest}")
+)
+```
+
+Chunking works with `managed_store` destinations, whose `chunk_prefix` the worker authorizes like `object_key`, and with `nixl_read`. A presigned destination grants a single object, so it cannot hold chunks. With `nixl_read`, the worker holds the object and its chunks in one readable operation and lists the chunks under `parts` in the receipt; read them together:
+
+```python
+from dynamo.artifacts.nixl import NixlArtifactReader
+
+artifact, chunks = await NixlArtifactReader().read_parts(receipt)
+(component,) = decode_generation_artifact(artifact.numpy().tobytes()).choices[0].components
+rows = assemble_hidden_states(component, lambda digest: chunks[digest].numpy())
+```
+
+A chunk must fit in 64 MiB (`chunk_tokens` times the row size), and an artifact may have at most 4,096 chunks. Chunked rows still count toward the worker's capture budget (`DYNAMO_ARTIFACT_CAPTURE_BYTES`) and the delivery's own limit: the artifact authority's `max_source_bytes` (256 MiB by default) or the NIXL byte budget. A request that cannot fit fails before inference.
+
+Limits of the current implementation:
+
+- On both backends the capturing worker does not speculate: vLLM's `extract_hidden_states` takes the place of a drafter, and SGLang turns speculation off when it captures.
+- Capture requires aggregated serving with token prompts and one choice, like the other artifact contents.
+- Without chunking, an artifact payload is capped at 64 MiB, checked against the prompt length plus `max_tokens` before inference.
+- vLLM's connector writes each file to local disk before the worker reads, uploads, and deletes it.
+- Chunk reuse depends on bitwise-identical rows. A prompt prefilled concurrently by two requests, rather than served from the prefix cache, may differ in its last bits and is stored twice.
 
 ## Handle Streaming and Retries
 
@@ -266,6 +428,7 @@ A status reflects the documented integration, not whether the framework can call
 | Completion token IDs through named `nvext` fields | Supported | Supported | Supported through the shared response path |
 | Native RL generation route | Experimental unary vLLM-compatible route | Streaming `/generate` | None |
 | Prompt log probabilities | Supported | Topology-dependent; validate the selected path | No dedicated RL end-to-end coverage recorded here |
+| Hidden-state artifacts | Aggregated; all artifact contents | Aggregated; `hidden_states` only | Not supported |
 | `/v1/rl/workers` registration | RL-enabled workers | Not currently registered | Not currently registered |
 | Built-in RL administration routes | Pause/resume, version, disk/distributed update, group lifecycle | Fixed weight controls plus explicit method allowlisting | No shared RL administration contract documented here |
 

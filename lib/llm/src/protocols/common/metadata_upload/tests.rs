@@ -160,3 +160,117 @@ fn rejects_traversal_and_invalid_mooncake_retention() {
     let input = json!({"kind": "generation_artifact", "contents": [], "mode": "relay_store", "destination": {"kind": "mooncake_store", "profile": "test", "consumer_group": "trainers", "retention_seconds": 0}});
     assert!(serde_json::from_value::<MetadataUpload>(input).is_err());
 }
+
+#[test]
+fn managed_store_chunk_prefix_round_trips_and_rejects_traversal() {
+    let input = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "object_store",
+        "destination": {
+            "kind": "managed_store", "profile": "test", "object_key": "runs/r1/sample-7",
+            "chunk_prefix": "runs/r1/chunks"
+        },
+        "content_options": {"hidden_states": {"chunk_tokens": 256}}
+    });
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    for prefix in [
+        "",
+        "../chunks",
+        "/chunks",
+        "a//b",
+        "a/./b",
+        "s3://bucket/chunks",
+    ] {
+        let input = json!({
+            "kind": "generation_artifact", "contents": [], "mode": "object_store",
+            "destination": {
+                "kind": "managed_store", "profile": "test", "object_key": "a",
+                "chunk_prefix": prefix
+            }
+        });
+        assert!(
+            serde_json::from_value::<MetadataUpload>(input).is_err(),
+            "{prefix}"
+        );
+    }
+}
+
+fn inline_with_options(options: Value) -> Value {
+    json!({
+        "kind": "generation_artifact",
+        "contents": ["hidden_states", "selected_logprobs"],
+        "mode": "inline_base64",
+        "content_options": options,
+    })
+}
+
+#[test]
+fn content_options_round_trip_for_requested_contents() {
+    let input = inline_with_options(json!({"hidden_states": {"token_start": 12}}));
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    let without = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "inline_base64"
+    });
+    let upload: MetadataUpload = serde_json::from_value(without.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), without);
+}
+
+#[test]
+fn content_options_reject_unrequested_contents_non_objects_and_oversize() {
+    for options in [
+        json!({"moe_routes": {"token_start": 1}}),
+        json!({"hidden_states": 12}),
+        json!({"hidden_states": [12]}),
+        json!({"hidden_states": {"pad": "x".repeat(5000)}}),
+        json!([{"hidden_states": {}}]),
+    ] {
+        let result = serde_json::from_value::<MetadataUpload>(inline_with_options(options));
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn nixl_read_requires_its_destination_and_a_bounded_lease() {
+    let input = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "nixl_read",
+        "destination": {"kind": "nixl_read", "lease_seconds": 120}
+    });
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    for (mode, destination) in [
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 0}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 3601}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "nixl_read", "lease_seconds": 60, "host": "x"}),
+        ),
+        (
+            "nixl_read",
+            json!({"kind": "mooncake_store", "profile": "p", "consumer_group": "g", "retention_seconds": 1}),
+        ),
+        (
+            "object_store",
+            json!({"kind": "nixl_read", "lease_seconds": 60}),
+        ),
+    ] {
+        let value = json!({
+            "kind": "generation_artifact", "contents": ["hidden_states"], "mode": mode,
+            "destination": destination
+        });
+        assert!(serde_json::from_value::<MetadataUpload>(value).is_err());
+    }
+    let missing = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "nixl_read"
+    });
+    assert!(serde_json::from_value::<MetadataUpload>(missing).is_err());
+}

@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import time
+from contextlib import closing
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, Mapping, Optional
 
 import numpy as np
@@ -15,7 +16,10 @@ from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.common.metadata_upload import (
+    MetadataUploader,
+    _backend_metadata_upload_settings,
+)
 from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
@@ -23,7 +27,7 @@ from dynamo.common.multimodal.image_loader import (
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
@@ -173,6 +177,15 @@ class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
 
     def close(self) -> None:
         pass
+
+
+def _requests_generation_artifact(request: Dict[str, Any]) -> bool:
+    settings = _backend_metadata_upload_settings(request)
+    return isinstance(settings, dict) and "kind" in settings
+
+
+def _failed_terminal(finish_reason: str) -> bool:
+    return finish_reason in ("cancelled", "error") or finish_reason.startswith("error:")
 
 
 def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> FrontendDecodedVideo:
@@ -588,6 +601,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
             self._video_loader = VideoLoader(enable_frontend_decoding=True)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
+        # Fixed at launch; a misconfigured capture fails worker startup.
+        self.artifact_hidden_state_profile = None
+        if getattr(self.config.server_args, "enable_return_aux_hidden_states", False):
+            from dynamo.artifacts.sglang.capture import hidden_state_profile_from_sglang
+
+            self.artifact_hidden_state_profile = hidden_state_profile_from_sglang(
+                self.config.server_args,
+                getattr(
+                    getattr(self.engine, "tokenizer_manager", None),
+                    "model_config",
+                    None,
+                ),
+            )
         # Without these, requests that leave top_k/top_p unset sample the full
         # vocabulary, unlike sglang.launch_server, and decode more slowly.
         self._default_sampling_params = _model_default_sampling_params(self.engine)
@@ -630,6 +656,173 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         that derived data once per tokenized request.
         """
         return supports_external_mm_hashes(engine)
+
+    def _artifact_session_from_request(
+        self,
+        request: Dict[str, Any],
+        input_param: Dict[str, Any],
+        sampling_params: Dict[str, Any],
+        logprob_kwargs: Dict[str, Any],
+    ) -> tuple[Any, Dict[str, Any], bool]:
+        """Admit generation-artifact capture before inference.
+
+        Returns the session (None without an artifact request), extra
+        ``async_generate`` kwargs, and whether logprobs were forced on only
+        for capture. Updates ``sampling_params`` and ``logprob_kwargs``.
+        """
+        if not _requests_generation_artifact(request):
+            return None, {}, False
+        if (
+            self.serving_mode != DisaggregationMode.AGGREGATED
+            or self.use_sglang_tokenizer
+        ):
+            raise InvalidArgument(
+                "artifact capture currently requires aggregated token-mode generation"
+            )
+        prompt_ids = input_param.get("input_ids")
+        if not isinstance(prompt_ids, list) or request.get("multi_modal_data"):
+            raise InvalidArgument("artifact capture requires an exact token prompt")
+        max_tokens = sampling_params.get("max_new_tokens")
+        if type(max_tokens) is not int:
+            raise InvalidArgument("artifact capture requires max_tokens")
+
+        from dynamo.artifacts.sglang.capture import SglangArtifactSession
+        from dynamo.artifacts.vllm.capture import CaptureCapacityError
+
+        settings = _backend_metadata_upload_settings(request) or {}
+        mode = settings.get("mode")
+        runtime: Any = None
+        if mode == "nixl_read":
+            from dynamo.artifacts.nixl import (
+                NixlArtifactCapacityError,
+                configured_nixl_artifact_server,
+            )
+
+            runtime = configured_nixl_artifact_server()
+            if runtime is None:
+                raise InvalidArgument(
+                    "NIXL artifact delivery is not enabled on this worker"
+                )
+        elif mode != "inline_base64":
+            # Needs opendal from the optional artifact-delivery extra.
+            from dynamo.artifacts.runtime import (
+                ArtifactAuthorityClosed,
+                configured_artifact_runtime,
+            )
+            from dynamo.artifacts.storage import ArtifactStorageError
+
+            runtime = configured_artifact_runtime()
+            if runtime is None:
+                raise InvalidArgument("artifact delivery authority is not configured")
+        try:
+            session = SglangArtifactSession.from_request(
+                request,
+                prompt_token_count=len(prompt_ids),
+                max_tokens=max_tokens,
+                choice_count=sampling_params.get("n") or 1,
+                runtime=runtime,
+                hidden_state_profile=self.artifact_hidden_state_profile,
+            )
+        except CaptureCapacityError as exc:
+            raise WorkerOverloaded(str(exc)) from None
+        except ValueError as exc:
+            if mode not in ("nixl_read", "inline_base64") and isinstance(
+                exc, ArtifactAuthorityClosed
+            ):
+                raise WorkerOverloaded(str(exc)) from None
+            raise InvalidArgument(str(exc)) from None
+        except RuntimeError as exc:
+            if mode == "nixl_read" and isinstance(exc, NixlArtifactCapacityError):
+                raise WorkerOverloaded(str(exc)) from None
+            # Storage policy rejects a destination with a credential-safe message.
+            if (
+                mode not in ("nixl_read", "inline_base64")
+                and isinstance(exc, ArtifactStorageError)
+                and exc.code in ("invalid_target", "destination_denied", "expired")
+            ):
+                raise InvalidArgument(str(exc)) from None
+            raise
+
+        engine_kwargs: Dict[str, Any] = {}
+        forced_logprobs = False
+        if session.hidden_profile is not None:
+            engine_kwargs["return_hidden_states"] = True
+            # Every streamed output re-sends all rows so far; send only the first
+            # token and the finish.
+            sampling_params["stream_interval"] = max_tokens + 1
+            # A prefix-cache hit returns no rows for cached positions, and SGLang
+            # caps the match at logprob_start_len.
+            start = session.hidden_token_start
+            forced_logprobs = not logprob_kwargs.get("return_logprob")
+            logprob_kwargs["return_logprob"] = True
+            current = logprob_kwargs.get("logprob_start_len", -1)
+            logprob_kwargs["logprob_start_len"] = (
+                start if current < 0 else min(current, start)
+            )
+        return session, engine_kwargs, forced_logprobs
+
+    async def _generate_artifact_tokens(
+        self,
+        request: Dict[str, Any],
+        context: Context,
+        *,
+        input_param: Dict[str, Any],
+        sampling_params: Dict[str, Any],
+        engine_kwargs: Dict[str, Any],
+        sglang_request_id: str,
+        submitted_request_id: str | None,
+        artifact_session: Any,
+        emit_logprobs: bool,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Aggregated token-mode generation with artifact capture.
+
+        Mirrors the aggregated ``async_generate`` call in ``generate`` for a
+        text-only token prompt; keep the two in step.
+        """
+        reject_unconsumed_media(
+            request, consumes_media=engine_consumes_media(self.engine)
+        )
+        routing = request.get("routing") or {}
+        stream = await self.engine.async_generate(
+            **input_param,
+            **cache_salt_kwargs(self.engine, request_cache_salt(request)),
+            sampling_params=sampling_params,
+            stream=True,
+            **require_reasoning_kwargs(
+                self.engine,
+                request,
+                thinking_budget_requested=thinking_budget_requested(request),
+            ),
+            **self._routed_experts_kwargs,
+            external_trace_header=(
+                context.trace_headers() if self.enable_trace else None
+            ),
+            rid=sglang_request_id,
+            **routed_dp_rank_kwargs(self.engine, routing.get("dp_rank")),
+            lora_path=self._resolve_lora(request),
+            **engine_kwargs,
+            **agent_session_kwargs(self.engine, request),
+            **kv_hint_kwargs(self.engine, request),
+        )
+        output_options = request.get("output_options", {})
+        (
+            completion_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(output_options)
+        async for out in self._process_token_stream(
+            stream,
+            context,
+            bool(output_options.get("return_tokens_as_token_ids")),
+            user_stop_token_ids=_user_stop_token_ids(request),
+            submitted_request_id=submitted_request_id,
+            prompt_logprobs_count=prompt_logprobs_count,
+            completion_logprobs_count=completion_logprobs_count,
+            report_kv_cache_hit=not _has_parallel_prefix_warmup(sampling_params),
+            artifact_session=artifact_session,
+            prompt_token_ids=input_param["input_ids"],
+            emit_logprobs=emit_logprobs,
+        ):
+            yield out
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -825,6 +1018,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             context.id(),
         )
         if native_payload is not None:
+            if _requests_generation_artifact(request):
+                raise InvalidArgument(
+                    "artifact capture is not supported for native SGLang Generate"
+                )
             native_sampling_params = native_payload.get("sampling_params")
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
@@ -875,6 +1072,32 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             supported=getattr(self, "_supports_ordered_cancellation", False),
         )
         logprob_kwargs = self._build_logprob_kwargs(request)
+        (
+            artifact_session,
+            artifact_kwargs,
+            artifact_forced_logprobs,
+        ) = self._artifact_session_from_request(
+            request, input_param, sampling_params, logprob_kwargs
+        )
+        if artifact_session is not None:
+            with closing(artifact_session):
+                async for out in self._generate_artifact_tokens(
+                    request,
+                    context,
+                    input_param=input_param,
+                    sampling_params=sampling_params,
+                    engine_kwargs={
+                        **logprob_kwargs,
+                        **artifact_kwargs,
+                        **priority_kwargs,
+                    },
+                    sglang_request_id=sglang_request_id,
+                    submitted_request_id=submitted_request_id,
+                    artifact_session=artifact_session,
+                    emit_logprobs=not artifact_forced_logprobs,
+                ):
+                    yield out
+            return
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
@@ -1176,6 +1399,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         report_kv_cache_hit: bool = True,
         prompt_logprobs_count: int | None = None,
         completion_logprobs_count: int | None = None,
+        artifact_session: Any = None,
+        prompt_token_ids: list[int] | None = None,
+        emit_logprobs: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1257,7 +1483,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
-                if metadata_uploader is None:
+                if artifact_session is not None:
+                    artifact_session.observe_tokens(output_ids, prompt_token_ids)
+                    if finish_reason:
+                        artifact_session.observe_finish(meta_info)
+                    # Rows so far; only the final output's are used.
+                    meta_info.pop("hidden_states", None)
+                if metadata_uploader is None and emit_logprobs:
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -1305,6 +1537,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if kv_cache_hit:
                         engine_data["kv_cache_hit"] = kv_cache_hit
+                    if artifact_session is not None and not _failed_terminal(
+                        out["finish_reason"]
+                    ):
+                        engine_data[
+                            "metadata_upload"
+                        ] = await artifact_session.finalize(release_capture=False)
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

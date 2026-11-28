@@ -200,6 +200,9 @@ pub enum ArtifactMode {
     InlineBase64,
     ObjectStore,
     RelayStore,
+    /// The worker holds the encoded artifact and returns NIXL read metadata;
+    /// the consumer pulls it once, directly from worker memory.
+    NixlRead,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -211,7 +214,14 @@ pub struct GenerationArtifactUpload {
     pub mode: ArtifactMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<ArtifactDestination>,
+    /// Opaque per-content options, keyed by a requested content name. Like the
+    /// names themselves, the backend adapter defines and validates each value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_options: Option<serde_json::Map<String, Value>>,
 }
+
+/// Bound on the serialized `content_options` object; options are small scalars.
+const MAX_CONTENT_OPTIONS_BYTES: usize = 4096;
 
 impl GenerationArtifactUpload {
     fn validate(&self, destination_present: bool) -> Result<(), &'static str> {
@@ -223,6 +233,18 @@ impl GenerationArtifactUpload {
         {
             return Err("artifact contents must contain at most 64 unique nonempty names");
         }
+        if let Some(options) = &self.content_options {
+            if options
+                .iter()
+                .any(|(name, value)| !contents.contains(name) || !value.is_object())
+            {
+                return Err("artifact content_options must map requested contents to objects");
+            }
+            let size = serde_json::to_vec(options).map(|bytes| bytes.len());
+            if !matches!(size, Ok(size) if size <= MAX_CONTENT_OPTIONS_BYTES) {
+                return Err("artifact content_options exceed the size limit");
+            }
+        }
         match (&self.mode, &self.destination) {
             (ArtifactMode::InlineBase64, None) if !destination_present => Ok(()),
             (ArtifactMode::ObjectStore, Some(ArtifactDestination::PresignedHttpPut(target))) => {
@@ -232,6 +254,9 @@ impl GenerationArtifactUpload {
                 target.validate()
             }
             (ArtifactMode::RelayStore, Some(ArtifactDestination::MooncakeStore(target))) => {
+                target.validate()
+            }
+            (ArtifactMode::NixlRead, Some(ArtifactDestination::NixlRead(target))) => {
                 target.validate()
             }
             _ => Err("artifact destination is incompatible with the delivery mode"),
@@ -245,6 +270,7 @@ pub enum ArtifactDestination {
     PresignedHttpPut(PresignedHttpPutDestination),
     ManagedStore(ManagedStoreDestination),
     MooncakeStore(MooncakeStoreDestination),
+    NixlRead(NixlReadDestination),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -312,24 +338,35 @@ impl PresignedHttpPutDestination {
 pub struct ManagedStoreDestination {
     pub profile: String,
     pub object_key: String,
+    /// Where the worker stores content-addressed chunks of a chunked artifact,
+    /// one object per chunk digest. Requests that share rows share chunks, so
+    /// the prefix is usually shared too. The worker authorizes it like
+    /// `object_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_prefix: Option<String>,
+}
+
+fn valid_object_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 1024
+        && !key.starts_with('/')
+        && !key.contains('\\')
+        && !key.contains('\0')
+        && !key.contains("://")
+        && !key.split('/').any(|part| matches!(part, "" | "." | ".."))
 }
 
 impl ManagedStoreDestination {
     fn validate(&self) -> Result<(), &'static str> {
         if !valid_name(&self.profile)
-            || self.object_key.is_empty()
-            || self.object_key.len() > 1024
-            || self.object_key.starts_with('/')
-            || self.object_key.contains('\\')
-            || self.object_key.contains('\0')
-            || self.object_key.contains("://")
+            || !valid_object_key(&self.object_key)
             || self
-                .object_key
-                .split('/')
-                .any(|part| matches!(part, "" | "." | ".."))
+                .chunk_prefix
+                .as_deref()
+                .is_some_and(|prefix| !valid_object_key(prefix))
         {
             return Err(
-                "managed store requires a profile and a relative object key without traversal",
+                "managed store requires a profile and relative object keys without traversal",
             );
         }
         Ok(())
@@ -351,6 +388,25 @@ impl MooncakeStoreDestination {
             || self.retention_seconds == 0
         {
             return Err("Mooncake relay requires a profile, consumer group and positive retention");
+        }
+        Ok(())
+    }
+}
+
+/// How long the worker keeps the artifact readable. The worker applies its own,
+/// usually lower, maximum.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NixlReadDestination {
+    pub lease_seconds: u64,
+}
+
+const MAX_NIXL_LEASE_SECONDS: u64 = 3600;
+
+impl NixlReadDestination {
+    fn validate(&self) -> Result<(), &'static str> {
+        if !(1..=MAX_NIXL_LEASE_SECONDS).contains(&self.lease_seconds) {
+            return Err("NIXL read requires a lease between 1 and 3600 seconds");
         }
         Ok(())
     }
