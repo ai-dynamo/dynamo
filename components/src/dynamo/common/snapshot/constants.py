@@ -30,6 +30,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # passed to create_runtime().
     "DYN_DISCOVERY_BACKEND",
     "DYN_REQUEST_PLANE",
+    "DYN_RESPONSE_PLANE",
     "DYN_EVENT_PLANE",
     # Destination policy replaces the temporary capture-time offline override.
     "HF_HUB_OFFLINE",

@@ -29,6 +29,7 @@ _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
     "discovery_backend",
     "request_plane",
+    "response_plane",
     "event_plane",
 )
 
@@ -48,9 +49,10 @@ async def refresh_snapshot_restore_config(
 
     Read destination env from ``snapshot-restore-proxy`` or a legacy standby
     context file. Apply that env first and then re-run the runtime parser so
-    fields derived from env (namespace, discovery backend, request plane, event
-    plane, etc.) follow the same CLI/env precedence as a cold start. This avoids
-    brittle ad hoc patches to an already-parsed config object.
+    fields derived from env (namespace, discovery backend, request plane,
+    response plane, event plane, etc.) follow the same CLI/env precedence as a
+    cold start. This avoids brittle ad hoc patches to an already-parsed config
+    object.
 
     Args:
         parse_config: Zero-argument callable that returns a config object after
@@ -78,15 +80,13 @@ async def refresh_snapshot_restore_config(
     _copy_restore_runtime_config(target_runtime_config, parsed_runtime_config)
     _validate_kubernetes_restore_env_for_config(target_runtime_config)
     logger.info(
-        "Refreshed snapshot restore runtime config",
-        extra={
-            "dynamo_namespace": getattr(target_runtime_config, "namespace", None),
-            "discovery_backend": getattr(
-                target_runtime_config, "discovery_backend", None
-            ),
-            "request_plane": getattr(target_runtime_config, "request_plane", None),
-            "event_plane": getattr(target_runtime_config, "event_plane", None),
-        },
+        "Refreshed snapshot restore runtime config: dynamo_namespace=%s "
+        "discovery_backend=%s request_plane=%s response_plane=%s event_plane=%s",
+        getattr(target_runtime_config, "namespace", None),
+        getattr(target_runtime_config, "discovery_backend", None),
+        getattr(target_runtime_config, "request_plane", None),
+        getattr(target_runtime_config, "response_plane", None),
+        getattr(target_runtime_config, "event_plane", None),
     )
     return config
 
