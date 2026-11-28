@@ -682,9 +682,10 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 530_432_000
             ),  # KV cache cap (2x safety over profiled min=265_216_000)
-            pytest.mark.timeout(
-                300
-            ),  # 1.1B loads quickly; margin covers CI model download
+            # Startup (~150 s with CI model download), one cold FA2 compile
+            # (~90 s) in the first request, and ~14 s per request after that.
+            # Each request has its own 180 s read timeout.
+            pytest.mark.timeout(480),
             pytest.mark.post_merge,
         ],
         model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
@@ -697,7 +698,9 @@ vllm_configs = {
             "completions",
         ],
         request_payloads=[
-            completion_payload_default(),
+            # When decode first reaches KV ~256, sm_120 CI JIT-compiles the
+            # sm_80-only FA2 split-KV kernel from PTX: ~90 s with a cold cache.
+            completion_payload_default(timeout=180),
         ],
     ),
     "multi_node_tp_headless": VLLMConfig(
