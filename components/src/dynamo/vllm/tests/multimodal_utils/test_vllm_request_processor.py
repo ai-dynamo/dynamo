@@ -762,6 +762,57 @@ async def test_reads_processor_kwargs_from_router_extra_args():
     assert prepared.multi_modal_data["audio"] is audio
 
 
+def _with_processor_kwargs(value: object, via_extra_args: bool) -> dict:
+    if via_extra_args:
+        return {"extra_args": {"mm_processor_kwargs": value}}
+    return {"mm_processor_kwargs": value}
+
+
+@pytest.mark.parametrize(
+    "via_extra_args", [False, True], ids=["top-level", "extra-args"]
+)
+@pytest.mark.parametrize(
+    "value", [None, {}, {"use_audio_in_video": True}], ids=["null", "empty", "object"]
+)
+def test_get_mm_processor_kwargs_accepts_object_or_null(
+    value: object, via_extra_args: bool
+) -> None:
+    request = _with_processor_kwargs(value, via_extra_args)
+
+    assert mod.get_mm_processor_kwargs(request) == value
+
+
+@pytest.mark.parametrize(
+    "via_extra_args", [False, True], ids=["top-level", "extra-args"]
+)
+@pytest.mark.parametrize(
+    "value", [-1, "bad", ["use_audio_in_video"]], ids=["int", "string", "list"]
+)
+def test_get_mm_processor_kwargs_rejects_non_object(
+    value: object, via_extra_args: bool
+) -> None:
+    request = _with_processor_kwargs(value, via_extra_args)
+
+    with pytest.raises(
+        mod.InvalidArgument, match="mm_processor_kwargs must be an object"
+    ):
+        mod.get_mm_processor_kwargs(request)
+
+
+@pytest.mark.asyncio
+async def test_rejects_non_object_processor_kwargs():
+    with pytest.raises(
+        mod.InvalidArgument, match="mm_processor_kwargs must be an object"
+    ):
+        await _prepare_prompt(
+            _processor(),
+            {"token_ids": [1, 2], "mm_processor_kwargs": "bad"},
+            "request-bad-kwargs",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
+
+
 @pytest.mark.asyncio
 async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
     processor = _processor()

@@ -12,6 +12,7 @@ import torch
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
+from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -334,6 +335,28 @@ class TestPoolingWorkerHandler:
         assert captured["prompt"]["cache_salt"] == "secret"
         assert captured["prompt"]["mm_processor_kwargs"] == {"do_resize": False}
         assert response["id"] == "pool-client-request"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_non_object_mm_processor_kwargs_is_rejected(self):
+        handler = _make_handler()
+        handler.engine_client.encode = MagicMock()
+
+        with pytest.raises(
+            InvalidArgument, match="mm_processor_kwargs must be an object"
+        ):
+            async for _ in handler.generate(
+                {
+                    "input": "text",
+                    "model": "test-model",
+                    "encoding_format": "float",
+                    "mm_processor_kwargs": -1,
+                },
+                _make_context(),
+            ):
+                pass
+
+        handler.engine_client.encode.assert_not_called()
 
     @pytest.mark.parametrize("encoding_format", ["base64", "bytes", "bytes_only"])
     @pytest.mark.asyncio
