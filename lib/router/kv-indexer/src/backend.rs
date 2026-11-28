@@ -448,7 +448,7 @@ impl Indexer {
                 session_updates, ..
             } => session_updates.as_ref().and_then(|sender| {
                 sender
-                    .mutation_from_event(&event, targets_primary)
+                    .mutation_from_event(&event)
                     .map(|mutation| (sender.clone(), mutation))
             }),
             Self::Remote { .. } | Self::None => None,
@@ -549,6 +549,37 @@ impl Indexer {
         }
     }
 
+    /// Queue a route-time credit for the cache owner attached to `worker`: how deep that
+    /// owner holds `block_hashes`. A no-op without a session index or an attached owner.
+    pub fn enqueue_session_cache_owner_match(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        block_hashes: &[LocalBlockHash],
+    ) -> Result<(), KvRouterError> {
+        let (Self::Single {
+            lower_tier,
+            session_updates: Some(sender),
+            ..
+        }
+        | Self::Concurrent {
+            lower_tier,
+            session_updates: Some(sender),
+            ..
+        }) = self
+        else {
+            return Ok(());
+        };
+        let Some(owner) = lower_tier.cache_owner_of(worker) else {
+            return Ok(());
+        };
+        sender.enqueue(SessionMutation::CacheOwnerMatched {
+            owner,
+            session_id: session_id.to_owned(),
+            block_hashes: block_hashes.to_vec(),
+        })
+    }
+
     #[cfg(test)]
     async fn flush_session_updates(&self) -> Result<(), KvRouterError> {
         match self {
@@ -643,7 +674,8 @@ impl Indexer {
             Self::None => {}
         }
         self.enqueue_session_update_and_wait(SessionMutation::Cleared {
-            worker: WorkerWithDpRank::new(worker_id, dp_rank),
+            worker: Some(WorkerWithDpRank::new(worker_id, dp_rank)),
+            cache_owner: None,
         })
         .await?;
         Ok(())
@@ -713,7 +745,8 @@ impl Indexer {
         }
         if let Err(error) = self
             .enqueue_session_update_and_wait(SessionMutation::Cleared {
-                worker: WorkerWithDpRank::new(worker_id, dp_rank),
+                worker: Some(WorkerWithDpRank::new(worker_id, dp_rank)),
+                cache_owner: None,
             })
             .await
         {
@@ -1779,8 +1812,15 @@ pub fn create_indexer_with_policy(
 mod session_tests {
     use super::test_util::store_event;
     use super::*;
-    use crate::prelude::{KvCacheEvent, KvCacheRemoveData, StorageTier};
+    use crate::prelude::{
+        KvCacheEvent, KvCacheRemoveData, ResidencyOwner, ResidencyOwnerKeyExt, StorageTier,
+        WireResidencyDomain,
+    };
     use crate::{SessionPrefixIndexer, SessionResidencyOwner};
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
 
     fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
         let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
@@ -2327,8 +2367,8 @@ mod session_tests {
             let tagged_store =
                 store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-1");
             let inherited_store = store_event(7, 0, 2, &[], &[41], StorageTier::HostPinned);
-            let delayed_stored = sender.mutation_from_event(&tagged_store, true).unwrap();
-            let delayed_inherited = sender.mutation_from_event(&inherited_store, false).unwrap();
+            let delayed_stored = sender.mutation_from_event(&tagged_store).unwrap();
+            let delayed_inherited = sender.mutation_from_event(&inherited_store).unwrap();
 
             indexer.remove_worker(worker.worker_id).await;
             sender.enqueue(delayed_stored).unwrap();
@@ -2457,5 +2497,270 @@ mod session_tests {
             vec![worker],
             "host residency was reported before the host index applied the store"
         );
+    }
+
+    fn cache_owner(slot: u8) -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    }
+
+    fn session_owner(owner: CacheOwnerId) -> SessionResidencyOwner {
+        SessionResidencyOwner::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+    }
+
+    /// `event` in `owner`'s residency domain.
+    fn owned(event: RouterEvent, owner: CacheOwnerId) -> RouterEvent {
+        RouterEvent::with_cache_owner(event.worker_id, event.event, event.storage_tier, owner)
+    }
+
+    /// One indexer of each kind, with `owner` attached to `worker`.
+    fn indexers_with_cache_owner(
+        owner: CacheOwnerId,
+        worker: WorkerWithDpRank,
+    ) -> [(Indexer, Arc<SessionPrefixIndexer>); 2] {
+        let indexers = [
+            make_session_test_indexer(),
+            make_concurrent_session_test_indexer(),
+        ];
+        for (indexer, _) in &indexers {
+            indexer.set_residency_projection(ResidencyProjection::new([(owner, worker)]).unwrap());
+        }
+        indexers
+    }
+
+    fn stored_hashes(event: &RouterEvent) -> Vec<ExternalSequenceBlockHash> {
+        match &event.event.data {
+            KvCacheEventData::Stored(stored) => {
+                stored.blocks.iter().map(|block| block.block_hash).collect()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn host_remove(event_id: u64, block_hashes: Vec<ExternalSequenceBlockHash>) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            7,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank: 0,
+            },
+            StorageTier::HostPinned,
+        )
+    }
+
+    /// The chains `session-1` holds under `owner` in `tier`.
+    fn held(
+        index: &SessionPrefixIndexer,
+        owner: SessionResidencyOwner,
+        tier: StorageTier,
+    ) -> Vec<Vec<ExternalSequenceBlockHash>> {
+        index
+            .get_session_block_lineage_in_tier("session-1", owner, tier, None)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cache_owner_events_track_session_residency_under_the_owner() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = cache_owner(4);
+        for (indexer, index) in indexers_with_cache_owner(owner, worker) {
+            let device_store = store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+                .with_session_id("session-1");
+            let block_hashes = stored_hashes(&device_store);
+
+            let in_owner = || held(&index, session_owner(owner), StorageTier::HostPinned);
+            let in_worker = |tier| held(&index, SessionResidencyOwner::Worker(worker), tier);
+
+            // The worker deposits two blocks into its cache owner, which names no session.
+            indexer.try_apply_event(device_store).await.unwrap();
+            indexer
+                .try_apply_event(owned(
+                    store_event(7, 0, 2, &[], &[41, 42], StorageTier::HostPinned),
+                    owner,
+                ))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(in_owner(), vec![block_hashes[..2].to_vec()]);
+            assert!(
+                in_worker(StorageTier::HostPinned).is_empty(),
+                "the owner's blocks are not the worker's own host tier"
+            );
+
+            // The owner evicts the second block.
+            indexer
+                .try_apply_event(owned(host_remove(3, vec![block_hashes[1]]), owner))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(in_owner(), vec![vec![block_hashes[0]]]);
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_owner_frontiers_follow_the_owners_lifecycle_not_the_workers() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = cache_owner(4);
+        for (indexer, index) in indexers_with_cache_owner(owner, worker) {
+            let sender = session_update_sender(&indexer);
+            let device_store = store_event(7, 0, 1, &[], &[41, 42], StorageTier::Device)
+                .with_session_id("session-1");
+            let block_hashes = stored_hashes(&device_store);
+            let host_store = || {
+                owned(
+                    store_event(7, 0, 2, &[], &[41, 42], StorageTier::HostPinned),
+                    owner,
+                )
+            };
+            let owner_host = || held(&index, session_owner(owner), StorageTier::HostPinned);
+            indexer.try_apply_event(device_store).await.unwrap();
+            indexer.try_apply_event(host_store()).await.unwrap();
+            // The owner clear below is published with worker id 0, rank 0.
+            indexer
+                .try_apply_event(
+                    store_event(0, 0, 3, &[], &[51], StorageTier::Device)
+                        .with_session_id("session-0"),
+                )
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(owner_host(), vec![block_hashes.clone()]);
+
+            // The router clears an owner whose source went away. A store ingested before
+            // the clear and applied after it must not bring the frontier back.
+            let delayed = sender.mutation_from_event(&host_store()).unwrap();
+            indexer
+                .try_apply_event(RouterEvent::with_cache_owner(
+                    0,
+                    KvCacheEvent {
+                        event_id: 4,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                    StorageTier::Device,
+                    owner,
+                ))
+                .await
+                .unwrap();
+            sender.enqueue(delayed).unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert!(owner_host().is_empty());
+            assert_eq!(
+                index
+                    .get_session_block_lineage("session-0", WorkerWithDpRank::new(0, 0), None)
+                    .unwrap()
+                    .len(),
+                1,
+                "an owner clear names no worker rank"
+            );
+
+            // The owner outlives its worker. A worker reset arrives as a worker-domain
+            // clear that names the owner; it and a worker removal keep the owner's
+            // frontiers, and a store ingested before them still applies.
+            indexer.try_apply_event(host_store()).await.unwrap();
+            let delayed_disk = sender
+                .mutation_from_event(&owned(
+                    store_event(7, 0, 5, &[], &[41], StorageTier::Disk),
+                    owner,
+                ))
+                .unwrap();
+            indexer
+                .try_apply_event(clear_event(7, 0, 6).with_state_source(owner))
+                .await
+                .unwrap();
+            indexer.remove_worker(7).await;
+            sender.enqueue(delayed_disk).unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(owner_host(), vec![block_hashes.clone()]);
+            assert_eq!(
+                held(&index, session_owner(owner), StorageTier::Disk),
+                vec![vec![block_hashes[0]]]
+            );
+
+            // A legacy clear carries no domain, and covers the worker and the owner it names.
+            let mut legacy_clear = clear_event(7, 0, 7).with_state_source(owner);
+            legacy_clear.residency_domain = WireResidencyDomain::Missing;
+            indexer.try_apply_event(legacy_clear).await.unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert!(index.get_session_residency("session-1").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn route_time_match_credits_what_the_cache_owner_holds() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = cache_owner(4);
+        let chain: Vec<LocalBlockHash> = [41, 42, 43, 44].map(LocalBlockHash).to_vec();
+        for (indexer, index) in indexers_with_cache_owner(owner, worker) {
+            let owner_host = || held(&index, session_owner(owner), StorageTier::HostPinned);
+
+            // The session ran on another worker. A peer fetch then lands its three blocks
+            // in this worker's owner before the session is recorded here, so the store
+            // credits nobody. The worker's own host tier holds the same blocks and a fourth.
+            indexer
+                .try_apply_event(
+                    store_event(8, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+                        .with_session_id("session-1"),
+                )
+                .await
+                .unwrap();
+            let fetched = owned(
+                store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::HostPinned),
+                owner,
+            );
+            let block_hashes = stored_hashes(&fetched);
+            indexer.try_apply_event(fetched).await.unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    2,
+                    &[],
+                    &[41, 42, 43, 44],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert!(owner_host().is_empty());
+
+            // The session's next request is routed to the worker.
+            indexer
+                .enqueue_session_cache_owner_match("session-1", worker, &chain)
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(owner_host(), vec![block_hashes.clone()]);
+
+            // The owner evicts the last block behind work the session consumer would
+            // otherwise outrun. A match queued after the removal must not restore it.
+            for event_id in 3..=2002u64 {
+                let filler: Vec<u64> = (1..=32).map(|i| 100_000 + event_id * 64 + i).collect();
+                indexer
+                    .try_apply_event(owned(
+                        store_event(7, 0, event_id, &[], &filler, StorageTier::HostPinned),
+                        owner,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            indexer
+                .try_apply_event(owned(host_remove(2003, vec![block_hashes[2]]), owner))
+                .await
+                .unwrap();
+            indexer
+                .enqueue_session_cache_owner_match("session-1", worker, &chain)
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(owner_host(), vec![block_hashes[..2].to_vec()]);
+        }
     }
 }

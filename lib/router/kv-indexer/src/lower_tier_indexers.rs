@@ -19,7 +19,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::prelude::{
-    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
+    LocalBlockHash, ResidencyOwnerKey, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+    StorageTier, WorkerWithDpRank,
 };
 use crate::{
     CacheOwnerBlockCounts, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
@@ -158,6 +159,19 @@ impl LowerTierIndexers {
             host.backend()
                 .cache_owner_block_counts(Arc::clone(&routing)),
         )
+    }
+
+    /// The worker rank `owner` is attached to under the current projection.
+    pub(crate) fn projected_worker(&self, owner: ResidencyOwnerKey) -> Option<WorkerWithDpRank> {
+        self.routing_snapshot.load().projection().project_key(owner)
+    }
+
+    /// The cache owner attached to `worker` under the current projection.
+    pub(crate) fn cache_owner_of(&self, worker: WorkerWithDpRank) -> Option<ResidencyOwnerKey> {
+        self.routing_snapshot
+            .load()
+            .projection()
+            .cache_owner_of(worker)
     }
 }
 
