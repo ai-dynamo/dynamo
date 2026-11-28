@@ -1729,6 +1729,7 @@ pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
 pub(crate) const REQUEST_PARSING_OPTIONS_CONTEXT_KEY: &str = "dynamo.llm.request_parsing_options";
 
 const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+const COMPLETIONS_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_COMPLETIONS_TOKENIZATION_ADD_SPECIAL_TOKENS";
 
 fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
     parse_bool_opt(value)
@@ -1750,18 +1751,18 @@ fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
-fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
-    match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
+fn add_special_tokens_env(name: &str) -> Result<Option<bool>> {
+    match std::env::var(name) {
         Ok(value) => match parse_embedding_add_special_tokens(&value) {
             Some(value) => Ok(Some(value)),
             None => bail!(
-                "invalid value {value:?} for {EMBEDDING_ADD_SPECIAL_TOKENS_ENV}; \
+                "invalid value {value:?} for {name}; \
                  expected true/false/on/off/yes/no/1/0"
             ),
         },
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => bail!(
-            "{EMBEDDING_ADD_SPECIAL_TOKENS_ENV} must be valid Unicode and one of \
+            "{name} must be valid Unicode and one of \
              true/false/on/off/yes/no/1/0"
         ),
     }
@@ -2079,22 +2080,27 @@ impl Default for ResponseGrammarContext {
     }
 }
 
-struct EmbeddingTokenizerState {
+/// Tokenizers with and without the model's declared special tokens, for the
+/// requests that let clients choose (embeddings and completions). Each variant
+/// is initialized on first use.
+struct TokenizerVariants {
     model_card: ModelDeploymentCard,
     with_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
     without_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
     initialization_lock: Mutex<()>,
+    /// Default for requests that omit `add_special_tokens`, from the
+    /// request type's environment variable.
     add_special_tokens_default: Option<bool>,
 }
 
-impl EmbeddingTokenizerState {
-    fn new(model_card: &ModelDeploymentCard) -> Result<Self> {
+impl TokenizerVariants {
+    fn new(model_card: &ModelDeploymentCard, add_special_tokens_env_name: &str) -> Result<Self> {
         Ok(Self {
             model_card: model_card.clone(),
             with_special_tokens: OnceLock::new(),
             without_special_tokens: OnceLock::new(),
             initialization_lock: Mutex::new(()),
-            add_special_tokens_default: embedding_add_special_tokens_env()?,
+            add_special_tokens_default: add_special_tokens_env(add_special_tokens_env_name)?,
         })
     }
 
@@ -2108,19 +2114,23 @@ impl EmbeddingTokenizerState {
             return Ok(tokenizer.clone());
         }
 
-        let _guard = self
-            .initialization_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("embedding tokenizer initialization lock was poisoned"))?;
-        if let Some(tokenizer) = tokenizer.get() {
-            return Ok(tokenizer.clone());
-        }
+        // The first request for a variant loads and parses the tokenizer files,
+        // and concurrent first requests wait on the lock: keep both off the
+        // async runtime's worker threads.
+        off_runtime(|| {
+            let _guard = self.initialization_lock.lock().map_err(|_| {
+                anyhow::anyhow!("tokenizer variant initialization lock was poisoned")
+            })?;
+            if let Some(tokenizer) = tokenizer.get() {
+                return Ok(tokenizer.clone());
+            }
 
-        let initialized = self.model_card.embedding_tokenizer_with_options(
-            crate::tokenizers::TokenizerOptions { add_special_tokens },
-        )?;
-        let initialized: Arc<dyn Tokenizer> = (*initialized).clone();
-        Ok(tokenizer.get_or_init(|| initialized).clone())
+            let initialized = self.model_card.request_tokenizer_with_options(
+                crate::tokenizers::TokenizerOptions { add_special_tokens },
+            )?;
+            let initialized: Arc<dyn Tokenizer> = (*initialized).clone();
+            Ok(tokenizer.get_or_init(|| initialized).clone())
+        })
     }
 }
 
@@ -2130,7 +2140,12 @@ pub struct OpenAIPreprocessor {
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
-    embedding_tokenizers: Option<EmbeddingTokenizerState>,
+    embedding_tokenizers: Option<TokenizerVariants>,
+    /// Present for the completions pipeline and in preprocessors built by
+    /// [`Self::new`]: completions text prompts are tokenized with the model's
+    /// special tokens unless the request or
+    /// `DYN_COMPLETIONS_TOKENIZATION_ADD_SPECIAL_TOKENS` turns them off.
+    completion_tokenizers: Option<TokenizerVariants>,
     model_info: Arc<dyn ModelInfo>,
     /// Exclusive bound for client token ids (`nvext.token_data`, token
     /// prompts, and embedding token input), from `token_id_bound`.
@@ -3021,11 +3036,24 @@ impl OpenAIPreprocessor {
             .is_some_and(|effort| effort != "none")
     }
 
+    /// Build a preprocessor for the model's chat and completions requests, as
+    /// the inference gateway tokenizes both.
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
+        let completion_tokenizers =
+            TokenizerVariants::new(&mdc, COMPLETIONS_ADD_SPECIAL_TOKENS_ENV)?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+            PromptFormatter::OAI(formatter) => Self::new_with_parts_inner(
+                mdc,
+                formatter,
+                tokenizer,
+                None,
+                Some(completion_tokenizers),
+                None,
+                true,
+                None,
+            ),
         }
     }
 
@@ -3037,12 +3065,13 @@ impl OpenAIPreprocessor {
 
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
-        let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
+        let embedding_tokenizers = TokenizerVariants::new(&mdc, EMBEDDING_ADD_SPECIAL_TOKENS_ENV)?;
         Self::new_with_parts_inner(
             mdc,
             formatter,
             tokenizer,
             Some(embedding_tokenizers),
+            None,
             None,
             false,
             None,
@@ -3054,7 +3083,18 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false, None)
+        let completion_tokenizers =
+            TokenizerVariants::new(&mdc, COMPLETIONS_ADD_SPECIAL_TOKENS_ENV)?;
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            Some(completion_tokenizers),
+            None,
+            false,
+            None,
+        )
     }
 
     pub fn new_with_parts(
@@ -3077,6 +3117,7 @@ impl OpenAIPreprocessor {
             formatter,
             tokenizer,
             None,
+            None,
             speculative_prefill_cancel,
             true,
             None,
@@ -3096,6 +3137,7 @@ impl OpenAIPreprocessor {
             formatter,
             tokenizer,
             None,
+            None,
             speculative_prefill_cancel,
             true,
             Some(runtime_configs),
@@ -3106,11 +3148,13 @@ impl OpenAIPreprocessor {
     ///
     /// Embedding and completion constructors skip chat-parser validation while
     /// preserving the deployment card's identity and decode defaults.
+    #[allow(clippy::too_many_arguments)]
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
-        embedding_tokenizers: Option<EmbeddingTokenizerState>,
+        embedding_tokenizers: Option<TokenizerVariants>,
+        completion_tokenizers: Option<TokenizerVariants>,
         speculative_prefill_cancel: Option<CancellationToken>,
         validate_chat_parsers: bool,
         runtime_configs: Option<RuntimeConfigWatch>,
@@ -3528,6 +3572,7 @@ impl OpenAIPreprocessor {
             formatter,
             tokenizer,
             embedding_tokenizers,
+            completion_tokenizers,
             model_info,
             token_id_bound,
             mdcsum,
@@ -5598,6 +5643,59 @@ impl OpenAIPreprocessor {
         })
     }
 
+    /// The tokenizer for a `/v1/completions` text prompt. Like vLLM, the prompt
+    /// gets the special tokens the model's tokenizer declares (such as BOS)
+    /// unless the request's `add_special_tokens`, or else
+    /// `DYN_COMPLETIONS_TOKENIZATION_ADD_SPECIAL_TOKENS`, is false. `None` keeps
+    /// the preprocessor's tokenizer, which adds none. Token-id prompts and
+    /// `nvext.token_data` skip tokenization, so they never need the variant, and
+    /// TikToken tokenizers declare no special tokens to add.
+    fn completion_text_tokenizer(
+        &self,
+        request: &NvCreateCompletionRequest,
+    ) -> Result<Option<Arc<dyn Tokenizer>>> {
+        let Some(variants) = self.completion_tokenizers.as_ref() else {
+            return Ok(None);
+        };
+        if !matches!(
+            variants.model_card.tokenizer,
+            Some(crate::model_card::TokenizerKind::HfTokenizerJson(_))
+        ) {
+            return Ok(None);
+        }
+        let add_special_tokens = request
+            .add_special_tokens
+            .or(variants.add_special_tokens_default)
+            .unwrap_or(true);
+        let text_prompt = matches!(
+            request.inner.prompt,
+            dynamo_protocols::types::Prompt::String(_)
+                | dynamo_protocols::types::Prompt::StringArray(_)
+        );
+        let pretokenized = request
+            .nvext
+            .as_ref()
+            .is_some_and(|ext| ext.token_data.is_some());
+        if !add_special_tokens || !text_prompt || pretokenized {
+            return Ok(None);
+        }
+        variants.tokenizer(true).map(Some)
+    }
+
+    /// [`Self::gather_tokens`] for a `/v1/completions` request, with the
+    /// special-token policy of [`Self::completion_text_tokenizer`]. Callers that
+    /// tokenize a completions request before the completions pipeline, such as
+    /// the inference gateway, use it so that their ids match the pipeline's.
+    pub async fn gather_completion_tokens(
+        &self,
+        request: &NvCreateCompletionRequest,
+        tracker: Option<&RequestTracker>,
+    ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
+        let text_tokenizer = self.completion_text_tokenizer(request)?;
+        self.gather_tokens_with(request, None, tracker, text_tokenizer.as_ref())
+            .await
+    }
+
     /// Tokenize the request and return the token ids alongside any annotations
     /// the caller asked for. The caller owns the result and is responsible for
     /// installing it on the builder via `builder.token_ids(...)` once any
@@ -5614,6 +5712,26 @@ impl OpenAIPreprocessor {
         request: &R,
         formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
+    ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
+        self.gather_tokens_with(request, formatted_prompt, tracker, None)
+            .await
+    }
+
+    /// [`Self::gather_tokens`] with an optional tokenizer for unformatted text
+    /// prompts. `None` uses the preprocessor's tokenizer.
+    async fn gather_tokens_with<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        formatted_prompt: Option<&RenderedPrompt>,
+        tracker: Option<&RequestTracker>,
+        text_tokenizer: Option<&Arc<dyn Tokenizer>>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
@@ -5656,59 +5774,15 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template.
                             // K3 keeps control-token spans distinct from user text until
                             // tokenization; all other renderers use the plain text path.
-
-                            // If nvext.token_data is present, use the pre-computed tokens
-                            // directly and skip tokenization.  This avoids redundant
-                            // tokenization when an external component (e.g. the GAIE EPP
-                            // KV-router) has already tokenized the prompt.
-                            // When backend_instance_id is set without token_data, warn
-                            // but fall back to tokenization (backward compat for non-GAIE
-                            // routers that set the header without providing tokens).
-                            let has_backend_instance_id = request
-                                .nvext()
-                                .and_then(|ext| ext.backend_instance_id)
-                                .is_some();
-
-                            let token_data =
-                                request.nvext().and_then(|ext| ext.token_data.as_ref());
-
-                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
-                                token_data
-                            {
-                                // token_data skips the tokenizer, so bound its ids here.
-                                ensure_token_ids_in_vocab(
-                                    "nvext.token_data",
-                                    tokens,
-                                    self.token_id_bound,
-                                )?;
-                                tracing::info!(
-                                    token_count = tokens.len(),
-                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
-                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
-                                );
-                                (tokens.clone(), true)
-                            } else if has_backend_instance_id {
-                                tracing::warn!(
-                                    "backend_instance_id provided but no token_data; tokenizing prompt"
-                                );
-                                let encoding = self
-                                    .encode_prompt_with_timing(
-                                        formatted_prompt,
-                                        raw_prompt.as_str(),
-                                        tracker,
-                                    )
-                                    .await?;
-                                (into_token_ids(encoding), false)
-                            } else {
-                                let encoding = self
-                                    .encode_prompt_with_timing(
-                                        formatted_prompt,
-                                        raw_prompt.as_str(),
-                                        tracker,
-                                    )
-                                    .await?;
-                                (into_token_ids(encoding), false)
-                            };
+                            let (tokens_vec, skip_token_annotation) = self
+                                .text_prompt_token_ids(
+                                    request,
+                                    formatted_prompt,
+                                    raw_prompt.as_str(),
+                                    tracker,
+                                    text_tokenizer,
+                                )
+                                .await?;
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
                                 && !skip_token_annotation
@@ -5723,8 +5797,19 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.encode_with_timing(&texts[0], tracker).await?;
-                                tokens_out = into_token_ids(encoding);
+                                // A one-prompt array takes `nvext.token_data` like a
+                                // scalar prompt: the inference gateway injects ids for
+                                // it too, and they must be the ids it routed on.
+                                let (tokens_vec, _) = self
+                                    .text_prompt_token_ids(
+                                        request,
+                                        None,
+                                        &texts[0],
+                                        tracker,
+                                        text_tokenizer,
+                                    )
+                                    .await?;
+                                tokens_out = tokens_vec;
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -5740,6 +5825,43 @@ impl OpenAIPreprocessor {
         Self::capture_prompt_token_ids(request, tracker, &tokens_out);
 
         Ok((tokens_out, annotations))
+    }
+
+    /// The token ids of one text prompt, and whether they came from
+    /// `nvext.token_data`.
+    ///
+    /// If nvext.token_data is present, use the pre-computed tokens directly and
+    /// skip tokenization. This avoids redundant tokenization when an external
+    /// component (e.g. the GAIE EPP KV-router) has already tokenized the prompt.
+    /// When backend_instance_id is set without token_data, warn but fall back to
+    /// tokenization (backward compat for non-GAIE routers that set the header
+    /// without providing tokens).
+    async fn text_prompt_token_ids<R: NvExtProvider>(
+        &self,
+        request: &R,
+        formatted_prompt: Option<&RenderedPrompt>,
+        raw_prompt: &str,
+        tracker: Option<&RequestTracker>,
+        text_tokenizer: Option<&Arc<dyn Tokenizer>>,
+    ) -> Result<(Vec<TokenIdType>, bool)> {
+        let nvext = request.nvext();
+        if let Some(tokens) = nvext.and_then(|ext| ext.token_data.as_ref()) {
+            // token_data skips the tokenizer, so bound its ids here.
+            ensure_token_ids_in_vocab("nvext.token_data", tokens, self.token_id_bound)?;
+            tracing::info!(
+                token_count = tokens.len(),
+                first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+            );
+            return Ok((tokens.clone(), true));
+        }
+        if nvext.and_then(|ext| ext.backend_instance_id).is_some() {
+            tracing::warn!("backend_instance_id provided but no token_data; tokenizing prompt");
+        }
+        let encoding = self
+            .encode_prompt_with_timing(formatted_prompt, raw_prompt, tracker, text_tokenizer)
+            .await?;
+        Ok((into_token_ids(encoding), false))
     }
 
     /// Retain the authoritative rendered prompt only for clients that request
@@ -5783,6 +5905,7 @@ impl OpenAIPreprocessor {
         &self,
         prompt: &str,
         tracker: Option<&RequestTracker>,
+        tokenizer: Option<&Arc<dyn Tokenizer>>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
         // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
@@ -5796,7 +5919,7 @@ impl OpenAIPreprocessor {
         } else {
             prompt.to_string()
         };
-        let tokenizer = self.tokenizer.clone();
+        let tokenizer = tokenizer.unwrap_or(&self.tokenizer).clone();
         let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
@@ -5809,17 +5932,21 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&RenderedPrompt>,
         raw_prompt: &str,
         tracker: Option<&RequestTracker>,
+        text_tokenizer: Option<&Arc<dyn Tokenizer>>,
     ) -> anyhow::Result<Encoding> {
         let Some(prompt) = formatted_prompt
             .filter(|prompt| prompt.segments().is_some())
             .cloned()
         else {
+            // `text_tokenizer` applies only to a prompt that no template formatted.
+            let tokenizer = text_tokenizer.filter(|_| formatted_prompt.is_none());
             return self
                 .encode_with_timing(
                     formatted_prompt
                         .map(RenderedPrompt::as_str)
                         .unwrap_or(raw_prompt),
                     tracker,
+                    tokenizer,
                 )
                 .await;
         };
@@ -9306,7 +9433,7 @@ impl
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
             let (token_ids, ann) = self
-                .gather_tokens(&request, None, tracker.as_deref())
+                .gather_completion_tokens(&request, tracker.as_deref())
                 .await?;
             builder.token_ids(token_ids);
             ann
@@ -9684,6 +9811,300 @@ mod token_data_tests {
                 .map(DynamoError::error_type),
             Some(ErrorType::InvalidArgument),
             "{error:#}"
+        );
+    }
+
+    /// Records the prompt token ids of each completion that reaches the backend.
+    #[derive(Default)]
+    struct RecordingCompletionBackend(Mutex<Vec<Vec<u32>>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RecordingCompletionBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            self.0.lock().unwrap().push(request.token_ids.to_vec());
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ))
+        }
+    }
+
+    fn completions_preprocessor(dir: &str) -> Arc<OpenAIPreprocessor> {
+        let card = ModelDeploymentCard::load_from_disk(dir, None).unwrap();
+        let tokenizer = card.tokenizer().unwrap();
+        OpenAIPreprocessor::new_for_completions(card, tokenizer).unwrap()
+    }
+
+    /// The prompt token ids the completions pipeline sends to the backend for
+    /// a request with the given fields.
+    async fn completion_prompt_ids(
+        preprocessor: &OpenAIPreprocessor,
+        fields: serde_json::Value,
+    ) -> Vec<u32> {
+        let mut body = serde_json::json!({"model": "test-model", "max_tokens": 1});
+        body.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+        assert!(request.unsupported_fields.is_empty());
+        let backend = Arc::new(RecordingCompletionBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = backend.clone();
+        Operator::generate(preprocessor, PipelineContext::new(request), next)
+            .await
+            .unwrap();
+        let mut prompts = backend.0.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        prompts.pop().unwrap()
+    }
+
+    /// TinyLlama's ids for `text` with and without its BOS token (id 1).
+    fn tinyllama_ids(text: &str) -> (Vec<u32>, Vec<u32>) {
+        let card = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let without = card
+            .tokenizer()
+            .unwrap()
+            .encode(text)
+            .unwrap()
+            .token_ids()
+            .to_vec();
+        assert_ne!(without.first(), Some(&1));
+        let with = [1].into_iter().chain(without.iter().copied()).collect();
+        (with, without)
+    }
+
+    #[tokio::test]
+    async fn completion_text_prompt_gets_the_tokenizers_special_tokens() {
+        // Like the Hugging Face tokenizer and vLLM's /v1/completions, a text
+        // prompt starts with TinyLlama's BOS unless the request turns it off.
+        let preprocessor = completions_preprocessor(TINYLLAMA_DIR);
+        let (with_bos, without_bos) = tinyllama_ids("Hello world");
+        for (fields, expected) in [
+            (serde_json::json!({"prompt": "Hello world"}), &with_bos),
+            (serde_json::json!({"prompt": ["Hello world"]}), &with_bos),
+            (
+                serde_json::json!({"prompt": "Hello world", "add_special_tokens": true}),
+                &with_bos,
+            ),
+            (
+                serde_json::json!({"prompt": "Hello world", "add_special_tokens": false}),
+                &without_bos,
+            ),
+        ] {
+            assert_eq!(
+                &completion_prompt_ids(&preprocessor, fields.clone()).await,
+                expected,
+                "{fields}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_token_prompt_is_never_modified() {
+        let preprocessor = completions_preprocessor(TINYLLAMA_DIR);
+        for add_special_tokens in [None, Some(true), Some(false)] {
+            let mut fields = serde_json::json!({"prompt": [15043, 3186]});
+            if let Some(add_special_tokens) = add_special_tokens {
+                fields["add_special_tokens"] = serde_json::json!(add_special_tokens);
+            }
+            assert_eq!(
+                completion_prompt_ids(&preprocessor, fields).await,
+                [15043, 3186]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn general_preprocessor_tokenizes_completions_like_the_pipeline() {
+        // The inference gateway tokenizes completions with `OpenAIPreprocessor::new`
+        // and passes the ids on as `nvext.token_data`.
+        let card = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let (with_bos, without_bos) = tinyllama_ids("Hello world");
+        for (add_special_tokens, expected) in [(None, &with_bos), (Some(false), &without_bos)] {
+            let mut body = serde_json::json!({"model": "test-model", "prompt": "Hello world"});
+            if let Some(add_special_tokens) = add_special_tokens {
+                body["add_special_tokens"] = serde_json::json!(add_special_tokens);
+            }
+            let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+            let (ids, _) = preprocessor
+                .gather_completion_tokens(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(&ids, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_token_data_is_what_the_pipeline_sends() {
+        // The inference gateway tokenizes a completion with
+        // `gather_completion_tokens` and injects the ids as `nvext.token_data`,
+        // for a one-prompt array as for a scalar prompt. The pipeline must send
+        // the backend those ids, the same ids it computes without them.
+        let gateway = OpenAIPreprocessor::new(
+            ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap(),
+        )
+        .unwrap();
+        let pipeline = completions_preprocessor(TINYLLAMA_DIR);
+        for prompt in [
+            serde_json::json!("Hello world"),
+            serde_json::json!(["Hello world"]),
+        ] {
+            for add_special_tokens in [None, Some(false)] {
+                let mut fields = serde_json::json!({"prompt": prompt});
+                if let Some(add_special_tokens) = add_special_tokens {
+                    fields["add_special_tokens"] = serde_json::json!(add_special_tokens);
+                }
+                let mut body = serde_json::json!({"model": "test-model"});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+                let (routed, _) = gateway
+                    .gather_completion_tokens(&request, None)
+                    .await
+                    .unwrap();
+                let mut injected = fields.clone();
+                injected["nvext"] = serde_json::json!({"token_data": routed});
+                assert_eq!(
+                    completion_prompt_ids(&pipeline, fields.clone()).await,
+                    routed,
+                    "{fields}"
+                );
+                assert_eq!(
+                    completion_prompt_ids(&pipeline, injected).await,
+                    routed,
+                    "{fields}"
+                );
+            }
+        }
+    }
+
+    /// A copy of TinyLlama's model directory whose `tokenizer_config.json` sets
+    /// `add_bos_token` and `add_eos_token` as given; `None` removes the key.
+    fn tinyllama_with_flags(add_bos: Option<bool>, add_eos: Option<bool>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(TINYLLAMA_DIR).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+        }
+        let path = dir.path().join("tokenizer_config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let config_fields = config.as_object_mut().unwrap();
+        for (key, value) in [("add_bos_token", add_bos), ("add_eos_token", add_eos)] {
+            match value {
+                Some(value) => config_fields.insert(key.to_string(), value.into()),
+                None => config_fields.remove(key),
+            };
+        }
+        std::fs::write(&path, config.to_string()).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn completion_special_tokens_follow_tokenizer_json_not_config_flags() {
+        // Transformers 5, which the vLLM, SGLang and TensorRT-LLM images pin,
+        // drops `add_bos_token` and `add_eos_token` from `tokenizer_config.json`
+        // when the model has a `tokenizer.json` (`_from_pretrained`), so
+        // `AutoTokenizer` adds what `tokenizer.json`'s post-processor adds: for
+        // these files, `[1, 15043, 3186]` with transformers 5.19.
+        for (add_bos, add_eos) in [
+            (Some(false), Some(false)),
+            (Some(true), Some(true)),
+            (None, Some(true)),
+        ] {
+            let dir = tinyllama_with_flags(add_bos, add_eos);
+            let preprocessor = completions_preprocessor(dir.path().to_str().unwrap());
+            assert_eq!(
+                completion_prompt_ids(&preprocessor, serde_json::json!({"prompt": "Hello world"}))
+                    .await,
+                [1, 15043, 3186],
+                "add_bos_token {add_bos:?}, add_eos_token {add_eos:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_first_completions_on_the_multi_thread_runtime_get_the_variant() {
+        // The variant is loaded inside `off_runtime` (`block_in_place` here),
+        // so concurrent first requests wait for it off the worker threads; each
+        // still gets the tokenizer's BOS.
+        let preprocessor = completions_preprocessor(TINYLLAMA_DIR);
+        let (with_bos, _) = tinyllama_ids("Hello world");
+        let requests: Vec<_> = (0..8)
+            .map(|_| {
+                let preprocessor = preprocessor.clone();
+                tokio::spawn(async move {
+                    completion_prompt_ids(
+                        &preprocessor,
+                        serde_json::json!({"prompt": "Hello world"}),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        for request in requests {
+            assert_eq!(request.await.unwrap(), with_bos);
+        }
+    }
+
+    #[tokio::test]
+    async fn completions_add_special_tokens_env_sets_the_default() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completions_add_special_tokens_env_sets_the_default"
+            ),
+            &[(COMPLETIONS_ADD_SPECIAL_TOKENS_ENV, "false")],
+        ) {
+            return;
+        }
+        let preprocessor = completions_preprocessor(TINYLLAMA_DIR);
+        let (with_bos, without_bos) = tinyllama_ids("Hello world");
+        assert_eq!(
+            completion_prompt_ids(&preprocessor, serde_json::json!({"prompt": "Hello world"}))
+                .await,
+            without_bos
+        );
+        assert_eq!(
+            completion_prompt_ids(
+                &preprocessor,
+                serde_json::json!({"prompt": "Hello world", "add_special_tokens": true})
+            )
+            .await,
+            with_bos
+        );
+    }
+
+    #[test]
+    fn invalid_completions_add_special_tokens_env_fails_construction() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::invalid_completions_add_special_tokens_env_fails_construction"
+            ),
+            &[(COMPLETIONS_ADD_SPECIAL_TOKENS_ENV, "sometimes")],
+        ) {
+            return;
+        }
+        let card = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let tokenizer = card.tokenizer().unwrap();
+        let Err(error) = OpenAIPreprocessor::new_for_completions(card, tokenizer) else {
+            panic!("an invalid {COMPLETIONS_ADD_SPECIAL_TOKENS_ENV} must fail construction");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(COMPLETIONS_ADD_SPECIAL_TOKENS_ENV),
+            "{error}"
         );
     }
 
@@ -17026,6 +17447,7 @@ mod tests {
             metadata: None,
             return_tokens_as_token_ids: None,
             no_stop_trim: None,
+            add_special_tokens: None,
             unsupported_fields: Default::default(),
         };
         let next: Arc<

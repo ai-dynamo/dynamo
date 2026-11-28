@@ -9921,6 +9921,7 @@ mod tests {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9947,6 +9948,7 @@ mod tests {
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9972,6 +9974,7 @@ mod tests {
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9997,6 +10000,7 @@ mod tests {
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -10022,6 +10026,7 @@ mod tests {
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -10048,6 +10053,7 @@ mod tests {
 
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -10078,6 +10084,7 @@ mod tests {
         // Test metadata field with nested object
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -10359,7 +10366,7 @@ mod tests {
         let json = r#"{
             "model": "test-model",
             "prompt": "Hello",
-            "add_special_tokens": true,
+            "truncate_prompt_tokens": 8,
             "response_format": {"type": "json_object"}
         }"#;
 
@@ -10369,7 +10376,7 @@ mod tests {
         assert!(
             request
                 .unsupported_fields
-                .contains_key("add_special_tokens")
+                .contains_key("truncate_prompt_tokens")
         );
         assert!(request.unsupported_fields.contains_key("response_format"));
 
@@ -10380,7 +10387,7 @@ mod tests {
             let msg = &error_response.1.message;
             assert!(msg.contains("Unsupported parameter"));
             // Verify both fields appear in error message
-            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("truncate_prompt_tokens"));
             assert!(msg.contains("response_format"));
         }
     }
