@@ -110,6 +110,7 @@ areas:
   - examples/backends/vllm/
   - lib/sidecar/vllm/
   - lib/generate-formats/vllm/
+  - lib/generate-format-catalog/tests/http/vllm.rs
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -134,6 +135,7 @@ areas:
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
   - lib/generate-formats/sglang/
+  - lib/generate-format-catalog/tests/http/sglang.rs
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
