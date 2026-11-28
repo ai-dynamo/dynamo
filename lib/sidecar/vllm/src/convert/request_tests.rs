@@ -133,30 +133,53 @@ fn plugin_projects_kv_transfer() {
 }
 
 #[test]
+fn client_image_uuids_reach_vllm_only_with_opt_in() {
+    let wire_uuids = |allow: Option<&str>| {
+        temp_env::with_var("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", allow, || {
+            let wire = build_generate_request(
+                epd_image_request(),
+                "client-uuid".to_string(),
+                DisaggregationMode::Aggregated,
+            )
+            .unwrap();
+            wire.media
+                .iter()
+                .map(|item| item.uuid.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+
+    assert_eq!(wire_uuids(None), ["", ""]);
+    assert_eq!(wire_uuids(Some("1")), ["image-a", "image-b"]);
+}
+
+#[test]
 fn unsafe_media_uuids_are_rejected() {
-    for uuid in [
-        "/tmp/escape",
-        "../escape",
-        "nested/item",
-        "nested\\item",
-        ".",
-        "..",
-        "nul\0item",
-    ] {
-        let mut request = epd_image_request();
-        request
-            .multi_modal_uuids
-            .as_mut()
-            .and_then(|by_modality| by_modality.get_mut("image_url"))
-            .expect("image UUIDs")[0] = Some(uuid.to_string());
-        let error = build_generate_request(
-            request,
-            "unsafe-media-uuid".to_string(),
-            DisaggregationMode::Encode,
-        )
-        .expect_err("unsafe UUID must be rejected");
-        assert!(error.to_string().contains("safe identifier"));
-    }
+    temp_env::with_var("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", Some("1"), || {
+        for uuid in [
+            "/tmp/escape",
+            "../escape",
+            "nested/item",
+            "nested\\item",
+            ".",
+            "..",
+            "nul\0item",
+        ] {
+            let mut request = epd_image_request();
+            request
+                .multi_modal_uuids
+                .as_mut()
+                .and_then(|by_modality| by_modality.get_mut("image_url"))
+                .expect("image UUIDs")[0] = Some(uuid.to_string());
+            let error = build_generate_request(
+                request,
+                "unsafe-media-uuid".to_string(),
+                DisaggregationMode::Encode,
+            )
+            .expect_err("unsafe UUID must be rejected");
+            assert!(error.to_string().contains("safe identifier"));
+        }
+    });
 }
 
 #[test]

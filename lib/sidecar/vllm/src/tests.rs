@@ -1646,7 +1646,12 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
 
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
-    assert_encoder_cache_handoff(epd_image_request()).await;
+    // The fixture's client image uuids reach the wire only with the opt-in.
+    temp_env::async_with_vars(
+        [("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", Some("1"))],
+        assert_encoder_cache_handoff(epd_image_request()),
+    )
+    .await;
 }
 
 #[tokio::test]

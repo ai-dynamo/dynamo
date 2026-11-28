@@ -137,13 +137,21 @@ pub(crate) fn build_generate_request(
         .as_ref()
         .and_then(|media| media.get(IMAGE_URL_KEY))
         .is_some_and(|items| !items.is_empty());
+    // A client uuid says nothing about the media it labels, so without the
+    // opt-in vLLM keys images by content or URL hashes.
+    let allow_client_uuids =
+        dynamo_runtime::config::env_is_truthy("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS");
     let forwarded_image_uuids = if has_images {
-        forwarded_image_uuids(&request)?
+        forwarded_image_uuids(&request, allow_client_uuids)?
     } else {
         None
     };
     let raw_media = if has_raw_media_metadata {
-        build_media(&mut request, forwarded_image_uuids.as_deref())?
+        build_media(
+            &mut request,
+            forwarded_image_uuids.as_deref(),
+            allow_client_uuids,
+        )?
     } else {
         Vec::new()
     };
@@ -705,16 +713,18 @@ fn validate_multimodal_cache_uuids(request: &PreprocessedRequest) -> Result<(), 
 
 fn forwarded_image_uuids(
     request: &PreprocessedRequest,
+    allow_client_uuids: bool,
 ) -> Result<Option<Vec<String>>, DynamoError> {
-    let has_user_uuid = request
-        .multi_modal_uuids
-        .as_ref()
-        .and_then(|by_modality| by_modality.get(IMAGE_URL_KEY))
-        .is_some_and(|uuids| {
-            uuids
-                .iter()
-                .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
-        });
+    let has_user_uuid = allow_client_uuids
+        && request
+            .multi_modal_uuids
+            .as_ref()
+            .and_then(|by_modality| by_modality.get(IMAGE_URL_KEY))
+            .is_some_and(|uuids| {
+                uuids
+                    .iter()
+                    .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
+            });
     if has_user_uuid {
         return Ok(None);
     }
@@ -771,6 +781,7 @@ fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
 fn build_media(
     request: &mut PreprocessedRequest,
     forwarded_uuids: Option<&[String]>,
+    allow_client_uuids: bool,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     let Some(media_by_modality) = request.multi_modal_data.take() else {
         if request
@@ -846,6 +857,7 @@ fn build_media(
             };
             let uuid = if modality == pb::Modality::Image {
                 uuids
+                    .filter(|_| allow_client_uuids)
                     .and_then(|uuids| uuids.get(index))
                     .and_then(Clone::clone)
                     .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())

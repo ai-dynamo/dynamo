@@ -3040,6 +3040,85 @@ class TestEmbeddingWorkerHandlerChatInput:
         handler.engine_client.renderer.render_chat_async.assert_not_awaited()
         assert encoded == []
 
+    @staticmethod
+    def _with_image_uuid(image_url, uuid="shared-image-id"):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": image_url, "uuid": uuid},
+                    {"type": "text", "text": "a chart"},
+                ],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_client_image_uuid_is_not_sent_to_vllm_by_default(self, monkeypatch):
+        """By default vLLM derives the image cache identity from the image, so
+        two images sent under one ``uuid`` are not treated as the same one."""
+        monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+        handler, encoded = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+        image = {"url": "data:image/png;base64,AAAA"}
+
+        await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": [
+                    self._with_image_uuid(image),
+                    self._with_image_uuid({"url": "data:image/png;base64,BBBB"}),
+                ],
+            },
+        )
+
+        conversations = render.await_args.args[0]
+        image_parts = [conv[0]["content"][0] for conv in conversations]
+        assert [part.get("uuid") for part in image_parts] == [None, None]
+        assert image_parts[0]["image_url"] == image
+        assert len(encoded) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_client_image_uuid_is_sent_to_vllm_when_allowed(self, monkeypatch):
+        monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
+        handler, _ = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": self._with_image_uuid(
+                    {"url": "data:image/png;base64,AAAA"}
+                ),
+            },
+        )
+
+        conversations = render.await_args.args[0]
+        assert conversations[0][0]["content"][0]["uuid"] == "shared-image-id"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("image_url", [None, {"url": None}])
+    async def test_uuid_only_image_is_rejected_before_rendering_by_default(
+        self, monkeypatch, image_url
+    ):
+        monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+        handler, encoded = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock()
+
+        with pytest.raises(mod.InvalidArgument, match="only a `uuid`"):
+            await self._generate(
+                handler,
+                {"model": "test-model", "messages": self._with_image_uuid(image_url)},
+            )
+        handler.engine_client.renderer.render_chat_async.assert_not_awaited()
+        assert encoded == []
+
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     @pytest.mark.parametrize(

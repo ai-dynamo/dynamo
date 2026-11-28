@@ -53,4 +53,5 @@ dynamo-vllm-generate = { workspace = true }
 reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 tokio-stream = { workspace = true, features = ["net"] }

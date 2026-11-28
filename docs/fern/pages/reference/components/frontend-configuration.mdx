@@ -154,10 +154,11 @@ and gives recovery advice without exposing the origin response or URL credential
 | --- | --- | --- |
 | `Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.` | The image origin returned 403. | Refresh the URL or access permissions, or send the image inline. |
 | `Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.` | The image origin returned 404. | Fix the URL, or send the image inline. |
+| ``Image parts that carry only a `uuid` are not accepted. Send the image URL or inline image data. To let clients reuse cached images by `uuid`, set DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1 on the vLLM workers.`` | An image part has a `uuid` and no URL, and client cache UUIDs are not enabled. | Send the image URL or inline data. Operators can enable client-managed reuse with `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`. |
 | `Cached image is unavailable on this worker. Resend the request with the image URL or inline image data and the same UUID; UUID-only reuse requires the image to be cached on every worker that processes the image.` | vLLM only: a UUID-only image is missing from a worker's processor cache. | Resend with the URL or inline data and the same UUID. Resending only the UUID does not restore a missing entry. |
 
 An ordinary URL-based image-cache miss is handled internally; the worker fetches
-the image if needed. In vLLM, UUID-only reuse requires an existing entry on every worker
+the image if needed. In vLLM, UUID-only reuse is available only with `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`, and requires an existing entry on every worker
 that processes the image. See [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
 
 ## Router

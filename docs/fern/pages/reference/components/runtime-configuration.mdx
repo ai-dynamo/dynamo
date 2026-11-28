@@ -321,6 +321,12 @@ address.
   Set it on both the frontend and the workers. The frontend rejects remote URLs before fetching them, and the workers cover media URLs that the frontend passes through without fetching.
 </ParamField>
 
+<ParamField path="DYN_MM_ALLOW_CLIENT_CACHE_UUIDS" type="boolean" default="0">
+  Environment-only. vLLM only. Set to `1` to pass the client `uuid` on media content parts to vLLM as its multimodal cache identity, and to accept image parts that carry only a `uuid`.
+
+  By default, the vLLM workers ignore client UUIDs and derive cache identity from the media content or URL. The Python vLLM worker rejects image parts that carry only a `uuid` with HTTP 400. The gRPC sidecar requires an image URL with either setting. Enable it only when every client is trusted to manage these keys. Set it on the vLLM workers; the frontend needs no setting. See [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
+</ParamField>
+
 <ParamField path="--output-modalities" type="string" default="text">
   Space-separated list of output modalities for omni or diffusion mode, for example `--output-modalities text image`. Defaults to `text` only. Use `image`, `video`, or `audio` when deploying image/video/audio generation models.
 

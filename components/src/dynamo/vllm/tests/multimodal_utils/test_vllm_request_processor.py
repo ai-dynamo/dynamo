@@ -821,8 +821,9 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
     ids=["all-modalities", "audio-without-uuid", "video-modality-omitted"],
 )
 async def test_audio_in_video_aligns_derived_audio_uuids(
-    standalone_audio_uuid, video_uuids, expected_uuids
+    standalone_audio_uuid, video_uuids, expected_uuids, monkeypatch
 ):
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     processor = _processor()
     video_a, video_b = object(), object()
     standalone_audio, audio_a, audio_b = object(), object(), object()
@@ -907,7 +908,26 @@ def test_build_tokens_prompt_forwards_hashes_kwargs_and_vision_chunk():
     assert prompt["mm_processor_kwargs"] == {"num_crops": 4}
 
 
-def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding():
+def test_build_tokens_prompt_uses_image_content_with_repeated_client_uuid(monkeypatch):
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+    processor = _processor()
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "multi_modal_uuids": {"image_url": ["shared-image-id"]},
+    }
+    identities = []
+    for color in [(255, 0, 0), (0, 0, 255), (255, 0, 0)]:
+        image = Image.new("RGB", (8, 8), color=color)
+        prompt = processor.build_tokens_prompt(request, {"image": image}, None)
+        identities.append(prompt["multi_modal_uuids"]["image"][0])
+    assert identities[0] != identities[1]
+    assert identities[0] == identities[2]
+    assert "shared-image-id" not in identities
+
+
+def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     processor = _processor()
     mm_data = {"image": [object(), None]}
 
@@ -925,7 +945,10 @@ def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding():
     assert prompt["multi_modal_uuids"] == {"image": ["sku-image-a", "sku-image-b"]}
 
 
-def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
+def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk(
+    monkeypatch,
+):
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     processor = _processor(unified_vision_chunk=True)
     mm_data = {"vision_chunk": [None]}
 
@@ -978,8 +1001,25 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     assert parse_mm_data.call_args.kwargs == {"validate": False}
 
 
+def test_validate_rejects_uuid_only_image_unless_client_uuids_allowed(monkeypatch):
+    processor = _processor()
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"UuidOnly": "cached-image"}]},
+        "multi_modal_uuids": {"image_url": ["cached-image"]},
+    }
+
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+    with pytest.raises(InvalidArgument, match="DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1"):
+        processor.validate_multimodal_request(request)
+
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
+    processor.validate_multimodal_request(request)
+
+
 @pytest.mark.asyncio
-async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
+async def test_worker_uuid_cache_miss_has_actionable_recovery_advice(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     uuid = "catalog/image:v2"
     request = {
         "token_ids": [1],
@@ -1033,7 +1073,10 @@ async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
     assert uuid not in str(raised.value)
 
 
-def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
+def test_build_tokens_prompt_forwards_user_uuids_for_each_modality(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     processor = _processor(unified_vision_chunk=True)
     mm_data = {
         "vision_chunk": [object(), object()],
