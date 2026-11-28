@@ -82,4 +82,13 @@ var (
 		Name:             "OrderedEnvironmentVariables",
 		MinOriginVersion: *semver.MustParse("1.8.0"),
 	}
+
+	// GraphWideBackendInheritance lets a commandless component inherit the
+	// graph-wide detected framework in Grove and DisaggregatedSet rendering.
+	// Enabled for DGDs created by operator >= 1.8.0 so an upgrade does not
+	// change the backend of existing workloads.
+	GraphWideBackendInheritance = Gate{
+		Name:             "GraphWideBackendInheritance",
+		MinOriginVersion: *semver.MustParse("1.8.0"),
+	}
 )

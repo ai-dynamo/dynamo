@@ -276,7 +276,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
-  Configures a PVC-backed compilation cache. The operator handles backend-specific mount paths and environment variables, so you do not hand-wire them into `podTemplate`.
+  Configures a PVC-backed compilation cache. Only vLLM has a default mount path and operator-managed cache environment variables. Other engines require an explicit `mountPath`, and the operator only mounts the PVC for them; admission rejects a `compilationCache` without `mountPath` when the resolved engine has no default.
 </ParamField>
 
 <Indent>
@@ -284,7 +284,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Name of a user-created PVC, which must exist in the same namespace as the deployment.
   </ParamField>
   <ParamField path="mountPath" type="string">
-    Overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
+    Overrides the backend-specific default mount path. Only vLLM has a default; for other engines `mountPath` is required.
   </ParamField>
 </Indent>
 

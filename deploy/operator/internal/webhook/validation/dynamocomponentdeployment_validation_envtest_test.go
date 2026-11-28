@@ -698,6 +698,46 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
+
+		// Compilation cache admission matches the engine's rendering defaults.
+		{
+			name: "vLLM compilation cache without mountPath is admitted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+		},
+		{
+			name: "SGLang compilation cache without mountPath is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionSGLangBackend
+				dcd.Spec.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
+		},
+		{
+			name: "TRT-LLM compilation cache without mountPath is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionTRTLLMBackend
+				dcd.Spec.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.compilationCache.mountPath: Required value: is required for backend framework trtllm (no default available)"},
+		},
+		{
+			name: "SGLang compilation cache with an explicit mountPath warns about the missing cache environment",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionSGLangBackend
+				dcd.Spec.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/cache"}
+			}),
+			wantWarnings: []string{"spec.compilationCache: the operator mounts the PVC but sets no compilation cache environment for backend framework sglang"},
+		},
+		{
+			name: "v1alpha1 converted SGLang compilation cache without mountPoint is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionSGLangBackend
+				dcd.Spec.VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{Name: "cache", UseAsCompilationCache: true}}
+			}),
+			wantWebhookErrs: []string{"spec.compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
+		},
 		{
 			name: "invalid shared memory",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
@@ -836,7 +876,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				},
 				VolumeMounts: []nvidiacomv1alpha1.VolumeMount{
 					{Name: "cache", MountPoint: "/cache"},
-					{Name: "compilation", UseAsCompilationCache: true},
+					{Name: "compilation", MountPoint: "/compilation-cache", UseAsCompilationCache: true},
 				},
 				SharedMemory: &nvidiacomv1alpha1.SharedMemorySpec{
 					Size: resource.MustParse("1Gi"),

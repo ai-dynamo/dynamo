@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +49,17 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (*unstructured.Unstructured, error) {
 
+	// New origins match DCD generation so a commandless role inherits the
+	// sibling's engine; legacy origins keep per-component resolution.
+	graphBackendFramework := dgd.Spec.BackendFramework
+	if compatibility.GraphWideBackendInheritance.Enabled(dgd.Annotations) {
+		resolvedFramework, err := dynamo.BackendFrameworkForGeneratedDCDs(dgd)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine graph backend framework: %w", err)
+		}
+		graphBackendFramework = resolvedFramework
+	}
+
 	roles := make([]any, 0, len(selection.ComponentToRole))
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName
@@ -59,7 +71,7 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 		if component == nil {
 			return nil, fmt.Errorf("normalized component missing for selected component %q", componentName)
 		}
-		backendFramework, err := dynamo.BackendFrameworkForComponent(component, dgd)
+		backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(component, graphBackendFramework)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for selected component %q: %w", componentName, err)
 		}

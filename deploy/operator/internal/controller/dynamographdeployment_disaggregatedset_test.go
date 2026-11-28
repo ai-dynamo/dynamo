@@ -650,6 +650,135 @@ func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 	}
 }
 
+func TestDisaggregatedSetRenderInheritsGraphFrameworkForCompilationCache(t *testing.T) {
+	t.Log("Build a 1.8.0-origin graph with no explicit framework: decode infers vLLM, prefill has no command and a compilation cache")
+	dgd := newEnvtestDSHappyPathDGD("cache-graph-framework")
+	dgd.Spec.BackendFramework = ""
+	dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.8.0"
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		switch component.ComponentName {
+		case "decode":
+			component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+			component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B"}
+		case "prefill":
+			component.PodTemplate.Spec.Containers[0].Command = nil
+			component.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+		}
+	}
+	rollingUpdateCtx := dynamo.RollingUpdateContext{NewWorkerHash: "worker123"}
+	normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, rollingUpdateCtx)
+	require.NoError(t, err)
+
+	t.Log("Render the DisaggregatedSet through the workload renderer")
+	renderScheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(renderScheme))
+	require.NoError(t, corev1.AddToScheme(renderScheme))
+	require.NoError(t, leaderworkersetv1.AddToScheme(renderScheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(renderScheme).Build()
+	config := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+	}
+	renderer := newDCDWorkloadRenderer(
+		kubeClient,
+		config,
+		&commoncontroller.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	selection := disaggregatedset.Selection{ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"}}
+	ds, err := newDisaggregatedSetWorkloadRenderer(renderer).Render(t.Context(), dgd, normalized, selection, rollingUpdateCtx, nil)
+	require.NoError(t, err)
+
+	t.Log("The prefill role inherits the graph-wide vLLM default cache mount")
+	roles := ds.Object["spec"].(map[string]any)["roles"].([]any)
+	var prefillRole map[string]any
+	for _, role := range roles {
+		entry := role.(map[string]any)
+		if entry["name"] == "prefill" {
+			prefillRole = entry
+		}
+	}
+	require.NotNil(t, prefillRole)
+	roleSpec := &leaderworkersetv1.LeaderWorkerSetSpec{}
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(prefillRole["spec"].(map[string]any), roleSpec))
+	var mainContainer *corev1.Container
+	for i := range roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers {
+		if roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers[i].Name == consts.MainContainerName {
+			mainContainer = &roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, mainContainer)
+	require.Contains(t, mainContainer.VolumeMounts, corev1.VolumeMount{Name: "compile-cache", MountPath: consts.DefaultVLLMCacheMountPoint})
+}
+
+func TestDisaggregatedSetRenderLegacyOriginPreservesCustomWorkerRendering(t *testing.T) {
+	t.Log("Build a legacy-origin graph with no explicit framework and no compilation cache: decode infers vLLM, prefill runs a custom module")
+	dgd := newEnvtestDSHappyPathDGD("legacy-custom-worker")
+	dgd.Spec.BackendFramework = ""
+	dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		switch component.ComponentName {
+		case "decode":
+			component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+			component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B"}
+		case "prefill":
+			component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "my_custom_worker"}
+			component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B"}
+		}
+	}
+	rollingUpdateCtx := dynamo.RollingUpdateContext{NewWorkerHash: "worker123"}
+	normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, rollingUpdateCtx)
+	require.NoError(t, err)
+
+	t.Log("Render the DisaggregatedSet through the workload renderer")
+	renderScheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(renderScheme))
+	require.NoError(t, corev1.AddToScheme(renderScheme))
+	require.NoError(t, leaderworkersetv1.AddToScheme(renderScheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(renderScheme).Build()
+	config := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+	}
+	renderer := newDCDWorkloadRenderer(
+		kubeClient,
+		config,
+		&commoncontroller.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	selection := disaggregatedset.Selection{ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"}}
+	ds, err := newDisaggregatedSetWorkloadRenderer(renderer).Render(t.Context(), dgd, normalized, selection, rollingUpdateCtx, nil)
+	require.NoError(t, err)
+
+	t.Log("The legacy-origin prefill role keeps its authored launch and gets no vLLM backend additions")
+	roles := ds.Object["spec"].(map[string]any)["roles"].([]any)
+	var prefillRole map[string]any
+	for _, role := range roles {
+		entry := role.(map[string]any)
+		if entry["name"] == "prefill" {
+			prefillRole = entry
+		}
+	}
+	require.NotNil(t, prefillRole)
+	roleSpec := &leaderworkersetv1.LeaderWorkerSetSpec{}
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(prefillRole["spec"].(map[string]any), roleSpec))
+	var mainContainer *corev1.Container
+	for i := range roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers {
+		if roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers[i].Name == consts.MainContainerName {
+			mainContainer = &roleSpec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, mainContainer)
+	require.Equal(t, []string{"python3", "-m", "my_custom_worker"}, mainContainer.Command)
+	require.Equal(t, []string{"--model", "Qwen/Qwen3-0.6B"}, mainContainer.Args)
+	for _, mount := range mainContainer.VolumeMounts {
+		require.Equal(t, "/dev/shm", mount.MountPath, "expected only the generic shared-memory mount")
+	}
+	for _, env := range mainContainer.Env {
+		require.False(t, strings.HasPrefix(env.Name, "VLLM_"), "legacy origin must not apply vLLM backend additions")
+	}
+}
+
 func TestDCDAndDirectDisaggregatedSetRoleTemplateRenderingParity(t *testing.T) {
 	t.Log("Create distinct complete leader and worker templates with different GPU quantities")
 	dgd := newEnvtestDSHappyPathDGD("role-render-parity")

@@ -210,6 +210,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		dynamoComponentDeploymentSharedSpecValidationOptions{
 			grovePathway:                      grovePathway,
 			validateInferencePoolAvailability: validateInferencePoolAvailability,
+			backendFramework:                  spec.BackendFramework,
 			oldComponent:                      oldSharedSpec,
 		},
 	)...)

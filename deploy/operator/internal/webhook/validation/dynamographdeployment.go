@@ -26,6 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -68,6 +69,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	pcsName                 string
 	generation              int64
 	workloadProvider        string
+	componentFrameworks     map[string]string
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
@@ -234,9 +236,29 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	if oldDGD != nil {
 		oldComponents = componentsByName(oldDGD.Spec.Components)
 	}
+	// Resolve the framework the generated DCDs carry so admission matches rendering.
+	graphBackendFramework, frameworkErr := dynamo.BackendFrameworkForGeneratedDCDs(dgd)
+	if frameworkErr != nil {
+		graphBackendFramework = dgd.Spec.BackendFramework
+	}
+
+	// Resolve each component against the framework its serving rendering path uses.
+	var dsSelection map[string]string
+	if workloadProvider == consts.WorkloadProviderDisaggregatedSet {
+		selection, _ := disaggregatedset.Select(dgd)
+		dsSelection = selection.ComponentToRole
+	}
+	componentFrameworks := make(map[string]string, len(dgd.Spec.Components))
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		componentFrameworks[component.ComponentName] = dynamo.ServingPathBackendFramework(
+			dgd, component, graphBackendFramework, grovePathway, dsSelection,
+		)
+	}
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
+		componentFrameworks:     componentFrameworks,
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
@@ -460,8 +482,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
-		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
-		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
+		componentFramework := opts.componentFrameworks[component.ComponentName]
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(componentFramework, component, componentPath)...)
+		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, componentFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(
@@ -476,6 +499,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
+				backendFramework:                  componentFramework,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,

@@ -280,7 +280,7 @@ func NormalizeDynamoGraphDeploymentComponents(
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
 	components := make(map[string]*v1beta1.DynamoComponentDeploymentSharedSpec)
-	if _, err := backendFrameworkForGeneratedDCDs(parentDGD); err != nil {
+	if _, err := BackendFrameworkForGeneratedDCDs(parentDGD); err != nil {
 		return nil, err
 	}
 
@@ -326,7 +326,7 @@ func GenerateDynamoComponentsDeploymentsFromNormalized(
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment, len(components))
-	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
+	backendFramework, err := BackendFrameworkForGeneratedDCDs(parentDGD)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +394,10 @@ func gmsExtraClientContainersError(
 	return fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
 }
 
-func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
+// BackendFrameworkForGeneratedDCDs returns the explicit graph framework, or
+// the framework detected consistently across worker components. parentDGD
+// must not be nil.
+func BackendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
 	if parentDGD.Spec.BackendFramework != "" {
 		return parentDGD.Spec.BackendFramework, nil
 	}
@@ -430,6 +433,35 @@ func BackendFrameworkForComponent(
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
 	return getBackendFrameworkFromComponent(component, dynamoDeployment)
+}
+
+// ServingPathBackendFramework returns the explicit framework the component's
+// serving rendering path resolves against: Grove and DisaggregatedSet
+// components on origins before GraphWideBackendInheritance keep the authored
+// graph framework, matching their gated renderers; all other components
+// inherit graphBackendFramework. dsSelection holds the DisaggregatedSet
+// selected component names, nil when that provider is not used.
+// dgd and component must not be nil.
+func ServingPathBackendFramework(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	graphBackendFramework string,
+	grovePathway bool,
+	dsSelection map[string]string,
+) string {
+	if compatibility.GraphWideBackendInheritance.Enabled(dgd.Annotations) {
+		return graphBackendFramework
+	}
+
+	gated := grovePathway && !component.ManagedByExternalController()
+	if _, selected := dsSelection[component.ComponentName]; selected {
+		gated = true
+	}
+	if gated {
+		return dgd.Spec.BackendFramework
+	}
+
+	return graphBackendFramework
 }
 
 func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDeploymentSharedSpec) string {
@@ -2057,7 +2089,7 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	}
 	mountPath := compilationCache.MountPath
 	if mountPath == "" {
-		mountPath = getDefaultCompilationCacheMountPoint(backendFramework)
+		mountPath = DefaultCompilationCacheMountPoint(backendFramework)
 		if mountPath == "" {
 			return fmt.Errorf("compilationCache.mountPath is required for backend framework %s (no default available)", backendFramework)
 		}
@@ -2986,6 +3018,16 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
+	// New origins match DCD generation so a commandless component inherits the
+	// sibling's engine; legacy origins keep per-component resolution.
+	graphBackendFramework := dynamoDeployment.Spec.BackendFramework
+	if compatibility.GraphWideBackendInheritance.Enabled(dynamoDeployment.Annotations) {
+		graphBackendFramework, err = BackendFrameworkForGeneratedDCDs(dynamoDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine graph backend framework: %w", err)
+		}
+	}
+
 	for i := range dynamoDeployment.Spec.Components {
 		sourceComponent := &dynamoDeployment.Spec.Components[i]
 		if isDelegatedComponent(sourceComponent, isDelegated) {
@@ -2994,8 +3036,7 @@ func GenerateGrovePodCliqueSet(
 		component := sourceComponent.DeepCopy()
 		prepareGroveComponentForRendering(component, existingPodCliqueSet, workerHash)
 		componentName := component.ComponentName
-		// Determine backend framework using hybrid approach
-		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
+		backendFramework, err := DetermineBackendFrameworkForComponent(component, graphBackendFramework)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 		}
@@ -3477,10 +3518,11 @@ func determineBackendFramework(
 	return BackendFrameworkNoop, nil
 }
 
-// determineBackendFrameworkForComponent inspects every complete authored
+// DetermineBackendFrameworkForComponent inspects every complete authored
 // PodTemplate source. Role-template mode may omit the component-level template,
-// so backend detection must not depend on that legacy location.
-func determineBackendFrameworkForComponent(
+// so backend detection must not depend on that legacy location. A nil component
+// resolves to the noop backend.
+func DetermineBackendFrameworkForComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	explicitBackendFramework string,
 ) (BackendFramework, error) {
@@ -3536,19 +3578,19 @@ func getBackendFrameworkFromComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
-	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
+	return DetermineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
-	return determineBackendFrameworkForComponent(
+	return DetermineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)
 }
 
-// getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
-func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
+// DefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
+func DefaultCompilationCacheMountPoint(backendFramework BackendFramework) string {
 	switch backendFramework {
 	case BackendFrameworkVLLM:
 		return commonconsts.DefaultVLLMCacheMountPoint
