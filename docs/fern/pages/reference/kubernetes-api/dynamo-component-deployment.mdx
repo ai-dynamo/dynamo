@@ -464,7 +464,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="failover" type="FailoverSpec">
-  Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+  Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD. For `IntraPod` failover, the engine must be vLLM or SGLang when `checkpoint` is enabled, and vLLM when it is not (cold-start failover). Admission resolves the engine from `backendFramework` or from the `main` container's command.
 </ParamField>
 
 <Indent>

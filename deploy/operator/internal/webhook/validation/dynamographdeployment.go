@@ -444,15 +444,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if !opts.grovePathway {
 				allErrs = append(allErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
 			}
-			if spec.BackendFramework != string(dynamo.BackendFrameworkVLLM) {
-				detected := spec.BackendFramework
-				if detected == "" {
-					detected = unsetValue
-				}
+
+			// Resolve the backend as rendering does, so an unset backendFramework falls back to the command.
+			backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(component, spec.BackendFramework)
+			if err != nil {
+				allErrs = append(allErrs, field.Invalid(modePath, gms.Mode, "the inter-pod GMS layout requires a consistent vLLM backend"))
+			} else if backendFramework != dynamo.BackendFrameworkVLLM {
 				allErrs = append(allErrs, field.Invalid(
 					modePath,
 					gms.Mode,
-					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detected),
+					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detectedBackendFramework(backendFramework)),
 				))
 			}
 		}
@@ -476,6 +477,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
+				backendFramework:                  spec.BackendFramework,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,

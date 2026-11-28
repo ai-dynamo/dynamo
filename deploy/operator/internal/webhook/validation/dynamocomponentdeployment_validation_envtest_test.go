@@ -113,6 +113,36 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
 			dcd.Spec.Experimental.Checkpoint.StartupPolicy = ""
 		}), wantWebhookErrs: []string{"spec.experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		// Cold-start intra-pod failover, with no checkpoint, renders only for vLLM.
+		{name: "vLLM cold-start failover is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionVLLMBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		})},
+		{name: "vLLM cold-start failover inferred from the command is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionVLLMBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		})},
+		{name: "SGLang cold-start failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: sglang)"}},
+		{name: "inferred TRT-LLM cold-start failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: trtllm)"}},
+		{name: "SGLang cold-start failover cannot be enabled on update", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+			dcd.Spec.Experimental.Failover = nil
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)
+			dcd.Spec.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: sglang)"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage

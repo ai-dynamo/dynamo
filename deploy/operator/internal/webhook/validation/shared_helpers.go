@@ -386,6 +386,15 @@ func forceScalingGroupFor(experimental *nvidiacomv1beta1.ExperimentalSpec) bool 
 	return grove != nil && ptr.Deref(grove.ForceScalingGroup, false)
 }
 
+// detectedBackendFramework formats a resolved backend for admission messages,
+// reporting a backend that resolved to nothing as unset.
+func detectedBackendFramework(backendFramework dynamo.BackendFramework) string {
+	if backendFramework == dynamo.BackendFrameworkNoop {
+		return unsetValue
+	}
+	return string(backendFramework)
+}
+
 func effectiveGMSMode(mode nvidiacomv1beta1.GPUMemoryServiceMode) nvidiacomv1beta1.GPUMemoryServiceMode {
 	if mode == "" {
 		return nvidiacomv1beta1.GMSModeIntraPod

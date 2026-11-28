@@ -187,6 +187,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
 	workloadProvider                  string
+	backendFramework                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
 	groveStrategyChanged              bool
@@ -369,7 +370,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
-	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
+	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway, options.backendFramework)...)
 
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) && !spec.IsLPX() {
@@ -396,10 +397,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	return allErrs
 }
 
+// validateSharedExperimentalSpec validates the experimental rules that need the
+// whole component. spec and fldPath must not be nil. explicitBackendFramework is
+// the owning resource's backendFramework and may be empty.
 func (v *sharedValidation) validateSharedExperimentalSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 	grovePathway bool,
+	explicitBackendFramework string,
 ) field.ErrorList {
 	if spec.Experimental == nil {
 		return nil
@@ -421,6 +426,24 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 			experimentalPath.Child("failover"),
 			"cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
 		))
+	}
+
+	// Cold-start intra-pod failover renders only for vLLM; resolve the engine as rendering does.
+	// Inter-pod GMS is skipped: validateFailoverSpec requires failover.mode to match gpuMemoryService.mode.
+	if dynamo.IsIntraPodFailoverEnabled(spec) && dynamo.GetCheckpoint(spec) == nil && !spec.IsInterPodGMSEnabled() {
+		failoverPath := experimentalPath.Child("failover")
+		backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(spec, explicitBackendFramework)
+		if err != nil {
+			allErrs = append(allErrs, field.Forbidden(
+				failoverPath,
+				"Cold-start intra-pod failover requires a consistent vLLM backend",
+			))
+		} else if backendFramework != dynamo.BackendFrameworkVLLM {
+			allErrs = append(allErrs, field.Forbidden(
+				failoverPath,
+				fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", detectedBackendFramework(backendFramework)),
+			))
+		}
 	}
 
 	return append(allErrs, v.validateExperimentalSpec(
