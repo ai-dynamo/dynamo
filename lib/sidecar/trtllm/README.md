@@ -32,8 +32,9 @@ supported, even when `--context-length` is supplied.
 > `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`, which includes
 > image/video URL passthrough, audio input, native KVCM2 event streaming, OpenEngine routing load support,
 > and aggregated image-aware KV routing ([NVIDIA/TensorRT-LLM#21125](https://github.com/NVIDIA/TensorRT-LLM/pull/21125)).
-> The nightly CI job tests image, video, and audio passthrough against the latest regular upstream nightly;
-> it also supports manual dispatch. The examples below stay pinned to the validated version.
+> The standard Dynamo nightly sidecar job tests image, video, audio and
+> image-cache identity through Dynamo HTTP using the TRT-LLM runtime pinned in
+> `container/context.yaml`. Custom upstream images require separate validation.
 
 ## Support matrix
 
@@ -71,9 +72,8 @@ curl -s localhost:8000/v1/chat/completions \
 ### Audio (Whisper)
 
 Audio requires a runtime containing upstream audio support, such as the example
-pin above. The nightly audio lane runs real Whisper-tiny
-inference and checks the transcript and authoritative token usage. Full frontend
-HTTP CI is tracked separately from that adapter-to-engine test.
+pin above. The standard serve suite runs Whisper-tiny through Dynamo HTTP and
+checks its transcript and token usage in Dynamo's TRT-LLM test container.
 
 Whisper-tiny has no chat template and accepts text task prefixes rather than
 token-ID input. Supply `--custom-jinja-template` to the sidecar. An empty template
@@ -90,7 +90,7 @@ python3 -m dynamo.frontend --migration-limit 0
 # In the audio-capable TensorRT-LLM environment, from the repository root:
 python3 -m tensorrt_llm.commands.serve openai/whisper-tiny \
   --grpc --grpc-protocol openengine --host 127.0.0.1 --port 30001 \
-  --max_seq_len 1500 --extra_llm_api_options lib/sidecar/trtllm/ci/whisper.yaml
+  --max_seq_len 1500 --extra_llm_api_options lib/sidecar/trtllm/launch/whisper.yaml
 
 # In the Dynamo environment:
 WHISPER_TEMPLATE=$(mktemp --suffix=.jinja)

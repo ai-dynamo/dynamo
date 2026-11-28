@@ -510,6 +510,172 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class MediaAccuracyPayload(ChatPayload):
+    """Native media accuracy and expanded usage through the public frontend."""
+
+    media: str = field(kw_only=True)
+    media_source: Callable[[int], str] = field(kw_only=True, repr=False)
+    expected_colors: tuple[str, str] = ("red", "blue")
+    _iteration: int = field(default=0, init=False, repr=False)
+    _request_body: dict = field(default_factory=dict, init=False, repr=False)
+
+    def body_for_iteration(self, iteration: int) -> dict:
+        self._iteration = iteration
+        body = deepcopy(self.body)
+        part_type = {"image": "image_url", "video": "video_url", "audio": "audio_url"}[
+            self.media
+        ]
+        content = body["messages"][0]["content"]
+        content[0] = {
+            "type": part_type,
+            part_type: {"url": self.media_source(iteration)},
+        }
+        self._request_body = body
+        return body
+
+    def process_response(self, response: Any) -> str:
+        self._validate_usage(response)
+        return super().process_response(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        self._validate_usage(response)
+        super().validate(response, content)
+        words = re.findall(r"[a-z]+", content.lower())
+        if self.media == "image":
+            colors = [word for word in words if word in ("red", "blue")]
+            if colors[:2] != list(self.expected_colors):
+                raise AssertionError(content)
+        elif self.media == "video":
+            if not {"triangle", "triangular"}.intersection(words):
+                raise AssertionError(content)
+        else:
+            if "thoughts affected hester" not in " ".join(words):
+                raise AssertionError(content)
+
+    def _validate_usage(self, response: Any) -> dict[str, Any]:
+        result = response.json()
+        usage = result["usage"]
+        for name in ("prompt_tokens", "completion_tokens"):
+            if type(usage.get(name)) is not int or usage[name] <= 0:
+                raise ValueError(f"Invalid media token usage: {usage}")
+        if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
+            raise ValueError(f"Invalid media token usage: {usage}")
+        if result["choices"][0]["finish_reason"] not in ("stop", "length"):
+            raise ValueError(f"Unexpected media finish reason: {result}")
+        if self.media != "audio":
+            prompt_ids = result.get("nvext", {}).get("prompt_token_ids")
+            if not isinstance(prompt_ids, list) or not prompt_ids:
+                raise ValueError(f"Missing media prompt token IDs: {result}")
+            if usage["prompt_tokens"] <= len(prompt_ids):
+                raise ValueError(f"Media prompt usage was not expanded: {usage}")
+        return result
+
+
+@dataclass
+class ImageCacheIdentityPayload(MediaAccuracyPayload):
+    """Warm one image, isolate aliases, then reject stale identity for changed pixels."""
+
+    cache_block_size: int = 64
+    _observed: list[tuple[int, int, float]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def before_request(self) -> None:
+        if self._iteration != 1 or len(self._observed) > 1:
+            return
+        self._wait_for_complete_prompt(self._observed[0][0])
+
+    def _wait_for_complete_prompt(self, prompt: int) -> None:
+        expected = (prompt // self.cache_block_size) / math.ceil(
+            prompt / self.cache_block_size
+        )
+        probe = deepcopy(self._request_body)
+        # Query-only selections have no final chunk and therefore no timing.
+        probe.update(stream=False, max_tokens=1)
+        probe["nvext"] = {"extra_fields": ["timing", "worker_id"]}
+        deadline = time.monotonic() + 60
+        observed = None
+        while time.monotonic() < deadline:
+            response = requests.post(self.url(), json=probe, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            try:
+                require_router_worker_id(result)
+            except AssertionError as error:
+                raise ValueError(
+                    "Image routing probe omitted worker identity"
+                ) from error
+            usage = result.get("usage", {})
+            if usage.get("prompt_tokens") != prompt:
+                raise ValueError(f"Image probe prompt usage changed: {result}")
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            # Fail before a readiness probe can repair missing primary-request caching.
+            complete_tokens = (
+                (prompt - 1) // self.cache_block_size * self.cache_block_size
+            )
+            if type(cached) is not int or cached < complete_tokens:
+                raise ValueError(f"Image probe found incomplete cached prompt: {usage}")
+            observed = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
+            if isinstance(observed, (float, int)) and observed >= expected - 1e-9:
+                return
+            time.sleep(0.1)
+        raise ValueError(
+            f"Image KV events did not cover complete prompt blocks: {observed} < {expected}"
+        )
+
+    def process_response(self, response: Any) -> str:
+        self.expected_colors = (
+            ("blue", "red") if self._iteration == 3 else ("red", "blue")
+        )
+        result = self._validate_usage(response)
+        usage = result["usage"]
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if type(cached) is not int or not 0 <= cached <= usage["prompt_tokens"]:
+            raise ValueError(f"Invalid image cached token count: {usage}")
+        hit_rate = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
+        if type(hit_rate) not in (float, int) or not 0 <= hit_rate <= 1:
+            raise ValueError(f"Invalid image KV hit rate: {result}")
+        prompt = usage["prompt_tokens"]
+        if prompt < self.cache_block_size * 2:
+            raise ValueError(f"Image prompt does not span enough cache blocks: {usage}")
+        if self._observed and prompt != self._observed[0][0]:
+            raise ValueError(f"Image prompt usage changed: {prompt}, {self._observed}")
+        if len(self._observed) == self._iteration:
+            if self._iteration == 1:
+                complete_tokens = (
+                    (prompt - 1) // self.cache_block_size * self.cache_block_size
+                )
+                expected = (prompt // self.cache_block_size) / math.ceil(
+                    prompt / self.cache_block_size
+                )
+                if cached <= self._observed[0][1] or cached < complete_tokens:
+                    raise ValueError(f"Repeated image did not reuse its cache: {usage}")
+                if hit_rate < expected - 1e-9:
+                    raise ValueError(
+                        f"Repeated image KV hit rate is too low: {hit_rate}"
+                    )
+            elif self._iteration in (2, 3):
+                if cached >= self._observed[1][1]:
+                    raise ValueError(
+                        f"Different image identity reused cached tokens: {usage}"
+                    )
+                if self._iteration == 2 and hit_rate >= self._observed[1][2]:
+                    raise ValueError(
+                        f"Alias image identity reused router cache: {hit_rate}"
+                    )
+            # Content retries warm this request; retain only its first cache observation.
+            self._observed.append((prompt, cached, hit_rate))
+            if self._iteration == 2:
+                self._wait_for_complete_prompt(prompt)
+        elif len(self._observed) != self._iteration + 1:
+            raise ValueError("Image identity requests ran out of order")
+        return super().process_response(response)
+
+    def final_validation(self) -> None:
+        assert len(self._observed) == 4, "All image identity cases must execute"
+
+
+@dataclass
 class StopStringChatPayload(ChatPayload):
     """End a chat completion on its single stop string.
 
