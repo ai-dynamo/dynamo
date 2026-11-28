@@ -12,6 +12,7 @@ use crate::prelude::ExternalSequenceBlockHash;
 
 const MIN_CAPACITY: usize = 16;
 const PREFETCH_DISTANCE: usize = 8;
+const CACHE_LINE: usize = 64;
 
 /// The key is kept as two `u32` halves so the slot needs only 4-byte alignment: with
 /// a non-zero 4-byte value, `Option<Slot<V>>` is 12 bytes rather than 16.
@@ -183,43 +184,51 @@ impl<V> BlockLookup<V> {
         Some(value)
     }
 
+    /// Hints `lines` cache lines for `key`, starting at its home slot's.
     #[inline]
-    fn prefetch(&self, key: ExternalSequenceBlockHash) {
+    fn prefetch(&self, key: ExternalSequenceBlockHash, lines: usize) {
         if self.slots.is_empty() {
             return;
         }
-        let ptr = self
+        let home = self
             .slots
             .as_ptr()
             .wrapping_add(self.home(key))
             .cast::<i8>();
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: prefetching is a hint that never faults, and `ptr` points into `slots`.
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(ptr);
-        }
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: `prfm` is a hint that never faults, and `ptr` points into `slots`.
-        unsafe {
-            std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, preserves_flags, readonly));
+        for line in 0..lines {
+            // Past the home line the address can lie beyond the table's end, where the
+            // probe run wraps to the first slots instead: a hint there is harmless and rare.
+            let ptr = home.wrapping_add(line * CACHE_LINE);
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: prefetching is a hint that never faults, whatever the address.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(ptr);
+            }
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: `prfm` is a hint that never faults, whatever the address.
+            unsafe {
+                std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, preserves_flags, readonly));
+            }
         }
     }
 
+    /// Runs `op` on every key, hinting `lines` cache lines of each key a few keys ahead.
     fn for_each_prefetched<I>(
         &mut self,
         keys: I,
+        lines: usize,
         mut op: impl FnMut(&mut Self, ExternalSequenceBlockHash),
     ) where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
         let mut ahead = keys.clone();
         for key in ahead.by_ref().take(PREFETCH_DISTANCE) {
-            self.prefetch(key);
+            self.prefetch(key, lines);
         }
         for key in keys {
             if let Some(next) = ahead.next() {
-                self.prefetch(next);
+                self.prefetch(next, lines);
             }
             op(self, key);
         }
@@ -234,7 +243,10 @@ impl<V> BlockLookup<V> {
     ) where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        self.for_each_prefetched(keys, |lookup, key| {
+        // A removal reads on past the key to the empty slot that ends its probe run, to
+        // shift later entries back. With 12-byte slots that often crosses into the next
+        // cache line, so hint two; the other batch operations seldom read that far.
+        self.for_each_prefetched(keys, 2, |lookup, key| {
             let removed = lookup.remove(&key);
             on_removed(key, removed);
         });
@@ -257,7 +269,7 @@ impl<V: Copy + Eq> BlockLookup<V> {
             self.reserve(1);
         }
         let mut changed = 0;
-        self.for_each_prefetched(keys, |lookup, key| match lookup.probe(key) {
+        self.for_each_prefetched(keys, 1, |lookup, key| match lookup.probe(key) {
             Ok(i) => {
                 if let Some(slot) = lookup.slots[i].as_mut()
                     && slot.value != value
@@ -278,11 +290,11 @@ impl<V: Copy + Eq> BlockLookup<V> {
     /// operations do.
     pub(crate) fn leading_holding(&self, keys: &[ExternalSequenceBlockHash], value: V) -> usize {
         for &key in keys.iter().take(PREFETCH_DISTANCE) {
-            self.prefetch(key);
+            self.prefetch(key, 1);
         }
         for (i, key) in keys.iter().enumerate() {
             if let Some(&ahead) = keys.get(i + PREFETCH_DISTANCE) {
-                self.prefetch(ahead);
+                self.prefetch(ahead, 1);
             }
             if self.get(key) != Some(&value) {
                 return i;
