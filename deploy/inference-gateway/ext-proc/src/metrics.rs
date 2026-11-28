@@ -98,7 +98,7 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
 ///
 /// Together the stages split the EPP's share of a request's time to first
 /// token: receiving the body, picking a worker (parse, template, tokenize,
-/// select, book, all inside pick), rewriting the forwarded body, and then
+/// select, all inside pick), rewriting the forwarded body, and then
 /// waiting for the first response chunk through the gateway, sidecar and
 /// worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,10 +119,9 @@ pub enum Stage {
     /// [`Stage::BlockingWait`]; for a completions text prompt, including its
     /// waits for a tokenization slot and a blocking-pool thread.
     Tokenize,
-    /// Choosing the prefill and decode workers, including router queueing.
+    /// Choosing the prefill and decode workers and booking their load,
+    /// including router queueing.
     Select,
-    /// Registering the request with the router's load bookkeeping.
-    Book,
     /// The whole `pick()` call, including waits between the steps above.
     Pick,
     /// Rewriting the forwarded body (`nvext.token_data`, `nvext` strip,
@@ -145,7 +144,7 @@ pub enum Stage {
 
 impl Stage {
     #[cfg(test)]
-    const ALL: [Stage; 13] = [
+    const ALL: [Stage; 12] = [
         Stage::ReceiveBody,
         Stage::ModelProbe,
         Stage::Parse,
@@ -153,7 +152,6 @@ impl Stage {
         Stage::Template,
         Stage::Tokenize,
         Stage::Select,
-        Stage::Book,
         Stage::Pick,
         Stage::Rewrite,
         Stage::ResponseHeaders,
@@ -170,7 +168,6 @@ impl Stage {
             Stage::Template => "template",
             Stage::Tokenize => "tokenize",
             Stage::Select => "select",
-            Stage::Book => "book",
             Stage::Pick => "pick",
             Stage::Rewrite => "rewrite",
             Stage::ResponseHeaders => "response_headers",
