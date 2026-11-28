@@ -1519,6 +1519,102 @@ mod tests {
             .unwrap();
     }
 
+    /// The reverse mixed-plane case: a worker configured for TCP answers a Velo
+    /// frontend and attaches the Velo metrics to its runtime's registry then,
+    /// since its runtime registered none at construction.
+    #[tokio::test]
+    async fn tcp_worker_answers_a_velo_frontend_and_registers_velo_metrics() {
+        use futures::StreamExt;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                // The frontend and the worker share this process's Velo service.
+                let owner = crate::Runtime::from_current()
+                    .unwrap()
+                    .velo_response_service();
+                let frontend = owner.service().await.unwrap();
+                let registered = frontend
+                    .register_response(Context::new(()).context(), false)
+                    .unwrap();
+                let (connection_info, provider) = registered.into_parts();
+
+                let ingress = TestIngress::for_engine(Arc::new(OneChunk)).unwrap();
+                ingress.response_plane.set(ResponsePlaneMode::Tcp).unwrap();
+                ingress
+                    .velo_response_owner
+                    .set(Arc::downgrade(&owner))
+                    .unwrap();
+                let registry = crate::MetricsRegistry::new();
+                ingress.metrics_registry.set(registry.clone()).unwrap();
+                const VELO_FAMILY: &str = "velo_messenger_pending_responses";
+                assert!(
+                    !registry
+                        .prometheus_expfmt_combined()
+                        .unwrap()
+                        .contains(VELO_FAMILY)
+                );
+
+                let control = RequestControlMessage {
+                    id: "mixed-plane".into(),
+                    request_type: RequestType::SingleIn,
+                    response_type: ResponseType::ManyOut,
+                    payload_codec: RequestPlanePayloadCodec::Json,
+                    connection_info,
+                    metadata: Default::default(),
+                    frontend_send_ts_ns: None,
+                    request_stream_connection_info: None,
+                };
+                let payload = TwoPartCodec::default()
+                    .encode_message(TwoPartMessage::from_parts(
+                        serde_json::to_vec(&control).unwrap().into(),
+                        Bytes::from_static(b"{}"),
+                    ))
+                    .unwrap();
+                let receive = async {
+                    let mut receiver = provider.await.unwrap().unwrap();
+                    let mut received = Vec::new();
+                    while !String::from_utf8_lossy(&received).contains("\"token\":0") {
+                        let bytes = receiver
+                            .rx
+                            .next()
+                            .await
+                            .expect("velo response stream closed before the chunk")
+                            .unwrap();
+                        received.extend_from_slice(&bytes);
+                    }
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    let (handled, ()) = tokio::join!(
+                        ingress.handle_payload_shared(payload, Some("mixed-plane".to_string())),
+                        receive
+                    );
+                    handled.unwrap();
+                })
+                .await
+                .expect("the worker sent no chunk over velo");
+
+                assert!(
+                    registry
+                        .prometheus_expfmt_combined()
+                        .unwrap()
+                        .contains(VELO_FAMILY)
+                );
+            },
+        )
+        .await;
+    }
+
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {
         WorkHandlerMetrics::new(

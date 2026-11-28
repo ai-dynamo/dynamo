@@ -1437,6 +1437,10 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     velo_response_service: tokio::sync::OnceCell<Arc<velo_response::VeloResponseService>>,
     velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
+    /// The bound runtime's registry. Velo metrics attach to it once this
+    /// ingress first answers on Velo, which a worker configured for another
+    /// plane does only when a Velo frontend reaches it.
+    metrics_registry: OnceLock<crate::MetricsRegistry>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
     track_response_completion: OnceLock<bool>,
@@ -1488,6 +1492,7 @@ where
             quic_response_client_pool: OnceLock::new(),
             velo_response_service: tokio::sync::OnceCell::new(),
             velo_response_owner: OnceLock::new(),
+            metrics_registry: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
             track_response_completion: OnceLock::new(),
@@ -1556,7 +1561,13 @@ where
             ));
         }
         self.velo_response_service
-            .get_or_try_init(|| owner.service())
+            .get_or_try_init(|| async {
+                let service = owner.service().await?;
+                if let Some(registry) = self.metrics_registry.get() {
+                    velo_response::register_metrics(registry);
+                }
+                Ok::<_, anyhow::Error>(service)
+            })
             .await
             .map_err(|error| PipelineError::Generic(error.to_string()))
     }
@@ -1632,6 +1643,9 @@ where
         let _ = self.velo_response_owner.set(Arc::downgrade(
             &endpoint.drt().runtime().velo_response_service(),
         ));
+        let _ = self
+            .metrics_registry
+            .set(endpoint.drt().get_metrics_registry().clone());
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self

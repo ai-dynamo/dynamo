@@ -12,7 +12,7 @@ This page does not list:
 - Inference engine metrics (`vllm:*`, `sglang:*`, `trtllm_*`) that the engine itself defines. See [Engine Metrics](#engine-metrics).
 - Kubernetes operator metrics. See [Operator Metrics](operator-metrics.mdx).
 - NIXL transfer metrics, which NIXL serves on its own port. See the [NIXL telemetry documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
-- Velo metrics (`velo_*`), which the Velo library defines. Dynamo processes expose them when `DYN_RESPONSE_PLANE=velo`. See the [Velo metrics reference](https://github.com/ai-dynamo/velo/blob/main/docs/src/appendix/metrics.md).
+- Velo metrics (`velo_*`), which the Velo library defines. Dynamo processes expose them when `DYN_RESPONSE_PLANE=velo`. A worker configured for another response plane also exposes them once it has answered a request from a Velo frontend. See the [Velo metrics reference](https://github.com/ai-dynamo/velo/blob/main/docs/src/appendix/metrics.md).
 - KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.8.0; see the documentation for v1.7 and earlier.
 
 ## Metric Types
