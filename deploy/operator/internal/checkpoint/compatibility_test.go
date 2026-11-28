@@ -216,7 +216,7 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
-	t.Log("Then graph, Pod, worker-generation, served-name, and helper-sidecar identity do not make the artifact incompatible")
+	t.Log("Then graph, Pod, worker-generation, served-name, response-plane, and helper-sidecar identity do not make the artifact incompatible")
 	assert.Equal(t, firstHash, secondHash)
 	assert.Len(t, firstHash, 64)
 }
@@ -433,6 +433,7 @@ func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix strin
 					{Name: "DYN_NAMESPACE_WORKER_SUFFIX", Value: workerSuffix},
 					{Name: "POD_NAME", Value: dgdName + "-pod"},
 					{Name: "DYN_SERVED_MODEL_NAME", Value: dgdName + "/model"},
+					{Name: "DYN_RESPONSE_PLANE", Value: dgdName + "-response-plane"},
 				},
 			}},
 		},

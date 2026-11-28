@@ -80,16 +80,13 @@ async def refresh_snapshot_restore_config(
     _copy_restore_runtime_config(target_runtime_config, parsed_runtime_config)
     _validate_kubernetes_restore_env_for_config(target_runtime_config)
     logger.info(
-        "Refreshed snapshot restore runtime config",
-        extra={
-            "dynamo_namespace": getattr(target_runtime_config, "namespace", None),
-            "discovery_backend": getattr(
-                target_runtime_config, "discovery_backend", None
-            ),
-            "request_plane": getattr(target_runtime_config, "request_plane", None),
-            "response_plane": getattr(target_runtime_config, "response_plane", None),
-            "event_plane": getattr(target_runtime_config, "event_plane", None),
-        },
+        "Refreshed snapshot restore runtime config: dynamo_namespace=%s "
+        "discovery_backend=%s request_plane=%s response_plane=%s event_plane=%s",
+        getattr(target_runtime_config, "namespace", None),
+        getattr(target_runtime_config, "discovery_backend", None),
+        getattr(target_runtime_config, "request_plane", None),
+        getattr(target_runtime_config, "response_plane", None),
+        getattr(target_runtime_config, "event_plane", None),
     )
     return config
 
