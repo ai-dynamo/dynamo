@@ -54,6 +54,8 @@ _MDC_REFRESH_FIELDS = (
     "max_num_batched_tokens",
     "context_length",
     "speculative_nextn",
+    "sglang_mixed_chunk",
+    "sglang_prefill_chunk_size",
 )
 _MDC_IDENTITY_FIELDS = ("component_name", "endpoint")
 

@@ -43,6 +43,9 @@ class EnginePerfLimits:
     max_num_batched_tokens: int
     max_num_seqs: int
     max_kv_tokens: int
+    # None preserves mixed pricing for older worker cards with unknown mode.
+    prefill_shares_decode_budget: Optional[bool] = True
+    prefill_chunk_size: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -54,6 +57,15 @@ class EnginePerfLimits:
                 raise ValueError(f"{name} must be positive, got {value}")
             if value > _U32_MAX:
                 raise ValueError(f"{name} exceeds u32::MAX")
+
+
+class EngineLoadStatus(Enum):
+    """A valid load signal without a finite estimated duration."""
+
+    SATURATED = "prefill_budget_saturated"
+
+
+LoadEstimate = float | EngineLoadStatus | None
 
 
 class OptimizationTarget(str, Enum):
@@ -250,21 +262,45 @@ class AISCoreEnginePerfModel:
 
     def get_queued_prefill_time(
         self, metrics_by_rank: list[ForwardPassMetrics]
-    ) -> Optional[float]:
-        """Estimate queued-prefill drain time in seconds."""
+    ) -> LoadEstimate:
+        """Estimate queue drain or report known prefill budget saturation."""
         if self._worker_type == "decode":
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
 
-        plans = [
-            _PrefillChunkPlan.build(
-                metrics.queued_requests.sum_prefill_tokens,
-                self._limits.max_num_batched_tokens,
+        if all(
+            metrics.queued_requests.sum_prefill_tokens == 0
+            for metrics in metrics_by_rank
+        ):
+            return 0.0
+
+        shares_budget = self._limits.prefill_shares_decode_budget
+        mixed = self._worker_type == "aggregated" and shares_budget is not False
+        chunk_limits = [
+            self._prefill_step_budget()
+            - (
+                metrics.scheduled_requests.num_decode_requests
+                if mixed and shares_budget is True
+                else 0
             )
             for metrics in metrics_by_rank
         ]
-        if all(plan.full_chunks == 0 and plan.tail_tokens == 0 for plan in plans):
-            return 0.0
+        if any(
+            limit <= 0 and row.queued_requests.sum_prefill_tokens > 0
+            for row, limit in zip(metrics_by_rank, chunk_limits, strict=True)
+        ):
+            return EngineLoadStatus.SATURATED
+
+        plans: list[_PrefillChunkPlan] = []
+        for metrics, max_chunk in zip(metrics_by_rank, chunk_limits, strict=True):
+            queued_tokens = metrics.queued_requests.sum_prefill_tokens
+            if max_chunk < 0:
+                return None
+            plans.append(
+                _PrefillChunkPlan.build(queued_tokens, max_chunk)
+                if max_chunk > 0
+                else _PrefillChunkPlan(full_chunks=0, tail_tokens=0)
+            )
 
         breakpoints = {0}
         for plan in plans:
@@ -277,8 +313,10 @@ class AISCoreEnginePerfModel:
         for start, end in pairwise(sorted(breakpoints)):
             repeat_count = end - start
             chunk_metrics: list[ForwardPassMetrics] = []
-            for snapshot, plan in zip(metrics_by_rank, plans, strict=True):
-                chunk = plan.chunk_at(start, self._limits.max_num_batched_tokens)
+            for snapshot, plan, max_chunk in zip(
+                metrics_by_rank, plans, chunk_limits, strict=True
+            ):
+                chunk = plan.chunk_at(start, max_chunk)
                 scheduled = ScheduledRequestMetrics(
                     num_prefill_requests=_estimate_prefill_request_count(
                         snapshot.queued_requests.num_prefill_requests, chunk
@@ -286,18 +324,14 @@ class AISCoreEnginePerfModel:
                     sum_prefill_tokens=chunk,
                     var_prefill_length=(snapshot.queued_requests.var_prefill_length),
                     num_decode_requests=(
-                        snapshot.scheduled_requests.num_decode_requests
-                        if self._worker_type == "aggregated"
-                        else 0
+                        snapshot.scheduled_requests.num_decode_requests if mixed else 0
                     ),
                     sum_decode_kv_tokens=(
-                        snapshot.scheduled_requests.sum_decode_kv_tokens
-                        if self._worker_type == "aggregated"
-                        else 0
+                        snapshot.scheduled_requests.sum_decode_kv_tokens if mixed else 0
                     ),
                     var_decode_kv_tokens=(
                         snapshot.scheduled_requests.var_decode_kv_tokens
-                        if self._worker_type == "aggregated"
+                        if mixed
                         else 0.0
                     ),
                 )
@@ -431,64 +465,67 @@ class AISCoreEnginePerfModel:
     def _find_aggregated_capacity(
         self, request: EngineCapacityRequest
     ) -> Optional[EngineCapacity]:
-        if request.osl == 0 or self._limits.max_num_batched_tokens <= 1:
+        if request.osl == 0:
             return None
 
+        shares_budget = self._limits.prefill_shares_decode_budget is not False
         prefill_isl = _effective_prefill_isl(request)
         accept_length = _normalized_accept_length(request.accept_length)
         context_length = _decode_context_length(request)
-        hard_cap = min(
-            self._decode_max_batch(context_length),
-            max(1, self._limits.max_num_batched_tokens - 1),
-        )
+        hard_cap = self._decode_max_batch(context_length)
+        if shares_budget:
+            hard_cap = min(hard_cap, self._limits.max_num_batched_tokens - 1)
         if hard_cap == 0:
             return None
 
         best: Optional[EngineCapacity] = None
         for batch_size in _capacity_batch_sizes(hard_cap):
-            if not _prefill_decode_balanced(
-                prefill_isl,
-                request.osl,
-                batch_size,
-                self._limits.max_num_batched_tokens,
-                accept_length,
-            ):
-                continue
-
-            decode_kv = _saturating_mul_u32(batch_size, context_length)
-            prefill_per_iteration = min(
-                self._limits.max_num_batched_tokens,
-                _aggregate_prefill_per_iteration(
+            if shares_budget:
+                if not _prefill_decode_balanced(
                     prefill_isl,
                     request.osl,
                     batch_size,
+                    self._prefill_step_budget() - batch_size,
                     accept_length,
-                ),
-            )
-            forward_s = self._mixed_time(prefill_per_iteration, batch_size, decode_kv)
-            if forward_s is None:
+                ):
+                    continue
+                decode_kv = _saturating_mul_u32(batch_size, context_length)
+                prefill_per_iteration = min(
+                    self._prefill_step_budget(),
+                    _aggregate_prefill_per_iteration(
+                        prefill_isl, request.osl, batch_size, accept_length
+                    ),
+                )
+                forward_s = self._mixed_time(
+                    prefill_per_iteration, batch_size, decode_kv
+                )
+                ttft_s = self._aggregated_ttft(
+                    min(_U32_MAX, prefill_per_iteration + prefill_isl),
+                    batch_size,
+                    decode_kv,
+                )
+            else:
+                # One prefill sequence per request, then its remaining decode steps.
+                forward_s = (
+                    self._decode_time_for_batch(batch_size, context_length)
+                    if request.osl > 1
+                    else 0.0
+                )
+                ttft_s = self._standalone_agg_prefill_time(prefill_isl, batch_size)
+            if forward_s is None or ttft_s is None:
                 return None
             itl_s = forward_s / accept_length
-            if itl_s == 0:
-                continue
-
-            ttft_s = self._aggregated_ttft(
-                min(_U32_MAX, prefill_per_iteration + prefill_isl),
-                batch_size,
-                decode_kv,
-            )
-            if ttft_s is None:
-                return None
             decode_tail_s = _checked_duration_mul(
-                itl_s,
-                max(0, request.osl - 1),
-                "aggregate E2E latency",
+                itl_s, request.osl - 1, "aggregate E2E latency"
             )
             e2e_s = _checked_duration_add(
                 ttft_s, decode_tail_s, "aggregate E2E latency"
             )
+            batch_s = request.osl * itl_s if shares_budget else e2e_s
+            if batch_s == 0:
+                continue
             capacity = EngineCapacity(
-                rps=batch_size / (request.osl * itl_s),
+                rps=batch_size / batch_s,
                 ttft_s=ttft_s,
                 itl_s=itl_s,
                 e2e_latency_s=e2e_s,
@@ -538,22 +575,104 @@ class AISCoreEnginePerfModel:
         current_decode_requests: int,
         current_decode_kv: int,
     ) -> Optional[float]:
+        if self._limits.prefill_shares_decode_budget is False:
+            return self._standalone_agg_prefill_time(queued_prefill_tokens)
+
+        if self._limits.prefill_shares_decode_budget is None:
+            return self._prefill_chunk_time(
+                queued_prefill_tokens,
+                lambda chunk: self._mixed_time(
+                    chunk, current_decode_requests, current_decode_kv
+                ),
+            )
+
+        # Synthetic work is split evenly across DP ranks. The busiest decode
+        # rank bounds the total prefill chunk under that same distribution.
+        decode_per_rank = _split_total(
+            current_decode_requests, self._attention_dp_size, 0
+        )
+        step_budget = self._prefill_step_budget()
+        max_chunk = min(
+            step_budget, (step_budget - decode_per_rank) * self._attention_dp_size
+        )
         return self._prefill_chunk_time(
             queued_prefill_tokens,
             lambda chunk: self._mixed_time(
                 chunk, current_decode_requests, current_decode_kv
             ),
+            max_chunk=max_chunk,
+        )
+
+    def _prefill_step_budget(self) -> int:
+        budget = self._limits.max_num_batched_tokens
+        chunk_size = self._limits.prefill_chunk_size
+        return min(budget, chunk_size) if chunk_size is not None else budget
+
+    def _standalone_agg_prefill_time(
+        self, prompt_tokens: int, batch_size: int = 1
+    ) -> Optional[float]:
+        if prompt_tokens == 0:
+            return 0.0
+        ranks = self._attention_dp_size
+        requests_by_rank = [
+            _split_total(batch_size, ranks, rank) for rank in range(ranks)
+        ]
+        prompts_per_wave = max(1, self._prefill_step_budget() // prompt_tokens)
+        full_waves = min(requests_by_rank) // prompts_per_wave
+        tail = [
+            requests - full_waves * prompts_per_wave for requests in requests_by_rank
+        ]
+
+        def estimate_wave(requests_by_rank: list[int]) -> Optional[float]:
+            def estimate_chunk(chunk: int) -> Optional[float]:
+                return self._estimate_forward_pass_seconds(
+                    [
+                        _replace_scheduled(
+                            _empty_fpm(rank),
+                            ScheduledRequestMetrics(
+                                num_prefill_requests=requests,
+                                sum_prefill_tokens=min(chunk, requests * prompt_tokens),
+                            ),
+                        )
+                        for rank, requests in enumerate(requests_by_rank)
+                    ]
+                )
+
+            return self._prefill_chunk_time(
+                max(requests_by_rank) * prompt_tokens,
+                estimate_chunk,
+                max_chunk=self._prefill_step_budget(),
+            )
+
+        tail_s = estimate_wave(tail)
+        if tail_s is None or not full_waves:
+            return tail_s
+        full_s = estimate_wave([prompts_per_wave] * ranks)
+        if full_s is None:
+            return None
+        return _checked_duration_add(
+            tail_s,
+            _checked_duration_mul(full_s, full_waves, "standalone prefill waves"),
+            "standalone prefill time",
         )
 
     def _prefill_chunk_time(
         self,
         tokens: int,
         estimate_chunk: Callable[[int], Optional[float]],
+        *,
+        max_chunk: Optional[int] = None,
     ) -> Optional[float]:
-        plan = _PrefillChunkPlan.build(tokens, self._limits.max_num_batched_tokens)
+        if tokens == 0:
+            return 0.0
+        if max_chunk is None:
+            max_chunk = self._limits.max_num_batched_tokens
+        if max_chunk <= 0:
+            return None
+        plan = _PrefillChunkPlan.build(tokens, max_chunk)
         total_s = 0.0
         if plan.full_chunks > 0:
-            duration_s = estimate_chunk(self._limits.max_num_batched_tokens)
+            duration_s = estimate_chunk(max_chunk)
             if duration_s is None:
                 return None
             total_s = _checked_duration_add(
@@ -776,10 +895,9 @@ def _prefill_decode_balanced(
     isl: int,
     osl: int,
     batch_size: int,
-    max_num_batched_tokens: int,
+    prefill_budget: int,
     accept_length: float,
 ) -> bool:
-    prefill_budget = max(0, max_num_batched_tokens - batch_size)
     if prefill_budget == 0:
         return False
     return (

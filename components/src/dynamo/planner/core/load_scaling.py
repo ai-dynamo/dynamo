@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.core.perf_model.engine_query import EngineLoadStatus
 from dynamo.planner.core.types import FpmObservations, ScalingDecision
 
 if TYPE_CHECKING:
@@ -604,7 +605,7 @@ class LoadScalingMixin:
                 max_num_batched_tokens=max_tokens,
                 kv_hit_rate=kv_hit_rate,
             )
-            if est is not None:
+            if est is not None and est is not EngineLoadStatus.SATURATED:
                 est_ms = est * 1000
                 estimates.append(est_ms)
                 logger.info(
@@ -621,7 +622,7 @@ class LoadScalingMixin:
                     kv_hit_rate=kv_hit_rate,
                     queue_scale=0.0,
                 )
-                if t_own_s is None:
+                if t_own_s is None or t_own_s is EngineLoadStatus.SATURATED:
                     can_scale_down = False
                     continue
                 t_own_ms = t_own_s * 1000
@@ -636,7 +637,7 @@ class LoadScalingMixin:
                     kv_hit_rate=kv_hit_rate,
                     queue_scale=consolidation,
                 )
-                if post_est is None:
+                if post_est is None or post_est is EngineLoadStatus.SATURATED:
                     can_scale_down = False
                 else:
                     queue_induced_ms = post_est * 1000 - t_own_ms
@@ -763,6 +764,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
 
         estimates: list[float] = []
+        saturated_workers = 0
         # Agg-prefill consolidation: queued prefill and decode KV are both
         # absorbed by the survivor (scale both by N/(N-1)). Sensitivity is
         # applied only to the queue-induced portion of TTFT -- ``T_own`` (a
@@ -770,7 +772,8 @@ class LoadScalingMixin:
         # as the fixed cost the new request must pay regardless of N.
         can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
-        for _label, group in self._agg_regression.query_groups(fpm_stats):
+        groups = self._agg_regression.query_groups(fpm_stats)
+        for _label, group in groups:
             # Pre-consolidation prediction uses scheduled-only decode load.
             # Queued decode is modeled only in the consolidation check below.
             est = self._agg_regression.estimate_queued_prefill_time(
@@ -778,7 +781,10 @@ class LoadScalingMixin:
                 max_num_batched_tokens=max_tokens,
                 kv_hit_rate=kv_hit_rate,
             )
-            if est is not None:
+            if est is EngineLoadStatus.SATURATED:
+                saturated_workers += 1
+                can_scale_down = False
+            elif est is not None:
                 estimates.append(est * 1000)
 
             if can_scale_down:
@@ -803,7 +809,13 @@ class LoadScalingMixin:
                     decode_scale=consolidation,
                     include_queued_decode=True,
                 )
-                if t_own_post is None or post_est is None:
+                if (
+                    t_own_post is EngineLoadStatus.SATURATED
+                    or post_est is EngineLoadStatus.SATURATED
+                ):
+                    can_scale_down = False
+                    consolidation_refused = True
+                elif t_own_post is None or post_est is None:
                     can_scale_down = False
                 else:
                     t_own_ms = t_own_post * 1000
@@ -812,6 +824,14 @@ class LoadScalingMixin:
                     if queue_budget_ms <= 0 or queue_induced_ms >= queue_budget_ms:
                         can_scale_down = False
                         consolidation_refused = True
+
+        if saturated_workers:
+            # Known backlog at zero headroom is a hot vote, not a lost sample.
+            hot = saturated_workers + sum(t > self._config.ttft_ms for t in estimates)
+            if hot == len(groups):
+                return num_workers + 1
+            self._diag_load_reason = "scale_down_refused_consolidation"
+            return num_workers
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)

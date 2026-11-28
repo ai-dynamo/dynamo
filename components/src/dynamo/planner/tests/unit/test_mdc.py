@@ -124,6 +124,19 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    @pytest.mark.parametrize("mixed_chunk", [True, False, None])
+    def test_sglang_mixed_chunk_metadata(self, mixed_chunk):
+        runtime_data = (
+            {} if mixed_chunk is None else {"enable_mixed_chunk": mixed_chunk}
+        )
+        entry = MdcEntry(
+            card_json=_card(runtime_data=runtime_data),
+            component="backend",
+            endpoint="generate",
+        )
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="sglang")
+        assert info.sglang_mixed_chunk is mixed_chunk
+
     def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
         entry = MdcEntry(
             card_json=_card(

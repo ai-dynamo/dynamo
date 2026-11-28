@@ -179,6 +179,10 @@ def _engine_caps(
         max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
         kv_cache_block_size=worker_info.kv_cache_block_size if worker_info else None,
         speculative_nextn=worker_info.speculative_nextn if worker_info else None,
+        sglang_mixed_chunk=worker_info.sglang_mixed_chunk if worker_info else None,
+        sglang_prefill_chunk_size=worker_info.sglang_prefill_chunk_size
+        if worker_info
+        else None,
         power_watts_per_replica=power_watts_per_replica,
     )
 

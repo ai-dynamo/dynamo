@@ -759,6 +759,12 @@ async def get_runtime_config(
     if _eagle_enabled_for(server_args.speculative_algorithm):
         runtime_config.enable_eagle = True
 
+    chunk_size = server_args.chunked_prefill_size or 0
+    mixed_chunk = server_args.enable_mixed_chunk and chunk_size > 0
+    runtime_config.set_engine_specific("enable_mixed_chunk", json.dumps(mixed_chunk))
+    if chunk_size > 0:
+        runtime_config.set_engine_specific("prefill_chunk_size", json.dumps(chunk_size))
+
     spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
     if spec_decode_runtime_data is not None:
         try:
