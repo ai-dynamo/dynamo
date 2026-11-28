@@ -466,3 +466,160 @@ def test_prefill_hold_keeps_cached_blocks_until_released():
     d.runner.prefill.close()
     check_quiescent(d)
     d.close()
+
+
+# -- host tier ----------------------------------------------------------------
+
+ROW = BS * 4  # the fake's KV block row, in bytes
+SNAP = 32  # the fake's stored state, in bytes
+
+
+def host_bytes(rows: int, snapshots: int = 16) -> int:
+    """A host budget of ``rows`` block rows plus ``snapshots`` snapshots."""
+    return rows * ROW + snapshots * SNAP
+
+
+def check_tiers(d: Driver) -> None:
+    """No live requests: GPU blocks pinned once and only below GPU blocks,
+    host blocks in distinct host rows, child counts consistent."""
+    cache, blocks = d.cache, list(d.cache._blocks.values())
+    on_host = [b for b in blocks if not b.on_gpu]
+    assert len({b.host_slot for b in on_host}) == len(on_host)
+    assert all(b.host_slot >= 0 for b in on_host)
+    assert cache._host.num_free == cache._host.capacity - len(on_host)
+    for b in blocks:
+        assert b.users == 0
+        kids = [c for c in blocks if c.parent is b]
+        assert b.children == len(kids)
+        assert b.gpu_children == sum(c.on_gpu for c in kids)
+        if b.on_gpu:
+            assert d.bm.ref_count(b.block_id) == 1 and b.host_slot == -1
+            assert b.parent is None or b.parent.on_gpu
+    total = d.runner.engine.cache_config.num_gpu_blocks
+    gpu = sum(b.on_gpu for b in blocks)
+    assert d.bm.get_num_free_blocks() == total - 1 - gpu
+    snapshots = sum(b.snapshot >= 0 for b in blocks)
+    assert cache._pool.num_free == cache._pool.num_slots - snapshots
+
+
+def chain(p: list[int], n: int = 3) -> list[bytes]:
+    hashes = [vllm_hash(None, p[:BS])]
+    for i in range(1, n):
+        hashes.append(vllm_hash(hashes[-1], p[i * BS : (i + 1) * BS]))
+    return hashes
+
+
+def test_host_tier_round_trip_keeps_the_bytes_and_the_tokens():
+    d = Driver(make_runner(host_bytes=host_bytes(8)))
+    cold = Driver(make_runner("none"))
+    assert d.cache._host.capacity == 8 and d.cache._pool._host
+    p = prompt(600)
+    first = d.run("a", p)
+    kv = d.runner.engine.driver_worker.cache_engine.gpu_blocks
+    blocks = dict(d.cache._blocks)
+    before = {h: kv[b.block_id].copy() for h, b in blocks.items()}
+    d.events.clear()
+
+    # Out of GPU memory, onto host: still a hit, so no BlockRemoved.
+    total = d.runner.engine.cache_config.num_gpu_blocks
+    assert d.cache.ensure_free(total - 1) == 3
+    d.cache.take_events()
+    assert not d.events
+    assert not any(b.on_gpu for b in blocks.values())
+    for h, b in blocks.items():
+        assert (d.cache._host._rows.row(b.host_slot) == before[h]).all()
+    check_tiers(d)
+
+    kv[:] = 0  # every GPU row is free now: only the host has the KV
+    assert d.run("b", p) == first == cold.run("c", p)
+    assert d.admissions["b"].hit_tokens == 384
+    assert d.cache.host_hit_tokens == 384
+    assert (d.cache.host_stores, d.cache.host_loads) == (3, 3)
+    for h, b in d.cache._blocks.items():
+        assert b.on_gpu and (kv[b.block_id] == before[h]).all()
+    check_tiers(d)
+    d.close()
+    cold.close()
+
+
+def test_host_hit_after_gpu_eviction(monkeypatch):
+    monkeypatch.setenv("DEEPINFER_FAKE_NUM_GPU_BLOCKS", "16")
+    d = Driver(make_runner(host_bytes=host_bytes(32)))
+    cold = Driver(make_runner("none"))
+    prompts = [prompt(600, salt=i) for i in range(5)]
+    tokens = [d.run(f"r{i}", p) for i, p in enumerate(prompts)]
+    # The GPU (15 blocks, 2 free for the floor, 5 for a running prompt) keeps
+    # the newest prompts: LRU demoted all of the first one and the leaf of the
+    # second, and dropped nothing.
+    on_gpu = [[d.cache._blocks[h].on_gpu for h in chain(p)] for p in prompts]
+    assert on_gpu[:2] == [[False] * 3, [True, True, False]]
+    assert not any(e.kind == "removed" for e in d.events)
+    check_tiers(d)
+    # The second prompt: two shared GPU blocks plus one from host.
+    assert d.run("again1", prompts[1]) == tokens[1] == cold.run("c1", prompts[1])
+    assert d.admissions["again1"].hit_tokens == 384
+    assert d.cache.host_hit_tokens == 128
+    # The first: all three from host.
+    assert d.run("again0", prompts[0]) == tokens[0] == cold.run("c0", prompts[0])
+    assert d.admissions["again0"].hit_tokens == 384
+    assert d.cache.host_hit_tokens == 128 + 384
+    check_tiers(d)
+    d.close()
+    cold.close()
+
+
+def test_host_tier_evicts_lru_leaves_and_reports_them_removed():
+    d = Driver(make_runner(host_bytes=host_bytes(4)))
+    cold = Driver(make_runner("none"))
+    total = d.runner.engine.cache_config.num_gpu_blocks
+    a, b = prompt(600, salt=1), prompt(600, salt=2)
+    d.run("a", a)
+    d.cache.ensure_free(total - 1)  # a's 3 blocks to host
+    expected = d.run("b", b)
+    d.events.clear()
+    d.cache.ensure_free(total - 1)  # b's 3 blocks need a's two leaves' rows
+    d.cache.take_events()
+    ha, hb = chain(a), chain(b)
+    assert [e.kind for e in d.events] == ["removed"]
+    assert d.events[0].block_hashes == [as_u64(ha[2]), as_u64(ha[1])]
+    assert set(d.cache._blocks) == {ha[0], *hb}
+    assert d.cache.host_evictions == 2
+    check_tiers(d)
+    # a's root alone has no snapshot to resume from; b is a full host hit.
+    assert d.run("b2", b) == expected == cold.run("c", b)
+    assert d.admissions["b2"].hit_tokens == 384
+    d.run("a2", a)
+    assert d.admissions["a2"].hit_tokens == 0
+    d.close()
+    cold.close()
+
+
+def test_host_tier_snapshots_on_host_and_clamped_rows(monkeypatch):
+    from dynamo.deepinfer.kv_cache import host
+
+    # 2 rows per pinned chunk; the host runs short after the snapshot chunk
+    # and two row chunks.
+    monkeypatch.setattr(host, "CHUNK_BYTES", 2 * ROW)
+    calls = iter(range(100))
+    monkeypatch.setattr(
+        host,
+        "mem_available",
+        lambda: (1 << 40 if next(calls) < 3 else 1 << 30, 1 << 40),
+    )
+    d = Driver(make_runner(host_bytes=16384))
+    cache = d.cache
+    # Snapshots: a 16th of the budget (more than the 16 configured), on host;
+    # the rest is 30 rows, clamped to 4.
+    assert cache._pool._host and cache._pool.num_slots == 16384 // 16 // SNAP == 32
+    assert cache._host.capacity == 4
+    cold = Driver(make_runner("none"))
+    p = prompt(600)
+    first = d.run("a", p)
+    d.cache.ensure_free(d.runner.engine.cache_config.num_gpu_blocks - 1)
+    slots = sorted(b.host_slot for b in cache._blocks.values())
+    assert len(slots) == 3 and slots[-1] >= 2  # rows in both chunks
+    assert d.run("b", p) == first == cold.run("c", p)
+    assert d.admissions["b"].hit_tokens == 384
+    check_tiers(d)
+    d.close()
+    cold.close()
