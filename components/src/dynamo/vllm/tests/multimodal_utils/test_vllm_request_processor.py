@@ -306,6 +306,21 @@ def _rgba_ink_png() -> bytes:
     return _encode_image(_ink_on_transparent("RGBA"))
 
 
+def _rgba_ink_decoded() -> tuple[bytes, np.ndarray]:
+    content = _rgba_ink_png()
+    # The frontend decoder sends an RGBA PNG as an (H, W, 4) uint8 array.
+    return content, np.asarray(Image.open(BytesIO(content)))
+
+
+def _grey16_trns_key_decoded() -> tuple[bytes, np.ndarray]:
+    content = _encode_image(
+        Image.fromarray(np.array([[100, 0]], np.uint16)), transparency=0
+    )
+    # It sends a 16-bit grey PNG with a tRNS key as grey plus alpha (see the
+    # lib/llm test test_sixteen_bit_grey_png_keeps_trns_key_as_alpha).
+    return content, np.array([[[100, 255], [0, 0]]], np.uint8)
+
+
 def _image_request(content: bytes) -> dict:
     # The loader reads the format from the bytes, so one media type serves every kind.
     url = "data:image/png;base64," + base64.b64encode(content).decode()
@@ -365,11 +380,16 @@ async def test_worker_image_matches_vllm_loader(build_image):
 
 
 @pytest.mark.asyncio
-async def test_worker_frontend_decoded_image_matches_vllm_loader():
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_rgba_ink_decoded, id="rgba"),
+        pytest.param(_grey16_trns_key_decoded, id="grey16_trns_key"),
+    ],
+)
+async def test_worker_frontend_decoded_image_matches_vllm_loader(build):
     """Frontend decoding on or off, a transparent image gives the same pixels."""
-    content = _rgba_ink_png()
-    # The frontend decoder sends an RGBA PNG as an (H, W, 4) uint8 array.
-    decoded = np.asarray(Image.open(BytesIO(content)))
+    content, decoded = build()
     processor = _processor(real_image_loader=True)
     # Stand in for the NIXL connector that --frontend-decoding creates at start-up.
     processor.image_loader._enable_frontend_decoding = True
