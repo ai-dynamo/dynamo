@@ -109,7 +109,7 @@ pub fn selected_parser_version() -> Result<ParserVersion> {
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
 /// Default system port for health and metrics endpoints (-1 = disabled)
-const DEFAULT_SYSTEM_PORT: i16 = -1;
+const DEFAULT_SYSTEM_PORT: i32 = -1;
 
 /// Default health endpoint paths
 const DEFAULT_SYSTEM_HEALTH_PATH: &str = "/health";
@@ -195,11 +195,13 @@ pub struct RuntimeConfig {
     /// System status server port for health and metrics endpoints
     /// Set to -1 to disable the system status server (default)
     /// Set to 0 to bind to a random available port
-    /// Set to a positive port number (e.g. 8081) to bind to a specific port
+    /// Set to a positive port number up to 65535 (e.g. 8081) to bind to a specific port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
+    // i32 rather than u16 so -1 (disabled) still parses.
+    #[validate(range(max = 65535))]
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub system_port: i16,
+    pub system_port: i32,
 
     /// Health and metrics System status server enabled (DEPRECATED)
     /// This field is deprecated. Use system_port instead (set to positive value to enable)
@@ -670,6 +672,44 @@ mod tests {
             assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
             assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
         });
+    }
+
+    /// DYN_SYSTEM_PORT takes the full TCP port range, plus -1 (disabled) and 0 (random).
+    #[test]
+    fn test_from_settings_parses_dyn_system_port() {
+        // Invalid values would make concurrent runtime construction fail, so run in a child.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_from_settings_parses_dyn_system_port"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        const PORT: &str = "DYN_SYSTEM_PORT";
+
+        for (value, expected) in [
+            ("8081", Some(8081)),
+            ("40000", Some(40000)),
+            ("65535", Some(65535)),
+            ("0", Some(0)),
+            ("-1", Some(-1)),
+            ("65536", None),
+            ("not-a-port", None),
+        ] {
+            temp_env::with_var(PORT, Some(value), || {
+                let result = RuntimeConfig::from_settings();
+                match expected {
+                    Some(port) => {
+                        let config = result.unwrap_or_else(|e| panic!("{PORT}={value}: {e}"));
+                        assert_eq!(config.system_port, port, "{PORT}={value}");
+                    }
+                    None => assert!(result.is_err(), "{PORT}={value} should be rejected"),
+                }
+            });
+        }
     }
 
     #[test]
