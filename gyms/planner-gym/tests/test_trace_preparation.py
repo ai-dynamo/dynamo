@@ -346,3 +346,216 @@ def test_empty_thinning_leaves_no_partial_trace(tmp_path):
     assert not output.exists()
     assert not output.with_name(output.name + ".manifest.json").exists()
     assert not list(tmp_path.glob(".trace-preparation-*"))
+
+
+# --- Mooncake upstream field aliases (Issue #19234) -----------------------
+
+
+def test_prepare_trace_identity_canonicalizes_aliases_and_records_provenance(tmp_path):
+    source = tmp_path / "source_aliased.jsonl"
+    aliased_records = [
+        {
+            "created_time": 0,
+            "input_tokens": 128,
+            "output_tokens": 16,
+            "hash_ids": [7, 8],
+            "request_id": "req-0",
+            "custom_metadata": "kept-intact",
+        },
+        {
+            "created_time": 100,
+            "input_tokens": 64,
+            "output_tokens": 32,
+            "hash_ids": [9],
+            "request_id": "req-1",
+            "custom_metadata": "also-kept",
+        },
+    ]
+    source.write_text("\n".join(json.dumps(r) for r in aliased_records) + "\n")
+    source_bytes_before = source.read_bytes()
+
+    output = tmp_path / "prepared_canonical.jsonl"
+    result = prepare_trace(
+        source, output, config=TracePreparationConfig(), block_size=64
+    )
+
+    assert source.read_bytes() == source_bytes_before
+
+    rows = _read(result.path)
+    assert len(rows) == 2
+    for original, row in zip(aliased_records, rows):
+        assert "created_time" not in row
+        assert "input_tokens" not in row
+        assert "output_tokens" not in row
+        assert row["timestamp"] == original["created_time"]
+        assert row["input_length"] == original["input_tokens"]
+        assert row["output_length"] == original["output_tokens"]
+        assert row["hash_ids"] == original["hash_ids"]
+        assert row["request_id"] == original["request_id"]
+        assert row["custom_metadata"] == original["custom_metadata"]
+
+    source_sha = hashlib.sha256(source_bytes_before).hexdigest()
+    output_sha = hashlib.sha256(result.path.read_bytes()).hexdigest()
+    assert result.manifest["source"]["sha256"] == source_sha
+    assert result.manifest["output"]["sha256"] == output_sha
+    # Hashes legitimately differ because fields were canonicalized
+    assert source_sha != output_sha
+    assert result.manifest["source"]["request_count"] == 2
+    assert result.manifest["output"]["request_count"] == 2
+
+    output_repeat = tmp_path / "prepared_repeat.jsonl"
+    result_repeat = prepare_trace(
+        source, output_repeat, config=TracePreparationConfig(), block_size=64
+    )
+    assert result_repeat.path.read_bytes() == result.path.read_bytes()
+    assert result_repeat.manifest["output"]["sha256"] == output_sha
+
+
+def test_prepare_trace_rejects_duplicate_semantic_fields(tmp_path):
+    source = tmp_path / "duplicate.jsonl"
+    record = {
+        "timestamp": 0,
+        "created_time": 0,
+        "input_length": 64,
+        "output_length": 16,
+        "hash_ids": [1],
+    }
+    source.write_text(json.dumps(record) + "\n")
+    output = tmp_path / "output.jsonl"
+    with pytest.raises(
+        ValueError, match="line 1: timestamp and its alias created_time are both set"
+    ):
+        prepare_trace(source, output, config=TracePreparationConfig(), block_size=64)
+    assert not output.exists()
+
+
+def test_prepare_trace_transformed_aliased_matches_canonical(tmp_path):
+    canonical_source = tmp_path / "canonical.jsonl"
+    aliased_source = tmp_path / "aliased.jsonl"
+
+    canonical_records = [
+        {
+            "timestamp": t,
+            "input_length": 128,
+            "output_length": 16 + i,
+            "hash_ids": [7, 8],
+            "request_id": f"req-{i}",
+            "session_id": "session-1",
+        }
+        for i, t in enumerate(range(0, 1000, 100))
+    ]
+    aliased_records = [
+        {
+            "created_time": r["timestamp"],
+            "input_tokens": r["input_length"],
+            "output_tokens": r["output_length"],
+            "hash_ids": r["hash_ids"],
+            "request_id": r["request_id"],
+            "session_id": r["session_id"],
+        }
+        for r in canonical_records
+    ]
+
+    canonical_source.write_text(
+        "\n".join(json.dumps(r) for r in canonical_records) + "\n"
+    )
+    aliased_source.write_text("\n".join(json.dumps(r) for r in aliased_records) + "\n")
+
+    config = TracePreparationConfig(
+        start_ms=100,
+        end_ms=600,
+        rebase=True,
+        request_scale=2.5,
+        seed=42,
+        jitter_ms=20.0,
+        session_id_field="session_id",
+    )
+
+    res_canonical = prepare_trace(
+        canonical_source,
+        tmp_path / "out_canonical.jsonl",
+        config=config,
+        block_size=64,
+    )
+    res_aliased = prepare_trace(
+        aliased_source,
+        tmp_path / "out_aliased.jsonl",
+        config=config,
+        block_size=64,
+    )
+
+    assert _read(res_aliased.path) == _read(res_canonical.path)
+    assert res_aliased.path.read_bytes() == res_canonical.path.read_bytes()
+    assert res_aliased.manifest["output"] == res_canonical.manifest["output"]
+    assert res_aliased.manifest["window"] == res_canonical.manifest["window"]
+
+
+@pytest.mark.parametrize(
+    "alias_field", ["created_time", "input_tokens", "output_tokens"]
+)
+def test_session_id_field_rejects_alias_names(alias_field):
+    with pytest.raises(
+        ValueError, match="session_id_field cannot name a replay metric"
+    ):
+        TracePreparationConfig(session_id_field=alias_field)
+
+
+def test_prepare_trace_identity_canonical_preserves_blank_lines_and_no_trailing_newline(
+    tmp_path,
+):
+    source = tmp_path / "canonical_messy.jsonl"
+    # Leading newline, blank lines, trailing space, no trailing newline
+    content = (
+        b"\n"
+        b'{"timestamp": 0, "input_length": 64, "output_length": 16, "hash_ids": [1]}  \n'
+        b"\n\n"
+        b'{"timestamp": 100, "input_length": 64, "output_length": 16, "hash_ids": [2]}'
+    )
+    source.write_bytes(content)
+    output = tmp_path / "prepared.jsonl"
+    result = prepare_trace(
+        source, output, config=TracePreparationConfig(), block_size=64
+    )
+
+    assert output.read_bytes() == content
+    assert result.manifest["source"]["sha256"] == hashlib.sha256(content).hexdigest()
+    assert result.manifest["output"]["sha256"] == result.manifest["source"]["sha256"]
+    assert result.manifest["output"]["request_count"] == 2
+
+
+def test_prepare_trace_identity_aliased_with_blank_lines_and_mixed_spellings(tmp_path):
+    source = tmp_path / "aliased_mixed.jsonl"
+    lines = [
+        "",
+        '{"timestamp": 0, "input_tokens": 64, "output_length": 16, "hash_ids": [1]}',
+        "",
+        '{"created_time": 100, "input_length": 64, "output_tokens": 16, "hash_ids": [2], "meta": 42}',
+        "",
+    ]
+    source.write_text("\n".join(lines))
+    output = tmp_path / "prepared.jsonl"
+    result = prepare_trace(
+        source, output, config=TracePreparationConfig(), block_size=64
+    )
+
+    rows = _read(result.path)
+    assert len(rows) == 2
+    assert [r["timestamp"] for r in rows] == [0, 100]
+    assert [r["input_length"] for r in rows] == [64, 64]
+    assert [r["output_length"] for r in rows] == [16, 16]
+    assert rows[1]["meta"] == 42
+    for r in rows:
+        assert "created_time" not in r
+        assert "input_tokens" not in r
+        assert "output_tokens" not in r
+    assert result.manifest["source"]["request_count"] == 2
+    assert result.manifest["output"]["request_count"] == 2
+    assert (
+        result.manifest["output"]["sha256"]
+        == hashlib.sha256(output.read_bytes()).hexdigest()
+    )
+    assert (
+        result.manifest["source"]["sha256"]
+        == hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    assert result.manifest["output"]["sha256"] != result.manifest["source"]["sha256"]
