@@ -58,6 +58,22 @@ SPDX-License-Identifier: Apache-2.0
   exceptional, intentional API semantics, and document why the distinction is
   required.
 
+## Generated Names and Labels
+
+- Treat resource names and label values that the operator generates from
+  Dynamo resource and component names as API, such as the component Service
+  name `<dgd>-<component>` and the `nvidia.com/selector` and
+  `nvidia.com/dynamo-graph-deployment-name` label values. Clients and other
+  components derive them independently. Do not rename, prefix, truncate, or
+  hash them to satisfy Kubernetes name or label limits.
+- Reject a resource at admission when its names would generate an invalid
+  resource name or label value. Validate the values that the renderers
+  generate; do not duplicate the naming logic in the webhook. Name the
+  generated value and the violated limit in the error. On `UPDATE`, reject
+  only invalid values that the update introduces, as
+  [`STRUCTURAL_VALIDATION.md`](internal/webhook/validation/STRUCTURAL_VALIDATION.md)
+  describes for pre-existing violations.
+
 ## Go Code Style
 
 - Put a one-line story comment above every multi-line block of logically
