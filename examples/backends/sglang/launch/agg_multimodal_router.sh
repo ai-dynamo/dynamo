@@ -87,6 +87,22 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
+# set -e ignores background jobs; without this check a worker that dies during
+# startup leaves the readiness loops polling a dead endpoint until timeout.
+LAUNCHED_PIDS=()
+LAUNCHED_NAMES=()
+exit_if_any_exited() {
+    local i pid rc
+    for i in "${!LAUNCHED_PIDS[@]}"; do
+        pid="${LAUNCHED_PIDS[i]}"
+        kill -0 "${pid}" 2>/dev/null && continue
+        rc=0
+        wait "${pid}" || rc=$?
+        echo "${LAUNCHED_NAMES[i]} (pid ${pid}) exited with code ${rc} before becoming ready" >&2
+        exit $(( rc == 0 ? 1 : rc ))
+    done
+}
+
 wait_ready() {
     local url="$1" name="$2" timeout_s="${3:-900}"
     local deadline=$((SECONDS + timeout_s))
@@ -96,6 +112,7 @@ wait_ready() {
             echo "${name} is ready"
             return 0
         fi
+        exit_if_any_exited
         sleep 1
     done
     return 1
@@ -152,6 +169,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --disable-piecewise-cuda-graph \
         ${NCCL_PORT_ARGS[@]+"${NCCL_PORT_ARGS[@]}"} \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+    LAUNCHED_PIDS+=("$!")
+    LAUNCHED_NAMES+=("SGLang worker $i")
 done
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -165,6 +184,8 @@ python -m dynamo.frontend \
     --http-port "${HTTP_PORT}" \
     --router-mode kv \
     --kv-cache-block-size "${BLOCK_SIZE}" &
+LAUNCHED_PIDS+=("$!")
+LAUNCHED_NAMES+=("Frontend")
 
 echo "Waiting for frontend to accept requests ..."
 FRONTEND_READY=false
@@ -176,6 +197,7 @@ while (( SECONDS < DEADLINE )); do
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
         2>/dev/null || echo "000")
     [[ "$HTTP_CODE" == "200" ]] && { FRONTEND_READY=true; echo "Frontend ready"; break; }
+    exit_if_any_exited
     sleep 2
 done
 if [[ "$FRONTEND_READY" != true ]]; then
