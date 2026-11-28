@@ -883,6 +883,55 @@ mod tests {
         assert!(!cache.contains_key("worker-a"));
     }
 
+    /// A reader skips the whole CR that carries a transport it does not know.
+    /// In pod mode that CR is the pod. In container mode each container has
+    /// its own CR, so a sibling still reads.
+    #[test]
+    fn unknown_transport_skips_only_the_cr_that_carries_it() {
+        let cr = |name: &str, transport: serde_json::Value| {
+            let mut data =
+                serde_json::to_value(&*make_cached_with_endpoint("unused").metadata).unwrap();
+            for endpoint in data["endpoints"].as_object_mut().unwrap().values_mut() {
+                endpoint["transport"] = transport.clone();
+            }
+            let mut cr = DynamoWorkerMetadata::new(
+                name,
+                super::super::crd::DynamoWorkerMetadataSpec::new(data),
+            );
+            cr.metadata.uid = Some(format!("{name}-uid"));
+            cr.metadata.owner_references = Some(vec![OwnerReference {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+                name: TEST_POD_NAME.to_string(),
+                uid: TEST_POD_UID.to_string(),
+                block_owner_deletion: None,
+                controller: Some(name == TEST_POD_NAME),
+            }]);
+            cr
+        };
+        let mut cache = HashMap::new();
+
+        let unreadable = cr(TEST_POD_NAME, serde_json::json!({ "future_plane": "x" }));
+        let (_, metadata) = read_cr_object(&unreadable, &mut cache).unwrap();
+        assert!(metadata.is_none());
+        assert!(cache.is_empty());
+
+        let sibling = cr(
+            "worker-a-sidecar",
+            serde_json::json!({ "tcp": "127.0.0.1:1234" }),
+        );
+        let (name, metadata) = read_cr_object(&sibling, &mut cache).unwrap();
+        assert_eq!(name, "worker-a-sidecar");
+        let endpoints = metadata.unwrap().metadata.get_all_endpoints();
+        let [DiscoveryInstance::Endpoint(instance)] = &endpoints[..] else {
+            panic!("expected one endpoint, got {endpoints:?}");
+        };
+        assert_eq!(
+            instance.transport,
+            TransportType::Tcp("127.0.0.1:1234".to_string())
+        );
+    }
+
     #[test]
     fn relist_events_only_wake_on_init_done() {
         assert!(endpoint_slice_event(watcher::Event::Init).is_none());
