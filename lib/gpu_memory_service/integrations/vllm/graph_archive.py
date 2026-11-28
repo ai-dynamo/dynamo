@@ -40,14 +40,18 @@ import dataclasses
 import enum
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
 import shutil
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
+
+from gpu_memory_service.common.locks import GrantedLockType
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +79,79 @@ _LOCK_FILE_MODE = 0o600
 # Ends the name of the load marker of an engine that may write the weights.
 _WRITER_SUFFIX = ".writer"
 
+# model_loader_extra_config key telling the GMS worker that its graphs are
+# saved to or loaded from an archive ("save" or "load").
+LOADER_OPTION = "gms_graph_archive"
+
+# Loader options that differ between the engines of one deployment and do not
+# change which graphs are captured.
+_PER_ENGINE_LOADER_OPTIONS = frozenset(
+    {"gms_read_only", "gms_ro_connect_timeout_ms", LOADER_OPTION}
+)
+
+# Engine arguments that decide which graphs exist and what is allocated around
+# them. An allow-list, because the engines of one deployment must get the same
+# key and many other arguments differ between them (ports, per-process ids).
+# An argument missing here only matters in a directory that outlives a
+# configuration change: the backend then refuses the old archive at load.
+_ENGINE_ARGS = (
+    "model",
+    "revision",
+    "code_revision",
+    "hf_config_path",
+    "hf_overrides",
+    "trust_remote_code",
+    "model_impl",
+    "load_format",
+    "dtype",
+    "quantization",
+    "kv_cache_dtype",
+    "kv_cache_dtype_skip_layers",
+    "max_model_len",
+    "block_size",
+    "num_gpu_blocks_override",
+    "gpu_memory_utilization",
+    "kv_cache_memory_bytes",
+    "max_num_seqs",
+    "max_num_batched_tokens",
+    "tensor_parallel_size",
+    "pipeline_parallel_size",
+    "data_parallel_size",
+    "enable_expert_parallel",
+    "enable_eplb",
+    "enable_dbo",
+    "all2all_backend",
+    "disable_custom_all_reduce",
+    "enforce_eager",
+    "cudagraph_capture_sizes",
+    "max_cudagraph_capture_size",
+    "optimization_level",
+    "performance_mode",
+    "compilation_config",
+    "kernel_config",
+    "attention_config",
+    "attention_backend",
+    "moe_backend",
+    "linear_backend",
+    "sparse_indexer_topk_backend",
+    "speculative_config",
+    "spec_method",
+    "spec_model",
+    "spec_tokens",
+    "enable_lora",
+    "max_loras",
+    "max_lora_rank",
+)
+
 
 class ArchiveMode(str, enum.Enum):
     NATIVE = "native"
     SAVE = "save"
     LOAD = "load"
+
+
+class GraphArchiveError(RuntimeError):
+    """The archive cannot be used by this engine."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,6 +233,50 @@ def archive_key(identity: Mapping[str, object], ranks: Sequence[int]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()[:32]
+
+
+def engine_identity(
+    engine_args: Any,
+    backend_settings: Mapping[str, object],
+    packages: Iterable[str],
+) -> dict[str, object]:
+    """What an engine's archive is keyed by: engine arguments, loader options,
+    backend settings and package versions.
+
+    Call it before the engine config is created: vLLM resolves some arguments
+    in place when it builds the config.
+    """
+    identity: dict[str, object] = {
+        f"engine.{name}": _plain(getattr(engine_args, name)) for name in _ENGINE_ARGS
+    }
+    loader_options = engine_args.model_loader_extra_config or {}
+    identity["engine.model_loader_extra_config"] = _plain(
+        {k: v for k, v in loader_options.items() if k not in _PER_ENGINE_LOADER_OPTIONS}
+    )
+    identity["backend"] = _plain(backend_settings)
+    for package in sorted(packages):
+        try:
+            version = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            version = None
+        identity[f"version.{package}"] = version
+    return identity
+
+
+def check_read_only_attach(loader_options: Mapping, granted: GrantedLockType) -> None:
+    """Refuse an archive engine that was granted the weights write lock.
+
+    A writer allocates differently from a reader, so graphs saved by one do not
+    fit the other. This happens only when the weights are not published yet,
+    for example after the GMS server restarted. The engine's next start
+    captures natively (see ``GraphArchive.abort``).
+    """
+    mode = loader_options.get(LOADER_OPTION)
+    if mode is not None and granted != GrantedLockType.RO:
+        raise GraphArchiveError(
+            f"[GMS] graph archive {mode} needs a read-only weights attach, but this "
+            f"engine was granted {granted.value}: no published weights to attach"
+        )
 
 
 @contextlib.contextmanager

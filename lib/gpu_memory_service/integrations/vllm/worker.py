@@ -37,10 +37,12 @@ from gpu_memory_service.common.utils import (
 from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
+    get_gms_fixed_va_window,
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
     torch_device,
 )
+from gpu_memory_service.integrations.vllm.graph_archive import check_read_only_attach
 from gpu_memory_service.integrations.vllm.model_loader import (
     abort_pending_gms_write,
     get_imported_weights_bytes,
@@ -174,13 +176,25 @@ class GMSWorker(_BaseWorker):
         )
         mode = get_gms_lock_mode(extra)
         self.gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
-        get_or_create_gms_client_memory_manager(
+        weights_manager = get_or_create_gms_client_memory_manager(
             get_socket_path(device, "weights"),
             device,
             mode=mode,
             tag="weights",
             timeout_ms=self.gms_ro_connect_timeout_ms,
+            fixed_va_window=get_gms_fixed_va_window(extra, "weights"),
         )
+        check_read_only_attach(extra, weights_manager.granted_lock_type)
+        kv_window = get_gms_fixed_va_window(extra, "kv_cache")
+        if kv_window is not None and is_scratch_kv_enabled():
+            # Reserve the KV window now: once kernels have run, the driver may
+            # not honor the address.
+            get_or_create_scratch_manager(
+                get_socket_path(device, "kv_cache"),
+                device,
+                tag="kv_cache",
+                fixed_va_window=kv_window,
+            )
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
@@ -298,10 +312,15 @@ class GMSWorker(_BaseWorker):
 
         device = self.local_rank
         socket = get_socket_path(device, "kv_cache")
+        kv_window = get_gms_fixed_va_window(
+            self.vllm_config.load_config.model_loader_extra_config or {}, "kv_cache"
+        )
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
-            scratch_mgr = get_or_create_scratch_manager(socket, device, tag="kv_cache")
+            scratch_mgr = get_or_create_scratch_manager(
+                socket, device, tag="kv_cache", fixed_va_window=kv_window
+            )
             super().initialize_from_config(kv_cache_config)
             # Visible summary of scratch engagement (GMS worker logs are routed
             # through vLLM's handler by configure_gms_worker_logging()).
@@ -331,6 +350,7 @@ class GMSWorker(_BaseWorker):
                 device,
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
+                fixed_va_window=kv_window,
             )
             super().initialize_from_config(kv_cache_config)
         else:

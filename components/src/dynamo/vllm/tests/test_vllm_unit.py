@@ -2924,3 +2924,94 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+
+
+# --gms-graph-archive tests
+
+GRAPH_ARCHIVE_ARGS = (
+    "--model",
+    "Qwen/Qwen3-0.6B",
+    "--load-format",
+    "gms",
+    "--gms-shadow-mode",
+    "--num-gpu-blocks-override",
+    "64",
+    "--compilation-config",
+    '{"mode": 0}',
+)
+
+
+@pytest.fixture
+def graph_archive_cli(mock_vllm_cli, monkeypatch):
+    """A command line for an engine that can use a graph archive, with the
+    environment forms of the flags it depends on unset."""
+    for name in (
+        "DYN_VLLM_GMS_GRAPH_ARCHIVE",
+        "DYN_VLLM_GMS_GRAPH_ARCHIVE_CONFIG",
+        "DYN_VLLM_GMS_SHADOW_MODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def cli(*extra, drop=()):
+        args = list(GRAPH_ARCHIVE_ARGS)
+        for flag in drop:
+            index = args.index(flag)
+            del args[index : index + (1 if flag == "--gms-shadow-mode" else 2)]
+        mock_vllm_cli(*args, *extra)
+
+    return cli
+
+
+def test_gms_graph_archive_from_the_environment(graph_archive_cli, monkeypatch):
+    """A deployment sets the archive directory through the environment."""
+    monkeypatch.setenv("DYN_VLLM_GMS_GRAPH_ARCHIVE", "/gms-graph-archive")
+    graph_archive_cli()
+    config = parse_args()
+    assert config.gms_graph_archive == "/gms-graph-archive"
+    assert config.gms_graph_archive_config is None
+
+
+@pytest.mark.parametrize(
+    "drop, extra, message",
+    [
+        (("--load-format", "--gms-shadow-mode"), (), "requires --load-format gms"),
+        (("--gms-shadow-mode",), (), "requires --gms-shadow-mode"),
+        (("--num-gpu-blocks-override",), (), "requires --num-gpu-blocks-override"),
+        (("--compilation-config",), (), "requires torch.compile off"),
+        ((), ("--enforce-eager",), "no CUDA graphs to archive"),
+        (
+            ("--compilation-config",),
+            ("--compilation-config", '{"mode": 0, "cudagraph_mode": "NONE"}'),
+            "no CUDA graphs to archive",
+        ),
+        ((), ("--tensor-parallel-size", "2"), "requires --disable-custom-all-reduce"),
+        ((), ("--data-parallel-size", "2"), "does not support data parallelism"),
+        (
+            (),
+            ("--pipeline-parallel-size", "2"),
+            "does not support pipeline parallelism",
+        ),
+        ((), ("--enable-dbo",), "does not support dual-batch overlap"),
+        (
+            (),
+            (
+                "--speculative-config",
+                '{"method": "ngram", "num_speculative_tokens": 2}',
+            ),
+            "does not support speculative decoding",
+        ),
+        ((), ("--headless",), "does not support --headless"),
+    ],
+)
+def test_gms_graph_archive_refuses_unsupported_engines(
+    graph_archive_cli, drop, extra, message
+):
+    graph_archive_cli(*extra, "--gms-graph-archive", "/archive", drop=drop)
+    with pytest.raises(ValueError, match=message):
+        parse_args()
+
+
+def test_gms_graph_archive_config_requires_the_archive(graph_archive_cli):
+    graph_archive_cli("--gms-graph-archive-config", "/foundry.toml")
+    with pytest.raises(ValueError, match="requires --gms-graph-archive"):
+        parse_args()

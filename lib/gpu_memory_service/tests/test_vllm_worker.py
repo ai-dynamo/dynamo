@@ -15,6 +15,12 @@ if not HAS_TORCH:
     pytest.skip("torch is required", allow_module_level=True)
 pytest.importorskip("vllm")
 
+from gpu_memory_service.common.locks import GrantedLockType  # noqa: E402
+from gpu_memory_service.integrations.common.utils import (  # noqa: E402
+    FIXED_VA_WINDOWS_OPTION,
+    get_gms_fixed_va_window,
+)
+from gpu_memory_service.integrations.vllm import graph_archive  # noqa: E402
 from gpu_memory_service.integrations.vllm import patches  # noqa: E402
 from gpu_memory_service.integrations.vllm import worker as gms_worker  # noqa: E402
 from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
@@ -23,6 +29,7 @@ from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
 from gpu_memory_service.v1.integrations.vllm import (  # noqa: E402
     worker as gms_v1_worker,
 )
+from vllm.engine.arg_utils import AsyncEngineArgs  # noqa: E402
 from vllm.v1.worker import utils as vllm_worker_utils  # noqa: E402
 
 pytestmark = [
@@ -121,6 +128,97 @@ def test_init_device_forwards_ro_connect_timeout(start_worker):
     )
 
     assert manager_factory.call_args.kwargs["timeout_ms"] == 4200
+
+
+def test_init_device_refuses_graph_archive_engine_granted_the_write_lock(start_worker):
+    options = {graph_archive.LOADER_OPTION: "load"}
+    weights_manager = gms_worker.get_or_create_gms_client_memory_manager.return_value
+    weights_manager.granted_lock_type = GrantedLockType.RO
+    start_worker(options)
+
+    weights_manager.granted_lock_type = GrantedLockType.RW
+    with pytest.raises(graph_archive.GraphArchiveError, match="read-only weights"):
+        start_worker(options)
+    # An engine without the option may be the writer.
+    start_worker()
+
+
+@pytest.mark.parametrize("scratch_kv", [True, False])
+def test_init_device_reserves_the_fixed_va_windows(
+    monkeypatch, start_worker, scratch_kv
+):
+    windows = {"weights": ["0x420000000000", 1 << 30], "kv_cache": [1 << 46, 1 << 30]}
+    scratch_factory = Mock()
+    monkeypatch.setattr(gms_worker, "get_or_create_scratch_manager", scratch_factory)
+    monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: scratch_kv)
+
+    manager_factory = start_worker({FIXED_VA_WINDOWS_OPTION: windows})
+
+    assert manager_factory.call_args.kwargs["fixed_va_window"] == (
+        0x420000000000,
+        1 << 30,
+    )
+    if scratch_kv:
+        assert scratch_factory.call_args.kwargs["fixed_va_window"] == (
+            1 << 46,
+            1 << 30,
+        )
+    else:
+        # Without scratch KV the window is reserved when the KV cache is created.
+        scratch_factory.assert_not_called()
+    assert get_gms_fixed_va_window({}, "weights") is None
+    with pytest.raises(ValueError, match="must be \\[base, size\\]"):
+        get_gms_fixed_va_window({FIXED_VA_WINDOWS_OPTION: {"weights": [1]}}, "weights")
+
+
+@pytest.mark.parametrize("scratch_kv", [True, False])
+def test_kv_cache_manager_is_created_in_the_fixed_va_window(
+    monkeypatch, tmp_path, scratch_kv
+):
+    scratch_factory = Mock(return_value=Mock(scratch_summary=lambda: (1, 0, 0)))
+    manager_factory = Mock()
+    monkeypatch.setattr(gms_worker, "get_or_create_scratch_manager", scratch_factory)
+    monkeypatch.setattr(
+        gms_worker, "get_or_create_gms_client_memory_manager", manager_factory
+    )
+    monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: scratch_kv)
+    monkeypatch.setattr(
+        gms_worker, "get_socket_path", lambda *_: str(tmp_path / "kv.sock")
+    )
+    monkeypatch.setattr(
+        gms_worker._BaseWorker, "initialize_from_config", lambda *_: None
+    )
+    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
+    worker.local_rank = 0
+    worker.vllm_config = SimpleNamespace(
+        load_config=SimpleNamespace(
+            model_loader_extra_config={
+                FIXED_VA_WINDOWS_OPTION: {"kv_cache": [1 << 46, 1 << 30]}
+            }
+        ),
+        model_config=SimpleNamespace(enable_sleep_mode=True),
+    )
+
+    worker.initialize_from_config(SimpleNamespace(kv_cache_tensors=[object()]))
+
+    # Scratch KV in shadow mode, else the sleep-mode KV manager.
+    factory = scratch_factory if scratch_kv else manager_factory
+    assert factory.call_args.kwargs["fixed_va_window"] == (1 << 46, 1 << 30)
+
+
+def test_graph_archive_identity_reads_the_pinned_engine_args(tmp_path):
+    def key(**kwargs):
+        # A local model path: vLLM resolves a model name on the hub.
+        engine_args = AsyncEngineArgs(
+            model=str(tmp_path), num_gpu_blocks_override=64, **kwargs
+        )
+        identity = graph_archive.engine_identity(engine_args, {}, ["vllm"])
+        return graph_archive.archive_key(identity, [0])
+
+    default = AsyncEngineArgs(model=str(tmp_path))
+    assert key() == key(master_port=default.master_port + 100)
+    assert key() != key(max_num_seqs=8)
+    assert key() != key(attention_backend="FLASHINFER")
 
 
 def test_scratch_kv_follows_the_setting_when_the_worker_starts(

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import functools
 import gc
 import json
@@ -762,6 +763,7 @@ def setup_vllm_engine(
     allow_nixl_telemetry_capture()
 
     engine_args = config.engine_args
+    graph_archive_start: contextlib.AbstractContextManager = contextlib.nullcontext()
 
     if engine_args.enable_lora:
         if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
@@ -778,6 +780,8 @@ def setup_vllm_engine(
                 configure_mx_ports,
             )
 
+            from dynamo.vllm.gms_graph_archive import start_graph_archive
+
             os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             logger.info(
                 "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
@@ -786,6 +790,10 @@ def setup_vllm_engine(
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
+            # After the lock mode: only engines that attach read-only save.
+            graph_archive_start = start_graph_archive(
+                config.gms_graph_archive, config.gms_graph_archive_config, engine_args
+            )
 
     # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
     configure_multimodal_embedding_cache(
@@ -857,13 +865,16 @@ def setup_vllm_engine(
             disable_log_stats=engine_args.disable_log_stats,
         )
     else:
-        engine_client = AsyncLLM.from_vllm_config(
-            vllm_config=vllm_config,
-            usage_context=usage_context,
-            stat_loggers=factory,
-            enable_log_requests=engine_args.enable_log_requests,
-            disable_log_stats=engine_args.disable_log_stats,
-        )
+        # With --gms-graph-archive, the engine's processes start with Foundry's
+        # environment and the archive policy learns whether the start succeeded.
+        with graph_archive_start:
+            engine_client = AsyncLLM.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                stat_loggers=factory,
+                enable_log_requests=engine_args.enable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats,
+            )
     load_time = time.time() - start_time
 
     # Record model load time. ``component_gauges`` is None on the

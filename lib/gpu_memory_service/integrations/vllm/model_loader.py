@@ -30,6 +30,7 @@ from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common.utils import (
     GMSCommittedMemoryStats,
+    get_gms_fixed_va_window,
     get_gms_lock_mode,
     prepare_gms_write,
     publish_gms_write,
@@ -246,6 +247,7 @@ def register_gms_loader(load_format: str = "gms") -> None:
                 device,
                 mode=mode,
                 tag="weights",
+                fixed_va_window=get_gms_fixed_va_window(extra, "weights"),
             )
 
             if gms_client.granted_lock_type == GrantedLockType.RO:
