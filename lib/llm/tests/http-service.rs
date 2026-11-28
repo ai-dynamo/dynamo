@@ -2457,6 +2457,76 @@ impl
     }
 }
 
+struct DispatchRejectionEngine(DynamoErrorType);
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for DispatchRejectionEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        Err(DynamoError::builder()
+            .error_type(DynamoErrorType::Unknown)
+            .cause(DynamoError::builder().error_type(self.0).build())
+            .build()
+            .into())
+    }
+}
+
+#[tokio::test]
+async fn test_canonical_dispatch_rejections_are_counted_across_http_routes() {
+    for kind in [
+        DynamoErrorType::RateLimited,
+        DynamoErrorType::CapacityExhausted,
+    ] {
+        let (port, metrics, cancel_token, task) =
+            start_anthropic_first_event_service(Arc::new(DispatchRejectionEngine(kind))).await;
+        let client = reqwest::Client::new();
+        let expected_status = if kind == DynamoErrorType::RateLimited {
+            429
+        } else {
+            dynamo_error::http::overload_status_code().as_u16()
+        };
+        for (route, endpoint) in [
+            ("chat/completions", Endpoint::ChatCompletions),
+            ("messages", Endpoint::AnthropicMessages),
+        ] {
+            for streaming in [false, true] {
+                let mut body = anthropic_stream_body();
+                body["stream"] = serde_json::json!(streaming);
+                let response = timeout(
+                    std::time::Duration::from_secs(5),
+                    client
+                        .post(format!("http://localhost:{port}/v1/{route}"))
+                        .json(&body)
+                        .send(),
+                )
+                .await
+                .expect("dispatch rejection did not arrive")
+                .unwrap();
+                assert_eq!(
+                    response.status().as_u16(),
+                    expected_status,
+                    "{kind:?} {route}"
+                );
+                assert_eq!(
+                    metrics.get_rejection_count(DELAYED_ERROR_MODEL, endpoint),
+                    if streaming { 2 } else { 1 },
+                    "{kind:?} {route}",
+                );
+            }
+        }
+        cancel_token.cancel();
+        task.await.unwrap();
+    }
+}
+
 /// What [`SilentEngine`] does with the kill a client disconnect delivers.
 #[derive(Clone, Copy)]
 enum OnKill {

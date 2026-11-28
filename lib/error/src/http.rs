@@ -247,8 +247,8 @@ impl SanitizedError {
 /// This only decides what goes on the wire. Retrying a worker-local overload
 /// against another replica is
 /// <https://github.com/ai-dynamo/dynamo/issues/12383>.
-fn keeps_retry_semantics(status: StatusCode) -> bool {
-    status == StatusCode::SERVICE_UNAVAILABLE || status == overload_status_code()
+fn keeps_retry_semantics(status: StatusCode, overload: StatusCode) -> bool {
+    status == StatusCode::SERVICE_UNAVAILABLE || status == overload
 }
 
 /// What to do with a status a backend worker asserted for itself.
@@ -275,13 +275,19 @@ impl BackendStatusAction {
     /// as a plain client error instead of sanitized and preserved as the
     /// overload response. Check it first, before that classification runs.
     pub fn triage(status: StatusCode) -> Self {
-        if status == overload_status_code() && !status.is_server_error() {
+        Self::triage_with(status, overload_status_code())
+    }
+
+    /// [`Self::triage`] with an explicit overload status, so tests do not
+    /// depend on `DYN_HTTP_OVERLOAD_STATUS_CODE` in the test process.
+    fn triage_with(status: StatusCode, overload: StatusCode) -> Self {
+        if status == overload && !status.is_server_error() {
             return BackendStatusAction::Sanitize(SanitizedError::Overloaded);
         }
         match SanitizedError::for_backend_status(status) {
             None => BackendStatusAction::ForwardClientError,
             Some(SanitizedError::PreserveServerError(asserted))
-                if !keeps_retry_semantics(asserted) =>
+                if !keeps_retry_semantics(asserted, overload) =>
             {
                 BackendStatusAction::CoerceToInternal(asserted)
             }
@@ -401,9 +407,10 @@ mod tests {
 
     #[test]
     fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
-        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+        let overload = StatusCode::from_u16(529).unwrap();
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload] {
             assert_eq!(
-                BackendStatusAction::triage(status),
+                BackendStatusAction::triage_with(status, overload),
                 BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
                 "{status} should keep its status line"
             );
@@ -412,10 +419,11 @@ mod tests {
 
     #[test]
     fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
+        let overload = StatusCode::from_u16(529).unwrap();
         for code in [500u16, 501, 502, 504, 507, 599] {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(
-                BackendStatusAction::triage(status),
+                BackendStatusAction::triage_with(status, overload),
                 BackendStatusAction::CoerceToInternal(status),
                 "{code} should be coerced to 500 with the asserted status reported"
             );
@@ -424,23 +432,51 @@ mod tests {
 
     #[test]
     fn triage_leaves_client_errors_and_cancellation_alone() {
+        let overload = StatusCode::from_u16(529).unwrap();
         assert_eq!(
-            BackendStatusAction::triage(StatusCode::BAD_REQUEST),
+            BackendStatusAction::triage_with(StatusCode::BAD_REQUEST, overload),
             BackendStatusAction::ForwardClientError
         );
         assert_eq!(
-            BackendStatusAction::triage(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            BackendStatusAction::triage_with(StatusCode::UNSUPPORTED_MEDIA_TYPE, overload),
             BackendStatusAction::ForwardClientError
         );
         assert_eq!(
-            BackendStatusAction::triage(StatusCode::from_u16(499).unwrap()),
+            BackendStatusAction::triage_with(StatusCode::from_u16(499).unwrap(), overload),
             BackendStatusAction::Sanitize(SanitizedError::Cancelled)
         );
         // A non-error status from a backend is nonsense, so it sanitizes too.
         assert_eq!(
-            BackendStatusAction::triage(StatusCode::from_u16(399).unwrap()),
+            BackendStatusAction::triage_with(StatusCode::from_u16(399).unwrap(), overload),
             BackendStatusAction::Sanitize(SanitizedError::Internal)
         );
+    }
+
+    #[test]
+    fn triage_follows_a_configured_overload_status() {
+        use BackendStatusAction::{CoerceToInternal, ForwardClientError, Sanitize};
+        use SanitizedError::{Overloaded, PreserveServerError};
+
+        let code = |code| StatusCode::from_u16(code).unwrap();
+        for (overload, status, expected) in [
+            // A non-5xx overload is sanitized as overload instead of forwarded
+            // as a client error, and 529 is no longer kept.
+            (429, 429, Sanitize(Overloaded)),
+            (429, 503, Sanitize(PreserveServerError(code(503)))),
+            (429, 529, CoerceToInternal(code(529))),
+            (429, 400, ForwardClientError),
+            // An overload that overlaps another branch.
+            (503, 503, Sanitize(PreserveServerError(code(503)))),
+            (503, 529, CoerceToInternal(code(529))),
+            (500, 500, Sanitize(PreserveServerError(code(500)))),
+            (499, 499, Sanitize(Overloaded)),
+        ] {
+            assert_eq!(
+                BackendStatusAction::triage_with(code(status), code(overload)),
+                expected,
+                "status {status} with overload {overload}"
+            );
+        }
     }
 
     #[test]

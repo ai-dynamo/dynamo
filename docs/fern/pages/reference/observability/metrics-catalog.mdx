@@ -145,7 +145,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_frontend_model_cancellation_total` | counter | [`request_type`](metric-labels.mdx#metric-specific-labels) | Request cancellations detected by the frontend: client disconnect or stream close. `endpoint` is the API route (`chat_completions`, `completions`, `embeddings`, …); `request_type` is `unary` or `stream`. | |
-| `dynamo_frontend_model_rejection_total` | counter | — | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Router queue rejections also return HTTP 529 but are not counted here; see `dynamo_frontend_router_admission_rejected_total`. | |
+| `dynamo_frontend_model_rejection_total` | counter | — | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Across the HTTP routes, it also counts a canonical rate-limit rejection (HTTP 429) or capacity rejection (the overload status), such as a request classifier's, returned during dispatch before the response starts. Router queue rejections also return HTTP 529 but are not counted here; see `dynamo_frontend_router_admission_rejected_total`. | |
 
 ### Per-Worker Load and Timing Gauges
 

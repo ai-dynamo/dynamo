@@ -3,7 +3,9 @@
 
 use axum::http::StatusCode;
 
-use dynamo_error::http::SanitizedError;
+use dynamo_error::ErrorClass;
+use dynamo_error::http::{ClientErrorAction, SanitizedError};
+
 use dynamo_http_server::metrics::{
     ErrorType, REQUEST_DEADLINE_EXCEEDED_MESSAGE, request_deadline_exceeded, request_was_cancelled,
     request_was_rejected, request_was_unavailable,
@@ -49,7 +51,15 @@ impl WorkerError {
 
     /// Common pre-stream policy of the native Generate endpoints. The format
     /// supplies its validation message; transport failures take precedence.
-    /// Dispatch counts `Overload` as an unavailable request plus a rejection.
+    /// Dispatch counts `Overload` as a rejection; a legacy one also counts as
+    /// an unavailable request.
+    /// A canonical `RateLimited` or `CapacityExhausted` rejection, such as a
+    /// request classifier's, takes its status from the shared HTTP policy, as
+    /// on the OpenAI path. That includes a `BackendError::WorkerOverloaded`
+    /// raised in this process, which normalizes to `CapacityExhausted`. A
+    /// remote worker's arrives as the legacy `ResourceExhausted` and keeps 503.
+    /// The check runs after the legacy rejection row, so the legacy
+    /// `ResourceExhausted` and `WorkerOverloaded` types keep their 503.
     pub fn dispatch(error: &(dyn std::error::Error + 'static), invalid: Option<String>) -> Self {
         if request_deadline_exceeded(error) {
             Self::new(
@@ -69,6 +79,19 @@ impl WorkerError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "engine rejected the request",
             )
+        } else if let Some(rejection) = dynamo_error::http::find_canonical_error_in_chain(error)
+            .filter(|error| {
+                matches!(
+                    error.class(),
+                    ErrorClass::RateLimited | ErrorClass::CapacityExhausted
+                )
+            })
+            && let ClientErrorAction::Respond {
+                status,
+                public_message,
+            } = dynamo_error::http::http_action_for_error(rejection)
+        {
+            Self::new(ErrorType::Overload, status, public_message)
         } else if request_was_unavailable(error) {
             Self::new(
                 ErrorType::Unavailable,

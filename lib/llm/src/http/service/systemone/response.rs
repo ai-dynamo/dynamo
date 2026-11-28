@@ -32,17 +32,26 @@ pub(super) fn capacity_error(
     status: StatusCode,
     message: impl Into<String>,
 ) -> Response {
+    let mut response = rejection_error(dialect, status, message);
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    response
+}
+
+pub(super) fn rejection_error(
+    dialect: Dialect,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> Response {
     let mut response = decision_error(DecisionError::new(
         dialect,
         status.as_u16(),
         "rate_limit_exceeded",
         message,
     ));
-    response.extensions_mut().insert(DecisionCapacityRejection);
-    response.headers_mut().insert(
-        axum::http::header::RETRY_AFTER,
-        HeaderValue::from_static("1"),
-    );
+    response.extensions_mut().insert(DecisionRejection);
     response
 }
 

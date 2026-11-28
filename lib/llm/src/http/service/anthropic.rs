@@ -779,11 +779,13 @@ async fn anthropic_messages(
                 dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_rejection_is_counted(e.as_ref()) {
             state.metrics_clone().inc_rejection(
                 &model,
                 dynamo_http_server::metrics::Endpoint::AnthropicMessages,
             );
+        }
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),

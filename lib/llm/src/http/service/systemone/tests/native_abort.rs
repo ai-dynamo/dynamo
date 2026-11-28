@@ -26,7 +26,7 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
         assert_eq!(
             response
                 .extensions()
-                .get::<super::super::DecisionCapacityRejection>()
+                .get::<super::super::DecisionRejection>()
                 .is_some(),
             status == 429
         );
@@ -65,7 +65,7 @@ async fn unknown_native_abort_is_unavailable_not_client_error_or_cancellation() 
         assert!(
             response
                 .extensions()
-                .get::<super::super::DecisionCapacityRejection>()
+                .get::<super::super::DecisionRejection>()
                 .is_none()
         );
         let body = response_body(response).await;

@@ -75,6 +75,23 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Count legacy and canonical dispatch rejections without changing status selection.
+pub fn request_rejection_is_counted(err: &(dyn std::error::Error + 'static)) -> bool {
+    if request_was_rejected(err) {
+        return true;
+    }
+    if request_deadline_exceeded(err) || request_was_cancelled(err) {
+        return false;
+    }
+    dynamo_runtime::error::http::find_canonical_error_in_chain(err).is_some_and(|error| {
+        matches!(
+            error.class().normalized(),
+            dynamo_runtime::error::ErrorClass::RateLimited
+                | dynamo_runtime::error::ErrorClass::CapacityExhausted
+        )
+    })
+}
+
 /// User-facing body for a request whose caller-supplied deadline elapsed
 /// before dispatch; shared by every HTTP surface so the wording stays uniform.
 pub const REQUEST_DEADLINE_EXCEEDED_MESSAGE: &str = "request deadline exceeded";
@@ -1458,7 +1475,7 @@ impl Metrics {
         let model_rejection_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
-                "Total number of requests rejected due to resource exhaustion",
+                "Total number of requests rejected due to rate limits or resource exhaustion",
             ),
             &["model", "endpoint"],
         )
@@ -1850,7 +1867,7 @@ impl Metrics {
             .get()
     }
 
-    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    /// Increment the rejection counter for a dispatch rejection
     pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
         self.model_rejection_total
             .with_label_values(&[model, &endpoint.to_string()])
@@ -2728,6 +2745,51 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 mod tests {
     use super::*;
     use std::thread::sleep;
+
+    #[test]
+    fn dispatch_rejection_accounting_preserves_legacy_status_selection() {
+        use dynamo_runtime::error::BackendError;
+
+        for kind in [
+            DynamoErrorType::RateLimited,
+            DynamoErrorType::CapacityExhausted,
+            DynamoErrorType::Backend(BackendError::WorkerOverloaded),
+        ] {
+            let error = DynamoError::builder().error_type(kind).build();
+            let wrapped = DynamoError::builder()
+                .error_type(DynamoErrorType::Unknown)
+                .cause(error)
+                .build();
+            assert!(request_rejection_is_counted(&wrapped), "{kind:?}");
+            assert!(!request_was_rejected(&wrapped), "{kind:?}");
+            let cancelled = DynamoError::builder()
+                .error_type(DynamoErrorType::Cancelled)
+                .cause(wrapped)
+                .build();
+            assert!(!request_rejection_is_counted(&cancelled), "{kind:?}");
+        }
+        let legacy = DynamoError::builder()
+            .error_type(DynamoErrorType::ResourceExhausted)
+            .build();
+        assert!(request_rejection_is_counted(&legacy));
+        assert!(request_was_rejected(&legacy));
+        let unavailable = DynamoError::builder()
+            .error_type(DynamoErrorType::Unavailable)
+            .build();
+        assert!(!request_rejection_is_counted(&unavailable));
+        let deadline = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
+            .cause(
+                DynamoError::builder()
+                    .error_type(DynamoErrorType::CapacityExhausted)
+                    .build(),
+            )
+            .build();
+        assert!(!request_rejection_is_counted(&deadline));
+    }
 
     fn response_collector(metrics: &Arc<Metrics>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(
