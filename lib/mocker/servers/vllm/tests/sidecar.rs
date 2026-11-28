@@ -10,6 +10,7 @@ use dynamo_backend_common::{
 };
 use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
@@ -112,7 +113,7 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine 
         "--grpc-connections".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
-        "5".to_string(),
+        TEST_STARTUP_TIMEOUT.as_secs().to_string(),
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];

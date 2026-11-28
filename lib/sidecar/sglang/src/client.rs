@@ -561,7 +561,8 @@ pub(crate) async fn rpc_with_deadline<T, F>(
 where
     F: Future<Output = Result<T, tonic::Status>>,
 {
-    deadline_result(rpc, timeout_at(deadline, future).await)
+    let started = Instant::now();
+    deadline_result(rpc, deadline, started, timeout_at(deadline, future).await)
 }
 
 /// A discovery RPC. An engine that does not serve `service`, or serves an
@@ -575,24 +576,33 @@ pub(crate) async fn contract_rpc_with_deadline<T, F>(
 where
     F: Future<Output = Result<T, tonic::Status>>,
 {
+    // Startup callers share one deadline across connect and several RPCs, so
+    // report how much budget this RPC actually had to tell those phases apart.
+    let started = Instant::now();
     match timeout_at(deadline, future).await {
         Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
             Err(contract_mismatch(rpc, service))
         }
-        result => deadline_result(rpc, result),
+        result => deadline_result(rpc, deadline, started, result),
     }
 }
 
 fn deadline_result<T>(
     rpc: &str,
+    deadline: Instant,
+    started: Instant,
     result: Result<Result<T, tonic::Status>, Elapsed>,
 ) -> Result<T, DynamoError> {
     match result {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(status)) => Err(status_to_dynamo(rpc, status)),
-        Err(_) => Err(connection_timeout(format!(
-            "{rpc} exceeded the configured deadline"
-        ))),
+        Err(_) => {
+            let remaining = deadline.saturating_duration_since(started);
+            Err(connection_timeout(format!(
+                "{rpc} exceeded the configured deadline (waited {:?}; {remaining:?} of the deadline remained when the RPC started)",
+                started.elapsed()
+            )))
+        }
     }
 }
 
@@ -865,6 +875,8 @@ mod tests {
                 .to_string()
                 .contains("HealthCheck exceeded the configured deadline")
         );
+        assert!(error.to_string().contains("waited"));
+        assert!(error.to_string().contains("remained when the RPC started"));
     }
 
     #[tokio::test]

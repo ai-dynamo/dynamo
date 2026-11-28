@@ -47,5 +47,6 @@ sglang-api-types = { workspace = true }
 tonic-v14 = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true, features = ["testing"] }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
