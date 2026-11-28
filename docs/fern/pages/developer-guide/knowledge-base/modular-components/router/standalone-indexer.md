@@ -473,17 +473,19 @@ Returns:
 ```json
 {
   "llama-3-8b:default": {
+    "partition": { "model_name": "llama-3-8b", "routing_group": "default" },
     "block_size": 16,
     "events": [<RouterEvent>, ...]
   },
   "mistral-7b:customer-a": {
+    "partition": { "model_name": "mistral-7b", "routing_group": "customer-a" },
     "block_size": 16,
     "events": [<RouterEvent>, ...]
   }
 }
 ```
 
-Each indexer is dumped concurrently. The `block_size` field lets recovering peers create indexers with the correct block size without requiring `--block-size` on every replica.
+Each indexer is dumped concurrently. The `block_size` field lets recovering peers create indexers with the correct block size without requiring `--block-size` on every replica. Recovering peers take the model and routing group from `partition`, because either name can contain `:`. Dumps from older peers omit `partition`, so recovering peers fall back to splitting the map key at the first `:`.
 
 ### `POST /register_peer` — Register a peer indexer
 

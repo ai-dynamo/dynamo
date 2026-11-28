@@ -13,6 +13,8 @@ use super::registry::IndexRegistry;
 
 #[derive(Deserialize)]
 struct DumpEntry {
+    /// `None` in dumps from older peers, which name the partition only in the map key.
+    partition: Option<RoutingPartitionId>,
     block_size: u32,
     events: Vec<RouterEvent>,
 }
@@ -62,11 +64,16 @@ async fn try_recover_from_peer(
         resp.json().await.context("failed to parse dump response")?;
     let mut total_events = 0usize;
     for (map_key, entry) in dump {
-        let (model_name, routing_group) = map_key
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("invalid dump key format: {map_key}"))?;
-
-        let key = RoutingPartitionId::new(model_name, routing_group);
+        let key = match entry.partition {
+            Some(key) => key,
+            // Ambiguous when either name contains ':'.
+            None => {
+                let (model_name, routing_group) = map_key
+                    .split_once(':')
+                    .ok_or_else(|| anyhow::anyhow!("invalid dump key format: {map_key}"))?;
+                RoutingPartitionId::new(model_name, routing_group)
+            }
+        };
 
         let indexer = registry.get_or_create_indexer(key, entry.block_size);
 
