@@ -17,9 +17,10 @@ fn routing_metadata(
 }
 
 fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
-    preprocessed_from_generate(
+    preprocessed_from_generate_with_priority(
         serde_json::from_value(raw.clone()).unwrap(),
         worker.model,
+        None,
         None,
         "resolved-request",
         worker,
@@ -227,9 +228,10 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         }
     }))
     .expect("deserialize request");
-    let preprocessed = preprocessed_from_generate(
+    let preprocessed = preprocessed_from_generate_with_priority(
         request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(4, false, None),
@@ -460,9 +462,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         }
         let expected_token_ids = request.token_ids.clone();
 
-        let preprocessed = preprocessed_from_generate(
+        let preprocessed = preprocessed_from_generate_with_priority(
             request,
             "test-model",
+            None,
             None,
             "resolved-request",
             &routing_metadata(4, false, None),
@@ -504,9 +507,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     });
     let base_request: GenerateRequest =
         serde_json::from_value(raw.clone()).expect("deserialize base request");
-    let base = preprocessed_from_generate(
+    let base = preprocessed_from_generate_with_priority(
         base_request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(4, true, None),
@@ -520,9 +524,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     for tower_connector_lora_enabled in [false, true] {
         let adapter_request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate(
+        let adapter = preprocessed_from_generate_with_priority(
             adapter_request,
             "adapter-a",
+            None,
             None,
             "resolved-request",
             &routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
@@ -563,10 +568,11 @@ fn routing_preserves_bounds_rank_and_priority() {
                 "token_ids": [1, 2], "sampling_params": sampling, "priority": priority,
             }))
             .unwrap();
-            let request = preprocessed_from_generate(
+            let request = preprocessed_from_generate_with_priority(
                 request,
                 "test-model",
                 Some(3),
+                None,
                 "req",
                 &routing_metadata(16, false, None),
             )
@@ -611,9 +617,10 @@ fn generate_projects_training_text_controls() {
     }))
     .expect("deserialize request");
 
-    let preprocessed = preprocessed_from_generate(
+    let preprocessed = preprocessed_from_generate_with_priority(
         request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(16, false, None),
