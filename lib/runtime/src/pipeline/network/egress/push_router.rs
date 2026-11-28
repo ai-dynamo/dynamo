@@ -662,6 +662,20 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    fn check_transport(&self, instance: &Instance) -> Result<(), Error> {
+        let mode = self.drt.request_plane();
+        let Some(foreign) = foreign_request_plane(mode, &instance.transport) else {
+            return Ok(());
+        };
+        Err(DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message(format!(
+                "request plane '{mode}' cannot route to transport '{foreign}': mixed request planes are unsupported"
+            ))
+            .build()
+            .into())
+    }
+
     /// A missing registration is a process misconfiguration, not a worker
     /// fault: `Internal` fails the request without reporting the worker down.
     fn direct(&self, instance_id: u64) -> Result<&Arc<dyn StreamingDispatch<T, U>>, Error> {
@@ -680,6 +694,23 @@ where
     }
 }
 
+/// Names the request plane of a worker this process cannot reach. Velo pools
+/// are strict: a Velo process routes only to Velo workers, and a TCP or NATS
+/// process never routes to one. `Direct` is not a request plane.
+fn foreign_request_plane(
+    mode: crate::distributed::RequestPlaneMode,
+    transport: &crate::component::TransportType,
+) -> Option<&'static str> {
+    use crate::{component::TransportType, distributed::RequestPlaneMode};
+
+    match (mode, transport) {
+        (RequestPlaneMode::Velo, TransportType::Tcp(_)) => Some("tcp"),
+        (RequestPlaneMode::Velo, TransportType::Nats(_)) => Some("nats"),
+        (RequestPlaneMode::Tcp | RequestPlaneMode::Nats, TransportType::Velo(_)) => Some("velo"),
+        _ => None,
+    }
+}
+
 fn is_direct(instance: &Instance) -> bool {
     matches!(
         instance.transport,
@@ -694,7 +725,11 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
-        match request.instance().filter(|instance| is_direct(instance)) {
+        let instance = request.instance();
+        if let Some(instance) = instance {
+            self.check_transport(instance)?;
+        }
+        match instance.filter(|instance| is_direct(instance)) {
             Some(instance) => self.direct(instance.id())?.generate(request).await,
             // Call what the request plane's own `StreamingDispatch` impl
             // forwards to, here and in `generate_bidirectional`: going through
@@ -715,6 +750,7 @@ where
         address: String,
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error> {
+        self.check_transport(&instance)?;
         if is_direct(&instance) {
             self.direct(instance.id())?
                 .generate_bidirectional(instance, address, input)
@@ -1909,6 +1945,7 @@ where
                     TransportType::Direct(endpoint) => {
                         (endpoint.clone(), "transport.direct.request")
                     }
+                    TransportType::Velo(endpoint) => (endpoint.clone(), "transport.velo.request"),
                 };
                 (addr, kind, instance)
             })
@@ -2289,16 +2326,17 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
         DistributedRuntime, Runtime,
-        distributed::DistributedConfig,
+        distributed::{DistributedConfig, RequestPlaneMode},
         error::DynamoError,
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
-            network::egress::route_span,
+            network::{ResponsePlaneMode, egress::route_span},
         },
     };
     use serde::{Deserialize, Serialize};
@@ -3622,6 +3660,131 @@ mod tests {
         rt.shutdown();
     }
 
+    /// A foreign request-plane worker is a local configuration error: the
+    /// request fails typed and both workers stay eligible. The frontend's
+    /// retry manager owns migration policy; this covers the router's
+    /// classification and eligibility.
+    #[tokio::test]
+    async fn mixed_request_plane_fails_internal_and_leaves_workers_eligible() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+        const TCP_ID: u64 = 41;
+        const VELO_ID: u64 = 42;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_mixed_request_plane".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let mut client = {
+            let monitor = tokio_util::sync::CancellationToken::new();
+            let client = Client::with_reconcile_interval_and_cancellation(
+                endpoint.clone(),
+                TEST_RECONCILE_INTERVAL,
+                monitor.clone(),
+            )
+            .await
+            .unwrap();
+            monitor.cancel();
+            client
+        };
+
+        let id = endpoint.id();
+        let instance = |instance_id, transport| Instance {
+            namespace: id.namespace.clone(),
+            component: id.component.clone(),
+            endpoint: id.name.clone(),
+            instance_id,
+            transport,
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let _instances = client.override_instances(vec![
+            instance(
+                TCP_ID,
+                TransportType::Tcp("127.0.0.1:9/AA/1/ns/c/e".to_string()),
+            ),
+            instance(
+                VELO_ID,
+                TransportType::Velo(
+                    "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
+                ),
+            ),
+        ]);
+
+        let router =
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        let (resolved, _, kind, _) = router
+            .resolve_transport(VELO_ID, TransportFallback::Allow)
+            .expect("a live velo worker resolves even when a fallback is allowed");
+        assert_eq!(
+            resolved, VELO_ID,
+            "the request must not migrate to the tcp worker"
+        );
+        assert_eq!(kind, "transport.velo.request");
+
+        let error = router
+            .direct(SingleIn::new(42u64), VELO_ID)
+            .await
+            .expect_err("the tcp request plane cannot reach a velo worker");
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Internal,
+            "{error}"
+        );
+        assert!(!is_inhibited(error.as_ref()), "{error}");
+        assert!(!match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerUnavailable, ErrorType::CannotConnect],
+            &[]
+        ));
+        assert!(
+            client.instance_ids_avail().contains(&VELO_ID),
+            "a local misconfiguration must not inhibit the velo worker"
+        );
+        assert!(
+            client
+                .available_instance_ids()
+                .is_some_and(|ids| ids.contains(&VELO_ID)),
+            "the velo worker stays in the eligible set"
+        );
+        assert!(
+            client.instance_ids_avail().contains(&TCP_ID),
+            "the healthy tcp worker stays eligible"
+        );
+
+        rt.shutdown();
+    }
+
+    /// The pairing rule for every request plane and every transport a worker
+    /// can advertise.
+    #[test]
+    fn only_velo_and_non_velo_request_planes_are_foreign_to_each_other() {
+        use RequestPlaneMode::{Nats, Tcp, Velo};
+
+        let transports = [
+            TransportType::Tcp("127.0.0.1:9/AA/1/ns/c/e".to_string()),
+            TransportType::Nats("ns.c.e-1".to_string()),
+            TransportType::Velo("velo://x".to_string()),
+            TransportType::Direct("http://engine:30001".to_string()),
+        ];
+        let foreign = |mode| {
+            transports
+                .clone()
+                .map(|transport| foreign_request_plane(mode, &transport))
+        };
+        assert_eq!(foreign(Tcp), [None, None, Some("velo"), None]);
+        assert_eq!(foreign(Nats), [None, None, Some("velo"), None]);
+        assert_eq!(foreign(Velo), [Some("tcp"), Some("nats"), None, None]);
+    }
+
     #[tokio::test]
     async fn transport_resolution_honors_fallback_policy() {
         let rt = Runtime::from_current().unwrap();
@@ -3965,14 +4128,27 @@ mod tests {
 
     /// A router built without a dispatch reaches direct instances through the
     /// runtime's registered direct dispatch, with its lifecycle hooks.
+    #[rstest::rstest]
+    #[case::tcp(RequestPlaneMode::Tcp, ResponsePlaneMode::Tcp)]
+    #[case::velo(RequestPlaneMode::Velo, ResponsePlaneMode::Velo)]
     #[tokio::test]
-    async fn direct_instances_use_the_registered_direct_dispatch() {
+    async fn direct_instances_use_the_registered_direct_dispatch(
+        #[case] request_plane: RequestPlaneMode,
+        #[case] response_plane: ResponsePlaneMode,
+    ) {
         let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
+        let drt = DistributedRuntime::new(
+            rt.clone(),
+            DistributedConfig {
+                request_plane,
+                response_plane: Some(response_plane),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
         let endpoint = drt
-            .namespace("test_direct_dispatch".to_string())
+            .namespace(format!("test_direct_dispatch_{request_plane}"))
             .unwrap()
             .component("test_component".to_string())
             .unwrap()

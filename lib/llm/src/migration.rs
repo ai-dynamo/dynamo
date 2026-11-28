@@ -1264,6 +1264,19 @@ mod tests {
         assert!(!is_migratable(&migratable_error(ErrorType::Unavailable)));
     }
 
+    #[test]
+    fn internal_configuration_errors_are_not_migratable() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message("mixed request planes are unsupported")
+            .build();
+        assert_eq!(err.reason().as_str(), "runtime.internal");
+        assert!(
+            !is_migratable(&err),
+            "a local configuration error must not migrate"
+        );
+    }
+
     // Guard: genuinely non-migratable errors stay non-migratable.
     #[test]
     fn terminal_error_types_are_not_migratable() {

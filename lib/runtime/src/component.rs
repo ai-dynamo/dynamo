@@ -85,6 +85,9 @@ pub enum TransportType {
     /// no request-plane server exists for it. The address is the engine's URL;
     /// the engine's own protocol (gRPC, HTTP, ...) is the dispatch's concern.
     Direct(String),
+    /// A worker reached over the Velo request plane. The address is a
+    /// `velo://` worker address.
+    Velo(String),
 }
 
 impl TransportType {
@@ -92,7 +95,8 @@ impl TransportType {
         match self {
             TransportType::Nats(address)
             | TransportType::Tcp(address)
-            | TransportType::Direct(address) => address,
+            | TransportType::Direct(address)
+            | TransportType::Velo(address) => address,
         }
     }
 }
@@ -646,5 +650,20 @@ fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
         Ok(())
     } else {
         Err(ValidationError::new("invalid_characters"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn velo_transport_round_trips() {
+        let encoded = serde_json::to_string(&TransportType::Velo("velo://x".to_string())).unwrap();
+        assert_eq!(encoded, r#"{"velo":"velo://x"}"#);
+
+        let decoded: TransportType = serde_json::from_str(r#"{"velo":"velo://x"}"#).unwrap();
+        assert_eq!(decoded, TransportType::Velo("velo://x".to_string()));
+        assert_eq!(decoded.address(), "velo://x");
     }
 }

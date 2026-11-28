@@ -16,6 +16,12 @@
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 use super::ingress::unified_server::RequestPlaneServer;
+use super::velo_request::{
+    client::VeloRequestClient,
+    discovery::{self, RequestPeerWatch},
+    server::VeloRequestServer,
+};
+use super::velo_response::{RuntimeService, VeloResponseService};
 use crate::config::environment_names::request_plane;
 use crate::distributed::RequestPlaneMode;
 use crate::utils::ip_resolver::{DefaultIpResolver, resolve_host_or_interface, resolve_local_host};
@@ -114,6 +120,13 @@ impl NetworkConfig {
     }
 }
 
+struct VeloRequestPlane {
+    service: Arc<VeloResponseService>,
+    owner: Arc<RuntimeService>,
+    discovery: Arc<dyn crate::discovery::Discovery>,
+    discovery_watch: OnceLock<RequestPeerWatch>,
+}
+
 /// Network Manager - Central coordinator for all network resources
 ///
 /// # Responsibilities
@@ -146,6 +159,7 @@ impl NetworkConfig {
 /// ```
 pub struct NetworkManager {
     mode: RequestPlaneMode,
+    velo: Option<VeloRequestPlane>,
     config: NetworkConfig,
     server: Arc<OnceCell<Arc<dyn RequestPlaneServer>>>,
     cancellation_token: CancellationToken,
@@ -194,15 +208,40 @@ impl NetworkManager {
                     "Initializing NetworkManager with NATS request plane"
                 );
             }
+            RequestPlaneMode::Velo => {
+                tracing::info!(%mode, "Initializing NetworkManager with Velo request plane");
+            }
         }
 
         Self {
             mode,
+            velo: None,
             config,
             server: Arc::new(OnceCell::new()),
             cancellation_token,
             component_registry,
         }
+    }
+
+    pub(crate) fn with_velo(
+        mut self,
+        service: Arc<VeloResponseService>,
+        owner: Arc<RuntimeService>,
+        discovery: Arc<dyn crate::discovery::Discovery>,
+    ) -> Self {
+        self.velo = Some(VeloRequestPlane {
+            service,
+            owner,
+            discovery,
+            discovery_watch: OnceLock::new(),
+        });
+        self
+    }
+
+    fn velo(&self) -> Result<&VeloRequestPlane> {
+        self.velo
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Velo service required for Velo request plane"))
     }
 
     /// Get or create the request plane server
@@ -246,6 +285,24 @@ impl NetworkManager {
         match self.mode {
             RequestPlaneMode::Tcp => self.create_tcp_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
+            RequestPlaneMode::Velo => {
+                let velo = self.velo()?;
+                let watch = velo.discovery_watch.get_or_init(|| {
+                    discovery::start(
+                        &velo.service,
+                        velo.discovery.clone(),
+                        velo.owner.request_discovery_token(),
+                    )
+                });
+                Ok(Arc::new(
+                    VeloRequestClient::new(
+                        velo.service.clone(),
+                        self.config.tcp_client_config.request_timeout,
+                    )
+                    .with_discovery(watch.ready.clone())
+                    .with_owner(velo.owner.clone()),
+                ))
+            }
         }
     }
 
@@ -265,6 +322,13 @@ impl NetworkManager {
         match self.mode {
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
+            RequestPlaneMode::Velo => {
+                let velo = self.velo()?;
+                Ok(Arc::new(VeloRequestServer::new(
+                    velo.service.clone(),
+                    &velo.owner,
+                )?))
+            }
         }
     }
 
@@ -370,6 +434,16 @@ mod tests {
             crate::component::Registry::new(),
             mode,
         )
+    }
+
+    #[tokio::test]
+    async fn new_in_velo_mode_without_service_errors() {
+        let manager = manager_for("velo".parse().expect("missing Velo request plane"));
+        let client_error = manager.create_client().err().expect("client requires Velo");
+        let server_error = manager.server().await.err().expect("server requires Velo");
+        for error in [client_error, server_error] {
+            assert!(error.to_string().contains("Velo service"), "{error:#}");
+        }
     }
 
     #[test]

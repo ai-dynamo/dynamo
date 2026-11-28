@@ -15,7 +15,8 @@ use crate::{
     distributed::RequestPlaneMode,
     pipeline::network::{
         PushWorkHandler, RequestPlanePayloadCodec, ResponsePlaneMode,
-        ingress::push_endpoint::PushEndpoint,
+        ingress::{push_endpoint::PushEndpoint, unified_server::RequestPlaneServer},
+        request_endpoint_address,
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
@@ -275,7 +276,6 @@ impl EndpointConfigBuilder {
         };
 
         // Create cleanup task that unregisters on cancellation.
-        let endpoint_name_for_cleanup = endpoint_name_for_task;
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let discovery_for_cleanup = discovery;
@@ -283,25 +283,13 @@ impl EndpointConfigBuilder {
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
 
-            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
-                tracing::warn!(%error, "Failed to unregister endpoint from discovery");
-            }
-
-            tracing::debug!(
-                endpoint = %endpoint_name_for_cleanup,
-                "Unregistering endpoint from request plane server"
-            );
-
-            if let Err(e) = server_for_cleanup
-                .unregister_endpoint_instance(&endpoint_id, connection_id)
-                .await
-            {
-                tracing::warn!(
-                    endpoint = %endpoint_name_for_cleanup,
-                    error = %e,
-                    "Failed to unregister endpoint"
-                );
-            }
+            withdraw_endpoint(
+                server_for_cleanup.as_ref(),
+                &endpoint_id,
+                connection_id,
+                async move { discovery_for_cleanup.unregister(discovery_instance).await },
+            )
+            .await;
 
             if let Some(tracker) = tracker_clone {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
@@ -319,22 +307,48 @@ impl EndpointConfigBuilder {
     }
 }
 
+async fn withdraw_endpoint(
+    server: &dyn RequestPlaneServer,
+    endpoint_id: &EndpointId,
+    instance_id: u64,
+    unregister_discovery: impl std::future::Future<Output = Result<()>>,
+) {
+    if let Err(error) = server
+        .close_endpoint_instance(endpoint_id, instance_id)
+        .await
+    {
+        tracing::warn!(endpoint = %endpoint_id.name, %error, "Failed to close endpoint admission");
+    }
+    if let Err(error) = unregister_discovery.await {
+        tracing::warn!(%error, "Failed to unregister endpoint from discovery");
+    }
+    tracing::debug!(endpoint = %endpoint_id.name, "Unregistering endpoint from request plane server");
+    if let Err(error) = server
+        .unregister_endpoint_instance(endpoint_id, instance_id)
+        .await
+    {
+        tracing::warn!(endpoint = %endpoint_id.name, %error, "Failed to unregister endpoint");
+    }
+}
+
 /// Build transport type based on request plane mode
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
 /// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
+/// - Velo: Appends the request path to the advertised Velo address.
 ///
 /// # Errors
 /// Returns an error if TCP mode is used but the TCP server hasn't been started yet.
-fn build_transport_type_inner(
-    mode: RequestPlaneMode,
+async fn build_transport_type_inner(
+    endpoint: &Endpoint,
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> Result<TransportType> {
-    match mode {
+    match endpoint.drt().request_plane() {
         RequestPlaneMode::Tcp => {
+            endpoint.drt().request_plane_server().await?;
             let address = crate::pipeline::network::manager::get_actual_tcp_rpc_address()?;
             Ok(tcp_transport_type(address, endpoint_id, connection_id))
         }
@@ -342,6 +356,14 @@ fn build_transport_type_inner(
             endpoint_id,
             connection_id,
         ))),
+        RequestPlaneMode::Velo => {
+            let server = endpoint.drt().request_plane_server().await?;
+            Ok(TransportType::Velo(request_endpoint_address(
+                &server.address(),
+                endpoint_id,
+                connection_id,
+            )?))
+        }
     }
 }
 
@@ -367,13 +389,7 @@ pub async fn build_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> Result<TransportType> {
-    let mode = endpoint.drt().request_plane();
-
-    if mode == RequestPlaneMode::Tcp {
-        let _ = endpoint.drt().request_plane_server().await?;
-    }
-
-    build_transport_type_inner(mode, endpoint_id, connection_id)
+    build_transport_type_inner(endpoint, endpoint_id, connection_id).await
 }
 
 impl Endpoint {
@@ -479,6 +495,66 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn velo_admission_closes_before_discovery_removal() {
+        #[derive(Default)]
+        struct RecordingServer(parking_lot::Mutex<Vec<&'static str>>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneServer for RecordingServer {
+            async fn register_endpoint(
+                &self,
+                _: String,
+                _: Arc<dyn PushWorkHandler>,
+                _: u64,
+                _: String,
+                _: String,
+                _: Arc<parking_lot::Mutex<crate::SystemHealth>>,
+            ) -> Result<()> {
+                unreachable!()
+            }
+
+            async fn close_endpoint_instance(&self, _: &EndpointId, _: u64) -> Result<()> {
+                self.0.lock().push("close");
+                Ok(())
+            }
+
+            async fn unregister_endpoint(&self, _: &str, _: u64) -> Result<()> {
+                self.0.lock().push("unregister");
+                Ok(())
+            }
+
+            fn address(&self) -> String {
+                unreachable!()
+            }
+            fn transport_name(&self) -> &'static str {
+                unreachable!()
+            }
+            fn is_healthy(&self) -> bool {
+                unreachable!()
+            }
+        }
+
+        let server = RecordingServer::default();
+        let id = EndpointId {
+            namespace: "test".into(),
+            component: "worker".into(),
+            name: "generate".into(),
+        };
+        let (release, paused) = tokio::sync::oneshot::channel();
+        let mut cleanup = std::pin::pin!(withdraw_endpoint(&server, &id, 1, async {
+            server.0.lock().push("discovery");
+            paused.await.unwrap();
+            Ok(())
+        }));
+        assert!(futures::poll!(&mut cleanup).is_pending());
+        let before = server.0.lock().clone();
+        release.send(()).unwrap();
+        cleanup.await;
+        assert_eq!(before, ["close", "discovery"]);
+        assert_eq!(*server.0.lock(), ["close", "discovery", "unregister"]);
+    }
 
     #[test]
     fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {

@@ -6,8 +6,11 @@ use crate::component::{
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
-use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::manager::NetworkManager;
+use crate::pipeline::network::{
+    ResponsePlaneMode, get_tcp_max_message_size,
+    velo_response::{ResponseTransport, VeloServiceOptions, tcp_tls_settings},
+};
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
@@ -286,6 +289,8 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
+        check_request_plane_pair(request_plane, response_plane)?;
+
         let config = crate::config::RuntimeConfig::from_settings()?;
         let nats_client = match nats_config {
             Some(nc) => Some(
@@ -359,6 +364,23 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let velo_owner = runtime.velo_response_service();
+        let velo_requests = request_plane == RequestPlaneMode::Velo;
+        velo_owner.set_options(VeloServiceOptions {
+            request_plane_enabled: velo_requests,
+            staged_payload_max: velo_requests.then(get_tcp_max_message_size),
+        })?;
+        let network_manager = if response_plane == ResponsePlaneMode::Velo {
+            let service = velo_owner.service().await?;
+            if velo_requests {
+                network_manager.with_velo(service, velo_owner, discovery_client.clone())
+            } else {
+                network_manager
+            }
+        } else {
+            network_manager
+        };
+
         let endpoint_registrations = EndpointRegistrationManager::new(
             discovery_client.clone(),
             runtime.secondary(),
@@ -395,7 +417,6 @@ impl DistributedRuntime {
             );
         }
         if response_plane == ResponsePlaneMode::Velo {
-            distributed_runtime.velo_response_service().await?;
             crate::pipeline::network::velo_response::register_metrics(
                 distributed_runtime.get_metrics_registry(),
             );
@@ -1054,6 +1075,49 @@ mod parser_env_tests {
         }
     }
 
+    #[tokio::test]
+    async fn velo_request_requires_velo_response() {
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = "velo".parse().expect("missing Velo request plane");
+        config.response_plane = Some(ResponsePlaneMode::Tcp);
+        let error = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
+            .await
+            .expect_err("Velo requests require Velo responses")
+            .to_string();
+        assert!(error.contains("DYN_REQUEST_PLANE"), "{error}");
+        assert!(error.contains("DYN_RESPONSE_PLANE"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn velo_request_refuses_tls_and_ucx() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::velo_request_refuses_tls_and_ucx"),
+            &[],
+        ) {
+            return;
+        }
+        for (name, value) in [
+            ("DYN_TCP_TLS_CERT_PATH", "test-cert.pem"),
+            ("DYN_VELO_RESPONSE_TRANSPORT", "ucx"),
+        ] {
+            let error = temp_env::async_with_vars([(name, Some(value))], async {
+                let mut config = DistributedConfig::process_local();
+                config.request_plane = "velo".parse().expect("missing Velo request plane");
+                config.response_plane = Some(ResponsePlaneMode::Velo);
+                DistributedRuntime::new(Runtime::from_current().unwrap(), config)
+                    .await
+                    .expect_err("Velo requests must refuse the unsupported combination")
+                    .to_string()
+            })
+            .await;
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains("DYN_REQUEST_PLANE"), "{error}");
+            if name.contains("TLS") {
+                assert!(error.contains("DYN_RESPONSE_PLANE"), "{error}");
+            }
+        }
+    }
+
     /// Velo has no TLS, so a runtime asked for Velo under TLS runs on tcp.
     #[tokio::test]
     async fn distributed_runtime_uses_tcp_for_velo_under_tls() {
@@ -1299,11 +1363,30 @@ impl DistributedConfig {
     }
 }
 
+fn check_request_plane_pair(request: RequestPlaneMode, response: ResponsePlaneMode) -> Result<()> {
+    if request != RequestPlaneMode::Velo {
+        return Ok(());
+    }
+    let tls = tcp_tls_settings();
+    anyhow::ensure!(
+        tls.is_empty(),
+        "DYN_REQUEST_PLANE=velo requires DYN_RESPONSE_PLANE=velo, which cannot be used with {}",
+        tls.join(", ")
+    );
+    anyhow::ensure!(
+        response == ResponsePlaneMode::Velo,
+        "DYN_REQUEST_PLANE=velo requires DYN_RESPONSE_PLANE=velo (resolved response plane: {})",
+        response.name()
+    );
+    ResponseTransport::configured()?.check_request_plane(true)
+}
+
 /// Request plane transport mode configuration
 ///
 /// This determines how requests are distributed from routers to workers:
 /// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
+/// - `Velo`: Send requests over the Velo response service
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane
@@ -1311,6 +1394,8 @@ pub enum RequestPlaneMode {
     /// Use raw TCP for request plane with msgpack support
     #[default]
     Tcp,
+    /// Use Velo for the request plane. Also requires Velo responses.
+    Velo,
 }
 
 impl fmt::Display for RequestPlaneMode {
@@ -1318,6 +1403,7 @@ impl fmt::Display for RequestPlaneMode {
         match self {
             Self::Nats => write!(f, "nats"),
             Self::Tcp => write!(f, "tcp"),
+            Self::Velo => write!(f, "velo"),
         }
     }
 }
@@ -1329,8 +1415,9 @@ impl std::str::FromStr for RequestPlaneMode {
         match s.to_lowercase().as_str() {
             "nats" => Ok(Self::Nats),
             "tcp" => Ok(Self::Tcp),
+            "velo" => Ok(Self::Velo),
             _ => Err(anyhow::anyhow!(
-                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'tcp'",
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'tcp', 'velo'",
                 s
             )),
         }
@@ -1350,7 +1437,7 @@ impl RequestPlaneMode {
             Ok(s) => s.parse(),
             Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
                 "Invalid request plane mode: '{}' is not valid Unicode. \
-                 Valid options are: 'nats', 'tcp'",
+                 Valid options are: 'nats', 'tcp', 'velo'",
                 raw.to_string_lossy()
             )),
         }
@@ -1376,6 +1463,15 @@ mod request_plane_env_tests {
     fn empty_request_plane_is_an_error() {
         RequestPlaneMode::from_env_result(Ok(String::new()))
             .expect_err("an empty DYN_REQUEST_PLANE must not silently fall back to TCP");
+    }
+
+    #[test]
+    fn velo_request_plane_parses_case_insensitively() {
+        for value in ["velo", "VELO"] {
+            let mode = RequestPlaneMode::from_env_result(Ok(value.to_owned()))
+                .expect("Velo must be an explicit request plane");
+            assert_eq!(mode.to_string(), "velo");
+        }
     }
 
     #[test]

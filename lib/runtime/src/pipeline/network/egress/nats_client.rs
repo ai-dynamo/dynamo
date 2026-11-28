@@ -6,9 +6,10 @@
 //! Wraps the NATS client to implement the unified RequestPlaneClient trait,
 //! providing a consistent interface across all transport types.
 
-use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use super::unified_client::{ClientStats, Headers, RequestPlaneClient, mixed_request_plane_error};
 use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::NATS_ERRORS_TOTAL;
+use crate::pipeline::network::is_velo_request_address;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -64,6 +65,14 @@ impl RequestPlaneClient for NatsRequestClient {
         payload: Bytes,
         headers: Headers,
     ) -> Result<Bytes> {
+        if is_velo_request_address(&address) {
+            tracing::error!(
+                address = %address,
+                "NATS request client received a foreign request-plane address; rejecting before publish"
+            );
+            return Err(mixed_request_plane_error("nats", &address));
+        }
+
         // Best-effort early rejection. This compares the payload body only, not the
         // header/subject framing that also counts toward the server's max_payload for
         // header messages (HPUB). It is therefore a lower bound: it reliably catches
@@ -157,5 +166,188 @@ mod tests {
         assert!(!err.message().contains("max_payload"));
         assert!(!err.message().contains("payload_bytes"));
         assert!(!err.message().contains("nats-server"));
+    }
+
+    #[tokio::test]
+    async fn well_formed_velo_address_is_rejected_before_publish() {
+        const SENTINEL_SUBJECT: &str = "dynamo.test.sentinel";
+
+        let broker = FakeNats::start().await;
+        let client = async_nats::connect(&broker.url).await.unwrap();
+        let nats = NatsRequestClient::new(client.clone());
+        let err = nats
+            .send_request(
+                "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
+                Bytes::from_static(b"request"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("a well-formed velo address must not be published to NATS");
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[ErrorType::Internal],
+            &[ErrorType::WorkerUnavailable]
+        ));
+
+        let sentinel = uuid::Uuid::new_v4().to_string();
+        let reply = client
+            .request_with_headers(
+                SENTINEL_SUBJECT,
+                async_nats::HeaderMap::new(),
+                Bytes::copy_from_slice(sentinel.as_bytes()),
+            )
+            .await
+            .expect("the sentinel request must round-trip through the broker");
+        assert_eq!(reply.payload, Bytes::copy_from_slice(sentinel.as_bytes()));
+
+        // The sentinel orders only synchronously enqueued commands. A detached
+        // publish in the rejection branch could land after it, so allow a
+        // bounded grace before trusting the broker log.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let commands = broker.commands();
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.starts_with(&format!("PUB {SENTINEL_SUBJECT} "))),
+            "the broker must see the sentinel request: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == &format!("BODY {sentinel}")),
+            "the broker must echo the sentinel payload: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|command| (command.starts_with("PUB ")
+                || command.starts_with("HPUB "))
+                && command.contains("velo://")),
+            "no publish may carry the well-formed velo address: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn velo_subject_keeps_its_nats_meaning() {
+        let broker = FakeNats::start().await;
+        let client = async_nats::connect(&broker.url).await.unwrap();
+        let nats = NatsRequestClient::new(client);
+
+        let response = nats
+            .send_request(
+                "velo://custom-service".to_string(),
+                Bytes::from_static(b"request"),
+                Headers::new(),
+            )
+            .await
+            .expect("a velo:// prefix alone is a valid NATS subject");
+        assert_eq!(response, Bytes::from_static(b"request"));
+        assert!(
+            broker
+                .commands()
+                .iter()
+                .any(|command| command.starts_with("PUB velo://custom-service ")),
+            "{:?}",
+            broker.commands()
+        );
+    }
+
+    /// A minimal NATS broker: enough of the protocol to complete the client
+    /// handshake, echo a request, and record every command it reads.
+    struct FakeNats {
+        url: String,
+        commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl FakeNats {
+        async fn start() -> Self {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = commands.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                write_half
+                    .write_all(
+                        b"INFO {\"server_id\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                    )
+                    .await
+                    .unwrap();
+
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).await.unwrap() == 0 {
+                        break;
+                    }
+                    recorded.lock().unwrap().push(line.trim_end().to_string());
+
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    match fields.first().copied() {
+                        Some("PING") => {
+                            write_half.write_all(b"PONG\r\n").await.unwrap();
+                            recorded.lock().unwrap().push("PONG".to_string());
+                        }
+                        Some("PUB") => {
+                            let size: usize = fields.last().unwrap().parse().unwrap();
+                            let mut body = vec![0u8; size + 2];
+                            reader.read_exact(&mut body).await.unwrap();
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(format!("BODY {}", String::from_utf8_lossy(&body[..size])));
+                            if fields.len() == 4 {
+                                let reply = fields[2];
+                                write_half
+                                    .write_all(format!("MSG {reply} 0 {size}\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
+                                write_half.write_all(&body[..size]).await.unwrap();
+                                write_half.write_all(b"\r\n").await.unwrap();
+                            }
+                        }
+                        Some("HPUB") => {
+                            let total: usize = fields.last().unwrap().parse().unwrap();
+                            let mut body = vec![0u8; total + 2];
+                            reader.read_exact(&mut body).await.unwrap();
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(format!("BODY {}", String::from_utf8_lossy(&body[..total])));
+                            if fields.len() == 5 {
+                                let reply = fields[2];
+                                write_half
+                                    .write_all(format!("MSG {reply} 0 {total}\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
+                                write_half.write_all(&body[..total]).await.unwrap();
+                                write_half.write_all(b"\r\n").await.unwrap();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            Self {
+                url: format!("nats://{addr}"),
+                commands,
+                server,
+            }
+        }
+
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for FakeNats {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
     }
 }

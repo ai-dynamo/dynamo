@@ -10,7 +10,7 @@
 //! Writer tasks batch request header/body chunks with vectored writes, preserving
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
-use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use super::unified_client::{ClientStats, Headers, RequestPlaneClient, mixed_request_plane_error};
 use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
@@ -19,6 +19,7 @@ use crate::pipeline::network::codec::{
     TcpRequestFrame, TcpRequestMessage, check_tcp_request_max_message_size,
 };
 use crate::pipeline::network::get_tcp_max_message_size;
+use crate::pipeline::network::is_velo_request_address;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
@@ -1646,16 +1647,22 @@ impl TcpRequestClient {
             address
         };
 
+        let parse_socket_addr = |socket_part: &str| {
+            socket_part.parse::<SocketAddr>().map_err(|e| {
+                if is_velo_request_address(address) {
+                    mixed_request_plane_error("tcp", address)
+                } else {
+                    anyhow::anyhow!("Invalid TCP address '{}': {}", address, e)
+                }
+            })
+        };
+
         // Check if endpoint name is included (format: host:port/endpoint_name)
         if let Some((socket_part, endpoint_name)) = addr_str.split_once('/') {
-            let socket_addr = socket_part
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow::anyhow!("Invalid TCP address '{}': {}", address, e))?;
+            let socket_addr = parse_socket_addr(socket_part)?;
             Ok((socket_addr, Some(endpoint_name.to_string())))
         } else {
-            let socket_addr = addr_str
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow::anyhow!("Invalid TCP address '{}': {}", address, e))?;
+            let socket_addr = parse_socket_addr(addr_str)?;
             Ok((socket_addr, None))
         }
     }
@@ -1888,6 +1895,46 @@ mod tests {
         assert_eq!(endpoint, Some("test_endpoint".to_string()));
 
         assert!(TcpRequestClient::parse_address("invalid").is_err());
+    }
+
+    #[tokio::test]
+    async fn velo_address_is_internal_configuration_error() {
+        let client = TcpRequestClient::new().unwrap();
+        let err = client
+            .send_request(
+                "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
+                Bytes::from_static(b"request"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("a velo address must not be parsed as tcp");
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::Internal],
+            &[ErrorType::WorkerUnavailable]
+        ));
+        assert!(
+            err.to_string()
+                .contains("mixed request planes are unsupported"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn invalid_tcp_address_keeps_its_parse_error() {
+        for address in ["invalid", "velo://custom-service"] {
+            let err = TcpRequestClient::parse_address(address).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("Invalid TCP address '{address}'")),
+                "{err:#}"
+            );
+            assert!(!match_error_chain(
+                err.as_ref(),
+                &[ErrorType::Internal, ErrorType::WorkerUnavailable],
+                &[]
+            ));
+        }
     }
 
     #[test]

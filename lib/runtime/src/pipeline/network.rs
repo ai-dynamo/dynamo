@@ -15,6 +15,8 @@ pub mod manager;
 pub mod quic_response;
 pub mod tcp;
 mod tombstones;
+mod velo_request;
+pub(crate) use velo_request::request_endpoint_address;
 pub mod velo_response;
 
 use crate::SystemHealth;
@@ -51,6 +53,41 @@ pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// ACK; anything it does not recognise is read as the ACK and it waits for a response stream.
 /// Both ends must use this constant.
 pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
+
+/// Scheme prefix of a Velo request-plane address published to discovery.
+pub(crate) const VELO_SCHEME: &str = "velo://";
+
+const VELO_MAX_WORKER_ADDRESS: usize = 8 * 1024;
+const VELO_MAX_ENDPOINT_PATH: usize = 1024;
+
+/// Whether `address` is a well-formed Velo request address:
+/// `velo://<uuid>/<base64url worker address>/<instance path>`.
+///
+/// NATS subjects share the request-plane address space and may legitimately
+/// start with `velo://`, so the scheme alone does not identify a foreign
+/// plane. Only the shape this runtime publishes does.
+pub(crate) fn is_velo_request_address(address: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let Some(rest) = address.strip_prefix(VELO_SCHEME) else {
+        return false;
+    };
+    let mut fields = rest.splitn(3, '/');
+    let (Some(id), Some(encoded), Some(path)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if id.len() != 36 || uuid::Uuid::parse_str(id).is_err() {
+        return false;
+    }
+    if encoded.is_empty()
+        || encoded.len() > VELO_MAX_WORKER_ADDRESS
+        || URL_SAFE_NO_PAD.decode(encoded).is_err()
+    {
+        return false;
+    }
+    !path.is_empty() && path.len() <= VELO_MAX_ENDPOINT_PATH
+}
 
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
@@ -849,7 +886,7 @@ mod tests {
         DEFAULT_SEND_BUFFER_COUNT, Ingress, IngressResponseEncoder, ManyOut, NetworkStreamWrapper,
         RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode,
         ResponseStreamPrologue, ResponseType, SerdeIngressPayloadAdapter, SingleIn, StreamOptions,
-        StreamPrologueError,
+        StreamPrologueError, is_velo_request_address,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::error::{BackendError, DynamoError, ErrorType};
@@ -864,6 +901,242 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    #[tokio::test]
+    async fn velo_ingress_can_open_its_first_response_after_owner_close() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::velo_ingress_can_open_its_first_response_after_owner_close"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        let service = owner.service().await.unwrap();
+        let ingress = Ingress::<SingleIn<String>, ManyOut<String>>::new();
+        ingress
+            .velo_response_owner
+            .set(Arc::downgrade(&owner))
+            .unwrap();
+        assert!(ingress.velo_response_service.get().is_none());
+
+        owner.close();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ingress.velo_response_service(),
+        )
+        .await
+        .unwrap();
+        owner.shutdown().await;
+
+        let from_ingress = result.expect("accepted ingress work could not use the live lease");
+        assert!(Arc::ptr_eq(&service, from_ingress));
+    }
+
+    #[tokio::test]
+    async fn cached_velo_ingress_refuses_after_its_owner_releases_the_lease() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::cached_velo_ingress_refuses_after_its_owner_releases_the_lease"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let first = crate::Runtime::from_current()
+            .unwrap()
+            .velo_response_service();
+        let second = crate::Runtime::from_current()
+            .unwrap()
+            .velo_response_service();
+        let service = second.service().await.unwrap();
+        let ingress = Ingress::<SingleIn<String>, ManyOut<String>>::new();
+        ingress
+            .velo_response_owner
+            .set(Arc::downgrade(&first))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &service,
+            ingress.velo_response_service().await.unwrap()
+        ));
+
+        first.close();
+        assert!(Arc::ptr_eq(
+            &service,
+            ingress.velo_response_service().await.unwrap()
+        ));
+        first.shutdown().await;
+        assert!(!service.is_closing());
+        assert!(Arc::ptr_eq(&service, &second.service().await.unwrap()));
+        let error = ingress
+            .velo_response_service()
+            .await
+            .err()
+            .expect("ingress used a released owner's cached service");
+        assert!(
+            error
+                .to_string()
+                .contains("Velo response runtime is shut down")
+        );
+        second.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tcp_request_worker_on_velo_response_drains() {
+        use super::{
+            PushWorkHandler,
+            codec::{TwoPartCodec, TwoPartMessage},
+            egress::{tcp_client::TcpRequestClient, unified_client::RequestPlaneClient},
+            ingress::{shared_tcp_endpoint::SharedTcpServer, unified_server::RequestPlaneServer},
+            velo_response::{ResponseTransport, VeloResponseService},
+        };
+        use crate::{
+            HealthStatus, SystemHealth,
+            pipeline::{AsyncEngine, ResponseStream},
+            protocols::{EndpointId, annotated::Annotated},
+        };
+        use bytes::Bytes;
+        use futures::{StreamExt, stream};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::tcp_request_worker_on_velo_response_drains"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+
+        struct Echo;
+        #[async_trait::async_trait]
+        impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error> for Echo {
+            async fn generate(
+                &self,
+                request: SingleIn<String>,
+            ) -> anyhow::Result<ManyOut<Annotated<String>>> {
+                Ok(ResponseStream::new(
+                    Box::pin(stream::iter([Annotated::from_data(String::from(
+                        "drained",
+                    ))])),
+                    request.context(),
+                ))
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let owner = crate::Runtime::from_current()
+                .unwrap()
+                .velo_response_service();
+            owner.service().await.unwrap();
+            let addr = "127.0.0.1:0".parse().unwrap();
+            let frontend = VeloResponseService::new(ResponseTransport::Tcp, addr)
+                .await
+                .unwrap();
+            let ingress = Ingress::for_engine(Arc::new(Echo)).unwrap();
+            ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
+            ingress
+                .velo_response_owner
+                .set(Arc::downgrade(&owner))
+                .unwrap();
+            let cancel = CancellationToken::new();
+            let server = SharedTcpServer::new(addr, cancel.clone()).unwrap();
+            let address = server.clone().bind_and_start().await.unwrap();
+            let id = EndpointId {
+                namespace: "test".into(),
+                component: "worker".into(),
+                name: "echo".into(),
+            };
+            let health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+                HealthStatus::Ready,
+                vec![],
+                false,
+                "/health".into(),
+                "/live".into(),
+            )));
+            RequestPlaneServer::register_endpoint(
+                server.as_ref(),
+                id.name.clone(),
+                ingress as Arc<dyn PushWorkHandler>,
+                1,
+                id.namespace.clone(),
+                id.component.clone(),
+                health,
+            )
+            .await
+            .unwrap();
+            let registered = frontend
+                .register_response(Context::new(()).context(), false)
+                .unwrap();
+            let control = RequestControlMessage {
+                id: "tcp-drain".into(),
+                request_type: RequestType::SingleIn,
+                response_type: ResponseType::ManyOut,
+                payload_codec: RequestPlanePayloadCodec::Json,
+                connection_info: registered.connection_info.clone(),
+                metadata: Default::default(),
+                frontend_send_ts_ns: None,
+                request_stream_connection_info: None,
+            };
+            let payload = TwoPartCodec::default()
+                .encode_message(TwoPartMessage::from_parts(
+                    serde_json::to_vec(&control).unwrap().into(),
+                    Bytes::from_static(br#""prompt""#),
+                ))
+                .unwrap();
+            let client = TcpRequestClient::new().unwrap();
+            owner.close();
+            let mut drain =
+                std::pin::pin!(owner.drain(Duration::from_millis(200), Duration::from_secs(2)));
+            assert!(futures::poll!(&mut drain).is_pending());
+            let ack = client
+                .send_request(
+                    format!(
+                        "{address}/{}",
+                        crate::transports::tcp::instance_path(&id, 1)
+                    ),
+                    payload,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(ack.is_empty());
+            let (_, provider) = registered.into_parts();
+            let mut response = provider.await.unwrap().unwrap();
+            let item: NetworkStreamWrapper<Annotated<String>> =
+                serde_json::from_slice(&response.rx.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(item.data.unwrap().data.as_deref(), Some("drained"));
+            assert!(!item.complete_final);
+            let final_item: NetworkStreamWrapper<Annotated<String>> =
+                serde_json::from_slice(&response.rx.next().await.unwrap().unwrap()).unwrap();
+            assert!(final_item.complete_final);
+            assert!(response.rx.next().await.is_none());
+            drain.await;
+            cancel.cancel();
+            owner.shutdown().await;
+        })
+        .await
+        .expect("TCP worker did not finish its Velo response during drain");
+    }
+
+    #[test]
+    fn velo_request_address_shape_is_precise() {
+        const ID: &str = "3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab";
+
+        assert!(is_velo_request_address(&format!("velo://{ID}/AA/1/ns/c/e")));
+        assert!(!is_velo_request_address("velo://custom-service"));
+        assert!(!is_velo_request_address(&format!(
+            "velo://{ID}/not!base64/1/ns/c/e"
+        )));
+        assert!(!is_velo_request_address(&format!("velo://{ID}/AA")));
+        assert!(!is_velo_request_address(&format!("tcp://{ID}/AA/1/ns/c/e")));
     }
 
     #[test]
@@ -1550,15 +1823,15 @@ where
                     "Velo ingress must be bound to a live runtime endpoint".into(),
                 )
             })?;
-        if owner.is_closed() {
-            return Err(PipelineError::Generic(
-                "Velo response runtime is shut down".into(),
-            ));
-        }
-        self.velo_response_service
-            .get_or_try_init(|| owner.service())
+        let service = self
+            .velo_response_service
+            .get_or_try_init(|| owner.service_for_ingress())
             .await
-            .map_err(|error| PipelineError::Generic(error.to_string()))
+            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        owner
+            .check_ingress_lease()
+            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        Ok(service)
     }
 
     pub fn add_metrics(
