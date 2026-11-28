@@ -260,6 +260,10 @@ Routes a request to a prefill pool based on its input sequence length (ISL) and 
   Optional list of priority-based pool overrides. When a request carries a priority value from its agent context that matches a rule, the override's `target_pool` replaces the grid result. Rules are evaluated in list order; first match wins. See [PriorityPoolOverride](#prioritypooloverride).
 </ParamField>
 
+<ParamField path="uncached_overrides" type="[]UncachedTokensPoolOverride" default="[]">
+  Optional list of uncached-tokens pool overrides. When a request carries a client-declared `nvext.router.uncached_tokens` estimate that matches a rule, the override's `target_pool` replaces the grid result. This separates long cold prompts from long-but-cached agent multi-turn requests, which the ISL grid alone cannot distinguish. Rules are evaluated in list order; first match wins; a matching priority override still wins. See [UncachedTokensPoolOverride](#uncachedtokenspooloverride).
+</ParamField>
+
 ### DecodePoolSelectionStrategy
 
 Routes a request to a decode pool based on its `context_length` bucket and ITL target. The current handler computes `context_length` as the number of request `token_ids` at decode routing time; it does not add subsequently generated tokens. The routing space is a 2D grid of `context_length_resolution × itl_resolution` cells. `decode_pool_mapping[ctx_idx][itl_idx]` gives the pool index.
@@ -344,6 +348,10 @@ Routes a request to an aggregated pool based on both its TTFT and ITL targets. U
   Optional priority-based pool overrides. See [PriorityPoolOverride](#prioritypooloverride).
 </ParamField>
 
+<ParamField path="uncached_overrides" type="[]UncachedTokensPoolOverride" default="[]">
+  Optional uncached-tokens pool overrides driven by `nvext.router.uncached_tokens`. See [UncachedTokensPoolOverride](#uncachedtokenspooloverride).
+</ParamField>
+
 ### PriorityPoolOverride
 
 A single priority-range rule in a strategy's `priority_overrides` list. When a request carries a priority value from its agent context, each rule is evaluated in list order; the first matching rule's `target_pool` overrides the grid result. If no rule matches, the grid result is used.
@@ -358,6 +366,22 @@ A single priority-range rule in a strategy's `priority_overrides` list. When a r
 
 <ParamField path="target_pool" type="integer" required={true}>
   Zero-based pool index to route to when the request priority falls within `[min_priority, max_priority]`. Must be a valid pool index for the enclosing strategy (0 to `num_prefill_pools - 1`, `num_decode_pools - 1`, or `num_agg_pools - 1`).
+</ParamField>
+
+### UncachedTokensPoolOverride
+
+A single uncached-tokens range rule in a strategy's `uncached_overrides` list. The uncached token count is a client-declared estimate carried in `nvext.router.uncached_tokens`: the number of prompt tokens expected to require fresh prefill computation, i.e. tokens not served from any KV cache. The router uses it as a routing hint only and never validates it against actual cache state. When a request carries an estimate, each rule is evaluated in list order; the first matching rule's `target_pool` overrides the grid result. If no rule matches, or the request carries no estimate, the grid result is used. A matching priority override takes precedence over a matching uncached override.
+
+<ParamField path="min_uncached_tokens" type="integer" required={true}>
+  Inclusive lower bound of the uncached-token range to match. Must be non-negative.
+</ParamField>
+
+<ParamField path="max_uncached_tokens" type="integer" default="null">
+  Inclusive upper bound of the uncached-token range to match. When omitted or `null`, the rule is unbounded above.
+</ParamField>
+
+<ParamField path="target_pool" type="integer" required={true}>
+  Zero-based pool index to route to when the estimate falls within the rule's range. Must be a valid pool index for the enclosing strategy (0 to `num_prefill_pools - 1` or `num_agg_pools - 1`).
 </ParamField>
 
 ## Validation rules
@@ -376,6 +400,7 @@ The router validates the configuration at startup and exits if any rule is viola
 - Without aggregated `isl_*` fields, `agg_pool_mapping` must have exactly `ttft_resolution` rows, each of length `itl_resolution`; all pool indices must be in `[0, num_agg_pools)`.
 - For aggregated selection, `isl_min`, `isl_max`, and `isl_resolution` must be omitted together or set together. When set, `isl_min < isl_max`, `isl_resolution` is positive, and `agg_pool_mapping` must have shape `[isl_resolution][ttft_resolution][itl_resolution]` instead of the 2D shape above.
 - In each `priority_overrides` entry: `min_priority` must be ≤ `max_priority`, and `target_pool` must be a valid pool index for the enclosing strategy.
+- In each `uncached_overrides` entry: `min_uncached_tokens` must be non-negative, `max_uncached_tokens` (when set) must be ≥ `min_uncached_tokens`, and `target_pool` must be a valid pool index for the enclosing strategy.
 
 ## Related pages
 
