@@ -287,7 +287,9 @@ impl NvCreateChatCompletionRequest {
     /// caller-supplied namespace and leaf names independently so the ordinary
     /// Chat Completions name rules remain unchanged.
     pub(crate) fn validate_responses_tool_definitions(&self) -> anyhow::Result<()> {
-        use crate::protocols::openai::validate::validate_tools;
+        use crate::protocols::openai::validate::{
+            validate_tool_definition_conflicts, validate_tools,
+        };
         let Some(context) = &self.responses_tools else {
             return validate_tools(&self.inner.tools.as_deref());
         };
@@ -319,7 +321,11 @@ impl NvCreateChatCompletionRequest {
             }
             definitions.extend(convert_template_tools(std::slice::from_ref(tool), false)?);
         }
-        validate_tools(&Some(definitions.as_slice()))
+        validate_tools(&Some(definitions.as_slice()))?;
+        validate_tool_definition_conflicts(
+            self.inner.tools.as_deref().unwrap_or_default(),
+            self.inner.tool_choice.as_ref(),
+        )
     }
 
     /// Phase replay is a model capability, independent of namespace rendering.

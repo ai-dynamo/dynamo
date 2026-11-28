@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, collections::HashMap, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
 
@@ -542,7 +542,45 @@ pub(crate) fn validated_effective_tools(
     };
 
     validate_tools(&Some(tools.as_ref()))?;
+    validate_tool_definition_conflicts(
+        request.tools.as_deref().unwrap_or_default(),
+        request.tool_choice.as_ref(),
+    )?;
     Ok(tools)
+}
+
+pub(crate) fn validate_tool_definition_conflicts(
+    tools: &[ChatCompletionTool],
+    choice: Option<&ChatCompletionToolChoiceOption>,
+) -> anyhow::Result<()> {
+    if tools.len() < 2 {
+        return Ok(());
+    }
+
+    let selected_name = match choice {
+        Some(ChatCompletionToolChoiceOption::Named(named)) => Some(named.function.name.as_str()),
+        _ => None,
+    };
+    let mut definitions: HashMap<&str, usize> = HashMap::new();
+    for (index, tool) in tools.iter().enumerate() {
+        let name = tool.function.name.as_str();
+        if selected_name.is_some_and(|selected| selected != name) {
+            continue;
+        }
+
+        let first_index = *definitions.entry(name).or_insert(index);
+        if first_index == index {
+            continue;
+        }
+        let first = &tools[first_index].function;
+        if first.parameters != tool.function.parameters || first.strict != tool.function.strict {
+            anyhow::bail!(
+                "Conflicting definitions for tool '{name}' in tools[{first_index}] and \
+                 tools[{index}]: parameter schemas or strict settings differ"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn normalize_dynamic_system_tool(
@@ -685,11 +723,9 @@ pub fn validate_tools(
 
 /// Validates that forced tool_choice requests refer to available tools.
 pub fn validate_tool_choice(
-    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tool_choice: &Option<ChatCompletionToolChoiceOption>,
     tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
-    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
-
     match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
         Ok(()) => Ok(()),
         Err(ToolChoiceError::EmptyTools) => {
@@ -1021,6 +1057,73 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+    #[test]
+    fn conflicting_top_level_tool_definitions_are_rejected() {
+        let first = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{},"additionalProperties":false,"required":[]}, "strict":false
+        }});
+        for change in [
+            json!({"parameters":{"type":"object","properties":{"city":{"type":"string"}}}}),
+            json!({"strict":true}),
+            json!({"strict":null}),
+            json!({"parameters":null}),
+        ] {
+            let mut second = first.clone();
+            second["function"]
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            for tools in [json!([first, second]), json!([second, first])] {
+                let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+                    "model":"test", "messages":[{"role":"user","content":"lookup"}],
+                    "tools":tools
+                }))
+                .unwrap();
+                let error = validated_effective_tools(&request).unwrap_err().to_string();
+                assert_eq!(
+                    error,
+                    "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]: \
+                     parameter schemas or strict settings differ"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_top_level_tool_definitions_preserve_compatible_requests() {
+        let first = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{},"additionalProperties":false,"required":[]}, "strict":false
+        }});
+        let mut renamed = first.clone();
+        renamed["function"]["name"] = json!("other_lookup");
+        let mut described = first.clone();
+        described["function"]["description"] = json!("Look up a record");
+        for tools in [
+            json!([first, first]),
+            json!([first, renamed]),
+            json!([first, described]),
+        ] {
+            let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[{"role":"user","content":"lookup"}], "tools":tools
+            }))
+            .unwrap();
+            assert_eq!(validated_effective_tools(&request).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn top_level_tool_check_preserves_dynamic_system_declarations() {
+        let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+            "model":"test",
+            "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+            "messages":[
+                {"role":"system","tools":[{"name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]},
+                {"role":"user","content":"lookup"}
+            ]
+        })).unwrap();
+        assert_eq!(validated_effective_tools(&request).unwrap().len(), 2);
+    }
 
     #[test]
     fn custom_message_content_preserves_model_validation() {

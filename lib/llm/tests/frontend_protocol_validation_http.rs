@@ -249,6 +249,118 @@ async fn chat_custom_unsupported_grammar_and_wrong_choice_do_not_reach_engine() 
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn conflicting_tool_schemas_are_checked_for_callable_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+        let first = json!({
+            "name":"lookup", "parameters":{"type":"object","properties":{"city":{"type":"string"}},
+            "required":["city"],"additionalProperties":false}
+        });
+        let second = json!({
+            "name":"lookup", "parameters":{"type":"object","properties":{"order_id":{"type":"integer"}},
+            "required":["order_id"],"additionalProperties":false}
+        });
+        for (path, mut body) in strict_tool_requests(first.clone()) {
+            let is_chat = path == "/v1/chat/completions";
+            let namespaced = body["tools"][0]["type"] == "namespace";
+            let tools = if namespaced { &mut body["tools"][0]["tools"] } else { &mut body["tools"] };
+            let mut added = second.clone();
+            if is_chat {
+                added = json!({"type":"function","function":added});
+            } else {
+                added["type"] = json!("function");
+            }
+            tools.as_array_mut().unwrap().push(added);
+            let named = if is_chat {
+                json!({"type":"function","function":{"name":"lookup"}})
+            } else {
+                json!({"type":"function","name":"lookup"})
+            };
+            for streaming in [false, true] {
+                body["stream"] = json!(streaming);
+                body["tool_choice"] = named.clone();
+                for _ in 0..2 {
+                    assert_openai_error(
+                        post_json(&svc, path, body.clone()).await,
+                        ExpectedError::Validation,
+                        "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]",
+                    ).await;
+                    let tools = if namespaced { &mut body["tools"][0]["tools"] } else { &mut body["tools"] };
+                    tools.as_array_mut().unwrap().reverse();
+                }
+            }
+
+            if is_chat {
+                body["stream"] = json!(false);
+                for choice in ["auto", "required"] {
+                    body["tool_choice"] = json!(choice);
+                    assert_openai_error(
+                        post_json(&svc, path, body.clone()).await,
+                        ExpectedError::Validation,
+                        "Conflicting definitions for tool 'lookup'",
+                    ).await;
+                }
+            }
+            assert!(svc.engine.take_requests().await.is_empty());
+
+            if !namespaced {
+                body["stream"] = json!(false);
+                let (other, choice) = if is_chat {
+                    (
+                        json!({"type":"function","function":{"name":"weather","parameters":{"type":"object"}}}),
+                        json!({"type":"function","function":{"name":"weather"}}),
+                    )
+                } else {
+                    (
+                        json!({"type":"function","name":"weather","parameters":{"type":"object"}}),
+                        json!({"type":"function","name":"weather"}),
+                    )
+                };
+                body["tools"].as_array_mut().unwrap().push(other);
+                body["tool_choice"] = choice;
+                let response = post_json(&svc, path, body).await;
+                let status = response.status();
+                let body = bounded(response.text()).await.unwrap();
+                assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(matches!(
+                    &requests[0].inner.tool_choice,
+                    Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Named(choice))
+                        if choice.function.name == "weather"
+                ));
+            }
+        }
+        let mut first = first;
+        let mut second = second;
+        first["type"] = json!("function");
+        second["type"] = json!("function");
+        for streaming in [false, true] {
+            let response = post_json(&svc, "/v1/responses", json!({
+                "model":MODEL,"input":"look up the record","stream":streaming,
+                "tools":[
+                    {"type":"namespace","name":"cities","description":"Cities","tools":[first]},
+                    {"type":"namespace","name":"orders","description":"Orders","tools":[second]}
+                ],
+                "tool_choice":"auto"
+            })).await;
+            let status = response.status();
+            let body = bounded(response.text()).await.unwrap();
+            assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let tools = requests[0].inner.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 2);
+            assert_ne!(tools[0].function.name, tools[1].function.name);
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }).await;
+}
+
 #[derive(Clone, Copy)]
 enum ExpectedError {
     Validation,
