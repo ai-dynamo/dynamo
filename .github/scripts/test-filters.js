@@ -61,6 +61,16 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'tests/frontend/test_strict_schema_upgrade.py',
+    expect: { core: true, deploy: true, dgdr: false, operator: false },
+    desc: 'upgrade acceptance changes run the N-2 deployment suite'
+  },
+  {
+    file: 'tests/frontend/conftest.py',
+    expect: { core: true, deploy: true, dgdr: false, operator: false },
+    desc: 'upgrade acceptance options keep N-2 deployment coverage'
+  },
+  {
     file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
     expect: { sidecar_trtllm_image: true },
     desc: 'the video fixture triggers the nightly harness checksum tests'
