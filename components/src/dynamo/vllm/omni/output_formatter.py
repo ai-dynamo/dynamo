@@ -73,7 +73,7 @@ from dynamo.common.protocols.image_protocol import (
     NvImagesResponse,
 )
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
-from dynamo.common.storage import upload_to_fs
+from dynamo.common.storage import remove_from_fs, upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import (
@@ -348,6 +348,7 @@ class DiffusionFormatter:
         Returns:
             Dict[str, Any] | None: Completed response, or a failed response for
                 invalid media metadata, mismatched durations, or encoding errors.
+                A failed response removes videos this call already uploaded.
 
         Raises:
             ValueError: If the response or output format is unsupported.
@@ -362,6 +363,7 @@ class DiffusionFormatter:
             raise ValueError(
                 f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
             )
+        uploaded_paths: list[str] = []
         try:
             start_time = time.time()
             multimodal_output = multimodal_output or {}
@@ -444,6 +446,7 @@ class DiffusionFormatter:
                         video_bytes,
                         self._media_http_url,
                     )
+                    uploaded_paths.append(filename)
                 data.append(video_data)
 
             return NvVideosResponse(
@@ -458,6 +461,7 @@ class DiffusionFormatter:
             ).model_dump()
         except Exception as e:
             logger.error("Failed to encode video for request %s: %s", request_id, e)
+            await remove_from_fs(self._media_fs, uploaded_paths, request_id)
             return NvVideosResponse(
                 id=request_id,
                 object="video",
@@ -871,6 +875,9 @@ class DiffusionFormatter:
             response_format: ``"url"`` or ``"b64_json"`` output representation.
             output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
+        If any image fails to encode or upload, images this call already
+        uploaded are removed before the error is re-raised.
+
         Returns:
             list: Encoded data URLs or uploaded media URLs.
 
@@ -886,34 +893,43 @@ class DiffusionFormatter:
             else {}
         )
         outlist = []
-        for img in images:
-            buf = BytesIO()
-            encoded_image = img
-            if image_encoder == "JPEG":
-                has_transparency = "transparency" in img.info
-                if img.mode not in ("L", "RGB") or has_transparency:
-                    if "A" in img.getbands() or has_transparency:
-                        rgba = img.convert("RGBA")
-                        encoded_image = Image.new("RGB", rgba.size, "white")
-                        encoded_image.paste(rgba, mask=rgba.getchannel("A"))
-                    else:
-                        encoded_image = img.convert("RGB")
-            encoded_image.save(buf, format=image_encoder, **save_kwargs)
-            image_bytes = buf.getvalue()
-            if response_format == "url":
-                url = await upload_to_fs(
-                    self._media_fs,
-                    f"images/{request_id}/{uuid.uuid4()}.{file_extension}",
-                    image_bytes,
-                    self._media_http_url,
-                )
-                outlist.append(url)
-            elif response_format == "b64_json" or response_format is None:
-                outlist.append(
-                    f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
-                )
-            else:
-                raise ValueError(f"Invalid response format: {response_format}")
+        uploaded_paths: list[str] = []
+        try:
+            for img in images:
+                buf = BytesIO()
+                encoded_image = img
+                if image_encoder == "JPEG":
+                    has_transparency = "transparency" in img.info
+                    if img.mode not in ("L", "RGB") or has_transparency:
+                        if "A" in img.getbands() or has_transparency:
+                            rgba = img.convert("RGBA")
+                            encoded_image = Image.new("RGB", rgba.size, "white")
+                            encoded_image.paste(rgba, mask=rgba.getchannel("A"))
+                        else:
+                            encoded_image = img.convert("RGB")
+                encoded_image.save(buf, format=image_encoder, **save_kwargs)
+                image_bytes = buf.getvalue()
+                if response_format == "url":
+                    storage_path = (
+                        f"images/{request_id}/{uuid.uuid4()}.{file_extension}"
+                    )
+                    url = await upload_to_fs(
+                        self._media_fs,
+                        storage_path,
+                        image_bytes,
+                        self._media_http_url,
+                    )
+                    uploaded_paths.append(storage_path)
+                    outlist.append(url)
+                elif response_format == "b64_json" or response_format is None:
+                    outlist.append(
+                        f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+                    )
+                else:
+                    raise ValueError(f"Invalid response format: {response_format}")
+        except Exception:
+            await remove_from_fs(self._media_fs, uploaded_paths, request_id)
+            raise
         return outlist
 
 

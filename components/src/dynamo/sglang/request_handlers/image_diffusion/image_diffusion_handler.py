@@ -21,7 +21,7 @@ from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
 from dynamo.common.protocols.request_parsing import parse_media_request
-from dynamo.common.storage import upload_to_fs
+from dynamo.common.storage import remove_from_fs, upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
 from dynamo.sglang.media_protocol import SGLangCreateImageRequest
@@ -184,7 +184,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         except Exception:
             # The whole batch fails: remove files already uploaded so a
             # failed request leaves no orphaned media behind.
-            await self._cleanup_uploads(uploaded_paths)
+            await remove_from_fs(self.fs, uploaded_paths, context_id)
             raise
 
         response = NvImagesResponse(created=int(time.time()), data=image_data)
@@ -331,14 +331,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         url = await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
         return url, storage_path
-
-    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
-        """Best-effort removal of uploaded files after a failed batch."""
-        for path in storage_paths:
-            try:
-                await asyncio.to_thread(self.fs.rm, path)
-            except Exception:
-                logger.warning("Failed to clean up uploaded file %s", path)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

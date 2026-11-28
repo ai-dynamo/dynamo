@@ -15,7 +15,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dynamo.common.storage import get_fs
+from dynamo.common.storage import get_fs, remove_from_fs
+from dynamo.common.storage import upload_to_fs as real_upload_to_fs
 from dynamo.common.utils.output_modalities import RequestType
 
 try:
@@ -244,6 +245,54 @@ class TestDiffusionFormatterPrepareImages:
             img.save = lambda b, **kwargs: b.write(b"px")
         results = await f._prepare_images(imgs, "req-1", "b64_json")
         assert len(results) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["upload", "encode"])
+    async def test_partial_url_batch_failure_removes_earlier_uploads(
+        self, tmp_path, failure
+    ):
+        f = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            media_http_url=None,
+        )
+        images = _generated_images(2)
+        upload_calls = 0
+
+        async def upload_then_fail(*args, **kwargs):
+            nonlocal upload_calls
+            upload_calls += 1
+            if upload_calls == 2:
+                raise OSError("upload failed")
+            url = await real_upload_to_fs(*args, **kwargs)
+            assert (tmp_path / args[1]).is_file()
+            return url
+
+        if failure == "encode":
+            images[1] = MagicMock()
+            images[1].save.side_effect = OSError("encode failed")
+
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.upload_to_fs",
+                side_effect=upload_then_fail,
+            ),
+            patch(
+                "dynamo.vllm.omni.output_formatter.remove_from_fs",
+                wraps=remove_from_fs,
+            ) as cleanup,
+        ):
+            with pytest.raises(OSError, match=f"{failure} failed"):
+                await f._prepare_images(images, "req-partial", "url")
+
+        assert upload_calls == (2 if failure == "upload" else 1)
+        cleanup.assert_awaited_once()
+        cleanup_fs, uploaded, cleanup_request_id = cleanup.await_args.args
+        assert cleanup_fs is f._media_fs
+        assert cleanup_request_id == "req-partial"
+        assert len(uploaded) == 1
+        assert uploaded[0].startswith("images/req-partial/")
+        assert not any((tmp_path / "images" / "req-partial").iterdir())
 
 
 def _generated_images(count: int, size: tuple[int, int] = (8, 8)) -> list:
@@ -730,6 +779,45 @@ class TestDiffusionFormatterVideo:
                 response_format="b64_json",
                 output_format="webm",
             )
+
+    @pytest.mark.asyncio
+    async def test_partial_url_batch_failure_removes_earlier_videos(self, tmp_path):
+        f = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            media_http_url=None,
+        )
+        videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
+        encode_calls = 0
+
+        def encode_then_fail(*args, **kwargs):
+            nonlocal encode_calls
+            encode_calls += 1
+            if encode_calls == 2:
+                assert (tmp_path / "videos" / "req-partial" / "0.mp4").is_file()
+                raise OSError("encode failed")
+            return b"vp9-mp4"
+
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                side_effect=encode_then_fail,
+            ),
+            patch(
+                "dynamo.vllm.omni.output_formatter.remove_from_fs",
+                wraps=remove_from_fs,
+            ) as cleanup,
+        ):
+            result = await f._encode_video(
+                videos, "req-partial", fps=16, response_format="url"
+            )
+
+        assert result["status"] == "failed"
+        assert "encode failed" in result["error"]
+        cleanup.assert_awaited_once_with(
+            f._media_fs, ["videos/req-partial/0.mp4"], "req-partial"
+        )
+        assert not any((tmp_path / "videos" / "req-partial").iterdir())
 
     @pytest.mark.asyncio
     async def test_normalizes_direct_fchw_torch_video(self):
