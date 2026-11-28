@@ -6,6 +6,7 @@
 No GPU, no vllm_omni — uses mock StageEngine matching AsyncOmni.generate() signature.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -79,6 +80,12 @@ class _ErrorEngine:
 class _MockContext:
     def id(self):
         return "test-req-id"
+
+    def is_stopped(self):
+        return False
+
+    async def async_killed_or_stopped(self):
+        await asyncio.Event().wait()
 
 
 def _make_stage_config(**overrides):

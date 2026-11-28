@@ -14,7 +14,7 @@ from dynamo.common.utils.output_modalities import RequestType
 from dynamo.llm.exceptions import InvalidArgument
 
 try:
-    from dynamo.vllm.omni import stage_router
+    from dynamo.vllm.omni import stage_router, stage_worker
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -41,12 +41,30 @@ class _StageClient:
     def __init__(self, handler):
         self._handler = handler
 
-    async def round_robin(self, request):
+    async def round_robin(self, request, context=None):
         async def _gen():
             payload = await self._handler(request)
             yield _Chunk(payload)
 
         return _gen()
+
+
+class _Context:
+    def __init__(self):
+        self._stopped = asyncio.Event()
+
+    def id(self):
+        return "ctx-id"
+
+    def is_stopped(self):
+        return self._stopped.is_set()
+
+    async def async_killed_or_stopped(self):
+        await self._stopped.wait()
+        return True
+
+    def stop_generating(self):
+        self._stopped.set()
 
 
 def _make_stage_cfg(stage_id: int):
@@ -188,7 +206,7 @@ async def test_generate_passes_stage_connector_refs_opaquely():
         with patch.object(
             stage_router, "shm_deserialize", return_value=SimpleNamespace()
         ):
-            [c async for c in router.generate({"prompt": "x"}, None)]
+            [c async for c in router.generate({"prompt": "x"}, _Context())]
 
     # Router must forward stage_connector_refs and original_prompt verbatim — never inspect them.
     assert stage1_received["stage_connector_refs"] == {
@@ -245,7 +263,9 @@ async def test_generate_concurrent_requests_have_independent_connector_refs():
                 with patch.object(
                     stage_router, "shm_deserialize", return_value=SimpleNamespace()
                 ):
-                    return [c async for c in router.generate({"prompt": "x"}, None)]
+                    return [
+                        c async for c in router.generate({"prompt": "x"}, _Context())
+                    ]
 
     await asyncio.gather(run_one("req-A"), run_one("req-B"))
 
@@ -276,10 +296,242 @@ async def test_generate_stage_error_stops_pipeline():
 
     p1, p2 = _patched_generate(router, {"prompt": "x"})
     with p1, p2:
-        chunks = [c async for c in router.generate({"prompt": "x"}, None)]
+        chunks = [c async for c in router.generate({"prompt": "x"}, _Context())]
 
     assert chunks == [{"error": "thinker exploded", "finished": True}]
     assert not stage1_called
+
+
+class _WorkerClient:
+    """Runs a real OmniStageWorker. Like the runtime, the stage request gets the
+    caller's context when one is passed and a fresh, never-stopped one otherwise."""
+
+    def __init__(self, worker):
+        self._worker = worker
+
+    async def round_robin(self, request, context=None):
+        async def _gen():
+            async for out in self._worker.generate(request, context or _Context()):
+                yield _Chunk(out)
+
+        return _gen()
+
+
+class _StepEngine:
+    """AsyncOmni stand-in: runs up to `steps` steps; abort() ends generation early."""
+
+    engine = None
+
+    def __init__(self, steps, on_step):
+        self.steps, self.on_step = steps, on_step
+        self.ran, self.aborted, self.abort_done = 0, [], False
+
+    async def generate(self, prompt, request_id="", *, sampling_params_list=None):
+        while self.ran < self.steps and not self.aborted:
+            self.ran += 1
+            self.on_step(self.ran)
+            await asyncio.sleep(0)
+        yield SimpleNamespace(request_id=request_id)
+
+    async def abort(self, request_id):
+        self.aborted.append(request_id)
+        for _ in range(3):  # the engine-side abort takes a few loop turns
+            await asyncio.sleep(0)
+        self.abort_done = True
+
+    async def get_tokenizer(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_aborts_stage_engine_and_skips_later_stages():
+    """Issue #19347: a disconnect mid-stage aborts that stage's engine and the
+    router neither dispatches later stages nor formats output."""
+    context = _Context()
+    engine = _StepEngine(
+        steps=1000, on_step=lambda n: n == 3 and context.stop_generating()
+    )
+    worker = stage_worker.OmniStageWorker(
+        engine=engine,
+        stage_config=SimpleNamespace(stage_type="llm", engine_input_source=[]),
+        connectors={},
+        stage_id=0,
+    )
+    stage1_called = False
+
+    async def stage1_handler(request):
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _WorkerClient(worker),
+            "stage1": _StageClient(stage1_handler),
+        },
+    )
+    parsed = {
+        "engine_inputs": "x",
+        "original_prompt": "x",
+        "sampling_params_list": None,
+    }
+
+    p1, p2 = _patched_generate(router, {"prompt": "x"})
+    with (
+        p1,
+        p2,
+        patch.object(
+            stage_worker, "parse_omni_request", AsyncMock(return_value=parsed)
+        ),
+        patch.object(stage_worker, "shm_write_bytes", return_value={"name": "req-1"}),
+        patch.object(stage_worker, "serialize_obj", return_value=b""),
+    ):
+        chunks = [c async for c in router.generate({"prompt": "x"}, context)]
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert engine.aborted == ["req-1"]
+    assert engine.abort_done
+    assert engine.ran < engine.steps
+    assert not stage1_called
+    router._formatter.format.assert_not_awaited()
+    assert chunks == [{"error": "Request cancelled", "finished": True}]
+
+
+@pytest.mark.asyncio
+async def test_stopped_context_skips_next_stage_when_cancel_frame_is_lost():
+    """If the stage's cancel frame never arrives, the router still must not
+    dispatch the next stage once the client is gone."""
+    context = _Context()
+    stage1_called = False
+
+    async def stage0_handler(request):
+        context.stop_generating()
+        return {}  # stream closed with no error frame
+
+    async def stage1_handler(request):
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+    )
+
+    p1, p2 = _patched_generate(router, {"prompt": "x"})
+    with p1, p2:
+        chunks = [c async for c in router.generate({"prompt": "x"}, context)]
+
+    assert not stage1_called
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_stage_worker_skips_engine_when_already_stopped():
+    """A stage request that arrives already stopped must not start the engine:
+    an abort sent before the engine registers the request would be lost."""
+    context = _Context()
+    context.stop_generating()
+    engine = _StepEngine(steps=1000, on_step=lambda n: None)
+    worker = stage_worker.OmniStageWorker(
+        engine=engine,
+        stage_config=SimpleNamespace(stage_type="llm", engine_input_source=[]),
+        connectors={},
+        stage_id=0,
+    )
+    parsed = {
+        "engine_inputs": "x",
+        "original_prompt": "x",
+        "sampling_params_list": None,
+    }
+
+    with patch.object(
+        stage_worker, "parse_omni_request", AsyncMock(return_value=parsed)
+    ):
+        chunks = [c async for c in worker.generate({"request_id": "req-1"}, context)]
+
+    assert chunks == [{"error": "Request cancelled", "finished": True}]
+    assert engine.ran == 0
+
+
+@pytest.mark.asyncio
+async def test_stage_worker_skips_upstream_registration_when_stopped_during_fetch():
+    """A stop while fetching stage inputs must return before code2wav's request
+    is registered with the output processor, which only generate cleans up."""
+    context = _Context()
+    engine = _StepEngine(steps=1000, on_step=lambda n: None)
+    worker = stage_worker.OmniStageWorker(
+        engine=engine,
+        stage_config=SimpleNamespace(stage_type="llm", engine_input_source=[]),
+        connectors={},
+        stage_id=1,
+    )
+    upstream = SimpleNamespace(engine_outputs=[SimpleNamespace(outputs=[object()])])
+
+    async def fetch(refs, request_id):
+        context.stop_generating()
+        return [upstream]
+
+    with (
+        patch.object(worker, "_fetch_stage_inputs", side_effect=fetch),
+        patch.object(worker, "_build_engine_core_request_from_upstream") as build,
+    ):
+        chunks = [
+            c
+            async for c in worker.generate(
+                {"request_id": "req-1", "stage_connector_refs": {"0": {}}}, context
+            )
+        ]
+
+    build.assert_not_called()
+    assert chunks == [{"error": "Request cancelled", "finished": True}]
+    assert engine.ran == 0
+
+
+@pytest.mark.asyncio
+async def test_completed_stage_stops_watching_for_disconnect():
+    """A disconnect after the stage finished must not abort it (no leaked watcher)."""
+    context = _Context()
+    engine = _StepEngine(steps=2, on_step=lambda n: None)
+    worker = stage_worker.OmniStageWorker(
+        engine=engine,
+        stage_config=SimpleNamespace(stage_type="llm", engine_input_source=[]),
+        connectors={},
+        stage_id=0,
+    )
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _WorkerClient(worker)},
+    )
+    parsed = {
+        "engine_inputs": "x",
+        "original_prompt": "x",
+        "sampling_params_list": None,
+    }
+
+    p1, p2 = _patched_generate(router, {"prompt": "x"})
+    with (
+        p1,
+        p2,
+        patch.object(
+            stage_worker, "parse_omni_request", AsyncMock(return_value=parsed)
+        ),
+        patch.object(stage_worker, "shm_write_bytes", return_value={"name": "req-1"}),
+        patch.object(stage_worker, "serialize_obj", return_value=b""),
+        patch.object(stage_router, "shm_deserialize", return_value=SimpleNamespace()),
+    ):
+        [c async for c in router.generate({"prompt": "x"}, context)]
+
+    context.stop_generating()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert engine.ran == 2
+    assert engine.aborted == []
 
 
 # ── existing tests (formatting + error paths) ────────────
@@ -322,7 +574,7 @@ async def test_generate_delegates_formatting_to_output_formatter(nvext, expected
             with patch(
                 "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
             ):
-                chunks = [c async for c in router.generate(request, context=None)]
+                chunks = [c async for c in router.generate(request, context=_Context())]
 
     assert chunks == [{"data": [{"b64_json": "abc"}]}]
     mock_formatter.format.assert_awaited_once_with(
@@ -352,7 +604,7 @@ async def test_invalid_image_output_format_is_rejected_before_stage_call():
     request = {"prompt": "x", "output_format": "gif"}
 
     with pytest.raises(InvalidArgument, match="Unsupported output_format"):
-        [chunk async for chunk in router.generate(request, context=None)]
+        [chunk async for chunk in router.generate(request, context=_Context())]
 
     assert not stage_called
 
@@ -379,7 +631,7 @@ async def test_stage_router_rejects_edit_references_before_dispatch(
     )
     with pytest.raises(InvalidArgument) as error:
         async for _ in router.generate(
-            {"prompt": "edit", "input_reference": reference}, context=None
+            {"prompt": "edit", "input_reference": reference}, context=_Context()
         ):
             pytest.fail("Unsupported image edits must not yield a generation result")
 
@@ -405,7 +657,9 @@ async def test_generate_yields_error_when_no_shm_meta():
         return_value=(None, "chat"),
     ):
         with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
-            chunks = [c async for c in router.generate({"prompt": "x"}, context=None)]
+            chunks = [
+                c async for c in router.generate({"prompt": "x"}, context=_Context())
+            ]
 
     assert chunks == [{"error": "No SHM output from final stage", "finished": True}]
 
@@ -443,7 +697,7 @@ async def test_generate_forwards_raw_request_to_stage0():
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
-                [c async for c in router.generate(request, None)]
+                [c async for c in router.generate(request, _Context())]
 
     assert stage0_received["request_id"] == "req-raw"
     assert stage0_received["prompt"] == "a dog"
@@ -495,7 +749,7 @@ class TestStageRouterContextNormalization:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
-                [c async for c in router.generate(request, None)]
+                [c async for c in router.generate(request, _Context())]
 
         assert len(formatter_calls) == 1
         ctx = formatter_calls[0]
@@ -531,7 +785,7 @@ class TestStageRouterContextNormalization:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
-                [c async for c in router.generate(request, None)]
+                [c async for c in router.generate(request, _Context())]
 
         ctx = formatter_calls[0]
         assert ctx["response_format"] == "b64_json"
@@ -564,7 +818,7 @@ class TestStageRouterContextNormalization:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
-                [c async for c in router.generate(request, None)]
+                [c async for c in router.generate(request, _Context())]
 
         ctx = formatter_calls[0]
         assert ctx["response_format"] == "url"
@@ -597,7 +851,7 @@ class TestStageRouterContextNormalization:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
             ):
-                [c async for c in router.generate(request, None)]
+                [c async for c in router.generate(request, _Context())]
 
         ctx = formatter_calls[0]
         assert "response_format" not in ctx
