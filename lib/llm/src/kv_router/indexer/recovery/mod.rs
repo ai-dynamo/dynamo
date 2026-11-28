@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::discovery::KvSourceMembershipWatch;
+
 mod broker_zmq;
 mod direct_zmq;
 mod recovery_lane;
@@ -31,3 +37,17 @@ pub(crate) use worker_query_endpoint::{
 pub(crate) use worker_query_transport::RuntimeWorkerQueryTransport;
 #[cfg(test)]
 pub(crate) use worker_query_transport::WorkerQueryTransport;
+
+/// Waits for `delay`, a membership change, or cancellation, whichever comes first.
+/// Returns `false` on cancellation or a closed membership channel.
+async fn wait_for_retry(
+    delay: Duration,
+    membership_watch: &mut KvSourceMembershipWatch,
+    cancellation_token: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        _ = cancellation_token.cancelled() => false,
+        changed = membership_watch.changed() => changed.is_ok(),
+        _ = tokio::time::sleep(delay) => true,
+    }
+}
