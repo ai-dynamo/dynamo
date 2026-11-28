@@ -216,7 +216,9 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -225,6 +227,11 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
             "DYN_TOOL_CALL_PARSER": "hermes",
+            # Mitigation, cause unknown: on Blackwell (SM120) CI runners this
+            # config's first long request can stall mid-decode on vLLM's V2
+            # model runner, though other V2 configs decode it there. Drop once
+            # the cause is found.
+            "VLLM_USE_V2_MODEL_RUNNER": "0",
         },
         request_payloads=[
             *_aggregated_payloads(
