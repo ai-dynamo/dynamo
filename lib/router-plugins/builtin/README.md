@@ -10,6 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 | Kind | Type name | Source |
 |---|---|---|
 | Worker selection | `default`, `dynamo-default-cost-fn`, `kvcr` | `src/default/` |
+| Worker selection | `dynamo-prefill-chunk-table` | `src/default/chunk_table.rs` |
 | Worker selection | `dynamo-sticky-min-load` | `src/sticky_min_load.rs` |
 | Worker selection | `dynamo-two-tier-cost-fn` | `src/two_tier_cost_fn.rs` |
 | Worker selection | `random`, `round-robin`, `least-loaded` | `src/router_modes/` |

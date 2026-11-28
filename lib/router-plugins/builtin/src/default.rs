@@ -3,6 +3,7 @@
 
 //! The default KV policy, composed from a scorer and a picker using the public plugin API.
 
+mod chunk_table;
 mod kvcr;
 mod parameters;
 mod picker;
