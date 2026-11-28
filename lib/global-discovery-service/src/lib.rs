@@ -10,12 +10,16 @@
 //!
 //! [`backends`] implements those traits: registrations kept in memory or in
 //! a DynamoDB table, and the EndpointSlices that SIG Multicluster (MCS)
-//! imports, joined with registrations.
+//! imports, joined with registrations. [`peers`] shares registrations kept in
+//! memory between service instances.
 
 pub mod backends;
+pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 
 pub use backends::clock::{Clock, ManualClock, SystemClock};
 pub use backends::dynamodb::{ConnectError, DynamoDbConfig, DynamoDbPoolStore};
+pub use backends::http::HttpRegistrationSource;
+pub use peers::{MIN_LEASE_HEARTBEATS, PeerSync};
 pub use service::{PoolDiscoveryBackend, Tls, routes, serve};

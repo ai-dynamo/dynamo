@@ -323,8 +323,10 @@ impl Join {
                     "MCS lists a Ready PoolRelay for this pool, but the pool has no live \
                      registration here, so it is not listed. Either its lease lapsed while MCS \
                      still shows a stale Ready endpoint, as when the pool's cluster loses contact \
-                     with the MCS implementation, or its PoolRelays do not call POST /pools on \
-                     this service with this key."
+                     with the MCS implementation, or its registration does not reach this \
+                     instance: check that its PoolRelays call POST /pools with this key, and that \
+                     this instance gets the registrations the other discovery instances receive, \
+                     through a shared DynamoDB table or --peer-service."
                 );
             } else {
                 tracing::warn!(

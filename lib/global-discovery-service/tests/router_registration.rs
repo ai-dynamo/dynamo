@@ -35,6 +35,7 @@ async fn start(store: Arc<RouterStore>) -> (GlobalDiscoveryClient, String, Cance
             pools: pools.clone(),
             routers: store.clone(),
             registrar: Some(pools),
+            sharing: None,
             router_registrar: Some(store),
         },
         None,
