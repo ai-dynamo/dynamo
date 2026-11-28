@@ -183,6 +183,7 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 }
 
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
+	sourcePath                        *field.Path
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
@@ -193,7 +194,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
-// Options are supplied by the owning resource.
+// All served versions use this storage-version owner after conversion.
+// options.sourcePath must not be nil; it selects submitted-version diagnostics only.
 //
 //nolint:gocyclo // Shared validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
@@ -333,9 +335,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		}
 	}
-	// Validate the represented eppConfig once using the submitted API version's field path.
-	if spec.EPPConfig != nil && !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
+	// Conversion preserves the config-map reference for every source version.
+	if spec.EPPConfig != nil {
+		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, options.sourcePath.Child("eppConfig"))...)
 	}
 
 	if spec.FrontendSidecar != nil {
@@ -369,25 +371,25 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
-	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
+	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.sourcePath, options.grovePathway)...)
 
-	// Validate runtime compatibility against the source-version fields.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) && !spec.IsLPX() {
-		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+	// Validate the converted runtime contract once, regardless of the submitted version.
+	if !v.ratchetRuntimeVersion && !spec.IsLPX() {
+		image, imagePath := runtimeVersionImageAndPath(spec, options.sourcePath, v.runtimeVersionSource)
 		if err := eppRuntimeCompatibilityError(
 			eppRuntimeContractV1Beta1(spec, image),
-			fldPath.Child("eppConfig"),
+			options.sourcePath.Child("eppConfig"),
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
 		if dynamo.HasRolePodTemplates(spec) {
-			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, fldPath)...)
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, options.sourcePath)...)
 		} else if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(spec.ComponentType)) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
+				options.sourcePath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
@@ -396,9 +398,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	return allErrs
 }
 
+// validateSharedExperimentalSpec validates converted experimental children for every served version.
+// spec, fldPath, and sourcePath must not be nil; sourcePath selects diagnostics only.
 func (v *sharedValidation) validateSharedExperimentalSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	sourcePath *field.Path,
 	grovePathway bool,
 ) field.ErrorList {
 	if spec.Experimental == nil {
@@ -407,6 +412,10 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 
 	allErrs := field.ErrorList{}
 	experimentalPath := fldPath.Child("experimental")
+	failoverPath := experimentalPath.Child("failover")
+	if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+		failoverPath = sourcePath.Child("failover")
+	}
 	rolePodTemplates := dynamo.HasRolePodTemplates(spec)
 
 	// Reject layouts whose launch contract still requires operator-generated role commands.
@@ -427,6 +436,7 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 		spec.Experimental,
 		experimentalPath,
 		experimentalSpecValidationOptions{
+			failoverPath:     failoverPath,
 			componentType:    spec.ComponentType,
 			resources:        dynamo.GetMainContainerResources(spec),
 			containers:       podTemplateContainers(spec.PodTemplate),
@@ -824,15 +834,21 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	return allErrs
 }
 
-// validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
+// validateEPPConfig validates converted Go-EPP settings for every source version.
+// The shared check also covers Alpha requests, which do not run Beta CEL.
+// config and fldPath must not be nil.
 func (v *sharedValidation) validateEPPConfig(
 	config *nvidiacomv1beta1.EPPConfig,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if config.ConfigMapRef == nil || config.ConfigMapRef.Name != "" {
-		return nil
+	allErrs := field.ErrorList{}
+	if (config.ConfigMapRef == nil) == (config.Config == nil) {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "exactly one of configMapRef or config is required"))
 	}
-	return field.ErrorList{field.Required(fldPath.Child("configMapRef", "name"), "is required")}
+	if config.ConfigMapRef != nil && config.ConfigMapRef.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("configMapRef", "name"), "is required"))
+	}
+	return allErrs
 }
 
 // validateTopologyConstraint validates constraint. constraint, specConstraint, and fldPath must not be nil.
@@ -871,6 +887,7 @@ func (v *sharedValidation) validateTopologyConstraint(
 }
 
 type experimentalSpecValidationOptions struct {
+	failoverPath     *field.Path
 	componentType    nvidiacomv1beta1.ComponentType
 	resources        corev1.ResourceRequirements
 	containers       []corev1.Container
@@ -878,7 +895,7 @@ type experimentalSpecValidationOptions struct {
 	rolePodTemplates bool
 }
 
-// validateExperimentalSpec validates experimental. experimental and fldPath must not be nil.
+// validateExperimentalSpec validates experimental. experimental, fldPath, and options.failoverPath must not be nil.
 func (v *sharedValidation) validateExperimentalSpec(
 	experimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
@@ -894,13 +911,18 @@ func (v *sharedValidation) validateExperimentalSpec(
 			options.containers,
 		)...)
 	}
-	if experimental.Failover != nil && !options.rolePodTemplates {
+	if experimental.Failover != nil {
+		// Role templates have no single component GPU allocation to validate.
+		var resources *corev1.ResourceRequirements
+		if !options.rolePodTemplates {
+			resources = &options.resources
+		}
 		allErrs = append(allErrs, v.validateFailoverSpec(
 			experimental.Failover,
-			fldPath.Child("failover"),
+			options.failoverPath,
 			experimental.GPUMemoryService,
 			options.componentType,
-			options.resources,
+			resources,
 		)...)
 	}
 	if experimental.Grove != nil {
@@ -987,13 +1009,14 @@ func (v *sharedValidation) validateGPUMemoryServiceSpec(
 }
 
 // validateFailoverSpec validates failover. failover and fldPath must not be nil.
-// gms may be nil because failover validates that sibling relationship.
+// gms may be nil. Nil resources means role templates have no single component
+// GPU allocation; scalar, sibling-mode, and component-type checks still run.
 func (v *sharedValidation) validateFailoverSpec(
 	failover *nvidiacomv1beta1.FailoverSpec,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 	componentType nvidiacomv1beta1.ComponentType,
-	resources corev1.ResourceRequirements,
+	resources *corev1.ResourceRequirements,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	failoverMode := effectiveGMSMode(failover.Mode)
@@ -1010,18 +1033,28 @@ func (v *sharedValidation) validateFailoverSpec(
 		))
 	}
 
+	if failoverMode == nvidiacomv1beta1.GMSModeIntraPod && failover.NumShadows > 1 {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("numShadows"),
+			failover.NumShadows,
+			`is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
+		))
+	}
+
 	if failoverMode == nvidiacomv1beta1.GMSModeInterPod {
-		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
-		if err != nil {
-			allErrs = append(allErrs, field.Forbidden(
-				fldPath,
-				fmt.Sprintf("failed to read main-container GPU limit: %v", err),
-			))
-		} else if gpuCount < 1 {
-			allErrs = append(allErrs, field.Forbidden(
-				fldPath,
-				"GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
-			))
+		if resources != nil {
+			gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(*resources)
+			if err != nil {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath,
+					fmt.Sprintf("failed to read main-container GPU limit: %v", err),
+				))
+			} else if gpuCount < 1 {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath,
+					"GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
+				))
+			}
 		}
 
 		switch componentType {
@@ -1109,16 +1142,17 @@ func (v *sharedValidation) validateComponentCheckpointJobConfig(
 }
 
 // validateDynamoComponentDeploymentSharedSpecUpdate validates a component update.
-// newComponent, oldComponent, and fldPath must not be nil; ownerKind.Kind must not be empty.
+// newComponent, oldComponent, fldPath, and sourcePath must not be nil; ownerKind.Kind must not be empty.
+// Converted component values own all shared update rules; sourcePath selects diagnostics only.
 //
 //nolint:gocyclo // Update validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	sourcePath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
-	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -1213,13 +1247,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Experimental,
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
-			experimentalSpecUpdateValidationOptions{
-				ownerKind:                        ownerKind,
-				componentType:                    newComponent.ComponentType,
-				resources:                        dynamo.GetMainContainerResources(newComponent),
-				containers:                       podTemplateContainers(newComponent.PodTemplate),
-				validateGPUMemoryServiceNewState: validateGPUMemoryServiceNewState,
-			},
+			ownerKind,
 		)...)
 	} else if oldComponent.Experimental != nil {
 		oldGMS := gpuMemoryServiceForExperimental(oldComponent.Experimental)
@@ -1247,17 +1275,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
-	// Ratchet only complete, unchanged source-version runtime contract violations.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) && !newComponent.IsLPX() {
-		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
-		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+	// Ratchet the complete converted inputs, including normalized component types.
+	if !newComponent.IsLPX() {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, sourcePath, v.runtimeVersionSource)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, sourcePath, v.runtimeVersionSource)
 		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
 
 		if dynamo.HasRolePodTemplates(newComponent) {
 			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdate(
 				newComponent,
 				oldComponent,
-				fldPath,
+				sourcePath,
 			)...)
 		} else if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -1265,7 +1293,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
 			(newImage != oldImage || overrideChanged || newComponent.ComponentType != oldComponent.ComponentType) {
 			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
+				sourcePath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
@@ -1274,7 +1302,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			eppRuntimeContractV1Beta1(newComponent, newImage),
 			eppRuntimeContractV1Beta1(oldComponent, oldImage),
 			apiequality.Semantic.DeepEqual(newComponent.EPPConfig, oldComponent.EPPConfig),
-			fldPath.Child("eppConfig"),
+			sourcePath.Child("eppConfig"),
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
@@ -1402,12 +1430,12 @@ func validateComponentRolesUpdate(
 		)...)
 	}
 	if len(newNames) != len(oldByName) {
-		allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+		allErrs = append(allErrs, field.Forbidden(fldPath, "role names are immutable after creation"))
 		return allErrs
 	}
 	for name := range oldByName {
 		if _, exists := newNames[name]; !exists {
-			allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+			allErrs = append(allErrs, field.Forbidden(fldPath, "role names are immutable after creation"))
 			break
 		}
 	}
@@ -1479,40 +1507,22 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 	)}
 }
 
-type experimentalSpecUpdateValidationOptions struct {
-	ownerKind                        schema.GroupKind
-	componentType                    nvidiacomv1beta1.ComponentType
-	resources                        corev1.ResourceRequirements
-	containers                       []corev1.Container
-	validateGPUMemoryServiceNewState bool
-}
-
 // validateExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and options.ownerKind.Kind must not be empty.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
-	options experimentalSpecUpdateValidationOptions,
+	ownerKind schema.GroupKind,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
-	if newGMS != nil && options.validateGPUMemoryServiceNewState {
-		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
-			newGMS,
-			fldPath.Child("gpuMemoryService"),
-			options.componentType,
-			options.resources,
-			options.containers,
-		)...)
-	}
-
 	oldGMS := gpuMemoryServiceForExperimental(oldExperimental)
 	if isInterPodGMS(newGMS) != isInterPodGMS(oldGMS) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("gpuMemoryService", "mode"),
 			k8sptr.Deref(newGMS, nvidiacomv1beta1.GPUMemoryServiceSpec{}).Mode,
-			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
+			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 
@@ -1522,7 +1532,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover"),
 			newFailover,
-			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
+			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 	if isInterPodFailover(newFailover) && isInterPodFailover(oldFailover) &&
@@ -1530,7 +1540,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", options.ownerKind.Kind),
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 
@@ -1540,13 +1550,13 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			newExperimental.Grove,
 			oldGrove,
 			fldPath.Child("grove"),
-			options.ownerKind,
+			ownerKind,
 		)...)
 	} else if oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("grove", "forceScalingGroup"),
 			nil,
-			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", options.ownerKind.Kind),
+			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 	return allErrs

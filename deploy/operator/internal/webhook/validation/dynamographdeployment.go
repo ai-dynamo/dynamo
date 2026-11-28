@@ -77,50 +77,34 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
 
-// Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
+// Validate validates current state on a converted storage-version DynamoGraphDeployment.
+// Shared rules run for every source API; Alpha validation only supplements inputs
+// unavailable after conversion.
 // ctx and deployment must not be nil.
 func (v *DynamoGraphDeploymentValidator) Validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
-	return v.validate(ctx, deployment, nil, runtimeVersionSource, false)
-}
-
-func (v *DynamoGraphDeploymentValidator) validate(
-	ctx context.Context,
-	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
-	oldDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
-	runtimeVersionSource runtimeVersionValidationSource,
-	ratchetRuntimeVersion bool,
-) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		ctx:                   ctx,
-		mgr:                   v.mgr,
-		runtimeVersionSource:  runtimeVersionSource,
-		ratchetRuntimeVersion: ratchetRuntimeVersion,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSource,
 	}
 
-	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
+	allErrs := validation.validateDynamoGraphDeployment(deployment, nil)
 	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-
-	// Alpha source lists retain their complete ordered old values for ratcheting.
-	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
-	if oldDeployment != nil && validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
-		if err != nil {
-			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
-		}
-	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, nil)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
 
-// ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
+// ValidateUpdate performs complete validation and compares old and new v1beta1 DGD objects.
+// Shared rules consume converted values for every source API. Alpha validation is
+// supplemental; submitted field paths do not change shared rule ownership.
 // ctx, oldDGD, and newDGD must not be nil. runtimeVersionSource identifies the request's source API.
 // If userInfo is nil, replica changes for DGDSA-enabled components fail closed.
 func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
@@ -140,16 +124,25 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		operatorPrincipal:     operatorPrincipal,
 	}
 
-	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
-	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
-		if err != nil {
-			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
-		}
-		oldAlpha, err := alphaDynamoGraphDeploymentForValidation(oldDGD)
+	allErrs := validation.validateDynamoGraphDeployment(newDGD, oldDGD)
+	newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+	}
+
+	// Alpha source lists retain their complete ordered old values for ratcheting.
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if validation.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDGD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 		}
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(newAlpha, oldAlpha)...)
+
+	// New-state failures must not hide independent update errors.
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)...)
+	if validation.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
 		allErrs = append(allErrs, validation.validateDynamoGraphDeploymentSpecUpdateV1alpha1(
 			&newAlpha.Spec,
 			&oldAlpha.Spec,
@@ -166,9 +159,8 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 // for an arbitrary period, so durable controller-owned metadata still has to be
 // protected, but any rule that judges the new object on its own can refuse the
 // cleanup update a legacy object needs and leave it impossible to finalize. The
-// spec update traversal is not purely comparative: it validates new-state GPU
-// memory service settings, and the v1alpha1 compatibility view returns a hard
-// error for an object that cannot round-trip.
+// v1alpha1 compatibility view returns a hard error for an object that cannot
+// round-trip.
 //
 // ctx, oldDGD, and newDGD must not be nil. If userInfo is nil, provider
 // materialization fails closed.
@@ -468,10 +460,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
 		)...)
 
+		// Shared semantics stay on converted values; only diagnostics use the source collection.
+		sourcePath := componentPath
+		if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+			sourcePath = fldPath.Child("services").Key(component.ComponentName)
+		}
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				sourcePath:                        sourcePath,
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
@@ -482,9 +480,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			},
 		)...)
 	}
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
-		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath)...)
-	}
+	allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath, v.runtimeVersionSource)...)
 
 	// Validate conductor requirements on the converted graph.
 	for index := range spec.Components {
@@ -507,7 +503,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	// The source-alpha recursion owns its differently named root envs field.
-	if !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+	if v.runtimeVersionSource != runtimeVersionSourceV1Alpha1 {
 		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"), opts.orderedEnvironment)...)
 	}
 
@@ -923,33 +919,24 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
 		oldComponent, exists := oldComponents[newComponent.ComponentName]
-
-		// Enforce the same LPX gate when the stateful validator is called independently.
-		allErrs = append(allErrs, lpxComponentGateErrors(
-			v.ctx, newComponent, oldComponent, componentsPath.Index(i), v.runtimeVersionSource,
-		)...)
 		if !exists {
 			continue
 		}
 
-		// Ratchet the shared multinode type contract because DGD updates skip the stateless traversal.
-		allErrs = append(allErrs, validateMultinodeComponentType(
-			newComponent,
-			oldComponent,
-			componentsPath.Index(i).Child("multinode"),
-		)...)
+		// Preserve submitted field paths without reimplementing shared rules in Alpha.
+		sourcePath := componentsPath.Index(i)
+		if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+			sourcePath = fldPath.Child("services").Key(newComponent.ComponentName)
+		}
 
-		// The stateless DGD validation run before this update traversal validates
-		// every complete role template. The legacy update path has only one
-		// component-level resource shape.
-		validateGPUMemoryServiceNewState := !dynamo.HasRolePodTemplates(newComponent)
+		// Compare existing components after the complete new-state traversal.
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
 			componentsPath.Index(i),
+			sourcePath,
 			canModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
-			validateGPUMemoryServiceNewState,
 		)...)
 		allErrs = append(allErrs, v.validateDynamoGraphDeploymentSharedSpecUpdate(
 			newComponent,

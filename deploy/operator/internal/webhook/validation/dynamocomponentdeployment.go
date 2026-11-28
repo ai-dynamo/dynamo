@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"strings"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
@@ -78,6 +77,8 @@ func (v *DynamoComponentDeploymentValidator) validate(
 
 // ValidateUpdate performs complete validation of an updated v1beta1 DCD and
 // compares its state with the previous object.
+// Shared rules run on converted values for every source API. Alpha validation
+// supplements source-only inputs and information lost by conversion, never shared semantics.
 // ctx, oldDCD, and newDCD must not be nil. runtimeVersionSource identifies the request's source API.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
@@ -98,25 +99,15 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	var oldAlpha *nvidiacomv1alpha1.DynamoComponentDeployment
 	var oldEnv []corev1.EnvVar
-	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err = alphaDynamoComponentDeploymentForValidation(oldDCD)
+	if validation.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 		}
 		oldEnv = oldAlpha.Spec.Envs
 	}
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldEnv, dynamo.DCDUsesOrderedEnvironment(newDCD))...)
-
-	// Run the source-version old/new ratchet after the stateless traversal.
-	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
-			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
-			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
-			field.NewPath("spec"),
-		)...)
-	}
 
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
@@ -148,7 +139,7 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 	}
 
 	checkpointRefPath := field.NewPath("spec", "experimental", "checkpoint", "checkpointRef")
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+	if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
 		checkpointRefPath = field.NewPath("spec", "checkpoint", "checkpointRef")
 	}
 	return field.ErrorList{field.Forbidden(
@@ -208,6 +199,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoComponentDeploymentSharedSpecValidationOptions{
+			sourcePath:                        fldPath,
 			grovePathway:                      grovePathway,
 			validateInferencePoolAvailability: validateInferencePoolAvailability,
 			oldComponent:                      oldSharedSpec,
@@ -237,10 +229,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCD updates preserve direct replica modification.
-	const (
-		canModifyReplicas                = true
-		validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
-	)
+	const canModifyReplicas = true
 
 	allErrs := field.ErrorList{}
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -256,9 +245,9 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		&newSpec.DynamoComponentDeploymentSharedSpec,
 		&oldSpec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
+		fldPath,
 		canModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
-		validateGPUMemoryServiceNewState,
 	)...)
 	return allErrs
 }

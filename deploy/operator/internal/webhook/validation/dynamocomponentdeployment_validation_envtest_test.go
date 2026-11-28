@@ -1235,7 +1235,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 1,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`},
+			wantWebhookErrs: []string{`spec.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`},
 		},
 		{
 			name: "inter-pod failover requires matching GMS mode",
@@ -1252,10 +1252,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 1,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.experimental.failover.mode: Invalid value: "InterPod": must match gpuMemoryService.mode "IntraPod"`},
+			wantWebhookErrs: []string{`spec.failover.mode: Invalid value: "InterPod": must match gpuMemoryService.mode "IntraPod"`},
 		},
 		{
-			name: "matching inter-pod GMS failover is accepted",
+			name: "matching inter-pod GMS failover permits configurable shadow counts",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
@@ -1266,7 +1266,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Failover: &nvidiacomv1alpha1.FailoverSpec{
 					Enabled:    true,
 					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-					NumShadows: 1,
+					NumShadows: 2,
 				},
 			}),
 		},

@@ -149,22 +149,25 @@ func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 			newSpec,
 			oldSpec,
 			field.NewPath("spec"),
+			field.NewPath("spec"),
 			true,
 			schema.GroupKind{Group: nvidiacomv1beta1.GroupVersion.Group, Kind: "DynamoComponentDeployment"},
-			false,
 		)
 		assertFieldPaths(t, errs, nil)
 	})
 
 	t.Run("v1alpha1", func(t *testing.T) {
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Alpha1}
-		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{}
-		newSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{}
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{}
+		newSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{}
 
-		errs := validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+		errs := validation.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newSpec,
 			oldSpec,
 			field.NewPath("spec"),
+			field.NewPath("spec"),
+			true,
+			schema.GroupKind{Group: nvidiacomv1beta1.GroupVersion.Group, Kind: "DynamoComponentDeployment"},
 		)
 		assertFieldPaths(t, errs, nil)
 	})
@@ -210,18 +213,18 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	})
 
 	t.Run("v1alpha1 changed legacy image requires override", func(t *testing.T) {
-		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentType: consts.ComponentTypeWorker,
-			Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
-				{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-				{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
 			},
 		}
 		newSpec := oldSpec.DeepCopy()
 		newSpec.Roles[0].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Alpha1}
 
-		errs := validation.validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(newSpec, oldSpec, field.NewPath("spec"))
+		errs := validation.validateRolePodTemplateRuntimeVersionUpdate(newSpec, oldSpec, field.NewPath("spec"))
 		assertFieldPaths(t, errs, []string{"spec.runtimeVersionOverride"})
 	})
 }
@@ -299,6 +302,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		spec,
 		field.NewPath("spec", "components").Index(0),
 		dynamoComponentDeploymentSharedSpecValidationOptions{
+			sourcePath:                        field.NewPath("spec", "components").Index(0),
 			validateInferencePoolAvailability: true,
 		},
 	)
@@ -354,7 +358,7 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 	errs := validation.validateDynamoComponentDeploymentSharedSpec(
 		spec,
 		field.NewPath("spec"),
-		dynamoComponentDeploymentSharedSpecValidationOptions{},
+		dynamoComponentDeploymentSharedSpecValidationOptions{sourcePath: field.NewPath("spec")},
 	)
 	t.Log("Verify validation rejects the unsupported provider context")
 	if len(errs) != 1 || errs[0].Field != "spec.providerOverride" {
@@ -425,7 +429,7 @@ func TestValidateComponentRolePodTemplateModes(t *testing.T) {
 	}
 	validation := &sharedValidation{ctx: context.Background()}
 	fldPath := field.NewPath("spec", "components").Index(0)
-	options := dynamoComponentDeploymentSharedSpecValidationOptions{}
+	options := dynamoComponentDeploymentSharedSpecValidationOptions{sourcePath: fldPath}
 
 	t.Run("complete role templates", func(t *testing.T) {
 		errs := validation.validateDynamoComponentDeploymentSharedSpec(component(), fldPath, options)
@@ -547,6 +551,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			spec,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				sourcePath:                        componentPath,
 				grovePathway:                      true,
 				validateInferencePoolAvailability: true,
 			},
@@ -568,6 +573,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			spec,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				sourcePath:                        componentPath,
 				grovePathway:                      true,
 				validateInferencePoolAvailability: true,
 			},
@@ -590,6 +596,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			spec,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				sourcePath:                        componentPath,
 				grovePathway:                      true,
 				validateInferencePoolAvailability: true,
 			},
@@ -713,6 +720,7 @@ func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
 		&nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: gms},
 		fldPath,
 		experimentalSpecValidationOptions{
+			failoverPath:  fldPath.Child("failover"),
 			componentType: nvidiacomv1beta1.ComponentTypeWorker,
 			grovePathway:  true,
 		},

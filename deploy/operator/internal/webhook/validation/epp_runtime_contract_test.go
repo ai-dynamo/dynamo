@@ -132,7 +132,7 @@ func TestEPPRequiresResolvableRuntimeVersion(t *testing.T) {
 				errs := v.validateDynamoComponentDeploymentSharedSpec(
 					eppSharedSpec(consts.ComponentTypeEPP, image),
 					field.NewPath("spec"),
-					dynamoComponentDeploymentSharedSpecValidationOptions{},
+					dynamoComponentDeploymentSharedSpecValidationOptions{sourcePath: field.NewPath("spec")},
 				)
 				if runtimeVersionOverrideError(errs) == nil {
 					t.Fatalf("EPP on unresolvable image %q was admitted with no runtime-version error "+
@@ -154,7 +154,7 @@ func TestNonEPPKeepsMissingRuntimeVersionOverrideExemption(t *testing.T) {
 	errs := v.validateDynamoComponentDeploymentSharedSpec(
 		eppSharedSpec(consts.ComponentTypeFrontend, imageCISHATag),
 		field.NewPath("spec"),
-		dynamoComponentDeploymentSharedSpecValidationOptions{},
+		dynamoComponentDeploymentSharedSpecValidationOptions{sourcePath: field.NewPath("spec")},
 	)
 	if err := runtimeVersionOverrideError(errs); err != nil {
 		t.Fatalf("non-EPP component lost its exemption: %v", err)
@@ -163,7 +163,7 @@ func TestNonEPPKeepsMissingRuntimeVersionOverrideExemption(t *testing.T) {
 
 // TestEPPRequiresResolvableRuntimeVersionOnUpdate covers the update path, where
 // the create-path runtime-version block is skipped entirely
-// (validatesRuntimeVersionFor is false once ratchetRuntimeVersion is set) and
+// (ratchetRuntimeVersion selects comparative validation) and
 // the update variants run instead. Changing an EPP to an image with no
 // resolvable version must still be rejected rather than admitted uncontracted.
 func TestEPPRequiresResolvableRuntimeVersionOnUpdate(t *testing.T) {
@@ -177,9 +177,9 @@ func TestEPPRequiresResolvableRuntimeVersionOnUpdate(t *testing.T) {
 			eppSharedSpec(consts.ComponentTypeEPP, imageCISHATag),
 			eppSharedSpec(consts.ComponentTypeEPP, imageRustEPP),
 			field.NewPath("spec"),
+			field.NewPath("spec"),
 			true,
 			schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
-			false,
 		)
 		if runtimeVersionOverrideError(errs) == nil {
 			t.Fatalf("EPP updated onto unresolvable image %q was admitted "+
@@ -200,9 +200,9 @@ func TestEPPUnchangedUnresolvableImageIsRatcheted(t *testing.T) {
 		eppSharedSpec(consts.ComponentTypeEPP, imageCISHATag),
 		eppSharedSpec(consts.ComponentTypeEPP, imageCISHATag),
 		field.NewPath("spec"),
+		field.NewPath("spec"),
 		true,
 		schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
-		false,
 	)
 	if err := runtimeVersionOverrideError(errs); err != nil {
 		t.Fatalf("unchanged pre-existing image lost its ratchet: %v", err)

@@ -95,10 +95,14 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	// Get user info from admission request context for identity-based validation
-	var terminatingUserInfo *authenticationv1.UserInfo
-	if req, reqErr := admission.RequestFromContext(ctx); reqErr == nil {
-		terminatingUserInfo = &req.UserInfo
+
+	// Unavailable caller identity must not grant replica or provider ownership permissions.
+	var userInfo *authenticationv1.UserInfo
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		logger.Error(err, "failed to get admission request from context, replica changes for DGDSA-enabled services will be rejected")
+	} else {
+		userInfo = &req.UserInfo
 	}
 
 	// A finalizer can hold an object terminating for an arbitrary period, so
@@ -108,26 +112,11 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	// leave it impossible to finalize.
 	if !newObj.DeletionTimestamp.IsZero() {
 		logger.Info("validating metadata-only update on terminating resource", "name", newObj.Name)
-		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, terminatingUserInfo, h.operatorPrincipal)
+		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, userInfo, h.operatorPrincipal)
 	}
 
-	warnings, err := validator.validate(ctx, newObj, oldObj, runtimeVersionSource, true)
-	if err != nil {
-		return warnings, err
-	}
-
-	// Get user info from admission request context for identity-based validation
-	var userInfo *authenticationv1.UserInfo
-	req, err := admission.RequestFromContext(ctx)
-	if err != nil {
-		logger.Error(err, "failed to get admission request from context, replica changes for DGDSA-enabled services will be rejected")
-		// userInfo remains nil, so scaling-adapter replica validation fails closed.
-	} else {
-		userInfo = &req.UserInfo
-	}
-
-	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(
+	// Return validation warnings even when the update is rejected.
+	warnings, err := validator.ValidateUpdate(
 		ctx,
 		oldObj,
 		newObj,
@@ -141,10 +130,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 			username = userInfo.Username
 		}
 		logger.Info("validation failed", "error", err.Error(), "user", username)
-		return updateWarnings, err
+		return warnings, err
 	}
-	// Combine warnings
-	warnings = append(warnings, updateWarnings...)
 	return warnings, nil
 }
 

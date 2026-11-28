@@ -23,7 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil.
+// validateDynamoComponentDeploymentV1alpha1 supplements storage validation with Alpha-only
+// Ingress/legacy settings, lossy flat mounts, and source env-list distinctions.
+// It is not a second complete validator. dcd must not be nil.
 // oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
@@ -31,7 +33,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 	orderedEnvironment bool,
 ) field.ErrorList {
 	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
-		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		v.runtimeVersionSource != runtimeVersionSourceV1Alpha1 {
 		return nil
 	}
 	return v.validateDynamoComponentDeploymentSpecV1alpha1(
@@ -43,7 +45,8 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 	)
 }
 
-// validateDynamoComponentDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+// validateDynamoComponentDeploymentSpecV1alpha1 delegates the supplemental Alpha-only
+// and lossy-conversion checks shared with graph components. spec and fldPath must not be nil.
 // oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSpec,

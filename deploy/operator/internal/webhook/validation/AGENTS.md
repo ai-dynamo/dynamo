@@ -3,3 +3,24 @@
 Before changing validation code or tests in this package, read
 [`STRUCTURAL_VALIDATION.md`](STRUCTURAL_VALIDATION.md) completely. Its requirements
 are mandatory.
+
+## Storage and compatibility version ownership
+
+- After typed conversion, the storage-version traversal validates every rule
+  whose inputs it can represent, for requests from **every** served version.
+- Alpha validation is supplemental, never an alternative complete validation
+  pass. Keep only rules that need source-only information, information lost by
+  conversion, or warnings about those fields.
+- Missing source-schema/CEL coverage is not an Alpha ownership exception when
+  the converted values contain the required inputs. Cover it in the shared
+  storage-version Go validator, even if Beta source CEL already checks it.
+- Different submitted field paths do not justify copying a rule into Alpha or
+  skipping the Beta rule. Adapt diagnostic paths in the storage-version owner.
+- Never pass complete Beta objects or component maps into an Alpha validator
+  to repeat a shared rule. Never compare whole Alpha specs to enforce a rule
+  already owned by Beta.
+- Every compatibility validator's Go doc must state the specific information
+  that conversion cannot preserve for validation.
+- Conversion does not run the destination version's schema or CEL. Inventory
+  source-schema gaps explicitly; do not silently import different Beta API
+  constraints into Alpha.

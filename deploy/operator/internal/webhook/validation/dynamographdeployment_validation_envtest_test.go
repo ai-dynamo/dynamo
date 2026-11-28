@@ -81,10 +81,39 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const unrelatedInitContainerName = "setup"
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
+	const roleTemplateSecret = "role-template-secret-canary"
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+
+	t.Log("Prepare role mutations with a private value in complete Pod templates")
+	roleMutationOld := betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		setBetaExplicitMultinodeRoleTemplates(worker, 2)
+		for i := range worker.Roles {
+			main := &worker.Roles[i].PodTemplate.Spec.Containers[0]
+			main.Env = append(main.Env, corev1.EnvVar{Name: "API_TOKEN", Value: roleTemplateSecret})
+		}
+	})
+	roleRename := roleMutationOld.DeepCopy()
+	betaWorkerComponent(roleRename).Roles[1].Name = "other"
+	roleRemoval := roleMutationOld.DeepCopy()
+	betaWorkerComponent(roleRemoval).Roles = betaWorkerComponent(roleRemoval).Roles[:1]
+
+	t.Log("Prepare legacy alpha runtime contracts with normalized worker subtypes")
+	alphaPrefill := alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+		worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+		worker.SubComponentType = "prefill"
+		worker.RuntimeVersionOverride = ""
+		worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+	})
+	alphaDecode := alphaPrefill.DeepCopy()
+	alphaDecode.Spec.Services[dgdAdmissionWorkerName].SubComponentType = "decode"
+	alphaPrefillRoles := alphaPrefill.DeepCopy()
+	setAlphaExplicitMultinodeRoleTemplates(alphaPrefillRoles.Spec.Services[dgdAdmissionWorkerName], 2)
+	alphaDecodeRoles := alphaPrefillRoles.DeepCopy()
+	alphaDecodeRoles.Spec.Services[dgdAdmissionWorkerName].SubComponentType = "decode"
 
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -603,6 +632,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
+		},
+		{
+			name:               "alpha normalized subtype changes revalidate the legacy runtime contract",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaPrefill,
+			deployment:         alphaDecode,
+			wantWebhookErrs:    []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "alpha normalized subtype changes revalidate role runtime contracts",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaPrefillRoles,
+			deployment:         alphaDecodeRoles,
+			wantWebhookErrs:    []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name:               "unchanged legacy alpha service runtime version is ratcheted on update",
@@ -1442,6 +1485,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = new(int32(2))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].minAvailable: Invalid value: 2: minAvailable is immutable after creation"},
+			wantWarnings:    []string{`spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name:          "v1alpha1 componentType change is rejected by CEL",
@@ -1579,6 +1623,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 power annotation cannot be added to a DRA component",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "device",
 					ResourceClaimTemplateName: new("device-template"),
@@ -1593,6 +1638,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300": field is immutable`,
 			},
 		},
 		{
@@ -1992,6 +2038,27 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				`spec.components[1].roles: Required value: must contain the "leader" role`,
 				`spec.components[1].roles: Required value: must contain the "worker" role`,
 			},
+		},
+		{
+			name:          "role rename errors omit private Pod template values",
+			oldDeployment: roleMutationOld,
+			deployment:    roleRename,
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[1].name: Unsupported value: "other": supported values: "leader", "worker"`,
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+				`spec.components[1].roles: Forbidden: role names are immutable after creation`,
+			},
+			notWantErr: roleTemplateSecret,
+		},
+		{
+			name:          "role removal errors omit private Pod template values",
+			oldDeployment: roleMutationOld,
+			deployment:    roleRemoval,
+			wantWebhookErrs: []string{
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+				`spec.components[1].roles: Forbidden: role names are immutable after creation`,
+			},
+			notWantErr: roleTemplateSecret,
 		},
 		{
 			name: "v1beta1 explicit multinode roles default omitted replicas",
@@ -2505,6 +2572,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
 		},
 		{
+			name: "alpha role templates retain independent failover shadow errors",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				setAlphaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod}
+				worker.Failover = &nvidiacomv1alpha1.FailoverSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod, NumShadows: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.gpuMemoryService: Forbidden: cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+				"spec.components[0].experimental.failover: Forbidden: cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+				`spec.services[worker].failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
+			},
+		},
+		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].Failover = &nvidiacomv1alpha1.FailoverSpec{
@@ -2515,7 +2597,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Invalid value: "": must be "container" when intra-pod failover is configured`,
-				`spec.components[0].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
+				`spec.services[worker].failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
 				`spec.services[worker].failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
 			},
 		},
@@ -3079,8 +3161,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:         "strategy change revalidates unchanged budget",
-			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			name: "strategy change revalidates unchanged budget",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.Replicas = new(int32(4))
@@ -3090,7 +3171,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Replicas = new(int32(4))
 				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
-				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+					consts.KubeAnnotationGroveUpdateStrategy:         "OnDelete",
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
 		},
@@ -3481,6 +3566,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+			wantWarnings:    []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "origin version cannot be removed on update",
@@ -3498,6 +3584,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{
 				"metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: null: field is immutable",
 			},
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "vLLM backend annotation accepts mp",
@@ -4153,6 +4240,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.restart.strategy.order: Forbidden: cannot be specified when strategy is parallel"},
 		},
 		{
+			name:          "v1beta1 update aggregates new-state and comparative errors",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeParallel, "frontend", "worker")
+			}),
+			wantWebhookErrs: []string{
+				"spec.restart.strategy.order: Forbidden: cannot be specified when strategy is parallel",
+				"spec.backendFramework: Invalid value: \"sglang\": is immutable and cannot be changed after creation",
+			},
+			wantWarnings: []string{"Changing spec.backendFramework may cause unexpected behavior"},
+		},
+		{
 			name:          "v1beta1 backend framework update reaches the webhook and warns",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -4252,7 +4352,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests = append(tests, probeDGDAdmissionCases()...)
 
 	t.Log("Add the LPX scenarios to the same DGD admission table")
-	tests = append(tests, lpxDGDAdmissionCases()...)
+	tests = append(tests, lpxDGDAdmissionCases(t)...)
 
 	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
 	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {
