@@ -1,6 +1,6 @@
 ---
 name: dynamo-issue-first
-description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, creating or sorting its Linear issue into a feature or workstream project, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
+description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use at the start of any task that will change files in ai-dynamo/dynamo, before the first edit, to find or create its issue. Also use when sorting a Linear issue into a feature or workstream project, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -100,14 +100,20 @@ Put at least one of these in the PR title or description:
 
 | Situation | Reference form |
 |---|---|
-| This PR completes the issue | `Fixes #123` or `Closes DYN-1234` |
-| The issue outlives this PR (multi-PR feature, tracking issue) | `Part of #123` or `refs DYN-1234` |
+| This PR completes the issue | `Closes DYN-1234`, or `Fixes #123` for a community issue |
+| The issue outlives this PR (multi-PR feature, tracking issue) | `Part of DYN-1234`, or `Part of #123` for a community issue |
 | The issue is a QA bug (a `qa:*` label) | `refs DYN-1234` or `Part of DYN-1234` in the description only, never a closing keyword, and the key out of the title |
 | The work implements a DEP | `Part of #<dep>` **and** a work issue of its own |
 | The issue lives in a sibling org repository | `ai-dynamo/<repo>#12` or the full issue URL |
 
 Closing keywords close the issue on merge; non-closing forms link without
-closing, which is what a multi-PR feature issue needs. A QA bug must stay open
+closing, which is what a multi-PR feature issue needs.
+
+When a Linear issue exists, reference it by its Linear ID with one of these
+keywords, even when it mirrors a GitHub issue. Linear adds an issue to the
+release on merge only when the PR closes it or is part of it; a GitHub issue
+number reaches the Linear mirror as a plain link, and that issue never joins
+the release. A QA bug must stay open
 until QA verifies the fix on a release candidate: closing it on the `main`
 merge closes the synced NVBug too early. `dynamo-release-cherry-pick` covers the
 release side. The reference must point at a real issue: the check verifies existence and does not count
