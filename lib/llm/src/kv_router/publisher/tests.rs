@@ -3970,7 +3970,7 @@ mod event_plane_batch_tests {
     use super::*;
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, RouterEvent,
+        KvCacheStoredBlockData, RecurrentStateEvent, RouterEvent,
     };
     use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
@@ -3983,7 +3983,8 @@ mod event_plane_batch_tests {
 
     use super::super::sinks::{
         EventPlanePublisher, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
-        MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH, RouterEventBatchSink, event_plane_event_batches,
+        MAX_EVENT_PLANE_KV_EVENT_BATCH_BYTES, MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+        RouterEventBatchSink, event_plane_event_batches,
     };
 
     fn router_event(event_id: u64) -> RouterEvent {
@@ -4073,6 +4074,25 @@ mod event_plane_batch_tests {
         )
     }
 
+    fn recurrent_router_event(event_id: u64, prefix_len: usize) -> RouterEvent {
+        RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Recurrent(Box::new(RecurrentStateEvent {
+                    epoch: "worker-epoch".to_string(),
+                    sequence: event_id,
+                    data: serde_json::json!({
+                        "snapshot": {
+                            "prefix_hashes": (0..prefix_len as u64).collect::<Vec<_>>()
+                        }
+                    }),
+                })),
+                dp_rank: (event_id % 2) as u32,
+            },
+        )
+    }
+
     #[test]
     fn production_event_plane_batches_fit_default_nats_payload() {
         const NATS_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -4129,6 +4149,26 @@ mod event_plane_batch_tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0], &events[..3]);
         assert_eq!(batches[1], &events[3..]);
+    }
+
+    #[test]
+    fn event_plane_batching_accounts_for_recurrent_payload_bytes() {
+        let events = (0..MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH as u64)
+            .map(|event_id| recurrent_router_event(event_id, 4096))
+            .collect::<Vec<_>>();
+
+        let batches = event_plane_event_batches(
+            &events,
+            MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+            MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+        )
+        .collect::<Vec<_>>();
+
+        assert!(batches.len() > 1);
+        assert!(batches.iter().all(|batch| {
+            encoded_wire_size(batch) <= MAX_EVENT_PLANE_KV_EVENT_BATCH_BYTES
+                && batch.len() <= MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH
+        }));
     }
 
     #[test]

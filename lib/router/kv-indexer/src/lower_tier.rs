@@ -918,6 +918,7 @@ impl LowerTierIndexer {
                 self.remove_blocks_impl(worker_blocks, owner, &remove_data.block_hashes)
             }
             KvCacheEventData::Cleared => unreachable!("Cleared returned above"),
+            KvCacheEventData::Recurrent(_) => Ok(()),
         }
     }
 

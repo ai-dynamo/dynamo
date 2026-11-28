@@ -67,6 +67,17 @@ The tail is parsed by type where possible. Because `group_idx` and
 order-sensitive: the first numeric tail value is `group_idx`, and the second is
 `kv_cache_spec_sliding_window`.
 
+## Recurrent State Events
+
+Publish `RecurrentState` as a tagged map with `type: "RecurrentState"` and a
+`payload` field, or as a tagged array with the tag at index 0 and the payload at
+index 1. The payload contains `epoch` (a producer generation identifier),
+`sequence` (an unsigned integer within that epoch), and `data` (the producer's
+JSON-compatible lifecycle or checkpoint metadata).
+
+Dynamo forwards these events in order without inserting them into the dense KV
+index. The worker retains ownership of the recurrent state tensors.
+
 ## Producer Notes
 
 vLLM's `BlockStored` tuple includes the vLLM-compatible fixed prefix before

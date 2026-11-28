@@ -101,7 +101,8 @@ impl ReplayEngineObservation for RouterEventObservation {
             .flat_map(|event| match &event.event.data {
                 dynamo_kv_events::event::KvCacheEventData::Stored(store) => store.blocks.as_slice(),
                 dynamo_kv_events::event::KvCacheEventData::Removed(_)
-                | dynamo_kv_events::event::KvCacheEventData::Cleared => &[],
+                | dynamo_kv_events::event::KvCacheEventData::Cleared
+                | dynamo_kv_events::event::KvCacheEventData::Recurrent(_) => &[],
             })
             .map(|block| block.tokens_hash.0)
             .collect()
@@ -190,6 +191,19 @@ fn encode_events(
                 }
             }
             KvCacheEventData::Cleared => encoder.begin_kind(2, "cleared"),
+            KvCacheEventData::Recurrent(recurrent) => {
+                encoder.begin_kind(3, "recurrent_state");
+                encoder.put_len(recurrent.epoch.len(), "recurrent epoch length")?;
+                for byte in recurrent.epoch.as_bytes() {
+                    encoder.put_u8(*byte);
+                }
+                encoder.put_u64(recurrent.sequence);
+                let kind = recurrent.kind().unwrap_or_default();
+                encoder.put_len(kind.len(), "recurrent state kind length")?;
+                for byte in kind.as_bytes() {
+                    encoder.put_u8(*byte);
+                }
+            }
         }
     }
     Ok(())

@@ -174,6 +174,7 @@ fn apply_block_refcounts(
             dedup.clear_rank_domain(dp_rank, domain, policy);
             KvCacheEventData::Cleared
         }
+        KvCacheEventData::Recurrent(data) => KvCacheEventData::Recurrent(data),
     };
     Some(placement_event)
 }

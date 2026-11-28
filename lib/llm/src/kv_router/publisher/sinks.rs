@@ -16,14 +16,18 @@ pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 
 /// Bound normal event-plane batches while always allowing one complete event.
 ///
-/// The default NATS Core `max_payload` is 1 MiB. Production-shaped batches at
-/// these caps, including sparse one-block events and one multimodal object with
-/// one offset per stored block, remain below that limit in the wire-size
-/// regression tests. Multimodal metadata is not intrinsically bounded, so an
-/// exceptional batch can still exceed a deployment's configured transport
-/// limit and fail under the existing best-effort publication semantics.
+/// The default NATS Core `max_payload` is 1 MiB. In addition to the event and
+/// block caps, use a conservative encoded-size budget so arbitrary recurrent
+/// JSON payloads and multimodal metadata cannot make an otherwise small batch
+/// exceed the transport limit. A single event is always emitted intact; if it
+/// is larger than the budget, the transport is still responsible for rejecting
+/// it because the event cannot be split without changing its semantics.
 pub(super) const MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH: usize = 128;
 pub(super) const MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS: usize = 8_192;
+const DEFAULT_EVENT_PLANE_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const EVENT_PLANE_PAYLOAD_SAFETY_MARGIN_BYTES: usize = 16 * 1024;
+pub(super) const MAX_EVENT_PLANE_KV_EVENT_BATCH_BYTES: usize =
+    DEFAULT_EVENT_PLANE_MAX_PAYLOAD_BYTES - EVENT_PLANE_PAYLOAD_SAFETY_MARGIN_BYTES;
 
 pub(super) trait RouterEventBatchSink: Send + Sync {
     fn publish_events(&self, events: &[RouterEvent]) -> impl Future<Output = Result<()>> + Send;
@@ -111,7 +115,7 @@ impl RouterEventBatchSink for EventPlanePublisher {
     }
 }
 
-/// Partition ordered events at event boundaries without exceeding either cap.
+/// Partition ordered events at event boundaries without exceeding any cap.
 /// A single event larger than the block cap is always emitted intact.
 pub(super) fn event_plane_event_batches(
     events: &[RouterEvent],
@@ -127,20 +131,26 @@ pub(super) fn event_plane_event_batches(
 
         let mut batch_end = batch_start;
         let mut batch_blocks = 0usize;
+        let mut batch_bytes = 0usize;
         while let Some(event) = events.get(batch_end) {
             let batch_events = batch_end - batch_start;
             let event_blocks = match &event.event.data {
                 KvCacheEventData::Stored(data) => data.blocks.len(),
                 KvCacheEventData::Removed(data) => data.block_hashes.len(),
                 KvCacheEventData::Cleared => 0,
+                KvCacheEventData::Recurrent(_) => 0,
             };
+            let event_bytes = encoded_event_size(event);
             if batch_events > 0
                 && (batch_events >= max_events
-                    || batch_blocks.saturating_add(event_blocks) > max_blocks)
+                    || batch_blocks.saturating_add(event_blocks) > max_blocks
+                    || batch_bytes.saturating_add(event_bytes)
+                        > MAX_EVENT_PLANE_KV_EVENT_BATCH_BYTES)
             {
                 break;
             }
             batch_blocks = batch_blocks.saturating_add(event_blocks);
+            batch_bytes = batch_bytes.saturating_add(event_bytes);
             batch_end += 1;
         }
 
@@ -148,6 +158,19 @@ pub(super) fn event_plane_event_batches(
         batch_start = batch_end;
         Some(batch)
     })
+}
+
+/// Return a conservative per-event contribution to the encoded event-plane
+/// payload. The batch encoding contains the same event values inside an outer
+/// array, so summing individual encodings overestimates that array encoding by
+/// a few bytes and lets the fixed safety margin cover the envelope overhead.
+/// Serialization of these types is not expected to fail; treating a failure as
+/// an oversized event preserves ordering and prevents unrelated events from
+/// being combined with an unmeasurable payload.
+fn encoded_event_size(event: &RouterEvent) -> usize {
+    rmp_serde::to_vec_named(event)
+        .map(|payload| payload.len())
+        .unwrap_or(usize::MAX)
 }
 
 /// Apply one canonical event using the shared local queue-admission contract.

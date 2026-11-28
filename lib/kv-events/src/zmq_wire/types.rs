@@ -6,6 +6,8 @@ use serde::Serialize;
 
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 
+use crate::event::RecurrentStateEvent;
+
 use super::filter::{KvCacheEventMetadata, KvCacheSpecKind};
 
 #[derive(Debug, Serialize)]
@@ -158,6 +160,11 @@ pub enum RawKvEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ownership: Option<String>,
     },
+    /// Sparse recurrent/GDN state metadata from a hybrid attention engine.
+    /// The state tensor itself never travels on the event plane.
+    RecurrentState {
+        payload: RecurrentStateEvent,
+    },
     Ignored,
 }
 
@@ -167,6 +174,7 @@ impl RawKvEvent {
             Self::BlockStored { .. } => "stored",
             Self::BlockRemoved { .. } => "removed",
             Self::AllBlocksCleared { .. } => "cleared",
+            Self::RecurrentState { .. } => "recurrent_state",
             Self::Ignored => "ignored",
         }
     }
@@ -182,7 +190,7 @@ impl RawKvEvent {
             Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
                 medium.as_deref()
             }
-            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+            Self::AllBlocksCleared { .. } | Self::RecurrentState { .. } | Self::Ignored => None,
         }
     }
 
@@ -191,7 +199,7 @@ impl RawKvEvent {
     pub fn locality(&self) -> Option<Locality> {
         match self {
             Self::BlockStored { locality, .. } | Self::BlockRemoved { locality, .. } => *locality,
-            Self::AllBlocksCleared { .. } | Self::Ignored => None,
+            Self::AllBlocksCleared { .. } | Self::RecurrentState { .. } | Self::Ignored => None,
         }
     }
 
@@ -204,6 +212,7 @@ impl RawKvEvent {
             Self::BlockStored { ownership, .. }
             | Self::BlockRemoved { ownership, .. }
             | Self::AllBlocksCleared { ownership } => ownership.as_deref(),
+            Self::RecurrentState { .. } => None,
             Self::Ignored => None,
         }
     }
@@ -211,7 +220,10 @@ impl RawKvEvent {
     pub fn block_size(&self) -> Option<usize> {
         match self {
             Self::BlockStored { block_size, .. } => Some(*block_size),
-            Self::BlockRemoved { .. } | Self::AllBlocksCleared { .. } | Self::Ignored => None,
+            Self::BlockRemoved { .. }
+            | Self::AllBlocksCleared { .. }
+            | Self::RecurrentState { .. }
+            | Self::Ignored => None,
         }
     }
 
@@ -233,7 +245,9 @@ impl RawKvEvent {
                 kv_cache_spec_kind: *kv_cache_spec_kind,
                 kv_cache_spec_sliding_window: *kv_cache_spec_sliding_window,
             },
-            Self::AllBlocksCleared { .. } | Self::Ignored => KvCacheEventMetadata::default(),
+            Self::AllBlocksCleared { .. } | Self::RecurrentState { .. } | Self::Ignored => {
+                KvCacheEventMetadata::default()
+            }
         }
     }
 }

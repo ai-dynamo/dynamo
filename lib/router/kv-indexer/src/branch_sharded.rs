@@ -808,6 +808,9 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
                     shard.as_ref().apply_event(event.clone()).await;
                 }
             }
+            // Recurrent state is carried by the ordered event plane but is
+            // intentionally not inserted into a dense KV shard.
+            KvCacheEventData::Recurrent(_) => {}
         }
     }
 

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RecurrentStateEvent};
 use dynamo_kv_events::residency::StorageTier;
 use futures::{Sink, SinkExt, StreamExt};
 use serde::Serialize;
@@ -54,6 +54,9 @@ enum ZmqRawKvEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<&'static str>,
         group_idx: u32,
+    },
+    RecurrentState {
+        payload: RecurrentStateEvent,
     },
 }
 
@@ -357,6 +360,11 @@ fn convert_to_zmq_events(
             }]
         }
         KvCacheEventData::Cleared => vec![],
+        KvCacheEventData::Recurrent(payload) => {
+            vec![ZmqRawKvEvent::RecurrentState {
+                payload: (**payload).clone(),
+            }]
+        }
     }
 }
 

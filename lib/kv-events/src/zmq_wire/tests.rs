@@ -213,6 +213,52 @@ fn test_deserialize_sglang_cache_salt() {
 }
 
 #[test]
+fn recurrent_state_map_and_array_are_forwarded_without_dense_indexing() {
+    let map = serde_json::json!({
+        "type": "RecurrentState",
+        "payload": {
+            "epoch": "boot-1:epoch-7",
+            "sequence": 7,
+            "data": {
+                "stored": {
+                    "prefix_len": 2048,
+                    "checkpoint": "gdn-7"
+                }
+            }
+        }
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&map).unwrap()).unwrap();
+    assert!(matches!(raw, RawKvEvent::RecurrentState { .. }));
+
+    let placement = ZmqEventNormalizer::new(16)
+        .normalize(raw, 11, WorkerWithDpRank::new(17, 0))
+        .expect("recurrent state should be accepted by the normalizer");
+    let KvCacheEventData::Recurrent(state) = placement.event.data else {
+        panic!("recurrent state expected");
+    };
+    assert_eq!(state.epoch, "boot-1:epoch-7");
+    assert_eq!(state.sequence, 7);
+    assert_eq!(state.kind(), Some("stored"));
+    assert_eq!(placement.placement.tier, StorageTier::Device);
+
+    let array = serde_json::json!([
+        "RecurrentState",
+        {
+            "epoch": "boot-1:epoch-7",
+            "sequence": 8,
+            "data": {"resources": {"free_slots": 4}}
+        },
+        {"future_field": true}
+    ]);
+    let raw: RawKvEvent = from_slice(&to_vec(&array).unwrap()).unwrap();
+    let RawKvEvent::RecurrentState { payload } = raw else {
+        panic!("array encoded recurrent state expected");
+    };
+    assert_eq!(payload.sequence, 8);
+    assert!(payload.is_resources());
+}
+
+#[test]
 fn test_deserialize_bigram_block_stored() {
     let raw_event = (
         "BlockStored",
@@ -2139,6 +2185,7 @@ fn indexed_block_hashes(events: &[BinaryKeyStored]) -> Vec<Vec<u64>> {
                     Vec::new()
                 }
                 KvCacheEventData::Cleared => panic!("no clear was sent"),
+                KvCacheEventData::Recurrent(_) => panic!("no recurrent event was sent"),
             }
         })
         .collect()

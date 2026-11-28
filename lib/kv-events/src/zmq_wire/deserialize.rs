@@ -17,6 +17,7 @@ use super::trtllm::{self, MapTokenIds};
 use super::types::{
     BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent, WIDE_TOKEN_SENTINEL,
 };
+use crate::event::RecurrentStateEvent;
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -70,6 +71,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
         let mut session_id: Option<Option<String>> = None;
+        // Keep this untyped while the map is being read. The custom visitor
+        // accepts fields in any order; decoding directly into
+        // `RecurrentStateEvent` here would make an unrelated `payload` field
+        // on a future dense event fail before its `type` is known.
+        let mut recurrent_payload: Option<serde_json::Value> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -127,6 +133,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "session_id" => {
                     session_id = Some(map.next_value()?);
+                }
+                "payload" => {
+                    recurrent_payload = Some(map.next_value()?);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -202,10 +211,22 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared {
                 ownership: ownership.unwrap_or(None),
             }),
+            Some("RecurrentState") => Ok(RawKvEvent::RecurrentState {
+                payload: serde_json::from_value(
+                    recurrent_payload.ok_or_else(|| de::Error::missing_field("payload"))?,
+                )
+                .map_err(de::Error::custom)?,
+            }),
             Some("Ignored") => Ok(RawKvEvent::Ignored),
             Some(other) => Err(de::Error::unknown_variant(
                 other,
-                &["BlockStored", "BlockRemoved", "AllBlocksCleared", "Ignored"],
+                &[
+                    "BlockStored",
+                    "BlockRemoved",
+                    "AllBlocksCleared",
+                    "RecurrentState",
+                    "Ignored",
+                ],
             )),
             None => Err(de::Error::missing_field("type")),
         }
@@ -324,13 +345,26 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
                 Ok(RawKvEvent::AllBlocksCleared { ownership })
             }
+            "RecurrentState" => {
+                let payload: RecurrentStateEvent = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing payload"))?;
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RawKvEvent::RecurrentState { payload })
+            }
             "Ignored" => {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
                 Ok(RawKvEvent::Ignored)
             }
             other => Err(de::Error::unknown_variant(
                 other,
-                &["BlockStored", "BlockRemoved", "AllBlocksCleared", "Ignored"],
+                &[
+                    "BlockStored",
+                    "BlockRemoved",
+                    "AllBlocksCleared",
+                    "RecurrentState",
+                    "Ignored",
+                ],
             )),
         }
     }

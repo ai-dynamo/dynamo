@@ -92,6 +92,9 @@ enum KvEventSummary {
         last: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
     },
     Cleared,
+    Recurrent {
+        sequence: u64,
+    },
 }
 
 impl KvEventSummary {
@@ -110,6 +113,9 @@ impl KvEventSummary {
                 last: removed.block_hashes.last().copied(),
             },
             dynamo_kv_events::event::KvCacheEventData::Cleared => Self::Cleared,
+            dynamo_kv_events::event::KvCacheEventData::Recurrent(recurrent) => Self::Recurrent {
+                sequence: recurrent.sequence,
+            },
         }
     }
 }
@@ -160,6 +166,9 @@ impl fmt::Display for KvEventSummary {
                 "removed count={count} first={first:?} last={last:?}"
             ),
             Self::Cleared => formatter.write_str("cleared"),
+            Self::Recurrent { sequence } => {
+                write!(formatter, "recurrent_state sequence={sequence}")
+            }
         }
     }
 }
@@ -525,6 +534,7 @@ impl SyncReplayIndexer {
             KvCacheEventData::Cleared => {
                 index.clear_worker_frontiers(worker);
             }
+            KvCacheEventData::Recurrent(_) => {}
         }
     }
 

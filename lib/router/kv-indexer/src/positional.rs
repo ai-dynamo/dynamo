@@ -368,6 +368,7 @@ impl PositionalIndexer {
                 self.remove_worker_dp_rank_impl(worker_blocks, worker_id, worker.dp_rank);
                 Ok(())
             }
+            KvCacheEventData::Recurrent(_) => Ok(()),
         }
     }
 

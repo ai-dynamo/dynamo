@@ -55,6 +55,19 @@ pub enum KvCacheEventData {
     /// This is ordered only within that rank publisher's event sequence. Worker-wide removal is
     /// a separate serving-membership lifecycle operation.
     Cleared,
+    /// A sparse recurrent-attention checkpoint or lifecycle transition.
+    ///
+    /// Recurrent state is deliberately kept separate from dense KV blocks. A
+    /// router can carry and order this event without treating the checkpoint
+    /// as a dense radix-tree node or claiming that it is equivalent to a KV
+    /// block. The payload contains routing metadata only; recurrent tensors
+    /// remain owned by the worker.
+    ///
+    /// Keep this variant after the legacy variants: some internal replay and
+    /// persistence formats use serde's positional enum representation, so the
+    /// discriminants of `Stored`, `Removed`, and `Cleared` are compatibility
+    /// surface.
+    Recurrent(Box<RecurrentStateEvent>),
 }
 
 /// Represents the data associated with a stored cache event.
@@ -86,6 +99,36 @@ pub struct KvCacheStoredBlockData {
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
+/// A versioned recurrent-state transition published on the ordered KV stream.
+///
+/// SGLang's hybrid cache publishes this shape as a `RecurrentState` event. The
+/// `data` object is intentionally retained as JSON so Dynamo can forward
+/// producer extensions without requiring a release of the router for every
+/// new telemetry field. Consumers that use the state for routing must validate
+/// the contract and checkpoint fields before granting affinity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecurrentStateEvent {
+    /// Producer boot/epoch identity. It changes whenever the worker's state
+    /// stream is reset or recreated.
+    pub epoch: String,
+    /// Monotonic sequence within `epoch`.
+    pub sequence: u64,
+    /// One of `reset`, `stored`, `removed`, `snapshot`, or `resources`.
+    pub data: serde_json::Value,
+}
+
+impl RecurrentStateEvent {
+    /// Return the stable transition tag, if the producer supplied one.
+    pub fn kind(&self) -> Option<&str> {
+        self.data.as_object()?.keys().next().map(String::as_str)
+    }
+
+    /// Whether this transition is a resource-only telemetry update.
+    pub fn is_resources(&self) -> bool {
+        self.kind() == Some("resources")
+    }
 }
 
 // ------

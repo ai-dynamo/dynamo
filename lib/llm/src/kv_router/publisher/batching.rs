@@ -42,7 +42,10 @@ impl<K: Eq> PlacementEventCoalescer<K> {
     /// follows a pending mutation, or when `Cleared` flushes the pending value
     /// and then passes through as its own barrier.
     pub(super) fn push(&mut self, key: K, event: PlacementEvent) -> [Option<PlacementEvent>; 2] {
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+        if matches!(
+            &event.event.data,
+            KvCacheEventData::Cleared | KvCacheEventData::Recurrent(_)
+        ) {
             return [self.flush(), Some(event)];
         }
 
@@ -105,6 +108,7 @@ fn event_block_count(event: &PlacementEvent) -> usize {
         KvCacheEventData::Stored(data) => data.blocks.len(),
         KvCacheEventData::Removed(data) => data.block_hashes.len(),
         KvCacheEventData::Cleared => 0,
+        KvCacheEventData::Recurrent(_) => 0,
     }
 }
 
@@ -220,6 +224,7 @@ impl BatchingState {
             KvCacheEventData::Cleared => {
                 unreachable!("Cleared is handled by the publisher's barrier policy")
             }
+            KvCacheEventData::Recurrent(data) => KvCacheEventData::Recurrent(data),
         };
         event.event_id = self.next_publish_id;
         let _ = emit(
@@ -243,6 +248,7 @@ impl BatchingState {
 mod tests {
     use dynamo_kv_events::event::{
         KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+        RecurrentStateEvent,
     };
     use dynamo_kv_events::placement::Placement;
     use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
@@ -279,6 +285,14 @@ mod tests {
         }))
     }
 
+    fn recurrent(sequence: u64) -> PlacementEvent {
+        event(KvCacheEventData::Recurrent(Box::new(RecurrentStateEvent {
+            epoch: "worker-epoch".to_string(),
+            sequence,
+            data: serde_json::json!({"stored": {"prefix_len": sequence}}),
+        })))
+    }
+
     #[test]
     fn coalesces_legacy_mutations_and_keeps_clear_as_a_boundary() {
         let mut coalescer = PlacementEventCoalescer::new(128);
@@ -305,6 +319,43 @@ mod tests {
             KvCacheEventData::Removed(data) if data.block_hashes.len() == 2
         ));
         assert!(matches!(output[2].event.data, KvCacheEventData::Cleared));
+    }
+
+    #[test]
+    fn recurrent_state_is_ordered_barrier_and_never_coalesced_with_dense_events() {
+        let mut coalescer = PlacementEventCoalescer::new(128);
+        let first = stored(None, 1);
+        let recurrent = recurrent(7);
+        let second = stored(None, 2);
+
+        let mut output = Vec::new();
+        let key = first.placement.clone();
+        output.extend(coalescer.push(key, first).into_iter().flatten());
+        let key = recurrent.placement.clone();
+        let ready = coalescer
+            .push(key, recurrent)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(ready.len(), 2);
+        assert!(matches!(&ready[0].event.data, KvCacheEventData::Stored(_)));
+        assert!(matches!(
+            &ready[1].event.data,
+            KvCacheEventData::Recurrent(state) if state.sequence == 7
+        ));
+        assert!(!coalescer.has_pending());
+        output.extend(ready);
+        let key = second.placement.clone();
+        output.extend(coalescer.push(key, second).into_iter().flatten());
+        output.extend(coalescer.flush());
+
+        assert_eq!(output.len(), 3);
+        assert!(matches!(output[0].event.data, KvCacheEventData::Stored(_)));
+        assert!(matches!(
+            &output[1].event.data,
+            KvCacheEventData::Recurrent(state) if state.sequence == 7
+        ));
+        assert!(matches!(output[2].event.data, KvCacheEventData::Stored(_)));
     }
 
     #[test]
