@@ -9,7 +9,7 @@ use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::KvHint;
 use dynamo_kv_indexer::host::RoutingDecisionHashes;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
+use dynamo_runtime::{dynamo_nvtx_keyed_range, nvtx, pipeline::Error};
 use dynamo_scheduler::host::{
     AdvisoryWorkerLoad, BookingHandle, RequestLifecycle, RouterConfigOverride, RoutingConstraints,
     RoutingEligibility,
@@ -216,7 +216,8 @@ impl RoutingHost {
         is_query_only: bool,
         options: SelectionOptions,
     ) -> Result<SelectionOutcome, Error> {
-        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
+        let nvtx_key = nvtx::request_key(context_id);
+        let _nvtx_select = dynamo_nvtx_keyed_range!("route.select_worker", nvtx_key);
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
@@ -344,7 +345,7 @@ impl RoutingHost {
             },
         };
         let Some(pinned_worker) = pinned_worker else {
-            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
+            let _nvtx_kv = dynamo_nvtx_keyed_range!("route.kv_match", nvtx_key);
             let selection = self
                 .select_best_match(BestMatchArgs {
                     accounting_attribution: crate::routing_policy::execution_requirements(request)
