@@ -152,7 +152,9 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | 后端 | 何时使用 | 设置 |
 |---|---|---|
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
-| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
+| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 ZMQ，与其他发现后端相同。 |
+
+所有发现后端的事件平面均默认使用 ZMQ。如果设置 `--event-plane nats` 或 `DYN_EVENT_PLANE=nats`，则需要 NATS。选择 NATS 请求平面（`--request-plane nats` 或 `DYN_REQUEST_PLANE=nats`）也需要 NATS。
 
 本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../../../pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)。
 
