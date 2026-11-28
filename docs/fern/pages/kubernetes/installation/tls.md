@@ -11,6 +11,10 @@ The Dynamo operator can inject TLS configuration into every
 is configured once at the platform level via `InfrastructureConfiguration`, and
 the operator propagates the corresponding env vars to all DGD pods it manages.
 
+> [!NOTE]
+> The default Velo response plane has no TLS. With the injected `DYN_TCP_TLS_*` settings, DGD pods
+> run the response stream on `tcp` instead, so it is encrypted too.
+
 For the full list of TLS/mTLS environment variables and CLI flags, and for the
 per-component configuration method, see the
 [TLS reference](../../reference/components/tls-configuration.mdx).

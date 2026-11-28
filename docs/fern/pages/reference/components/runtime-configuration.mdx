@@ -192,7 +192,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
-  Host for the TCP response-stream server. It accepts the same address syntax and uses the same
+  Host for the TCP response-stream server and the QUIC and Velo response listeners. It accepts the same address syntax and uses the same
   address selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. Dynamo trims whitespace and
   treats an empty value as unset. With a wildcard host, the TCP listener binds the selected wildcard,
   while the QUIC response listener binds only the selected concrete address.
@@ -205,6 +205,30 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
   is unset, empty, or `0`, the operating system assigns a free port. Values must be between `0` and
   `65535`.
+</ParamField>
+
+<ParamField path="--response-plane" type="string" default="velo">
+  Transport that carries responses from workers back to the frontend. `velo` multiplexes every
+  response stream between a worker and a frontend over a few persistent connections and batches
+  frames from many streams into each write. `tcp` opens one connection per request. Use the same
+  value on frontends and workers. Velo has no TLS, so a process that selects `velo` uses `tcp`,
+  and logs a warning, while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is true.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>velo</Badge> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>quic</Badge></span>
+
+  Environment variable: `DYN_RESPONSE_PLANE`
+</ParamField>
+
+<ParamField path="DYN_VELO_RESPONSE_PORT" type="integer" default="0">
+  TCP port of the Velo response listener. Every process on the Velo response plane, workers
+  included, opens one: frontends connect to the workers' listeners, and workers to the frontends'.
+  Only one process per IP address can use a given port. When unset or `0`, the operating system
+  assigns a free port.
+</ParamField>
+
+<ParamField path="DYN_VELO_RESPONSE_TRANSPORT" type="string" default="tcp">
+  Transport under the Velo response plane: `tcp`, or `ucx` for RDMA. `ucx` requires a build with
+  the `velo-ucx` feature.
 </ParamField>
 
 <ParamField path="--event-plane" type="string" default="zmq">
