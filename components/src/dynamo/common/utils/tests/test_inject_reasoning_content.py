@@ -189,7 +189,7 @@ class TestInputParamManagerReasoningInjection:
         tokenizer.chat_template = (
             "{% for m in messages %}{{ m.role }}: {{ m.content }}{% endfor %}"
         )
-        tokenizer.apply_chat_template = MagicMock(return_value="rendered")
+        tokenizer.apply_chat_template = MagicMock(return_value=[1, 2, 3])
 
         from dynamo.common.utils.input_params import InputParamManager
 
@@ -221,7 +221,7 @@ class TestInputParamManagerReasoningInjection:
             "{% if m.reasoning_content %}<think>{{ m.reasoning_content }}</think>{% endif %}"
             "{{ m.role }}: {{ m.content }}{% endfor %}"
         )
-        tokenizer.apply_chat_template = MagicMock(return_value="rendered")
+        tokenizer.apply_chat_template = MagicMock(return_value=[1, 2, 3])
 
         from dynamo.common.utils.input_params import InputParamManager
 
