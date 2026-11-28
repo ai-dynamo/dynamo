@@ -3,9 +3,10 @@
 
 """Targeted checks for JSON schemas passed to constrained-decoding backends."""
 
+import copy
 import json
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 from urllib.parse import unquote
 
@@ -52,6 +53,134 @@ def admits_only_empty_object(schema: Any) -> bool:
             continue
         return False
     return True
+
+
+# Keywords holding subschemas; literal keywords such as ``const`` are skipped.
+# Mirrors ``rebase_schema_refs`` in lib/llm/src/protocols/openai/tools.rs.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "definitions",
+        "properties",
+        "patternProperties",
+        "dependentSchemas",
+        "dependencies",
+    }
+)
+_SCHEMA_KEYWORDS = frozenset(
+    {
+        "items",
+        "prefixItems",
+        "additionalItems",
+        "contains",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "propertyNames",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "contentSchema",
+    }
+)
+
+
+def _rebase_schema_refs(schema: Any, root: str) -> bool:
+    """Prefix fragment-only ``$ref`` values in schema positions with ``root``.
+
+    An object with ``$id`` starts a separate resource, so its references keep
+    that base and the walk stops there. Returns whether any reference changed.
+    """
+    rebased = False
+    if isinstance(schema, list):
+        for item in schema:
+            rebased |= _rebase_schema_refs(item, root)
+    elif isinstance(schema, dict):
+        if "$id" in schema:
+            # The engine owns reference resolution within this resource.
+            return False
+        reference = schema.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#"):
+            fragment = reference[1:]
+            if (
+                not fragment
+                or fragment.startswith("/")
+                or fragment[:3].lower() == "%2f"
+            ):
+                schema["$ref"] = root + fragment
+                rebased = True
+        for keyword, value in schema.items():
+            if keyword in _SCHEMA_MAP_KEYWORDS:
+                if isinstance(value, dict):
+                    for child in value.values():
+                        rebased |= _rebase_schema_refs(child, root)
+            elif keyword in _SCHEMA_KEYWORDS:
+                rebased |= _rebase_schema_refs(value, root)
+    return rebased
+
+
+def build_required_tool_schema(
+    tools: Iterable[tuple[str, dict[str, Any] | None]],
+    parallel_tool_calls: bool | None,
+) -> dict[str, Any]:
+    """Build the ``tool_choice="required"`` JSON schema for an array of calls.
+
+    ``tools`` holds ``(name, parameters)`` pairs. Nesting a parameter document
+    under ``items.anyOf[i].properties.parameters`` would leave its local
+    references (``#/definitions/...``, ``#/properties/...``, ``#``) pointing at
+    the outer array, and would merge every tool's ``$defs`` into one map. A
+    document that has local references or ``$defs`` therefore moves to
+    ``$defs.tool_{i}`` with its references rebased onto that root; any other
+    document stays inline. The callers' parameter dicts are not modified.
+    Port of ``build_required_schema`` in lib/llm/src/protocols/openai/tools.rs.
+
+    Raises ``ValueError`` when a tool's ``$defs`` is not an object.
+    """
+    defs: dict[str, Any] = {}
+    any_of = []
+    for index, (name, parameters) in enumerate(tools):
+        # vLLM and SGLang treat empty parameters like missing ones.
+        schema = (
+            copy.deepcopy(parameters)
+            if parameters
+            else {"type": "object", "properties": {}}
+        )
+        if isinstance(schema, dict) and "$defs" in schema:
+            if not isinstance(schema["$defs"], dict):
+                raise ValueError(
+                    f"`$defs` in the parameters of tool '{name}' must be an "
+                    f"object, got {type(schema['$defs']).__name__}."
+                )
+        reference = f"#/$defs/tool_{index}"
+        if _rebase_schema_refs(schema, reference) or (
+            isinstance(schema, dict) and "$defs" in schema
+        ):
+            defs[f"tool_{index}"] = schema
+            schema = {"$ref": reference}
+        any_of.append(
+            {
+                "properties": {
+                    "name": {"type": "string", "enum": [name]},
+                    "parameters": schema,
+                },
+                "required": ["name", "parameters"],
+            }
+        )
+
+    result: dict[str, Any] = {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "object", "anyOf": any_of},
+    }
+    if parallel_tool_calls is False:
+        result["maxItems"] = 1
+    if defs:
+        result["$defs"] = defs
+    return result
 
 
 def _schema_error(message: str) -> HttpError:
