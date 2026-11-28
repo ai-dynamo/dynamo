@@ -212,7 +212,9 @@ class DiagnosticsRecorder:
             self._snapshots = self._snapshots[-self._max_snapshots :]
 
     def should_generate_report(self, now_s: float) -> bool:
-        if not self.enabled or not self._snapshots:
+        # Periodic reports are off when report_interval_hours is unset, even
+        # though the recorder stays enabled for the live dashboard.
+        if not self.enabled or not self._snapshots or self._interval_s <= 0:
             return False
         if self._last_report_s == 0.0:
             self._last_report_s = self._snapshots[0].timestamp_s
