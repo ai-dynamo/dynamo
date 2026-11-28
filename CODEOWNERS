@@ -434,6 +434,7 @@
 /recipes/nemotron-3-nano-omni/                                                                          @ai-dynamo/dynamo-performance-codeowners
 /recipes/nemotron-3-super-fp8/                                                                          @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/sin_load_generator/                                                                         @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/tests/                                                                        @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/prefix_data_generator/                                                                      @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/README.md                                                                     @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/tests/                                                                    @ai-dynamo/dynamo-performance-codeowners
@@ -441,6 +442,7 @@
 /benchmarks/request_trace/__init__.py                                                                   @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/bench_ais_concurrency.py                                                             @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/convert_to_perfetto.py                                                        @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/nsys_request_timeline.py                                                      @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/validate_convert_to_perfetto.py                                               @ai-dynamo/dynamo-performance-codeowners
 
 # === xpu  (@ai-dynamo/dynamo-xpu-codeowners) ===
