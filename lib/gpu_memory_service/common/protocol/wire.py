@@ -3,6 +3,7 @@
 
 """Wire protocol for length-prefixed messages with optional FD passing."""
 
+import array
 import asyncio
 import os
 import socket
@@ -44,30 +45,74 @@ def _try_extract_message(
 # ==================== Async (for server) ====================
 
 
+async def _wait_writable(writer, fd: int) -> None:
+    """Wait until fd is writable; raise if the transport closed meanwhile."""
+    loop = asyncio.get_running_loop()
+    writable = loop.create_future()
+
+    def ready() -> None:
+        if not writable.done():
+            writable.set_result(None)
+
+    loop.add_writer(fd, ready)
+    try:
+        await writable
+    finally:
+        loop.remove_writer(fd)
+    if writer.transport.is_closing():
+        raise ConnectionResetError("Transport closed while sending an FD frame")
+
+
 async def send_message(writer, msg: Message, fd: int = -1) -> None:
-    """Send a length-prefixed message with optional FD via SCM_RIGHTS."""
+    """Send a length-prefixed message with optional FD via SCM_RIGHTS.
+
+    An FD frame bypasses the transport, so only one task may send on a writer
+    at a time.
+    """
     frame = _frame_message(msg)
 
     if fd >= 0:
+        transport = writer.transport
+        if transport.is_closing():
+            raise ConnectionResetError("Transport is closing")
         transport_sock = writer.get_extra_info("socket")
         if transport_sock is None:
             raise RuntimeError("Cannot get socket from transport for FD passing")
 
-        def do_send_fd():
-            raw_fd = transport_sock.fileno()
-            dup_fd = os.dup(raw_fd)
+        view = memoryview(frame)
+        sent = 0
+        # The loop cannot watch the transport's own descriptor for a second
+        # writer, so wait and send on a duplicate. MSG_DONTWAIT keeps every
+        # send non-blocking without touching the shared file status flags.
+        with transport_sock.dup() as sock:
             try:
-                sock = socket.socket(fileno=dup_fd)
-                try:
-                    sock.setblocking(True)
-                    socket.send_fds(sock, [frame], [fd])
-                finally:
-                    sock.detach()
-            except Exception:
-                os.close(dup_fd)
-                raise
-
-        await asyncio.get_running_loop().run_in_executor(None, do_send_fd)
+                # Bytes the transport still buffers from an earlier frame must
+                # reach the socket first, or the two frames interleave.
+                while transport.get_write_buffer_size():
+                    await _wait_writable(writer, sock.fileno())
+                while sent < len(frame):
+                    try:
+                        if sent == 0:
+                            # SCM_RIGHTS rides the first bytes only.
+                            sent = sock.sendmsg(
+                                [view],
+                                [
+                                    (
+                                        socket.SOL_SOCKET,
+                                        socket.SCM_RIGHTS,
+                                        array.array("i", [fd]),
+                                    )
+                                ],
+                                socket.MSG_DONTWAIT,
+                            )
+                        else:
+                            sent += sock.send(view[sent:], socket.MSG_DONTWAIT)
+                    except BlockingIOError:
+                        await _wait_writable(writer, sock.fileno())
+            finally:
+                if 0 < sent < len(frame):
+                    # A partial frame cannot be rolled back.
+                    transport.abort()
     else:
         writer.write(frame)
         await writer.drain()
