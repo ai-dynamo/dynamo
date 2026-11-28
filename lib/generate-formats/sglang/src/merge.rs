@@ -444,6 +444,86 @@ mod tests {
         }
     }
 
+    /// P/D with prompt logprobs: decode's empty prompt field is replaced by
+    /// prefill's value, or omitted when prefill has none, as from an older
+    /// prefill worker. Aggregated serving (no prefill item) keeps decode's.
+    #[test]
+    fn prompt_fields_without_prefill_value_are_omitted() {
+        let rows = json!([[null, 1, null], [-0.5, 2, null]]);
+        let cases = [
+            ("legacy prefill, no engine_data", Some(None), None),
+            (
+                "prefill without prompt fields",
+                Some(Some(json!({"meta_info": {}}))),
+                None,
+            ),
+            (
+                "authoritative empty",
+                Some(Some(json!({"meta_info": {"input_token_logprobs": []}}))),
+                Some(json!([])),
+            ),
+            (
+                "authoritative rows",
+                Some(Some(json!({"meta_info": {"input_token_logprobs": rows}}))),
+                Some(rows.clone()),
+            ),
+            ("aggregated", None, Some(json!([]))),
+        ];
+        for stream in [false, true] {
+            for (name, prefill, expected) in &cases {
+                let body = json!({
+                    "input_ids": [1, 2], "return_logprob": true,
+                    "logprob_start_len": 0, "stream": stream,
+                });
+                let Opened { bind, .. } = SglangFormat::native()
+                    .open(ClientRequest {
+                        body: body.to_string().as_bytes(),
+                        headers: &axum::http::HeaderMap::from_iter([(
+                            axum::http::header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("application/json"),
+                        )]),
+                        default_request_id: "id",
+                    })
+                    .unwrap();
+                let mut exchange = bind(&crate::testkit::worker()).unwrap().exchange;
+                let mut emitted = Vec::new();
+                if let Some(prefill) = prefill {
+                    let output = LLMEngineOutput {
+                        engine_data: prefill
+                            .clone()
+                            .map(|response| Box::new(json!({ RESPONSE_KEY: response }))),
+                        ..Default::default()
+                    };
+                    exchange
+                        .chunk(output, true, &mut |v| emitted.push(v.clone()))
+                        .unwrap();
+                }
+                for (id, finish) in [(7, Value::Null), (8, json!({"type": "length"}))] {
+                    let chunk = json!({"text": "x", "output_ids": [id], "meta_info": {
+                        "input_token_logprobs": [], "output_token_logprobs": [[-0.1, id, null]],
+                        "finish_reason": finish,
+                    }});
+                    let output = LLMEngineOutput {
+                        engine_data: Some(Box::new(json!({ RESPONSE_KEY: chunk }))),
+                        ..Default::default()
+                    };
+                    exchange
+                        .chunk(output, false, &mut |v| emitted.push(v.clone()))
+                        .unwrap();
+                }
+                emitted.extend(exchange.finish().unwrap());
+                assert_eq!(emitted.len(), if stream { 2 } else { 1 }, "{name}");
+                for response in emitted {
+                    assert_eq!(
+                        response.pointer("/meta_info/input_token_logprobs"),
+                        expected.as_ref(),
+                        "{name}, stream={stream}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn simulator_sends_each_field_the_way_sglang_does() {
         use crate::testkit::sim::{self, Role, Truth};
