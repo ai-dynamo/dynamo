@@ -54,8 +54,11 @@ def _write_synthetic_video(
     offset_y = int(rng.integers(0, span_y))
     speed_x = int(rng.integers(1, max(2, width // 8)))
     speed_y = int(rng.integers(1, max(2, height // 8)))
-    xx = np.arange(width, dtype=np.uint16)[None, :]
-    yy = np.arange(height, dtype=np.uint16)[:, None]
+    # Use int64 rather than uint16: NumPy 2 (NEP 50) raises OverflowError when
+    # frame_idx * speed exceeds 65535. Every channel reduces modulo 256 before
+    # casting to uint8, so the wider grid produces identical pixels.
+    xx = np.arange(width, dtype=np.int64)[None, :]
+    yy = np.arange(height, dtype=np.int64)[:, None]
 
     with imageio.get_writer(
         str(path),
