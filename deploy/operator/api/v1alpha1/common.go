@@ -68,7 +68,7 @@ const (
 	ComponentRoleLeader = "leader"
 	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
 	ComponentRoleWorker = "worker"
-	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	// ComponentRoleLPXConductor identifies the role that runs the GPU engine of a hybrid LPX component.
 	ComponentRoleLPXConductor = "conductor"
 	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
 	ComponentRoleLPXAgent = "agent"

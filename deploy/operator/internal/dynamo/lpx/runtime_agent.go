@@ -10,7 +10,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -18,8 +17,6 @@ import (
 const (
 	v2LPUResourceName corev1.ResourceName = "lpu.nvidia.com/lpu"
 	v3LPUResourceName corev1.ResourceName = "nvidia.com/lpu"
-
-	allocationEnvVar = "LPX_ALLOCATION"
 )
 
 // configureAgentScheduling consumes a fresh, nonnil Agent PodSpec containing main.
@@ -41,15 +38,6 @@ func configureAgentScheduling(agent *corev1.PodSpec, architecture lpuArchitectur
 		container.Resources.Limits = make(corev1.ResourceList)
 	}
 	container.Resources.Requests[name], container.Resources.Limits[name] = amount, amount
-}
-
-// configureNodeLocalConductorRuntime consumes a fresh conductor PodSpec with a validated main container.
-func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string, environment *semanticenv.ContainerLayers) {
-	// Bind placement data without interpreting the template's executable or arguments.
-	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
-
-	// Kubernetes expands environment references in order; publish allocation before authored bindings.
-	environment.Prepend(conductor, "operator.lpx.allocation", []corev1.EnvVar{{Name: allocationEnvVar, Value: allocation}})
 }
 
 // modelPaths resolves every binding for nonempty canonical projections before any Pod is changed.

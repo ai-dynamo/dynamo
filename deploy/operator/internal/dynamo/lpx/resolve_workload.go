@@ -9,6 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 
@@ -36,16 +39,44 @@ var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 // immutable build snapshot from its backing store.
 var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snapshot")
 
-// ResolveWorkload projects one admitted component group against immutable builds.
+// ResolveWorkloads resolves and names each LPX workload in serving-component order.
+// reader, dgd and registry must be non-nil, and dgd must have passed admission.
+// Inputs are not mutated.
+func ResolveWorkloads(ctx context.Context, reader client.Reader, dgd *dynamov1beta1.DynamoGraphDeployment, pcsName string, registry ModelRegistry) ([]*Workload, error) {
+	// Sorted serving-component names fix the workload order for every caller.
+	groups := ComponentGroups(dgd)
+	workloads := make([]*Workload, 0, len(groups))
+	for _, name := range slices.Sorted(maps.Keys(groups)) {
+		workload, err := resolveWorkload(ctx, reader, dgd, groups[name], registry, pcsName, len(groups) > 1)
+		if err != nil {
+			return nil, err
+		}
+
+		// Finalized names must be unique among all workloads in the same PCS.
+		for _, previous := range workloads {
+			if previous.ScalingGroup() == workload.ScalingGroup() || previous.ResourcePrefix() == workload.ResourcePrefix() {
+				return nil, fmt.Errorf("LPX components %q and %q resolve to conflicting resource names; rename one component", previous.ServingComponentName(), name)
+			}
+		}
+		workloads = append(workloads, workload)
+	}
+	return workloads, nil
+}
+
+// resolveWorkload projects one admitted component group against immutable builds
+// and names it in its PodCliqueSet.
 // reader, dgd and registry must be non-nil. componentNames must contain exactly the members
 // of one ComponentGroups entry from the admitted dgd, in any order.
+// shared reports that the dgd has other component groups in the same PCS.
 // Inputs are read without mutation.
-func ResolveWorkload(
+func resolveWorkload(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	componentNames []string,
 	registry ModelRegistry,
+	pcsName string,
+	shared bool,
 ) (*Workload, error) {
 	// Resolve only this group's native components from the unchanged graph.
 	components := make([]*dynamov1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
@@ -126,20 +157,28 @@ func ResolveWorkload(
 		projections = append(projections, projected...)
 	}
 
-	// The conductor component owns explicit capacity or the initial native seed.
-	conductor := components[len(components)-1]
-	scalingGroupReplicas := ptr.Deref(conductor.Replicas, provideroverride.EffectiveGroveMinAvailable(conductor))
-
-	// Canonical roles expand into default or draft0..draft7 followed by target.
-	digest, err := workloadSetDigest(projections)
+	// The serving component owns explicit capacity or the initial native seed, and the conductor width.
+	serving := components[len(components)-1]
+	scalingGroupReplicas := ptr.Deref(serving.Replicas, provideroverride.EffectiveGroveMinAvailable(serving))
+	conductorReplicas, err := resolveConductorReplicas(serving.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor), pipeline, snapshot)
 	if err != nil {
 		return nil, err
 	}
-	return &Workload{
-		modelProjections:     projections,
-		digest:               digest,
-		scalingGroupReplicas: scalingGroupReplicas,
-	}, nil
+	return newWorkload(pcsName, shared, projections, scalingGroupReplicas, conductorReplicas)
+}
+
+// resolveConductorReplicas returns the conductor width of a hybrid workload, and zero for any other
+// workload, which has no conductor. An omitted width starts with one complete compiled client
+// group. role is the validated conductor role of a hybrid workload; build is its non-nil build.
+func resolveConductorReplicas(role *dynamov1beta1.ComponentRoleSpec, pipeline Pipeline, build *Build) (int32, error) {
+	if pipeline != PipelineHybrid {
+		return 0, nil
+	}
+	minimum := int64(build.ioFPGACount) * int64(build.ioFanoutFactor)
+	if minimum > math.MaxInt32 {
+		return 0, fmt.Errorf("minimum Cyborg replicas %d exceeds the PodClique replica limit %d", minimum, math.MaxInt32)
+	}
+	return ptr.Deref(role.Replicas, int32(minimum)), nil
 }
 
 // validateWorkloadConductor checks role requirements that depend on the immutable build.
@@ -161,14 +200,6 @@ func validateWorkloadConductor(
 	}
 
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
-	// A shared draft and target pair's conductor serves the pair itself, whatever the build.
-	if pipeline == PipelineSpecDecode && conductor != nil &&
-		common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
-		return fmt.Errorf(
-			"%w: component %q is the target of a shared draft and target pair, whose conductor takes no Dynamo sidecar; remove the %q init container",
-			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
-		)
-	}
 
 	// Validate the selected hybrid runtime's GPU resources and claim bindings.
 	if requiresGPU {
@@ -192,21 +223,19 @@ func validateWorkloadConductor(
 		return fmt.Errorf("component %q conductor main container requires a positive GPU count from scalar resources or resourceClaims", component.ComponentName)
 	}
 
-	// A Dynamo sidecar fronts the hybrid GPU engine; the LPU-only conductor is not a Dynamo worker.
-	if conductor != nil && common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
-		return fmt.Errorf("%w: component %q conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine", ErrUnsupportedRuntime, component.ComponentName)
-	}
-
-	// An LPU-only conductor is a singleton even when the workload replica count is larger.
-	if conductor != nil && ptr.Deref(conductor.Replicas, 1) != 1 {
-		return fmt.Errorf("%w: component %q conductor replicas must be one for LPU-only execution", ErrUnsupportedRuntime, component.ComponentName)
+	// Only a hybrid build has a conductor: Cyborg that runs its GPU engine.
+	if conductor != nil {
+		return fmt.Errorf(
+			"%w: component %q conductor requires a hybrid build; an LPU-only engine serves from its agent role through the %q sidecar",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
+		)
 	}
 
 	return nil
 }
 
 func expandedModelNames(componentCount int, target bool, draftCount int) []string {
-	// Component membership retains Nova's existing default/draft/target identities.
+	// Component membership retains the established default/draft/target identities.
 	if componentCount == 1 {
 		return []string{"default"}
 	}

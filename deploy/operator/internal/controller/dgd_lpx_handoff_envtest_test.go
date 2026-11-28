@@ -135,18 +135,14 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 			ComponentName: "lpx", ComponentType: v1beta1.ComponentTypeLPX,
 			LPX: &v1beta1.LPXConfig{BuildID: (&url.URL{Scheme: "file", Path: buildDir}).String()},
 			Roles: []v1beta1.ComponentRoleSpec{{
-				Name: v1beta1.ComponentRoleLPXConductor,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: consts.MainContainerName, Image: "example/conductor:1.4.0",
-						Command: []string{"/custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
-						VolumeMounts: []corev1.VolumeMount{{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models"}},
-					}},
-					Volumes: []corev1.Volume{{Name: v1alpha1.ModelStorageVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				}},
-			}, {
 				Name: v1beta1.ComponentRoleLPXAgent,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{
+						Name: consts.RuntimeContainerName, Image: "example/dynamo-sidecar:1.4.0",
+						RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+						Args:          []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
+						VolumeMounts:  []corev1.VolumeMount{{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models", ReadOnly: true}},
+					}},
 					Containers: []corev1.Container{{
 						Name: consts.MainContainerName, Image: "example/lpu-runtime:1.4.0",
 						VolumeMounts: []corev1.VolumeMount{
@@ -232,7 +228,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		return env.Client().Update(t.Context(), source)
 	})
 	require.True(t, apierrors.IsInvalid(err), "%v", err)
-	require.ErrorContains(t, err, "spec.components[0].roles[1].podTemplate.spec.nodeName")
+	require.ErrorContains(t, err, "spec.components[0].roles[0].podTemplate.spec.nodeName")
 	require.ErrorContains(t, err, "LPX owns role addressing and placement")
 	require.NoError(t, env.Client().Get(t.Context(), key, source))
 	require.NoError(t, env.Client().Get(t.Context(), key, child))

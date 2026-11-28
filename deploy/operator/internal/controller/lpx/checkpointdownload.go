@@ -31,7 +31,7 @@ const checkpointDownloadPendingMessage = "Waiting for checkpoint downloads to co
 func (r *graphReconciler) reconcileCheckpointDownloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
-	workloads map[string]*lpx.Workload,
+	workloads []*lpx.Workload,
 ) (ctrl.Result, error) {
 	var (
 		lastCheckedAt *metav1.Time
@@ -112,7 +112,7 @@ func ensureCheckpointsDownloaded(
 
 // workloadCheckpoints returns the distinct checkpoints of the resolved
 // workloads' model projections, sorted by key.
-func workloadCheckpoints(workloads map[string]*lpx.Workload) []*lpx.Checkpoint {
+func workloadCheckpoints(workloads []*lpx.Workload) []*lpx.Checkpoint {
 	checkpointsByKey := make(map[string]*lpx.Checkpoint)
 	for _, workload := range workloads {
 		for _, projection := range workload.ModelProjections() {

@@ -73,7 +73,6 @@ func RenderLPXWorkloadTemplates(
 	runtimeConfig *controller_common.RuntimeConfig,
 	secretsRetriever SecretsRetriever,
 	workload *dynamolpx.Workload,
-	plan *dynamolpx.MaterializationPlan,
 ) (*dynamolpx.WorkloadTemplates, error) {
 	// Apply Dynamo defaults independently to the selected workload's authored roles.
 	component := source.GetComponentByName(workload.ServingComponentName())
@@ -83,16 +82,16 @@ func RenderLPXWorkloadTemplates(
 		secretsRetriever: secretsRetriever,
 		discoveryBackend: controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, source.Annotations),
 		discoveryContext: NewDiscoveryContext(operatorConfig.Discovery.Backend, source.Annotations),
-	}, workload, plan)
+	}, workload)
 	if err != nil {
 		return nil, err
 	}
-	rendered, err := dynamolpx.RenderNodeLocal(workload, plan, *input)
+	rendered, err := dynamolpx.RenderNodeLocal(workload, *input)
 	if err != nil {
 		return nil, err
 	}
 
-	// The conductor component owns the complete workload's disruption budget.
+	// The serving component owns the complete workload's disruption budget.
 	if component.ProviderOverride != nil {
 		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
 			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(budget)}
@@ -252,8 +251,8 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 // renderLPXComponents merges ordinary Dynamo defaults independently into every
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
-// Preflight supplies the non-nil validated workload and materialization plan.
-func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, error) {
+// Preflight supplies the non-nil, validated workload.
+func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload) (*dynamolpx.RenderInput, error) {
 	// Cooperating workers use one serving revision; discovery labels keep the base namespace.
 	servingHash, err := ComputeDGDWorkersSpecHash(p.dynamoDeployment)
 	if err != nil {
@@ -284,36 +283,19 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
 		input.Stages[component.ComponentName] = dynamolpx.PodTemplate{Template: *lpuTemplate, Environment: environment}
+
+		// Only a hybrid workload has a conductor: Cyborg of its serving component.
+		if component != p.component || workload.Pipeline() != dynamolpx.PipelineHybrid {
+			continue
+		}
+
+		// Cyborg renders as a decode worker at the workload's resolved width.
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
-
-		// Only the serving component's declared conductor contributes a template.
-		if component != p.component || conductor == nil {
-			continue
-		}
-
-		// The serving role owns its startup independently of the Agent template.
-		if workload.Pipeline() != dynamolpx.PipelineHybrid {
-			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-			template, environment, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-				p.discoveryContext, defaults)
-			if err != nil {
-				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
-			}
-			input.Conductor = &dynamolpx.PodTemplate{Template: *template, Environment: environment}
-			continue
-		}
-
-		// Omitted hybrid capacity starts with one complete compiled client group.
-		minimumReplicas, err := workload.MinimumCyborgReplicas()
-		if err != nil {
-			return nil, err
-		}
-		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
-		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
+		role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		gpu := p
 		gpu.component = role
-		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
+		gpu.r = ServiceRole{Name: workload.ConductorTemplate(), Role: RoleMain, Replicas: workload.ConductorReplicas()}
 		gpuTemplate, environment, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {

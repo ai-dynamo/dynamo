@@ -16,21 +16,6 @@ spec:
     lpx:
       buildId: node-local-v2-connected
     roles:
-    - name: conductor
-      podTemplate:
-        spec:
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          containers:
-          - name: main
-            volumeMounts:
-            - name: model-storage
-              mountPath: /models
-            image: example.invalid/lpu-conductor:test
-            command: [/opt/dynamo-lpu]
-            args: [serve]
     - name: agent
       podTemplate:
         spec:
@@ -38,14 +23,36 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - name: openengine
+            emptyDir: {}
           containers:
           - name: main
             volumeMounts:
             - name: model-storage
               mountPath: /models
+            - name: openengine
+              mountPath: /run/openengine
             image: example.invalid/lpu-agent:test
             command: [/opt/dynamo-lpu]
             args: [serve]
+          initContainers:
+          - name: runtime
+            image: example.invalid/dynamo-sidecar:test
+            restartPolicy: Always
+            args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            - --node-rank
+            - $(GROVE_PCLQ_POD_INDEX)
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+              readOnly: true
+            - name: openengine
+              mountPath: /run/openengine
   - name: target
     type: worker
     replicas: 1
@@ -55,7 +62,7 @@ spec:
         - name: main
           image: example.invalid/vllm-target:test
           command: [python, -m, dynamo.vllm]
-          args: [--experimental-external-draft-endpoint, $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/backend/generate]
+          args: [--experimental-external-draft-endpoint, $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/lpx/generate]
           resources:
             limits:
               nvidia.com/gpu: '1'

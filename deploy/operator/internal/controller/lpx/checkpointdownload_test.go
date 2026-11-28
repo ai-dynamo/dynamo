@@ -331,7 +331,7 @@ func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
 			publishSelectedLPXForTest(t, ctx, r, child, selected)
 
 			t.Log("Journal one Agent Pod for release")
-			agentClique := getResource[*grovev1alpha1.PodClique](t, objects, selected.plan.Agents[0].CliqueName)
+			agentClique := getResource[*grovev1alpha1.PodClique](t, objects, lpxTestAgentCliqueName(selected.workload, 0, 0))
 			pod := &corev1.Pod{
 				Namespace: child.Namespace, Name: "released", UID: "released-uid",
 				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}}

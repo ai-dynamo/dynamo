@@ -155,7 +155,8 @@ rolled by this change.
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
 The operator no longer reads `manifest.v2.capnp.bin` or legacy placement fields,
-and it no longer generates placement ConfigMaps under `/configs`.
+and it no longer generates placement ConfigMaps under `/configs`. Only a hybrid LPX build has a
+conductor role: an LPU-only build serves from a `runtime` init container in its agent template.
 
 **Affected:** Every existing LPX deployment must be deployed again. Bundles that have no
 `deployment.v1.capnp.bin` or no `lpuUnits`, including bundles that have only
@@ -178,12 +179,39 @@ and it no longer generates placement ConfigMaps under `/configs`.
    ```
 
 4. Update each DGD manifest: set the new `buildId`, use runtime images that read placement from
-   `lpuUnits`, and remove each `/configs` mount and its volume.
+   `lpuUnits`, and remove each `/configs` mount and its volume. For an LPU-only build, also
+   move serving from the conductor to the agent. Configure each `runtime` init container as
+   [Hybrid LPX conductors require the runtime sidecar](#hybrid-lpx-conductors-require-the-runtime-sidecar)
+   describes for a conductor:
+   - For an LPU-only component that serves its own endpoint, remove its conductor role and add
+     the `runtime` init container to its agent template.
+   - When two LPU-only components share one speculative engine, remove the target's conductor
+     role and add `runtime` only to the target's agent template, with
+     `--model-path $(LPX_TARGET_MODEL_PATH)/tokenizer`. Leave the draft's agent template without
+     `runtime`: a draft that has the sidecar becomes a second, independent engine.
+   - Add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to the arguments of the `runtime` init container:
+     each Agent Pod of a serving component runs the sidecar, and without a rank every sidecar
+     serves as rank 0.
+   - When `--model-path` points into the compiled model directory, mount the `model-storage`
+     volume of `main` read-only in `runtime`, at the same `mountPath` and `subPath`, in addition
+     to the volume that the two containers share to reach the engine.
+   - When the agent template sets `hostNetwork: true`, declare a `readinessProbe` on `runtime`
+     itself: an HTTP GET on the sidecar's system health path (`/health` by default), on the fixed
+     port in `DYN_SYSTEM_PORT`. The operator injects no probe into a host-network Pod, so without
+     this probe the Pod is ready before the sidecar serves.
 5. Apply the DGD manifests.
 
 A bundle that has no `lpuUnits` fails reconciliation with a message that contains
 `config.lpuUnits is empty; recompile the model with LPU units`. The operator creates no
 workload for that bundle.
+
+A manifest that keeps a conductor role on an LPU-only build is rejected in one of two places:
+
+- Admission rejects a conductor role that has no `runtime` init container, with
+  `LPX conductor requires the "runtime" init container`, and a conductor role in a shared
+  speculative pair, with `a shared draft and target pair has no conductor`.
+- A conductor role that has the sidecar, on a single LPU-only component, passes admission and
+  fails reconciliation with a message that contains `conductor requires a hybrid build`.
 
 > [!WARNING]
 > Remove `/configs` mounts and their volumes before you create the workloads again. The operator

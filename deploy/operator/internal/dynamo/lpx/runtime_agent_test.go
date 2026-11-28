@@ -10,7 +10,6 @@ import (
 	"slices"
 	"testing"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -24,10 +23,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 		name           string
 		family         lpuArchitecture
 		devicesPerNode int
-		conductor      bool
 	}{
-		{name: "XT conductor", family: lp20, conductor: true},
-		{name: "HX conductor", family: lp30, conductor: true},
 		{name: "XT worker", family: lp20, devicesPerNode: 8},
 		{name: "HX worker", family: lp30, devicesPerNode: 16},
 	} {
@@ -99,12 +95,8 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				}
 				before := pod.DeepCopy()
 
-				t.Log("Apply runtime bindings for the selected family and role")
-				if role.conductor {
-					configureNodeLocalConductorRuntime(&pod, "allocation", nil)
-				} else {
-					configureAgentScheduling(&pod, role.family, role.devicesPerNode)
-				}
+				t.Log("Apply runtime bindings for the selected family")
+				configureAgentScheduling(&pod, role.family, role.devicesPerNode)
 
 				t.Log("Retain the sidecar and bind only the authored main runtime")
 				require.Len(t, pod.Containers, 2)
@@ -113,16 +105,9 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				require.Equal(t, authored.Command, container.Command)
 				require.Equal(t, authored.Args, container.Args)
 				require.Equal(t, authored.Name, container.Name)
-				if role.conductor {
-					require.Equal(t, "allocation", testContainerEnvValue(container.Env, "LPX_ALLOCATION"))
-				}
 				require.Equal(t, authored.SecurityContext, container.SecurityContext)
 
 				t.Log("Keep static environment values template-owned, including intentional omission")
-				if role.conductor {
-					container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool { return variable.Name == "LPX_ALLOCATION" })
-					authored.Env = slices.DeleteFunc(slices.Clone(authored.Env), func(variable corev1.EnvVar) bool { return variable.Name == "LPX_ALLOCATION" })
-				}
 				require.Equal(t, authored.Env, container.Env)
 				require.Equal(t, authored.EnvFrom, container.EnvFrom)
 				require.Equal(t, authored.StartupProbe, container.StartupProbe)
@@ -136,38 +121,6 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				require.Equal(t, authored.VolumeMounts, container.VolumeMounts)
 			})
 		}
-	}
-}
-
-func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		bindings []corev1.EnvVar
-	}{
-		{name: "absent"},
-		{name: "existing", bindings: []corev1.EnvVar{{Name: allocationEnvVar, Value: "stale"}}},
-		{name: "duplicates", bindings: []corev1.EnvVar{
-			{Name: allocationEnvVar, Value: "stale"},
-			{Name: allocationEnvVar, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Author environment references before any stale allocation bindings")
-			authored := []corev1.EnvVar{
-				{Name: "NOVA_ALLOCATION", Value: "$(LPX_ALLOCATION)"},
-				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-			}
-			pod := corev1.PodSpec{Containers: []corev1.Container{{
-				Name: commonconsts.MainContainerName, Command: []string{"custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
-				Env: append(slices.Clone(authored), test.bindings...),
-			}}}
-			want := pod.Containers[0].DeepCopy()
-			want.Env = append([]corev1.EnvVar{{Name: allocationEnvVar, Value: "agt0:agt1"}}, authored...)
-
-			t.Log("Publish exactly one authoritative allocation before references without changing startup or other environment")
-			configureNodeLocalConductorRuntime(&pod, "agt0:agt1", nil)
-			require.Equal(t, *want, pod.Containers[0])
-		})
 	}
 }
 
