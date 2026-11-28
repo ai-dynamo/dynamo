@@ -4,6 +4,7 @@
 """Unit tests for DynamoGraphDeploymentRequest lifecycle helpers."""
 
 import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,7 @@ from tests.deploy.dgdr_utils import (
     DGDRTestConfig,
     ManagedDGDR,
     build_dgdr,
+    kubectl_read,
     parse_final_dgd,
     parse_served_model_ids,
     run_lifecycle,
@@ -382,6 +384,145 @@ async def test_get_output_dgd_retries_vcluster_connection_refusal(
     assert result["kind"] == "DynamoGraphDeployment"
     assert manager.core.read_namespaced_config_map.await_count == 2
     sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.parametrize(
+    ("client_name", "method_name", "read"),
+    [
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            lambda manager: manager.get_versioned("request", "v1alpha1"),
+        ),
+        (
+            "apiextensions",
+            "read_custom_resource_definition",
+            lambda manager: manager.get_crd(),
+        ),
+    ],
+    ids=["get_versioned", "get_crd"],
+)
+async def test_validation_read_retries_vcluster_connection_refusal(
+    monkeypatch, client_name, method_name, read
+) -> None:
+    manager = initialized_manager()
+    response = {"apiVersion": "nvidia.com/v1alpha1"}
+    request = AsyncMock(side_effect=[vcluster_connection_error(), response])
+    setattr(getattr(manager, client_name), method_name, request)
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    result = await read(manager)
+
+    assert result == response
+    assert request.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.parametrize(
+    ("client_name", "method_name", "response", "check"),
+    [
+        (
+            "batch",
+            "read_namespaced_job",
+            SimpleNamespace(status=SimpleNamespace(succeeded=1, failed=0)),
+            lambda manager: manager.assert_profiling_job_succeeded("job"),
+        ),
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            {"status": {"state": "successful"}},
+            lambda manager: manager.wait_for_dgd_successful("dgd", timeout=60),
+        ),
+        (
+            "core",
+            "list_namespaced_pod",
+            SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="pod"),
+                        status=SimpleNamespace(phase="Running", container_statuses=[]),
+                    )
+                ]
+            ),
+            lambda manager: manager.assert_dgd_pods_ready("dgd"),
+        ),
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            {"status": {"components": {"Frontend": {"replicas": 1}}}},
+            lambda manager: manager.assert_services("dgd", {"Frontend": 1}),
+        ),
+    ],
+    ids=[
+        "assert_profiling_job_succeeded",
+        "wait_for_dgd_successful",
+        "assert_dgd_pods_ready",
+        "assert_services",
+    ],
+)
+async def test_deployment_check_retries_vcluster_connection_refusal(
+    monkeypatch, client_name, method_name, response, check
+) -> None:
+    manager = initialized_manager()
+    request = AsyncMock(side_effect=[vcluster_connection_error(), response])
+    setattr(getattr(manager, client_name), method_name, request)
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    await check(manager)
+
+    assert request.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_dgd_successful_stops_connection_retries_at_deadline(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    manager.get_dgd = AsyncMock(side_effect=vcluster_connection_error())
+    real_sleep = asyncio.sleep
+
+    # Twelve 0.05 s retry sleeps take longer than the 0.25 s deploy timeout.
+    async def short_sleep(_delay: float) -> None:
+        await real_sleep(0.05)
+
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", short_sleep)
+
+    with pytest.raises(TimeoutError, match="Timed out after 0.25s"):
+        await manager.wait_for_dgd_successful("dgd", timeout=0.25)
+
+    assert manager.get_dgd.await_count < VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected_runs"),
+    [
+        (
+            "The connection to the server 127.0.0.1:8443 was refused - "
+            "did you specify the right host or port?",
+            2,
+        ),
+        ('error: the server doesn\'t have a resource type "dgdr"', 1),
+    ],
+    ids=["connection_refused", "other_error"],
+)
+def test_kubectl_read_retries_only_vcluster_connection_errors(
+    monkeypatch, stderr, expected_runs
+) -> None:
+    failure = subprocess.CompletedProcess(["kubectl"], 1, "", stderr)
+    success = subprocess.CompletedProcess(["kubectl"], 0, "", "")
+    run = MagicMock(side_effect=[failure, success])
+    monkeypatch.setattr("tests.deploy.dgdr_utils.subprocess.run", run)
+    sleep = MagicMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
+
+    result = kubectl_read("get", "dgdr")
+
+    assert run.call_count == expected_runs
+    assert result is (success if expected_runs == 2 else failure)
+    assert sleep.call_count == expected_runs - 1
 
 
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:

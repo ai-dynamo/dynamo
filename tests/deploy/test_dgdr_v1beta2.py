@@ -12,7 +12,9 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from functools import partial
+from typing import TypeVar
 from uuid import uuid4
 
 import aiohttp
@@ -24,6 +26,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from tests.deploy.vcluster_utils import retry_vcluster_api_async
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 pytestmark = [
     pytest.mark.k8s,
@@ -35,22 +38,26 @@ pytestmark = [
 ]
 
 
+async def _read(operation: str, request: Callable[..., Awaitable[T]], *args) -> T:
+    return await retry_vcluster_api_async(
+        operation,
+        partial(request, *args, _request_timeout=30),
+        (aiohttp.ClientError, asyncio.TimeoutError),
+        logger,
+    )
+
+
 async def _read_custom(
     custom: client.CustomObjectsApi, namespace: str, plural: str, name: str
 ) -> dict:
-    return await retry_vcluster_api_async(
+    return await _read(
         f"reading {plural}/{name}",
-        partial(
-            custom.get_namespaced_custom_object,
-            "nvidia.com",
-            "v1beta2",
-            namespace,
-            plural,
-            name,
-            _request_timeout=30,
-        ),
-        (aiohttp.ClientError, asyncio.TimeoutError),
-        logger,
+        custom.get_namespaced_custom_object,
+        "nvidia.com",
+        "v1beta2",
+        namespace,
+        plural,
+        name,
     )
 
 
@@ -162,7 +169,9 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         logger.info("Completed Run: %s", json.dumps(run))
 
         job_name = run["status"]["jobRef"]["name"]
-        job = await batch.read_namespaced_job(job_name, namespace, _request_timeout=30)
+        job = await _read(
+            f"reading Job {job_name}", batch.read_namespaced_job, job_name, namespace
+        )
         _assert_owned_by(api.sanitize_for_serialization(job), run)
         assert any(
             c.type == "Complete" and c.status == "True" for c in job.status.conditions
@@ -170,8 +179,11 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         pod_spec = job.spec.template.spec
         assert {c.name for c in pod_spec.containers} == {"sweeper", "publisher"}
         assert pod_spec.service_account_name != "default"
-        binding = await rbac.read_namespaced_role_binding(
-            job_name, namespace, _request_timeout=30
+        binding = await _read(
+            f"reading RoleBinding {job_name}",
+            rbac.read_namespaced_role_binding,
+            job_name,
+            namespace,
         )
         assert binding.role_ref.kind == "Role"
         assert any(
@@ -180,8 +192,10 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
             and subject.namespace == namespace
             for subject in binding.subjects
         )
-        pods = await core.list_namespaced_pod(
-            namespace, label_selector=f"job-name={job_name}", _request_timeout=30
+        pods = await _read(
+            f"listing pods for Job {job_name}",
+            partial(core.list_namespaced_pod, label_selector=f"job-name={job_name}"),
+            namespace,
         )
         assert len(pods.items) == 1
         assert {c.name for c in pods.items[0].status.container_statuses} == {
@@ -193,8 +207,11 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
             assert container.state.terminated.exit_code == 0, container
 
         # The frozen input consumed by the Job must match the public Run status.
-        config_map = await core.read_namespaced_config_map(
-            job_name, namespace, _request_timeout=30
+        config_map = await _read(
+            f"reading ConfigMap {job_name}",
+            core.read_namespaced_config_map,
+            job_name,
+            namespace,
         )
         assert config_map.immutable is True
         _assert_owned_by(api.sanitize_for_serialization(config_map), run)

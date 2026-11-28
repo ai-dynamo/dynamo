@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from kubernetes_asyncio.client import exceptions
 
 from tests.deploy.vcluster_utils import (
     VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api,
     retry_vcluster_api_async,
 )
 
@@ -320,6 +322,34 @@ def kubectl(*args: str, input_: str | None = None) -> subprocess.CompletedProces
     )
 
 
+# Matches the tunnel errors that .github/scripts/retry_kubectl.sh retries.
+_KUBECTL_CONNECTION_ERROR = re.compile(
+    r"Unable to connect to the server:.*(EOF|connection refused|connection reset"
+    r"|i/o timeout|TLS handshake timeout)"
+    r"|The connection to the server .* was refused"
+    r"|read: connection reset by peer",
+    re.IGNORECASE,
+)
+
+
+class _KubectlConnectionError(RuntimeError):
+    pass
+
+
+def kubectl_read(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run an idempotent kubectl command, retrying while the vCluster tunnel recovers."""
+
+    def run() -> subprocess.CompletedProcess[str]:
+        result = kubectl(*args)
+        if result.returncode != 0 and _KUBECTL_CONNECTION_ERROR.search(result.stderr):
+            raise _KubectlConnectionError(result.stderr.strip())
+        return result
+
+    return retry_vcluster_api(
+        f"running kubectl {' '.join(args)}", run, (_KubectlConnectionError,), logger
+    )
+
+
 class DGDRCleanupError(RuntimeError):
     """Report every DGDR that could not be cleaned up."""
 
@@ -449,7 +479,9 @@ class ManagedDGDR:
     async def get_versioned(self, name: str, version: str) -> dict[str, Any]:
         self._require_clients()
         assert self.custom is not None
-        return await self.custom.get_namespaced_custom_object(
+        return await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} at {version}",
+            self.custom.get_namespaced_custom_object,
             group=DGDR_GROUP,
             version=version,
             namespace=self.config.namespace,
@@ -552,7 +584,12 @@ class ManagedDGDR:
     async def assert_profiling_job_succeeded(self, name: str) -> None:
         self._require_clients()
         assert self.batch is not None
-        job = await self.batch.read_namespaced_job(name, self.config.namespace)
+        job = await self._retry_vcluster_api(
+            f"reading profiling Job {self.config.namespace}/{name}",
+            self.batch.read_namespaced_job,
+            name,
+            self.config.namespace,
+        )
         assert (job.status.succeeded or 0) >= 1, (
             f"profiling job {name} did not succeed: "
             f"succeeded={job.status.succeeded}, failed={job.status.failed}"
@@ -565,7 +602,21 @@ class ManagedDGDR:
         deadline = time.monotonic() + timeout
         last_state = None
         while time.monotonic() < deadline:
-            dgd = await self.get_dgd(name)
+            # Connection retries can outlast the deploy timeout, so stop them at
+            # the deadline and report the deploy timeout instead.
+            try:
+                dgd = await asyncio.wait_for(
+                    self._retry_vcluster_api(
+                        f"reading DGD {self.config.namespace}/{name}",
+                        self.get_dgd,
+                        name,
+                    ),
+                    timeout=deadline - time.monotonic(),
+                )
+            except TimeoutError:
+                if time.monotonic() < deadline:
+                    raise
+                break
             last_state = dgd.get("status", {}).get("state") if dgd else None
             if last_state and last_state.lower() == "successful":
                 return dgd
@@ -578,8 +629,11 @@ class ManagedDGDR:
     async def assert_dgd_pods_ready(self, dgd_name: str) -> None:
         self._require_clients()
         assert self.core is not None
-        pods = await self.core.list_namespaced_pod(
-            self.config.namespace, label_selector=f"{DGD_LABEL}={dgd_name}"
+        pods = await self._retry_vcluster_api(
+            f"listing pods for DGD {self.config.namespace}/{dgd_name}",
+            self.core.list_namespaced_pod,
+            self.config.namespace,
+            label_selector=f"{DGD_LABEL}={dgd_name}",
         )
         assert pods.items, f"DGD {dgd_name} should own at least one pod"
         for pod in pods.items:
@@ -596,7 +650,11 @@ class ManagedDGDR:
     async def assert_services(
         self, dgd_name: str, expectations: dict[str, int]
     ) -> None:
-        dgd = await self.get_dgd(dgd_name)
+        dgd = await self._retry_vcluster_api(
+            f"reading DGD {self.config.namespace}/{dgd_name}",
+            self.get_dgd,
+            dgd_name,
+        )
         assert dgd is not None
         dgd_status = dgd.get("status", {})
         statuses = dgd_status.get("components") or dgd_status.get("services", {})
@@ -614,8 +672,10 @@ class ManagedDGDR:
     async def get_crd(self) -> client.V1CustomResourceDefinition:
         self._require_clients()
         assert self.apiextensions is not None
-        return await self.apiextensions.read_custom_resource_definition(
-            "dynamographdeploymentrequests.nvidia.com"
+        return await self._retry_vcluster_api(
+            "reading DGDR CustomResourceDefinition",
+            self.apiextensions.read_custom_resource_definition,
+            "dynamographdeploymentrequests.nvidia.com",
         )
 
     async def ensure_absent(self, name: str) -> None:
