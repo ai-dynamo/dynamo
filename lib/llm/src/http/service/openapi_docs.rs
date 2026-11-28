@@ -886,10 +886,21 @@ pub fn openapi_router(
     route_docs: Vec<RouteDoc>,
     options: OpenApiOptions,
 ) -> (Vec<RouteDoc>, Router) {
+    openapi_router_with_visibility(route_docs, options, None)
+}
+
+pub(super) type RouteVisibility = Arc<dyn Fn(&axum::http::Method, &str) -> bool + Send + Sync>;
+
+pub(super) fn openapi_router_with_visibility(
+    route_docs: Vec<RouteDoc>,
+    options: OpenApiOptions,
+    is_visible: Option<RouteVisibility>,
+) -> (Vec<RouteDoc>, Router) {
     let document = Arc::new(CachedOpenApi {
         routes: route_docs,
         options,
         bytes: OnceCell::new(),
+        is_visible,
     });
     let router = documentation_router(document);
 
@@ -906,9 +917,59 @@ struct CachedOpenApi {
     routes: Vec<RouteDoc>,
     options: OpenApiOptions,
     bytes: OnceCell<Result<Bytes, String>>,
+    is_visible: Option<RouteVisibility>,
 }
 
 impl CachedOpenApi {
+    async fn visible_bytes(self: &Arc<Self>) -> Result<Bytes, String> {
+        let bytes = self.bytes().await?;
+        let Some(is_visible) = &self.is_visible else {
+            return Ok(bytes);
+        };
+        let disabled: Vec<_> = self
+            .routes
+            .iter()
+            .filter(|route| !is_visible(route.method(), route.path()))
+            .collect();
+        if disabled.is_empty() {
+            return Ok(bytes);
+        }
+
+        // Project the cached native JSON, not Utoipa's model, to retain OpenAPI 3.2 fields.
+        let mut spec: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            tracing::error!(%error, "OpenAPI visibility projection could not parse cached schema");
+            error.to_string()
+        })?;
+        if let Some(paths) = spec
+            .get_mut("paths")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for route in disabled {
+                if let Some(item) = paths
+                    .get_mut(route.path())
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    item.remove(&route.method().as_str().to_ascii_lowercase());
+                    let has_operation = item.iter().any(|(key, value)| match key.as_str() {
+                        "get" | "post" | "put" | "delete" | "patch" | "head" | "options"
+                        | "trace" | "query" => true,
+                        "additionalOperations" => value
+                            .as_object()
+                            .is_some_and(|operations| !operations.is_empty()),
+                        _ => false,
+                    });
+                    if !has_operation {
+                        paths.remove(route.path());
+                    }
+                }
+            }
+        }
+        serde_json::to_vec(&spec).map(Bytes::from).map_err(|error| {
+            tracing::error!(%error, "OpenAPI visibility projection could not serialize schema");
+            error.to_string()
+        })
+    }
+
     /// Return shared serialized bytes, generating on an 8 MiB thread on first access.
     /// Await its channel without parking a blocking-pool thread. Cache generation
     /// failures, but allow later requests to retry after a thread-launch failure.
@@ -972,11 +1033,11 @@ fn documentation_router(document: Arc<CachedOpenApi>) -> Router {
         .merge(SwaggerUi::new("/docs").config(Config::new(["/openapi.json"])))
 }
 
-/// Serve cached JSON bytes, or a generic 500 when generation failed; never expose diagnostics.
+/// Serve currently visible operations, or a generic 500; never expose diagnostics.
 async fn serve_openapi(
     axum::extract::State(document): axum::extract::State<Arc<CachedOpenApi>>,
 ) -> axum::response::Response {
-    match document.bytes().await {
+    let response = match document.visible_bytes().await {
         Ok(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
             bytes,
@@ -987,7 +1048,8 @@ async fn serve_openapi(
             "OpenAPI documentation unavailable",
         )
             .into_response(),
-    }
+    };
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
 #[cfg(test)]
@@ -1121,6 +1183,7 @@ mod tests {
                     ..Default::default()
                 },
                 bytes: OnceCell::new(),
+                is_visible: None,
             });
             let router = documentation_router(document.clone());
             assert!(
@@ -1135,6 +1198,7 @@ mod tests {
             let first = first.unwrap();
             assert_eq!(first.status(), StatusCode::OK);
             assert_eq!(first.headers()["content-type"], "application/json");
+            assert_eq!(first.headers()["cache-control"], "no-store");
             let first = first.bytes().await.unwrap();
             assert_eq!(first, second.unwrap().bytes().await.unwrap());
             assert_eq!(&first, document.bytes.get().unwrap().as_ref().unwrap());
@@ -1164,6 +1228,83 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn openapi_projection_removes_metadata_only_paths() {
+        let full = serde_json::json!({
+            "openapi": "3.2.0",
+            "paths": {
+                "/disabled": {"summary": "Disabled", "parameters": [], "post": {}},
+                "/shared": {"summary": "Shared", "get": {}, "post": {}},
+                "/query": {"query": {}, "post": {}},
+                "/custom": {"additionalOperations": {"CUSTOM": {}}, "post": {}}
+            },
+            "components": {"schemas": {"Retained": {"type": "string"}}}
+        });
+        let document = Arc::new(CachedOpenApi {
+            routes: ["/disabled", "/shared", "/query", "/custom"]
+                .into_iter()
+                .map(|path| RouteDoc::new(axum::http::Method::POST, path))
+                .collect(),
+            options: OpenApiOptions::default(),
+            bytes: OnceCell::new_with(Some(Ok(Bytes::from(serde_json::to_vec(&full).unwrap())))),
+            is_visible: Some(Arc::new(|_, _| false)),
+        });
+        let projected: serde_json::Value =
+            serde_json::from_slice(&document.visible_bytes().await.unwrap()).unwrap();
+        assert!(projected["paths"].get("/disabled").is_none());
+        assert_eq!(projected["paths"]["/shared"]["summary"], "Shared");
+        assert!(projected["paths"]["/shared"]["get"].is_object());
+        assert!(projected["paths"]["/query"]["query"].is_object());
+        assert!(projected["paths"]["/custom"]["additionalOperations"]["CUSTOM"].is_object());
+        for path in ["/shared", "/query", "/custom"] {
+            assert!(projected["paths"][path].get("post").is_none());
+        }
+        assert_eq!(projected["components"], full["components"]);
+    }
+
+    #[tokio::test]
+    async fn openapi_projection_failure_logs_without_exposing_schema() {
+        use std::io::{Read, Seek, SeekFrom};
+        use tower::ServiceExt;
+        use tracing::instrument::WithSubscriber;
+
+        let document = Arc::new(CachedOpenApi {
+            routes: vec![RouteDoc::new(axum::http::Method::POST, "/chat")],
+            options: OpenApiOptions::default(),
+            bytes: OnceCell::new_with(Some(Ok(Bytes::from_static(b"{PRIVATE_SCHEMA_DIAGNOSTIC")))),
+            is_visible: Some(Arc::new(|_, _| false)),
+        });
+        let mut capture = tempfile::tempfile().unwrap();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(capture.try_clone().unwrap())
+            .finish();
+        let response = documentation_router(document)
+            .oneshot(
+                axum::http::Request::get("/openapi.json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body, "OpenAPI documentation unavailable");
+        capture.seek(SeekFrom::Start(0)).unwrap();
+        let mut logs = String::new();
+        capture.read_to_string(&mut logs).unwrap();
+        assert!(logs.contains("OpenAPI visibility projection could not parse cached schema"));
+        assert!(logs.contains("error="));
+        assert!(!logs.contains("PRIVATE_SCHEMA_DIAGNOSTIC"));
+    }
+
     /// A failed launch must leave the document retryable, then reuse the successful bytes.
     #[tokio::test]
     async fn openapi_thread_launch_failure_is_retryable() {
@@ -1171,6 +1312,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new(),
+            is_visible: None,
         });
         let failed = document
             .bytes_with_spawn(|_| Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)))
@@ -1215,6 +1357,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new(),
+            is_visible: None,
         });
         let error = document
             .bytes_with_spawn(|task| {
@@ -1240,6 +1383,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new_with(Some(Err("internal schema invariant diagnostic".into()))),
+            is_visible: None,
         });
         let router = documentation_router(document.clone())
             .route("/inference", axum::routing::get(|| async { "available" }));
@@ -1254,6 +1398,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.headers()["cache-control"], "no-store");
             assert_eq!(
                 response.text().await.unwrap(),
                 "OpenAPI documentation unavailable"
