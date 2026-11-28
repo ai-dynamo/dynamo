@@ -57,22 +57,28 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
         }
 
     def histogram_quantile(name: str, quantile: float, filter_label: str = "") -> float:
-        bucket_pattern = rf"^{re.escape(name)}_bucket\{{[^}}]*{re.escape(filter_label)}[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+(\S+)"
+        def matching_samples(suffix: str):
+            pattern = rf"^{re.escape(name)}_{suffix}\{{([^}}]*)\}}\s+(\S+)"
+            for match in re.finditer(pattern, text, re.MULTILINE):
+                labels, value = match.groups()
+                if not filter_label or re.search(
+                    rf"(?:^|,)\s*{re.escape(filter_label)}\s*(?:,|$)", labels
+                ):
+                    yield labels, float(value)
+
         buckets = []
-        for m in re.finditer(bucket_pattern, text, re.MULTILINE):
-            le_str, count_str = m.group(1), m.group(2)
+        for labels, count in matching_samples("bucket"):
+            le_match = re.search(r'(?:^|,)\s*le="([^"]+)"', labels)
+            if le_match is None:
+                continue
+            le_str = le_match.group(1)
             le = float("inf") if le_str == "+Inf" else float(le_str)
-            buckets.append((le, float(count_str)))
+            buckets.append((le, count))
         if not buckets:
             return 0.0
         buckets.sort(key=lambda x: x[0])
 
-        count_m = re.search(
-            rf"^{re.escape(name)}_count\{{{re.escape(filter_label)}[^}}]*\}}\s+(\S+)",
-            text,
-            re.MULTILINE,
-        )
-        total = float(count_m.group(1)) if count_m else buckets[-1][1]
+        total = next((count for _, count in matching_samples("count")), buckets[-1][1])
         if total == 0:
             return 0.0
 
