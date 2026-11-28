@@ -21,6 +21,8 @@ from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.reasoning import ReasoningParserManager
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -232,6 +234,87 @@ def publish_vllm_llguidance_lark_grammar(
     runtime_config.set_engine_specific(
         LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
         json.dumps(backend == "guidance"),
+    )
+
+
+# `--dyn-reasoning-parser` names whose vLLM reasoner of the same name was
+# validated end to end as the structured-output gate (response_format and
+# required/named tool_choice, thinking on and off). The same name does not
+# guarantee a compatible gate (e.g. vLLM's Muse reasoner only reports the end
+# of reasoning once a tool channel opens), so extend this only after the same
+# validation.
+ENGINE_REASONING_PARSERS_FOR_STRUCTURED_OUTPUTS = frozenset({"deepseek_v41"})
+
+# Parsers whose reasoning boundary the frontend owns by design; the
+# engine-side parser hint does not apply to them.
+FRONTEND_OWNED_REASONING_BOUNDARY_PARSERS = frozenset(
+    {"gpt_oss", "muse_spark", "muse_spark_open"}
+)
+
+
+def configure_engine_reasoning_parser_for_structured_outputs(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Let vLLM's structured outputs wait for the end of reasoning.
+
+    With ``--dyn-reasoning-parser`` the reasoning block is parsed in the Dynamo
+    frontend, but vLLM's grammar backend only knows where reasoning ends through
+    ``structured_outputs_config.reasoning_parser``. Left empty, a
+    ``response_format`` / forced-tool grammar is applied from the first generated
+    token: the model is made to write the JSON inside the reasoning block, the
+    frontend returns it as ``reasoning_content`` and ``content`` is null.
+
+    For the parsers in ``ENGINE_REASONING_PARSERS_FOR_STRUCTURED_OUTPUTS``, set
+    the engine parser of the same name when it is unset. This also makes
+    ``publish_vllm_structural_tag_reasoning_policy`` publish that the tool tag
+    excludes reasoning, as the engine now owns the boundary. Nothing changes
+    when an engine parser is already configured, when ``enable_in_reasoning`` is
+    set, or when ``--dyn-structural-tag`` sets ``reasoning_boundary`` to
+    ``structural_tag``. The reasoner is built once here with the model's
+    tokenizer, so a tokenizer it cannot serve is a startup warning instead of a
+    failure on the first structured-output request.
+    """
+    name = config.dyn_reasoning_parser
+    if not name:
+        return
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if (
+        structured_outputs_config.reasoning_parser
+        or structured_outputs_config.enable_in_reasoning
+    ):
+        return
+    structural_tag = config.structural_tag
+    if structural_tag and structural_tag.get("reasoning_boundary") == "structural_tag":
+        return
+    if name not in ENGINE_REASONING_PARSERS_FOR_STRUCTURED_OUTPUTS:
+        if name not in FRONTEND_OWNED_REASONING_BOUNDARY_PARSERS:
+            logger.warning(
+                "--dyn-reasoning-parser=%s: structured outputs (response_format, "
+                "required/named tool_choice) are constrained from the first token, "
+                "including the reasoning block. If vLLM has a compatible reasoning "
+                "parser, pass --structured-outputs-config "
+                '\'{"reasoning_parser": "<vllm parser>"}\'.',
+                name,
+            )
+        return
+    tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+    if tokenizer is None:
+        return
+    try:
+        ReasoningParserManager.get_reasoning_parser(name)(tokenizer=tokenizer)
+    except (ValueError, RuntimeError) as e:
+        logger.warning(
+            "Not setting the engine reasoning parser %s for structured outputs: "
+            "it cannot be built for this tokenizer (%s)",
+            name,
+            e,
+        )
+        return
+    structured_outputs_config.reasoning_parser = name
+    logger.info(
+        "Structured outputs start after reasoning: engine reasoning_parser=%s "
+        "(from --dyn-reasoning-parser)",
+        name,
     )
 
 
@@ -802,6 +885,7 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     configure_muse_structural_tag_reasoning(config, vllm_config)
     pin_guidance_for_tekken_checkpoints(vllm_config)
+    configure_engine_reasoning_parser_for_structured_outputs(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 

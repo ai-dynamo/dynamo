@@ -743,6 +743,39 @@ def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
 
 
 @pytest.mark.parametrize(
+    "engine_parser,structural_tag,expected",
+    [
+        # Unset engine parser: the validated frontend parser is applied.
+        ("", None, "deepseek_v41"),
+        # An explicit engine-side parser always wins.
+        ("deepseek_r1", None, "deepseek_r1"),
+        # The frontend tag owns the boundary: the engine parser stays unset.
+        ("", {"scope": "always", "reasoning_boundary": "structural_tag"}, ""),
+    ],
+)
+def test_engine_reasoning_parser_defaults_from_dyn_reasoning_parser(
+    monkeypatch, engine_parser, structural_tag, expected
+):
+    vllm_main = _load_vllm_main()
+
+    monkeypatch.setattr(vllm_main, "cached_tokenizer_from_config", lambda _: object())
+    monkeypatch.setattr(
+        vllm_main.ReasoningParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: lambda tokenizer: None),
+    )
+    config = SimpleNamespace(
+        dyn_reasoning_parser="deepseek_v41", structural_tag=structural_tag
+    )
+    outputs = SimpleNamespace(reasoning_parser=engine_parser, enable_in_reasoning=False)
+    vllm_main.configure_engine_reasoning_parser_for_structured_outputs(
+        config,
+        SimpleNamespace(structured_outputs_config=outputs, model_config=object()),
+    )
+    assert outputs.reasoning_parser == expected
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
