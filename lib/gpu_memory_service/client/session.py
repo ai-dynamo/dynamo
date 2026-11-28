@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    CAPABILITY_METADATA_GET_ALL,
     AllocateRequest,
     AllocateResponse,
     CommitLayoutRequest,
@@ -34,6 +35,8 @@ from gpu_memory_service.common.protocol.messages import (
     ListAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
+    MetadataGetAllRequest,
+    MetadataGetAllResponse,
     MetadataGetRequest,
     MetadataGetResponse,
     MetadataListRequest,
@@ -94,6 +97,7 @@ class _GMSClientSession:
             self._transport.close()
             raise RuntimeError("HandshakeResponse omitted granted_lock_type")
         self._granted_lock_type = response.granted_lock_type
+        self._capabilities = frozenset(response.capabilities)
 
         logger.info(
             "Connected with %s lock (granted=%s), committed=%s",
@@ -229,6 +233,52 @@ class _GMSClientSession:
         return self._transport.request(
             MetadataListRequest(prefix=prefix), MetadataListResponse
         ).keys
+
+    def supports(self, capability: str) -> bool:
+        """Whether the server advertised ``capability`` in its handshake."""
+        return capability in self._capabilities
+
+    def metadata_get_all(self, prefix: str = "") -> List[tuple[str, str, int, bytes]]:
+        """Every (key, allocation_id, offset_bytes, value) under ``prefix``, in key order.
+
+        Pages through MetadataGetAllRequest when the server supports it, and
+        falls back to MetadataList + one MetadataGet per key otherwise.
+        """
+        if not self.supports(CAPABILITY_METADATA_GET_ALL):
+            return self._metadata_get_all_by_key(prefix)
+
+        entries: List[tuple[str, str, int, bytes]] = []
+        start_after: Optional[str] = None
+        while True:
+            response = self._transport.request(
+                MetadataGetAllRequest(prefix=prefix, start_after=start_after),
+                MetadataGetAllResponse,
+            )
+            entries.extend(
+                (i.key, i.allocation_id, i.offset_bytes, i.value)
+                for i in response.items
+            )
+            cursor = response.next_start_after
+            if cursor is None:
+                return entries
+            if not response.items or (
+                start_after is not None and cursor <= start_after
+            ):
+                raise RuntimeError(
+                    f"GMS metadata listing made no progress after {start_after!r}"
+                )
+            start_after = cursor
+
+    def _metadata_get_all_by_key(
+        self, prefix: str
+    ) -> List[tuple[str, str, int, bytes]]:
+        entries = []
+        for key in self.metadata_list(prefix):
+            got = self.metadata_get(key)
+            if got is None:
+                raise RuntimeError(f"Metadata key disappeared: {key}")
+            entries.append((key, *got))
+        return entries
 
     def get_memory_layout_hash(self) -> str:
         return self._transport.request(

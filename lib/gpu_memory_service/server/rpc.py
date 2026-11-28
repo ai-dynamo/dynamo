@@ -13,6 +13,7 @@ import socket
 from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
+    SERVER_CAPABILITIES,
     ErrorResponse,
     GetEventHistoryRequest,
     GetRuntimeStateRequest,
@@ -200,6 +201,7 @@ class GMSRPCServer:
                     success=True,
                     committed=self._gms.committed,
                     granted_lock_type=granted_mode,
+                    capabilities=list(SERVER_CAPABILITIES),
                 ),
             )
         except Exception as exc:

@@ -11,10 +11,11 @@ Tier 1 (Atomic Operations):
     get_handle_info, free_handle, commit, list_handles,
     get_memory_layout_hash
   - VA ops (local address space): reserve_va, map_va, unmap_va, free_va
-  - Metadata: metadata_put, metadata_get, metadata_list, metadata_delete
+  - Metadata: metadata_put, metadata_get, metadata_list, metadata_get_all,
+    metadata_delete
 
 Tier 2 (Convenience — compose Tier 1 with error handling + sync):
-  - create_mapping, destroy_mapping
+  - create_mapping, import_allocations, destroy_mapping
   - unmap_all_vas, remap_all_vas, reallocate_all_handles
   - close
 
@@ -31,16 +32,29 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import os
+import resource
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
-from gpu_memory_service.common.utils import align_to_granularity
+from gpu_memory_service.common.utils import align_to_granularity, is_bulk_import_enabled
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
 
 logger = logging.getLogger(__name__)
+
+
+def _fd_headroom() -> Optional[int]:
+    """File descriptors this process may still open; None if unknown or unlimited."""
+    soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY:
+        return None
+    try:
+        return soft - len(os.listdir("/proc/self/fd"))
+    except OSError:
+        return None
 
 
 class StaleMemoryLayoutError(Exception):
@@ -157,6 +171,13 @@ class GMSClientMemoryManager:
     Constructor does NOT connect — call connect() explicitly after construction.
     """
 
+    # Exported fds a bulk import holds open at once, at most. A chunk shrinks
+    # when the process is close to RLIMIT_NOFILE, down to one fd at a time,
+    # which is what a per-allocation import holds.
+    _BULK_CHUNK = 256
+    # Descriptors a chunk leaves free for the rest of the process.
+    _BULK_FD_MARGIN = 32
+
     def __init__(
         self,
         socket_path: str,
@@ -164,7 +185,12 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
+        bulk_import: Optional[bool] = None,
     ) -> None:
+        """``bulk_import``: whether ``remap_all_vas`` and the read-only attach
+        map allocations in bulk (see ``import_allocations``) instead of one at
+        a time. ``None`` follows ``DYN_GMS_BULK_IMPORT``, which defaults to on.
+        """
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
@@ -188,6 +214,10 @@ class GMSClientMemoryManager:
         self._unmapped = False
         self._aborted = False
         self._granted_lock_type: Optional[GrantedLockType] = None
+
+        self.bulk_import = (
+            is_bulk_import_enabled() if bulk_import is None else bulk_import
+        )
 
         # VA-stable unmap/remap state
         self._va_preserved = False
@@ -401,6 +431,10 @@ class GMSClientMemoryManager:
     def metadata_list(self, prefix: str = "") -> List[str]:
         return self._client_rpc.metadata_list(prefix)
 
+    def metadata_get_all(self, prefix: str = "") -> List[tuple[str, str, int, bytes]]:
+        """Every (key, allocation_id, offset_bytes, value) under ``prefix``, in key order."""
+        return self._client_rpc.metadata_get_all(prefix)
+
     def metadata_delete(self, key: str) -> bool:
         return self._client_rpc.metadata_delete(key)
 
@@ -475,6 +509,123 @@ class GMSClientMemoryManager:
         self._inverse_mapping.pop(mapping.allocation_id, None)
 
     # ==================== Tier 2: Convenience ====================
+
+    def _bulk_map(self, entries: List[tuple[int, int, str]]) -> List[int]:
+        """Map server allocations in phases and return their handles in order.
+
+        ``entries``: (va, aligned_size, allocation_id). Each chunk is exported,
+        then imported, then mapped; access is set last, once per mapping. One
+        phase over many allocations avoids alternating client and server driver
+        calls for every allocation.
+
+        All or nothing for a failure that propagates, such as a failed export
+        or an interrupt: every fd, handle and mapping made here is released
+        first. A CUDA driver error does not propagate: ``cuda_check_result``
+        ends the process.
+        """
+        if self._granted_lock_type is None:
+            raise RuntimeError("Memory manager holds no lock")
+        fds: List[int] = []
+        handles: List[int] = []
+        mapped: List[tuple[int, int]] = []
+        try:
+            lo = 0
+            while lo < len(entries):
+                chunk = entries[lo : lo + self._bulk_chunk_size()]
+                lo += len(chunk)
+                fds = []
+                for _, _, allocation_id in chunk:
+                    fds.append(self.export_handle(allocation_id))
+                for i, (_, aligned_size, _) in enumerate(chunk):
+                    # The import closes the fd even when it fails.
+                    fd, fds[i] = fds[i], -1
+                    handles.append(
+                        self._vmm.import_shareable_handle_close_fd(
+                            fd, import_size=aligned_size
+                        )
+                    )
+                fds = []
+                for va, aligned_size, _ in chunk:
+                    self._vmm.map(va, aligned_size, handles[len(mapped)])
+                    mapped.append((va, aligned_size))
+            for va, aligned_size, _ in entries:
+                self._vmm.set_access(
+                    va, aligned_size, self.device, self._granted_lock_type
+                )
+        except BaseException:
+            # A release that fails is logged and the unwind goes on: the caller
+            # needs the first error, and the rest still has to be released.
+            for fd in fds:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        logger.exception("[GMS] unwinding bulk import: close fd %d", fd)
+            for va, size in reversed(mapped):
+                try:
+                    self._vmm.unmap(va, size)
+                except Exception:
+                    logger.exception("[GMS] unwinding bulk import: unmap 0x%x", va)
+            for handle in handles:
+                try:
+                    self._vmm.release(handle)
+                except Exception:
+                    logger.exception("[GMS] unwinding bulk import: release %d", handle)
+            raise
+        return handles
+
+    def _bulk_chunk_size(self) -> int:
+        headroom = _fd_headroom()
+        if headroom is None:
+            return self._BULK_CHUNK
+        return max(1, min(self._BULK_CHUNK, headroom - self._BULK_FD_MARGIN))
+
+    def import_allocations(self, allocation_ids: Iterable[str]) -> None:
+        """Import and map, in bulk, every listed allocation not tracked yet.
+
+        Later ``create_mapping(allocation_id=...)`` calls return the cached VA.
+        Each allocation gets its own reservation, as with per-allocation import.
+        All or nothing: on failure no reservation or mapping is left behind.
+        """
+        wanted = [
+            a for a in dict.fromkeys(allocation_ids) if a not in self._inverse_mapping
+        ]
+        if not wanted:
+            return
+        infos = {str(info.allocation_id): info for info in self.list_handles()}
+        entries: List[tuple[int, int, str]] = []
+        try:
+            for allocation_id in wanted:
+                info = infos.get(allocation_id)
+                if info is None:
+                    raise RuntimeError(
+                        f"Allocation {allocation_id} is not in the layout"
+                    )
+                aligned_size = int(info.aligned_size)
+                va = self.reserve_va(aligned_size)
+                entries.append((va, aligned_size, allocation_id))
+            handles = self._bulk_map(entries)
+        except BaseException:
+            # As in _bulk_map: a failed release must not hide the first error.
+            for va, aligned_size, _ in entries:
+                try:
+                    self._vmm.address_free(va, aligned_size)
+                except Exception:
+                    logger.exception("[GMS] unwinding bulk import: free 0x%x", va)
+            raise
+        for (va, aligned_size, allocation_id), handle in zip(entries, handles):
+            info = infos[allocation_id]
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=int(info.size),
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=str(info.tag),
+                    layout_slot=int(info.layout_slot),
+                )
+            )
 
     def create_mapping(
         self,
@@ -612,6 +763,7 @@ class GMSClientMemoryManager:
         remapped_count = 0
         total_bytes = 0
         remapped_vas: list[int] = []
+        pending: List[tuple[int, LocalMapping, GetAllocationResponse]] = []
         for rank, ((va, mapping), alloc_info) in enumerate(
             zip(local_mappings, committed_allocations)
         ):
@@ -628,6 +780,9 @@ class GMSClientMemoryManager:
                     f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
+            if self.bulk_import:
+                pending.append((va, mapping, alloc_info))
+                continue
             fd = self.export_handle(alloc_info.allocation_id)
             handle = self._vmm.import_shareable_handle_close_fd(
                 fd, import_size=mapping.aligned_size
@@ -638,15 +793,19 @@ class GMSClientMemoryManager:
             )
             remapped_vas.append(va)
 
-            if mapping.allocation_id != alloc_info.allocation_id:
-                self._inverse_mapping.pop(mapping.allocation_id, None)
-            self._mappings[va] = mapping.with_server_identity(
-                alloc_info.allocation_id,
-                int(alloc_info.layout_slot),
-            ).with_handle(handle)
-            self._inverse_mapping[alloc_info.allocation_id] = va
+            self._record_remap(va, mapping, alloc_info, handle)
             remapped_count += 1
             total_bytes += mapping.aligned_size
+
+        if pending:
+            handles = self._bulk_map(
+                [(va, m.aligned_size, str(i.allocation_id)) for va, m, i in pending]
+            )
+            for (va, mapping, alloc_info), handle in zip(pending, handles):
+                remapped_vas.append(va)
+                self._record_remap(va, mapping, alloc_info, handle)
+                remapped_count += 1
+                total_bytes += mapping.aligned_size
 
         if remapped_vas:
             self._vmm.synchronize()
@@ -937,3 +1096,18 @@ class GMSClientMemoryManager:
     def _track_mapping(self, m: LocalMapping) -> None:
         self._mappings[m.va] = m
         self._inverse_mapping[m.allocation_id] = m.va
+
+    def _record_remap(
+        self,
+        va: int,
+        mapping: LocalMapping,
+        alloc_info: GetAllocationResponse,
+        handle: int,
+    ) -> None:
+        if mapping.allocation_id != alloc_info.allocation_id:
+            self._inverse_mapping.pop(mapping.allocation_id, None)
+        self._mappings[va] = mapping.with_server_identity(
+            alloc_info.allocation_id,
+            int(alloc_info.layout_slot),
+        ).with_handle(handle)
+        self._inverse_mapping[alloc_info.allocation_id] = va

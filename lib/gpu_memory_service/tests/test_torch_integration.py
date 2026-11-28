@@ -378,6 +378,58 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     reader.close()
 
 
+# Well under a second on a GPU; the bound is for a stalled lock or socket.
+@pytest.mark.timeout(60)
+def test_bulk_import_and_remap_map_each_allocation_at_its_own_address(
+    running_gms, monkeypatch
+):
+    socket_path = running_gms
+    # Several chunks, so an allocation mapped at another one's address shows.
+    monkeypatch.setattr(GMSClientMemoryManager, "_BULK_CHUNK", 2)
+    shape = (16,)
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    expected = {}
+    for value in range(1, 6):
+        source = torch.full(shape, float(value), device=_DEVICE)
+        allocation_id, writer_tensor = _make_gms_tensor(writer, source, tag="weights")
+        del writer_tensor
+        expected[allocation_id] = source
+    assert writer.commit()
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
+    reader.connect(RequestedLockType.RO)
+    try:
+        reader.import_allocations(expected)
+        tensors = {
+            allocation_id: _tensor_from_pointer(
+                reader.create_mapping(allocation_id=allocation_id),
+                list(shape),
+                [1],
+                torch.float32,
+                0,
+            )
+            for allocation_id in expected
+        }
+        pointers = {a: t.data_ptr() for a, t in tensors.items()}
+        assert len(set(pointers.values())) == len(expected)
+        for allocation_id, source in expected.items():
+            _assert_exact_tensor_equal(source, tensors[allocation_id])
+
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+
+        for allocation_id, source in expected.items():
+            assert tensors[allocation_id].data_ptr() == pointers[allocation_id]
+            _assert_exact_tensor_equal(source, tensors[allocation_id])
+    finally:
+        reader.close()
+
+
 def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     socket_path = running_gms
     torch.manual_seed(7)
