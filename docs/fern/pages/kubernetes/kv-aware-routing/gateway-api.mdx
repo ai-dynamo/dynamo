@@ -19,9 +19,11 @@ You need:
 
 - A working DGD whose workers can serve requests.
 - The Dynamo operator installed.
+- A `Gateway` named `inference-gateway` in the DGD namespace.
 - Gateway API, GAIE, and a compatible Gateway implementation installed. See
   [Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx).
-- A `Gateway` named `inference-gateway` in the DGD namespace.
+    - With agentgateway, set `AGW_NAMESPACE` to `$NAMESPACE` before running the
+      install script so the Gateway is created in the DGD namespace.
 
 This page modifies an existing DGD named `qwen` that serves `Qwen/Qwen3-0.6B`. Keep your existing
 model credentials, storage, worker images, and backend settings when adapting the example.
