@@ -90,6 +90,54 @@ worker_selection:
     }
 }
 
+/// The KV-capacity-aware decode policy resolves from the YAML its documentation shows, and a
+/// misspelled parameter fails startup like the other policies.
+#[test]
+fn resolves_kv_capacity_aware_for_decode() {
+    let mut registry = dynamo_router_policies::default_registry();
+    dynamo_router_policies::register(&mut registry).unwrap();
+    let (_file, documented) = config(
+        r#"
+worker_selection:
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_fraction: 1.0
+      count_priority: true
+      decode_active_request_weight: 0
+      capacity_blocks: 20000
+"#,
+    );
+    let factory = registry
+        .resolve(&documented)
+        .unwrap()
+        .expect("a configured policy resolves to a factory");
+    factory(WorkerSelectionPolicyContext::new(
+        &SelectionConfig::from(&documented),
+        WorkerType::Decode,
+        RoutingPartitionRef::new("model", "default"),
+    ));
+
+    let (_file, misspelled) = config(
+        r#"
+worker_selection:
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_ceiling: 20000
+"#,
+    );
+    let Err(error) = registry.resolve(&misspelled) else {
+        panic!("an unknown parameter must fail resolution");
+    };
+    assert!(
+        matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type, .. }
+            if policy_type == "dynamo-kv-capacity-aware"),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("capacity_ceiling"), "{error}");
+}
+
 #[test]
 fn programmatic_factory_is_an_explicit_custom_selection() {
     let plugins =
