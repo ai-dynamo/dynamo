@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Rust test reports
+description: Convert saved Rust JSON results and upload JUnit reports to Datadog
+inputs:
+  api-key:
+    description: Datadog API key; uploads are skipped when empty
+    default: ''
+  dd-env:
+    description: Datadog environment for the test results
+    default: ci
+  artifact-name:
+    description: Unique artifact name for this job and matrix entry
+    required: true
+  workspace:
+    description: Workspace directory identifying the test results
+    default: root
+runs:
+  using: composite
+  steps:
+    - name: Install cargo2junit
+      id: cargo2junit
+      if: ${{ !cancelled() && hashFiles('rust-test-results/*.jsonl') != '' }}
+      uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
+      with:
+        tool: cargo2junit@0.1.15
+        locked: true
+    - name: Convert completed Rust JSON reports
+      id: rust_report
+      if: ${{ !cancelled() && steps.cargo2junit.outcome == 'success' }}
+      shell: bash
+      env:
+        REPORT_WORKSPACE: ${{ inputs.workspace }}
+      run: |
+        shopt -s nullglob
+        reports=(rust-test-results/*.jsonl)
+        for report in "${reports[@]}"; do
+          xml="${report%.jsonl}.xml"
+          rm -f "$xml"
+          # cargo2junit returns nonzero for failed tests, even with valid XML.
+          TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
+            cargo2junit < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+          if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
+            mv "$xml.tmp" "$xml"
+          else
+            rm -f "$xml.tmp"
+            echo "::warning::No valid, nonempty JUnit report for $report; retained the JSON log."
+          fi
+        done
+    - name: Archive Rust test reports and logs
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: rust-test-results/
+        if-no-files-found: ignore
+        retention-days: 7
+    - name: Install Datadog CLI
+      id: datadog_cli
+      if: ${{ !cancelled() && steps.rust_report.outcome == 'success' && inputs.api-key != '' && hashFiles('rust-test-results/*.xml') != '' }}
+      uses: DataDog/install-datadog-ci-github-action@6d7f0c7c5402a4b1912055b76970ca76bef71fe5  # v1.0.4
+      with:
+        version: v5.27.0
+    - name: Upload Rust results to Datadog
+      if: ${{ !cancelled() && steps.datadog_cli.outcome == 'success' && hashFiles('rust-test-results/*.xml') != '' }}
+      shell: bash
+      env:
+        DATADOG_API_KEY: ${{ inputs.api-key }}
+        DATADOG_SITE: datadoghq.com
+        DD_ENV: ${{ inputs.dd-env }}
+        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:json
+      run: |
+        # source_ref callers can test a different SHA from github.sha.
+        DD_GIT_COMMIT_SHA="$(git rev-parse HEAD)"
+        export DD_GIT_COMMIT_SHA
+        datadog-ci junit upload --service ai-dynamo rust-test-results/
