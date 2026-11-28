@@ -573,6 +573,16 @@ where
                 .await;
                 continue;
             }
+            Err(ModelManagerError::EndpointNotSupported(_, endpoint)) => {
+                send_error_event(
+                    ws_tx,
+                    "endpoint_not_supported",
+                    &format!("model does not support {endpoint}: {model_name}"),
+                    Some(model_param),
+                )
+                .await;
+                continue;
+            }
             Err(err) => {
                 tracing::error!(%err, "/v1/realtime engine lookup failed");
                 send_error_event(

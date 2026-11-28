@@ -15,6 +15,7 @@ use dynamo_llm::protocols::{
         audios::{AudioData, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+        embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
 };
 use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
@@ -1005,6 +1006,119 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     println!("{}", response.text().await.unwrap());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Engine stub for an embeddings-only model. Never invoked: the requests it
+/// serves fail at engine lookup, before any dispatch.
+struct StubEmbeddingsEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateEmbeddingRequest>,
+        ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+        Error,
+    > for StubEmbeddingsEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateEmbeddingRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
+        unreachable!("embeddings engine must not be invoked for capability-mismatch requests")
+    }
+}
+
+#[tokio::test]
+async fn test_endpoint_capability_mismatch_is_distinguishable_from_unknown_model() {
+    let (listener, port) = bind_random_port().await;
+    // Embeddings endpoints are enabled by default; the registered model only
+    // carries a chat engine, so a request to /v1/embeddings exercises the
+    // capability-mismatch path end to end.
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let cancel_token = CancellationToken::new();
+    let token = cancel_token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("chat-only");
+    manager
+        .add_chat_completions_model("chat-only", card.mdcsum(), Arc::new(CounterEngine {}))
+        .expect("failed to register chat-only model");
+
+    let client = reqwest::Client::new();
+    let url = format!("http://localhost:{port}/v1/embeddings");
+
+    // A registered model whose engines do not implement embeddings gets a 400
+    // naming the model and the capability — not the generic 404 an unknown
+    // model gets, so clients can tell the two conditions apart.
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({"model": "chat-only", "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "Model 'chat-only' does not support embedding requests"
+    );
+    assert_eq!(body["type"], "Bad Request");
+    assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
+
+    // A genuinely unknown model still gets the canonical 404.
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({"model": "no-such-model", "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["message"], "Model not found");
+    assert_eq!(body["type"], "Not Found");
+    assert_eq!(body["code"], StatusCode::NOT_FOUND.as_u16());
+
+    // The mismatch is symmetric: an embeddings-only model asked for chat
+    // completions gets the same kind of 400, naming chat.
+    let card = ModelDeploymentCard::with_name_only("embed-only");
+    manager
+        .add_embeddings_model(
+            "embed-only",
+            card.mdcsum(),
+            Arc::new(StubEmbeddingsEngine {}),
+        )
+        .expect("failed to register embeddings-only model");
+
+    let response = client
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "embed-only",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "Model 'embed-only' does not support chat requests"
+    );
+    assert_eq!(body["type"], "Bad Request");
+    assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

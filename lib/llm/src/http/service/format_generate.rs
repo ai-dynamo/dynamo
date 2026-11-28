@@ -347,6 +347,9 @@ async fn handler(
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
+                crate::discovery::ModelManagerError::EndpointNotSupported(..) => {
+                    StatusCode::BAD_REQUEST
+                }
                 _ => StatusCode::NOT_FOUND,
             };
             return reject(error_response(format, status, &error.to_string()));

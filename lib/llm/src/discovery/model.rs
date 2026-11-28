@@ -16,6 +16,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::endpoint_type::EndpointType;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
@@ -688,41 +689,59 @@ impl Model {
         &self,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+            .ok_or_else(|| self.engine_error(EndpointType::Chat.as_str(), self.has_chat_engine()))
     }
 
     pub fn get_completions_engine(
         &self,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.completions_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+            .ok_or_else(|| {
+                self.engine_error(
+                    EndpointType::Completion.as_str(),
+                    self.has_completions_engine(),
+                )
+            })
     }
 
     pub fn get_embeddings_engine(
         &self,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
+            .ok_or_else(|| {
+                self.engine_error(
+                    EndpointType::Embedding.as_str(),
+                    self.has_embeddings_engine(),
+                )
+            })
     }
 
     pub fn get_classify_engine(&self) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.classify_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_classify_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Classify.as_str(), self.has_classify_engine())
+            })
     }
 
     pub fn get_pooling_engine(&self) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.pooling_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Pooling.as_str(), self.has_pooling_engine())
+            })
     }
 
     pub fn get_rerank_engine(&self) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.rerank_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_rerank_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Rerank.as_str(), self.has_rerank_engine())
+            })
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_images_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Images.as_str(), self.has_images_engine())
+            })
     }
 
     /// Choose a ready WorkerSet whose admitted members all accept the reference count.
@@ -756,34 +775,47 @@ impl Model {
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_videos_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Videos.as_str(), self.has_videos_engine())
+            })
     }
 
     pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_audios_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Audios.as_str(), self.has_audios_engine())
+            })
     }
 
     pub fn get_transcriptions_engine(
         &self,
     ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
+            .ok_or_else(|| {
+                self.engine_error(
+                    EndpointType::Transcriptions.as_str(),
+                    self.has_transcriptions_engine(),
+                )
+            })
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+            .ok_or_else(|| self.engine_error("tensor", self.has_tensor_engine()))
     }
 
     pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.realtime_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Realtime.as_str(), self.has_realtime_engine())
+            })
     }
 
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+            .ok_or_else(|| {
+                self.engine_error(EndpointType::Generate.as_str(), self.has_generate_engine())
+            })
     }
     /// Get a Generate engine from a worker advertising `capability`.
     pub fn get_generate_engine_for_capability(
@@ -796,7 +828,12 @@ impl Model {
                 .then(|| worker_set.generate_engine.clone())
                 .flatten()
         })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+        .ok_or_else(|| {
+            self.engine_error(
+                EndpointType::Generate.as_str(),
+                self.has_generate_engine_for_capability(capability),
+            )
+        })
     }
 
     /// Select a generate engine and its routing metadata atomically from the
@@ -820,7 +857,12 @@ impl Model {
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
                 })
         })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+        .ok_or_else(|| {
+            self.engine_error(
+                EndpointType::Generate.as_str(),
+                self.has_generate_engine_for_capability(capability),
+            )
+        })
     }
 
     pub(crate) fn get_systemone_execution_selection(
@@ -907,7 +949,7 @@ impl Model {
                 .clone()
                 .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
         })
-        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        .ok_or_else(|| self.engine_error(EndpointType::Chat.as_str(), self.has_chat_engine()))
     }
 
     /// Select a chat engine from a WorkerSet that advertises `capability`.
@@ -921,7 +963,7 @@ impl Model {
             return if self.has_chat_engine() {
                 Ok(None)
             } else {
-                Err(self.engine_error(false))
+                Err(self.engine_error(EndpointType::Chat.as_str(), false))
             };
         }
         self.select_worker_set_with(|ws| {
@@ -930,7 +972,7 @@ impl Model {
                 .flatten()
         })
         .map(Some)
-        .ok_or_else(|| self.engine_error(true))
+        .ok_or_else(|| self.engine_error(EndpointType::Chat.as_str(), true))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -941,7 +983,12 @@ impl Model {
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
         })
-        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+        .ok_or_else(|| {
+            self.engine_error(
+                EndpointType::Completion.as_str(),
+                self.has_completions_engine(),
+            )
+        })
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -952,7 +999,9 @@ impl Model {
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
         })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+        .ok_or_else(|| {
+            self.engine_error(EndpointType::Generate.as_str(), self.has_generate_engine())
+        })
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -1002,12 +1051,12 @@ impl Model {
 
     /// Return the appropriate error when no servable WorkerSet was found.
     /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
-    /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
-    fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+    /// etc.), return ModelUnavailable (maps to 503). Otherwise EndpointNotSupported (maps to 400).
+    fn engine_error(&self, endpoint: &'static str, engine_exists: bool) -> ModelManagerError {
         if engine_exists {
             ModelManagerError::ModelUnavailable(self.name.clone())
         } else {
-            ModelManagerError::ModelNotFound(self.name.clone())
+            ModelManagerError::EndpointNotSupported(self.name.clone(), endpoint)
         }
     }
 
@@ -1207,6 +1256,54 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
+    }
+
+    #[test]
+    fn test_engine_error_labels_capability_mismatch_for_every_endpoint() {
+        let model = Model::new("test-model".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "checksum"));
+
+        macro_rules! assert_unsupported {
+            ($label:literal, $call:expr) => {
+                match $call.map(|_| ()) {
+                    Err(ModelManagerError::EndpointNotSupported(name, endpoint)) => {
+                        assert_eq!(name, "test-model");
+                        assert_eq!(endpoint, $label);
+                    }
+                    other => panic!(
+                        "expected EndpointNotSupported(\"{}\"), got {:?}",
+                        $label, other
+                    ),
+                }
+            };
+        }
+
+        assert_unsupported!("chat", model.get_chat_engine());
+        assert_unsupported!("chat", model.get_chat_engine_with_parsing());
+        assert_unsupported!(
+            "chat",
+            model.get_chat_engine_with_parsing_for_capability("cap")
+        );
+        assert_unsupported!("completion", model.get_completions_engine());
+        assert_unsupported!("completion", model.get_completions_engine_with_parsing());
+        assert_unsupported!("embedding", model.get_embeddings_engine());
+        assert_unsupported!("classify", model.get_classify_engine());
+        assert_unsupported!("pooling", model.get_pooling_engine());
+        assert_unsupported!("rerank", model.get_rerank_engine());
+        assert_unsupported!("images", model.get_images_engine());
+        assert_unsupported!("images", model.select_image_edit_engine(1));
+        assert_unsupported!("videos", model.get_videos_engine());
+        assert_unsupported!("audios", model.get_audios_engine());
+        assert_unsupported!("transcriptions", model.get_transcriptions_engine());
+        assert_unsupported!("tensor", model.get_tensor_engine());
+        assert_unsupported!("realtime", model.get_realtime_engine());
+        assert_unsupported!("generate", model.get_generate_engine());
+        assert_unsupported!("generate", model.get_generate_engine_with_parsing());
+        assert_unsupported!("generate", model.get_generate_engine_for_capability("cap"));
+        assert_unsupported!(
+            "generate",
+            model.get_generate_engine_for_capability_with_routing("cap")
+        );
     }
 
     fn make_generate_worker_set(
