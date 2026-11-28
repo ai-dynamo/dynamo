@@ -10,7 +10,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal, Optional
 
 import aiohttp
 
@@ -40,6 +40,19 @@ BLOCK_SIZE = 16
 BASE_PORT = 9100
 BASE_PORT_BOOTSTRAP = 10100
 BASE_PORT_ZMQ = 11100
+
+
+def _apply_extra_env(
+    env: dict[str, str], extra_env: Mapping[str, str | None] | None
+) -> None:
+    """Merge optional process env overlays without changing caller defaults."""
+    if extra_env is None:
+        return
+    for name, value in extra_env.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
 
 
 def _build_mocker_command(
@@ -87,13 +100,22 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        extra_env: Mapping[str, str | None] | None = None,
+        namespace: str | None = None,
+        display_name: str | None = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
-        namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
+        if namespace is None:
+            namespace_suffix = generate_random_suffix()
+            self.namespace = f"test-namespace-{namespace_suffix}"
+        elif not namespace:
+            raise ValueError("namespace must be non-empty when provided")
+        else:
+            self.namespace = namespace
         self.component_name = "mocker"
+        self._display_name = display_name or "dynamo-mocker"
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
@@ -114,6 +136,7 @@ class MockerProcess:
         self._store_backend = store_backend
         self._request_plane = request_plane
         self._mocker_config = MockerConfig.from_value(mocker_args)
+        self._extra_env = extra_env
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
         request.addfinalizer(self._release_ports)
 
@@ -177,6 +200,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            _apply_extra_env(env, extra_env)
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -186,7 +210,7 @@ class MockerProcess:
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
-                display_name="dynamo-mocker",
+                display_name=self._display_name,
             )
 
         logger.info(
@@ -309,6 +333,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            _apply_extra_env(env, self._extra_env)
             proc = ManagedProcess(
                 command=command,
                 env=env,
@@ -504,7 +529,7 @@ class DisaggMockerProcess:
         enable_bootstrap: bool = False,
         event_plane: Optional[str] = None,
         raw_kv_events: bool = False,
-        env_overrides: Optional[Dict[str, str]] = None,
+        env_overrides: Mapping[str, str | None] | None = None,
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -569,7 +594,7 @@ class DisaggMockerProcess:
             env["DYN_EVENT_PLANE"] = event_plane
         if event_plane == "zmq" and request_plane != "nats":
             env.pop("NATS_SERVER", None)
-        env.update(env_overrides or {})
+        _apply_extra_env(env, env_overrides)
 
         self._process = ManagedProcess(
             command=command,
@@ -582,6 +607,7 @@ class DisaggMockerProcess:
             terminate_all_matching_process_names=False,
             display_name=f"dynamo-mocker-{worker_type}",
         )
+        self._command = command
         logger.info(
             "Created %s mocker process with %s worker(s), endpoint: %s",
             worker_type,
@@ -592,6 +618,25 @@ class DisaggMockerProcess:
     @property
     def bootstrap_ports(self) -> list[int]:
         return self._bootstrap_ports
+
+    @property
+    def owned_popen(self):
+        """Return this wrapper's live python -m dynamo.mocker Popen."""
+        proc = self._process.proc
+        if proc is None or proc.poll() is not None:
+            raise AssertionError(f"{self.worker_type} mocker owned Popen is not live")
+        argv = [str(item) for item in (proc.args or [])]
+        if "-m" not in argv or "dynamo.mocker" not in argv:
+            raise AssertionError(
+                f"{self.worker_type} owned Popen argv is not "
+                f"python -m dynamo.mocker: {argv}"
+            )
+        if argv != [str(item) for item in self._command]:
+            raise AssertionError(
+                f"{self.worker_type} owned Popen argv drifted from the "
+                f"wrapper command: {argv}"
+            )
+        return proc
 
     def __enter__(self):
         logger.info(
