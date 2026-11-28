@@ -52,6 +52,41 @@ pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// Both ends must use this constant.
 pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
 
+/// Scheme prefix of a Velo request-plane address published to discovery.
+pub(crate) const VELO_SCHEME: &str = "velo://";
+
+const VELO_MAX_WORKER_ADDRESS: usize = 8 * 1024;
+const VELO_MAX_ENDPOINT_PATH: usize = 1024;
+
+/// Whether `address` is a well-formed Velo request address:
+/// `velo://<uuid>/<base64url worker address>/<instance path>`.
+///
+/// NATS subjects share the request-plane address space and may legitimately
+/// start with `velo://`, so the scheme alone does not identify a foreign
+/// plane. Only the shape this runtime publishes does.
+pub(crate) fn is_velo_request_address(address: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let Some(rest) = address.strip_prefix(VELO_SCHEME) else {
+        return false;
+    };
+    let mut fields = rest.splitn(3, '/');
+    let (Some(id), Some(encoded), Some(path)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if id.len() != 36 || uuid::Uuid::parse_str(id).is_err() {
+        return false;
+    }
+    if encoded.is_empty()
+        || encoded.len() > VELO_MAX_WORKER_ADDRESS
+        || URL_SAFE_NO_PAD.decode(encoded).is_err()
+    {
+        return false;
+    }
+    !path.is_empty() && path.len() <= VELO_MAX_ENDPOINT_PATH
+}
+
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 
@@ -849,7 +884,7 @@ mod tests {
         DEFAULT_SEND_BUFFER_COUNT, Ingress, IngressResponseEncoder, ManyOut, NetworkStreamWrapper,
         RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode,
         ResponseStreamPrologue, ResponseType, SerdeIngressPayloadAdapter, SingleIn, StreamOptions,
-        StreamPrologueError,
+        StreamPrologueError, is_velo_request_address,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::error::{BackendError, DynamoError, ErrorType};
@@ -864,6 +899,19 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn velo_request_address_shape_is_precise() {
+        const ID: &str = "3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab";
+
+        assert!(is_velo_request_address(&format!("velo://{ID}/AA/1/ns/c/e")));
+        assert!(!is_velo_request_address("velo://custom-service"));
+        assert!(!is_velo_request_address(&format!(
+            "velo://{ID}/not!base64/1/ns/c/e"
+        )));
+        assert!(!is_velo_request_address(&format!("velo://{ID}/AA")));
+        assert!(!is_velo_request_address(&format!("tcp://{ID}/AA/1/ns/c/e")));
     }
 
     #[test]
