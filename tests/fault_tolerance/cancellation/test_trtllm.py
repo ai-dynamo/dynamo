@@ -116,7 +116,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
 
-        log_dir = tmp_path / f"{mode}_worker"
+        log_dir = f"{request.node.name}_{mode}_worker"
 
         super().__init__(
             command=command,
@@ -125,7 +125,7 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
-            log_dir=str(log_dir),
+            log_dir=log_dir,
         )
 
         self.mode = mode

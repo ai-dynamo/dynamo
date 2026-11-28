@@ -339,7 +339,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        log_dir = log_root / worker_id
+        log_dir = f"{request.node.name}_{worker_id}"
 
         super().__init__(
             command=command,
