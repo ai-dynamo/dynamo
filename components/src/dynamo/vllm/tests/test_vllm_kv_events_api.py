@@ -27,6 +27,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import vllm.config
 
 from dynamo.vllm.args import update_engine_config_with_dynamo
 from dynamo.vllm.constants import DisaggregationMode
@@ -315,7 +316,13 @@ def test_kv_event_publisher_keeps_legacy_block_hashes(
     update_engine_config_with_dynamo(dynamo_config, engine_args)
 
     assert dynamo_config.use_kv_events
-    assert engine_args.speculative_config == {
-        "disable_lookahead_block_hashes": True,
-        **(speculative_config or {}),
-    }
+    if (
+        "disable_lookahead_block_hashes"
+        in vllm.config.SpeculativeConfig.__dataclass_fields__
+    ):
+        assert engine_args.speculative_config == {
+            "disable_lookahead_block_hashes": True,
+            **(speculative_config or {}),
+        }
+    else:
+        assert engine_args.speculative_config == speculative_config

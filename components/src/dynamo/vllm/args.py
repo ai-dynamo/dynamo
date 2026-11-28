@@ -9,6 +9,7 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+import vllm.config
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import (
     AsyncEngineArgs,
@@ -706,6 +707,11 @@ def create_kv_events_config(
 def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
     """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
     Dynamo's KV indexers hash only each block's own tokens."""
+    if (
+        "disable_lookahead_block_hashes"
+        not in vllm.config.SpeculativeConfig.__dataclass_fields__
+    ):
+        return
     spec = engine_config.speculative_config
     if (
         spec is None
