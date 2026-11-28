@@ -312,9 +312,10 @@ available for hand-written tests.
 parent, so the full trace tree (frontend → NATS → worker → engine) is
 contiguous. Attributes are auto-recorded across the stream lifecycle.
 
-Set `OTEL_EXPORT_ENABLED=1` to enable OTLP export (default off). When off,
-the span still exists locally so `tracing` log events carry the `trace_id`,
-but per-chunk recording is skipped for cost.
+OTLP trace export is off by default; see the
+[OpenTelemetry environment variables](../../docs/fern/pages/reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs)
+to enable it. When trace export is off, the span still exists locally so `tracing` log
+events carry the `trace_id`, but per-chunk recording is skipped for cost.
 
 ### `engine.generate` attributes
 

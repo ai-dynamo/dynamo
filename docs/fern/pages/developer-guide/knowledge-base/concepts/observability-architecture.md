@@ -27,8 +27,11 @@ the endpoint. The frontend exposes metrics on its HTTP port. Workers and standal
 them through the system-status server when `DYN_SYSTEM_PORT` is enabled.
 
 Traces and logs use a push model. Each participating process exports OTLP records to a collector.
-`OTEL_EXPORT_ENABLED` intentionally controls both signals so their trace context stays aligned. The
-collector can route the records to different backends, such as Tempo and Loki.
+`OTEL_EXPORT_ENABLED` turns on both signals, and `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` can
+export or suppress each one separately. Logs carry trace context either way: in logs-only mode the
+`trace_id` still groups a request's logs, but no trace with that ID is exported, so it does not open
+in Tempo. The collector can route the records to different backends, such as Tempo and Loki. See
+[Environment Variables](../../../reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs).
 
 ## Trace and Log Correlation
 
