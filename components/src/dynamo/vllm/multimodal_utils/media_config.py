@@ -22,6 +22,9 @@ def create_frontend_media_config(
 
     media_decoder = MediaDecoder()
     media_decoder.enable_image(build_frontend_image_decoder_options())
+    # vLLM's own image loader applies EXIF orientation, and the worker receives
+    # decoded pixels with no metadata, so the frontend must rotate to match.
+    media_decoder.apply_exif_orientation = True
     enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()

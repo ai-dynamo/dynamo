@@ -2323,8 +2323,13 @@ class LoRADownloader:
 class MediaDecoder:
     """Media decoder for image and video preprocessing."""
 
+    apply_exif_orientation: bool
+
     def __init__(self) -> None: ...
     def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
+    def enable_video(self, decoder_options: Dict[str, Any]) -> None:
+        """Only present when the binding is built with the `media-ffmpeg` feature."""
+        ...
 
 
 class MediaFetcher:
