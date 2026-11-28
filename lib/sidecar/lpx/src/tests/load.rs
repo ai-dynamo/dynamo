@@ -103,7 +103,7 @@ async fn reported_load_is_polled_into_the_publisher() {
 }
 
 /// A load that stays unavailable is given up on at the staleness limit, which
-/// `serve` turns into the worker's withdrawal.
+/// the Worker turns into its withdrawal.
 #[tokio::test]
 async fn stale_load_is_given_up_at_the_staleness_limit() {
     let (server, engine, _, metrics, bindings) = sidecar(Load::Used(64)).await;
@@ -111,7 +111,7 @@ async fn stale_load_is_given_up_at_the_staleness_limit() {
     // Every poll times out; paused time skips the waits.
     tokio::time::pause();
     start_publishing(&metrics, bindings);
-    let lost = engine.load_lost();
+    let lost = engine.engine_lost();
     tokio::pin!(lost);
     let just_before = crate::load::STALENESS_LIMIT - Duration::from_secs(1);
     tokio::time::timeout(just_before, &mut lost)

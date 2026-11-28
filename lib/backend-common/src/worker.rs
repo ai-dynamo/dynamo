@@ -618,25 +618,28 @@ impl Worker {
         // grace-period sleep, which is a fixed wait rather than a hang
         // risk), otherwise we exit(911). Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
-        // is cancelled. A lost engine starts the same shutdown.
+        // is cancelled. A lost engine cancels the token, as a signal does.
         let engine = self.engine.clone();
-        let outcome = {
+        let worker_done = CancellationToken::new();
+        let watch_engine = async {
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => None,
+                _ = worker_done.cancelled() => None,
+                error = engine.engine_lost() => {
+                    tracing::error!(%error, "Engine lost; shutting down the worker");
+                    shutdown_token.cancel();
+                    Some(error)
+                }
+            }
+        };
+        let run = async {
             let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
-            let (finished, lost) = tokio::select! {
-                biased;
-                result = &mut inner_fut => (Some(result), None),
-                _ = shutdown_token.cancelled() => (None, None),
-                error = engine.engine_lost() => (None, Some(error)),
-            };
-            match finished {
-                Some(result) => result,
-                None => {
-                    if let Some(error) = &lost {
-                        tracing::error!(%error, "Engine lost; shutting down the worker");
-                        shutdown_token.cancel();
-                    }
+            let result = tokio::select! {
+                result = &mut inner_fut => result,
+                _ = shutdown_token.cancelled() => {
                     runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
@@ -647,7 +650,7 @@ impl Worker {
                         timeout.as_secs(),
                         grace,
                     );
-                    let result = match tokio::time::timeout(deadline, &mut inner_fut).await {
+                    match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
@@ -657,18 +660,19 @@ impl Worker {
                             );
                             std::process::exit(911);
                         }
-                    };
-                    match lost {
-                        Some(error) => {
-                            if let Err(stopped) = result {
-                                tracing::warn!(error = %stopped, "Worker shutdown failed");
-                            }
-                            Err(error)
-                        }
-                        None => result,
                     }
                 }
+            };
+            worker_done.cancel();
+            result
+        };
+        let outcome = match tokio::join!(run, watch_engine) {
+            (Err(stopped), Some(error)) => {
+                tracing::warn!(error = %stopped, "Worker shutdown failed");
+                Err(error)
             }
+            (_, Some(error)) => Err(error),
+            (outcome, None) => outcome,
         };
 
         // Final safety net: guarantee engine.cleanup() runs if start()
