@@ -2848,3 +2848,118 @@ async def test_custom_json_cannot_merge_with_processed_media():
         await processor.prepare_input(
             request, "request-1", None, DisaggregationMode.AGGREGATED
         )
+
+
+# --- Inkling 2 Jinja seed-pad stripping & RGBA checkerboard ------------------
+
+_INKLING2_MARKER_ID = 200005
+_INKLING2_PAD_ID = 200054
+_INKLING2_END_MSG_ID = 200010
+
+
+def _inkling2_processor(
+    *,
+    model_type: str = "inkling2_loop",
+    real_image_loader: bool = False,
+) -> tuple[mod.VllmMultimodalRequestProcessor, MagicMock]:
+    def _encode(text: str, add_special_tokens: bool = False) -> list[int]:
+        mapping = {
+            "<|content_image|>": [_INKLING2_MARKER_ID],
+            "<|unused_200054|>": [_INKLING2_PAD_ID],
+        }
+        return mapping.get(text, [999])
+
+    tokenizer = SimpleNamespace(encode=MagicMock(side_effect=_encode))
+    engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type=model_type)
+            )
+        ),
+        get_tokenizer=MagicMock(return_value=tokenizer),
+    )
+    processor = mod.VllmMultimodalRequestProcessor(
+        model="thinkingmachines/Inkling-2-Mini",
+        engine_client=engine_client,
+        enable_multimodal=True,
+        image_loader=None
+        if real_image_loader
+        else SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
+        use_unified_vision_chunk=False,
+    )
+    return processor, engine_client
+
+
+@pytest.mark.parametrize("model_type", ["inkling2", "inkling2_loop"])
+def test_inkling2_strips_jinja_seed_pads_before_vllm_expansion(model_type: str):
+    processor, engine_client = _inkling2_processor(model_type=model_type)
+    tokens = [
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_PAD_ID,
+        _INKLING2_END_MSG_ID,
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_PAD_ID,
+        _INKLING2_END_MSG_ID,
+    ]
+
+    adapted = processor._adapt_image_placeholders(
+        tokens, {"image": [object(), object()]}
+    )
+
+    assert adapted == [
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_END_MSG_ID,
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_END_MSG_ID,
+    ]
+    engine_client.get_tokenizer.assert_called_once_with()
+
+
+def test_inkling2_leaves_bare_vllm_renderer_markers_unchanged():
+    processor, _ = _inkling2_processor()
+    tokens = [200000, _INKLING2_MARKER_ID, _INKLING2_END_MSG_ID]
+
+    assert processor._adapt_image_placeholders(tokens, {"image": [object()]}) is tokens
+
+
+def test_inkling2_rejects_image_count_mismatch_and_mixed_framing():
+    processor, _ = _inkling2_processor()
+
+    with pytest.raises(mod.InvalidArgument, match=r"carries 1 <\|content_image\|>"):
+        processor._adapt_image_placeholders(
+            [200000, _INKLING2_MARKER_ID, _INKLING2_PAD_ID, _INKLING2_END_MSG_ID],
+            {"image": [object(), object()]},
+        )
+
+    mixed = [
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_PAD_ID,
+        _INKLING2_END_MSG_ID,
+        200000,
+        _INKLING2_MARKER_ID,
+        _INKLING2_END_MSG_ID,
+    ]
+    with pytest.raises(mod.InvalidArgument, match="mixes bare"):
+        processor._adapt_image_placeholders(mixed, {"image": [object(), object()]})
+
+
+@pytest.mark.asyncio
+async def test_inkling2_image_loader_composites_transparency_on_checkerboard():
+    processor, _ = _inkling2_processor(real_image_loader=True)
+    buf = BytesIO()
+    Image.new("RGBA", (16, 16), color=(0, 0, 0, 0)).save(buf, format="PNG")
+    data_url = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+    loaded = await processor.image_loader.load_image(data_url)
+
+    assert loaded.mode == "RGB"
+    pixels = np.asarray(loaded)
+    assert int(pixels[0, 0, 0]) == 204
+    assert int(pixels[0, 8, 0]) == 153
+    assert int(pixels[8, 0, 0]) == 153
+    assert int(pixels[8, 8, 0]) == 204

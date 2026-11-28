@@ -46,6 +46,11 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
+from .models.inkling2 import (
+    INKLING2_MODEL_TYPES,
+    Inkling2ImagePlaceholders,
+    inkling2_rgb,
+)
 from .models.mistral import MistralImagePlaceholders
 from .models.qwen import (
     QwenGridParams,
@@ -392,8 +397,17 @@ class VllmMultimodalRequestProcessor:
         self.enable_frontend_decoding = enable_frontend_decoding
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
+        model_config = getattr(
+            getattr(engine_client, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(model_config, "hf_config", None)
+        to_rgb = (
+            inkling2_rgb
+            if getattr(hf_config, "model_type", None) in INKLING2_MODEL_TYPES
+            else _vllm_rgb
+        )
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=to_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -407,16 +421,15 @@ class VllmMultimodalRequestProcessor:
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
         self._k3_expansion_cached = False
+        self._inkling2_placeholders: Optional[Inkling2ImagePlaceholders] = None
+        self._inkling2_placeholders_cached = False
         self._mistral_placeholders: Optional[MistralImagePlaceholders] = None
         self._mistral_placeholders_cached = False
 
         if use_unified_vision_chunk is None:
-            model_config = getattr(
-                getattr(engine_client, "vllm_config", None), "model_config", None
-            )
             use_unified_vision_chunk = bool(
                 getattr(
-                    getattr(model_config, "hf_config", None),
+                    hf_config,
                     "use_unified_vision_chunk",
                     False,
                 )
@@ -582,14 +595,45 @@ class VllmMultimodalRequestProcessor:
         self._mistral_placeholders_cached = True
         return self._mistral_placeholders
 
+    def _inkling2_image_placeholders(self) -> Optional[Inkling2ImagePlaceholders]:
+        if self._inkling2_placeholders_cached:
+            return self._inkling2_placeholders
+
+        model_config = getattr(
+            getattr(self.engine_client, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(model_config, "hf_config", None)
+        if hf_config is None:
+            return None
+
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type is None:
+            return None
+        if model_type not in INKLING2_MODEL_TYPES:
+            self._inkling2_placeholders_cached = True
+            return None
+
+        get_tokenizer = getattr(self.engine_client, "get_tokenizer", None)
+        tokenizer = get_tokenizer() if callable(get_tokenizer) else None
+        if tokenizer is None:
+            raise RuntimeError("Inkling 2 tokenizer is unavailable")
+
+        self._inkling2_placeholders = Inkling2ImagePlaceholders.from_tokenizer(
+            tokenizer
+        )
+        self._inkling2_placeholders_cached = True
+        return self._inkling2_placeholders
+
     def _adapt_image_placeholders(
         self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
     ) -> list[int]:
         """Adapt the frontend's image placeholders for this model's vLLM processor.
 
         The frontend emits one placeholder per image. Kimi K3 renames it to the
-        token vLLM expands. vLLM never expands Mistral-format placeholders, so
-        the worker expands them. Other models take the placeholder as is.
+        token vLLM expands. Inkling 2's HF Jinja template emits a seed pad after
+        ``<|content_image|>`` that vLLM's processor otherwise leaves unembedded.
+        vLLM never expands Mistral-format placeholders, so the worker expands
+        them. Other models take the placeholder as is.
         """
         if not multi_modal_data:
             return token_ids
@@ -597,6 +641,14 @@ class VllmMultimodalRequestProcessor:
         # variant it accepts skips the Mistral path.
         if self._kimi_k3_pad_expansion() is not None:
             return self._expand_kimi_k3_pads(token_ids, multi_modal_data)
+        inkling2 = self._inkling2_image_placeholders()
+        if inkling2 is not None:
+            images = multi_modal_data.get("image")
+            if images is None or isinstance(images, dict):
+                return token_ids
+            if not isinstance(images, (list, tuple)):
+                images = [images]
+            return inkling2.strip_seed_pads(token_ids, images)
         mistral = self._mistral_image_placeholders()
         if mistral is None:
             return token_ids
