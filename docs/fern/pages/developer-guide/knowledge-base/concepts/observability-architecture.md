@@ -130,6 +130,11 @@ different default; see
    in total, so a canary waiting behind a long prefill does not fail while the engine makes
    progress.
 
+At startup the canary is also the readiness gate. An endpoint with a canary payload starts
+`notready`, and Dynamo sends the first canary as soon as the endpoint registers instead of waiting
+for the idle timer. Until the endpoint is first ready, a failed canary is retried after one second,
+or after `DYN_CANARY_WAIT_TIME` if that is shorter. Each canary finishes before the next is sent.
+
 Normal traffic suppresses unnecessary canaries because response activity shows engine progress;
 it does not establish completion of every request or successful client delivery. Active checks are
 disabled by default. Set `DYN_HEALTH_CHECK_ENABLED=true` where this extra failure-detection path is
