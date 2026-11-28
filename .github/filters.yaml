@@ -529,6 +529,8 @@ rust:
   # changes.
   - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
   - 'lib/bindings/python/src/dynamo/prometheus_names.py'
+  # Pinned protoc installer used by rust-tests and rust-clippy.
+  - '.github/actions/setup-protoc/**'
   # Router crate files. Their markdown docs do not need the Rust jobs.
   - 'lib/router/**'
   - '!lib/router/**/*.md'
