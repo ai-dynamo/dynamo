@@ -41,7 +41,7 @@ func TestCreateProfilingJobOutputCopierImage(t *testing.T) {
 		requestImage  string
 		want          string
 	}{
-		{name: "default", want: "bitnami/kubectl:latest"},
+		{name: "default", want: "docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d"},
 		{name: "operator digest", operatorImage: "registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", want: "registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "request overrides operator", operatorImage: "registry.example/kubectl:operator", requestImage: "registry.example/kubectl:request", want: "registry.example/kubectl:request"},
 	}

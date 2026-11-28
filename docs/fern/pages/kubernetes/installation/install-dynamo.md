@@ -7,6 +7,8 @@ subtitle: Install accelerator support and the Dynamo Platform on Kubernetes.
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
 
+For air-gapped or private-registry installations, prepare [image mirrors](#private-registries-and-image-mirroring) before installing.
+
 ## Prerequisites
 
 Before you begin, make sure you have Helm v3 or later and choose the accelerator type in your
@@ -306,6 +308,71 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 </Step>
 
 </Steps>
+
+## Private Registries and Image Mirroring
+
+Prepare the image inventory for the exact chart release, values and workloads you will deploy.
+The [release artifact list](../../reference/general/release-artifacts.mdx) names Dynamo's published
+images; it does not include third-party dependencies or all controller-created Pods. For production,
+keep the selected images in a registry whose retention you control, including every required
+architecture and manifest referenced by a pinned digest.
+
+Include the following image groups for the features you enable. Configuration names below refer
+to the current chart; check your selected release's values for older versions.
+
+| Image group | Images to include | Where to configure or find them |
+| --- | --- | --- |
+| Platform operator | Operator, CRD-apply and DGD-override helper init containers, and v1beta2 Run publisher; these reuse the operator image | `dynamo-operator.controllerManager.manager.image` |
+| Install and upgrade hooks | Grove preflight and upgrade-preflight Python images, including per-check overrides; KAI queue-wait kubectl image | `dynamo-operator.grovePreflight.image`, `dynamo-operator.upgradePreflight.job.image`, `dynamo-operator.upgradePreflight.checks.<checkName>.job.image`, `kaiQueueWait.image` |
+| Enabled subcharts | Grove, KAI Scheduler, Snapshot, etcd and NATS, including their init containers, sidecars and hook/test Pods | The selected dependency charts' image values and rendered manifests |
+| Controller-created Pods | KAI-managed components, reservation and scaling Pods; Grove's `grove-initc`; other admission-injected containers | `kai-scheduler.global.registry` and per-component image overrides; Grove's init-container image configuration |
+| Serving workloads | Frontend, Planner, backend runtimes or engine/sidecar images, plus custom init containers and sidecars | Your DGD and recipe manifests; see the [DGD reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx) |
+| DGDR profiling | Planner/profiler and every backend/frontend image profiling can launch or write into the generated DGD | Request/runtime configuration and the [profiler image settings](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#container-images) |
+| v1beta1 output copier | The separate kubectl image; v1beta2 publishers already use the operator image above | [`dynamo-operator.dgdr.outputCopierImage`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image), or the per-request override |
+| Separately installed prerequisites | Accelerator and network operators/drivers, storage/CSI, monitoring, ModelExpress, and externally managed schedulers/orchestrators | Each component's chart, controller configuration and installation guide |
+
+On a connected staging host, render both install and upgrade manifests with the same chart archive
+and `your-values.yaml` used for deployment. This includes Helm hooks; match the target cluster's
+Helm capabilities when a component depends on API availability. With [yq v4](https://github.com/mikefarah/yq):
+
+```bash
+helm template dynamo-platform "dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "$NAMESPACE" -f your-values.yaml --include-crds > platform-install.yaml
+helm template dynamo-platform "dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "$NAMESPACE" -f your-values.yaml --include-crds --is-upgrade > platform-upgrade.yaml
+yq -r -N '.. | select(tag == "!!map") | .image | select(tag == "!!str")' \
+  platform-install.yaml platform-upgrade.yaml | sort -u > images.txt
+```
+
+Render separately installed charts and query your workload manifests as well. Add the
+controller-created and profiling images from the table: Helm rendering cannot list images chosen
+later from a request or created by another controller. Building images offline also requires their
+Dockerfile base images.
+
+Copy each source to its mirror, using the source digest when it is pinned. Use `skopeo login`
+for registries that require authentication. For example:
+
+```bash
+SOURCE_IMAGE="nvcr.io/nvidia/ai-dynamo/kubernetes-operator:${RELEASE_VERSION}"
+MIRROR_IMAGE="registry.example.com/ai-dynamo/kubernetes-operator:${RELEASE_VERSION}"
+skopeo copy --all --preserve-digests --digestfile mirror-digest.txt \
+  "docker://${SOURCE_IMAGE}" "docker://${MIRROR_IMAGE}"
+```
+
+`--all` copies the full manifest list and its platform images. `--preserve-digests` fails if the
+destination cannot retain the digests. If you intentionally convert manifests or copy only one
+architecture, use the destination digest instead of the source digest. `mirror-digest.txt` records
+the copied image's digest.
+
+Update each chart's image settings, workload references and controller-injected image settings to
+use the mirrors; a single operator image override does not rewrite the other references. Create
+pull Secrets in every namespace that pulls private images and reference them through chart values
+or workload Pod templates. For profiling Jobs, use
+`spec.overrides.profilingJob.template.spec.imagePullSecrets`; the operator chart's `imagePullSecrets`
+apply only to the operator Pod.
+
+Stage Helm chart archives and model/tokenizer files as well. Verify installation, upgrade, serving
+and any enabled profiling workflows with external registry access disabled.
 
 ## Upgrade Dynamo
 

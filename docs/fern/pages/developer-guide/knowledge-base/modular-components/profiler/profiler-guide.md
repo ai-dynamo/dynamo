@@ -680,7 +680,7 @@ spec:
 ```
 
 The profiling job also runs an `output-copier` sidecar that relays profiler status and
-writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
+writes results to the output ConfigMap. By default it uses digest-pinned `bitnami/kubectl`.
 In air-gapped or private-registry clusters, configure all profiling Jobs with
 `dynamo-operator.dgdr.outputCopierImage` in the [Helm chart](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
 To use a different image for one DGDR, override it in `overrides.profilingJob`:
