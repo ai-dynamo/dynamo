@@ -996,7 +996,18 @@ impl KvRouter {
         let workers_for_availability = workers_with_configs.clone();
         let policy_for_availability = admission_policy.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
-            let available = client_for_availability.available_instance_ids();
+            // A held worker is available only to a request that pins it. The routing host
+            // drops a session binding to a held worker, so a pin names one only when the
+            // caller did. Every other request shares the routable set, which keeps the
+            // scheduler's per-set cache on one entry.
+            let pins_held_worker = request
+                .pinned_worker
+                .is_some_and(|worker| client_for_availability.is_instance_held(worker.worker_id));
+            let available = if pins_held_worker {
+                client_for_availability.dispatchable_instance_ids()
+            } else {
+                client_for_availability.available_instance_ids()
+            };
             match policy_for_availability.as_ref() {
                 Some(policy) => {
                     policy.refresh_admission(request, available, &workers_for_availability)

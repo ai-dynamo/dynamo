@@ -131,7 +131,13 @@ impl RoutingHost {
             .routing
             .as_ref()
             .ok_or_else(dynamo_lora::policy::RequestPolicy::capability_error)?;
-        let live = self.inner.client.instance_ids_avail().into_iter().collect();
+        // `worker` is already selected, and only a request that names it selects a held one.
+        let live = self
+            .inner
+            .client
+            .instance_ids_dispatchable()
+            .into_iter()
+            .collect();
         let workers = self.kv_router().workers_with_configs.borrow();
         let default_constraints = RoutingConstraints::default();
         policy.check_current(
@@ -239,7 +245,13 @@ impl RoutingHost {
             && let Some(policy) = self.kv_router().admission_policy.as_ref()
         {
             let workers = self.kv_router().workers_with_configs.borrow();
-            let live = self.inner.client.instance_ids_avail().into_iter().collect();
+            // Only a request that names its worker may be placed on a held one.
+            let live = match explicit_pin {
+                Some(_) => self.inner.client.instance_ids_dispatchable(),
+                None => self.inner.client.instance_ids_avail(),
+            }
+            .into_iter()
+            .collect();
             let pins = explicit_pin
                 .map(|(worker, _)| worker)
                 .into_iter()
@@ -267,6 +279,8 @@ impl RoutingHost {
                 workers.get(worker_id).is_some_and(|config| {
                     routing_constraints.is_compatible_with_worker_taints(&config.taints)
                 }) && !migration_excluded_worker_ids.contains(worker_id)
+                    // A held worker is no migration target: the retry names no worker.
+                    && !self.inner.client.is_instance_held(*worker_id)
             });
             if eligible.is_empty()
                 && let Some(error) = request

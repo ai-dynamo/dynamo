@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use futures::StreamExt;
 use tokio::sync::watch;
@@ -115,12 +115,14 @@ fn base_runtime_config_watch(
 /// Join instance availability and config discovery into a single watch.
 ///
 /// Only includes workers that have BOTH an instance registration AND a runtime config.
+/// A held worker is included: a request that names it needs its config, and the router keeps
+/// it out of automatic selection through worker availability, not through this watch.
 /// Spawns a background task that recomputes the joined state whenever either source changes.
 /// The returned `watch::Receiver` always contains the latest joined snapshot.
 ///
 /// `lifecycle` bounds `Source 2`'s `base_runtime_config_watch` task directly, and this
 /// function's own join task below. `Source 1`'s `Client` already scopes its own
-/// `monitor_instance_source` task to the lifetime of its last `instance_avail_watcher`
+/// `monitor_instance_source` task to the lifetime of its last instance watcher
 /// receiver, so it needs no token here — dropping this function's receivers already
 /// stops it. A caller scoped to something narrower than the process, such as a monitor
 /// bound to one `WorkerSet`'s lifecycle, must still pass that scope's own token, or
@@ -135,7 +137,7 @@ pub async fn runtime_config_watch(
 
     // Source 1: instance availability (watches DiscoveryQuery::Endpoint)
     let client = endpoint.client().await?;
-    let mut instance_ids_rx = client.instance_avail_watcher();
+    let mut instance_ids_rx = client.instance_dispatch_watcher();
 
     // Source 2: runtime configs from discovery (watches DiscoveryQuery::EndpointModels)
     let discovery = component.drt().discovery();
@@ -164,11 +166,7 @@ pub async fn runtime_config_watch(
                 result = configs_rx.changed() => { if result.is_err() { break; } }
             }
 
-            let instances: HashSet<WorkerId> = instance_ids_rx
-                .borrow_and_update()
-                .iter()
-                .copied()
-                .collect();
+            let instances = instance_ids_rx.borrow_and_update().ids.clone();
             let configs = configs_rx.borrow_and_update().clone();
 
             let ready: HashMap<WorkerId, ModelRuntimeConfig> = instances
@@ -196,6 +194,7 @@ pub async fn runtime_config_watch(
 mod tests {
     use super::*;
     use dynamo_runtime::discovery::{DiscoveryInstance, ModelCardInstanceId, ModelTaintsUpdate};
+    use std::collections::HashSet;
 
     fn model_instance(
         instance_id: u64,
@@ -374,5 +373,65 @@ mod tests {
                 .is_err()
         );
         assert_eq!(configs.borrow().len(), 1);
+    }
+
+    /// A held worker stays in the joined watch: a request that names it needs its config, and
+    /// the router waits for it when it builds a worker set's pipeline.
+    #[tokio::test]
+    async fn runtime_config_watch_includes_a_held_worker() {
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime, component::TransportType, discovery::DiscoverySpec,
+            distributed::DistributedConfig,
+        };
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("runtime-config-held-worker".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let id = endpoint.id();
+        drt.discovery()
+            .register(DiscoverySpec::Endpoint {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+                held: true,
+            })
+            .await
+            .unwrap();
+        let mut card = ModelDeploymentCard::with_name_only("held-worker-model");
+        card.runtime_config.total_kv_blocks = Some(42);
+        crate::local_model::register_model_card(&endpoint, &card)
+            .await
+            .unwrap();
+        let worker_id = drt.discovery().instance_id();
+
+        let mut configs = runtime_config_watch(&endpoint, CancellationToken::new())
+            .await
+            .unwrap();
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            configs.wait_for(|configs| configs.contains_key(&worker_id)),
+        )
+        .await
+        .expect("the held worker never joined the runtime-config watch")
+        .unwrap()
+        .clone();
+        assert_eq!(joined[&worker_id].total_kv_blocks, Some(42));
+
+        // The same worker is not routable.
+        let client = endpoint.client().await.unwrap();
+        assert!(client.is_instance_held(worker_id));
+        assert!(client.instance_ids_avail().is_empty());
+
+        runtime.shutdown();
     }
 }

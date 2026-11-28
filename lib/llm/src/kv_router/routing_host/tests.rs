@@ -2483,6 +2483,99 @@ async fn router_with_config_classifier_and_policy(
 
 #[tokio::test]
 #[serial_test::serial]
+async fn kv_reaches_a_held_worker_only_through_a_caller_pin() {
+    const READY: u64 = 7;
+    const HELD: u64 = 8;
+
+    let workers = HashMap::from([
+        (READY, ModelRuntimeConfig::default()),
+        (HELD, ModelRuntimeConfig::default()),
+    ]);
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
+    router
+        .inner
+        .client
+        .override_discovered_instances_with_held(vec![READY, HELD], vec![HELD]);
+    let budget = CleanupBudget::default();
+
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        // Automatic selection never lands on the held worker.
+        for _ in 0..16 {
+            let (selection, _) = router
+                .select_with_affinity(&Context::new(request()), phase, true, &budget)
+                .await
+                .unwrap();
+            assert_eq!(selection.worker.worker_id, READY, "{phase:?}");
+        }
+
+        // The caller's pin for this phase reaches it.
+        let mut pinned = request();
+        pinned.routing = Some(serde_json::from_value(serde_json::json!({field: HELD})).unwrap());
+        let (selection, _) = router
+            .select_with_affinity(&Context::new(pinned), phase, true, &budget)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, HELD, "{phase:?}");
+
+        // A session bound to it is automatic selection: the binding is dropped and the
+        // request is placed on a routable worker, whether the binding names the worker
+        // alone or an exact rank, and whether the request is a query or a dispatch.
+        for (label, target) in [
+            ("worker", AffinityTarget::worker(HELD)),
+            ("rank", AffinityTarget::new(HELD, Some(0))),
+        ] {
+            for is_query_only in [true, false] {
+                let session =
+                    SessionAffinityId::new(format!("held-{field}-{label}-{is_query_only}"));
+                bind_affinity_target(&router, &session, target).await;
+                let mut bound = Context::new(request());
+                bound.insert(SESSION_AFFINITY_CONTEXT_KEY, session);
+                let (selection, _hold) = router
+                    .select_with_affinity(&bound, phase, is_query_only, &budget)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    selection.worker.worker_id, READY,
+                    "{phase:?} {label} query={is_query_only}"
+                );
+            }
+        }
+    }
+
+    // Once released, the worker is an ordinary candidate.
+    router
+        .inner
+        .client
+        .override_discovered_instances_with_held(vec![READY, HELD], vec![]);
+    let mut selected = HashSet::new();
+    for _ in 0..64 {
+        let (selection, _) = router
+            .select_with_affinity(
+                &Context::new(request()),
+                RequestPhase::Aggregated,
+                true,
+                &budget,
+            )
+            .await
+            .unwrap();
+        selected.insert(selection.worker.worker_id);
+    }
+    assert!(
+        selected.contains(&HELD),
+        "the released worker took no automatic request"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking() {
     let (host, runtime) = router_with_config(
         None,

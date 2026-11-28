@@ -211,8 +211,14 @@ impl RoutingInstances {
         let next_request_overload_expiry = request_overload_deadlines.values().min().copied();
         overloaded_ids.extend(request_overload_deadlines.keys().copied());
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
-        let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
-        let dispatchable_id_set = Arc::new(dispatchable_ids.iter().copied().collect());
+        let routable_id_set: Arc<HashSet<u64>> = Arc::new(routable_ids.iter().copied().collect());
+        // With nothing held the two sets are equal, and sharing one allocation lets a reader
+        // that alternates between them keep telling snapshots apart by pointer.
+        let dispatchable_id_set = if held_ids.is_empty() {
+            Arc::clone(&routable_id_set)
+        } else {
+            Arc::new(dispatchable_ids.iter().copied().collect())
+        };
         Self {
             discovered_ids,
             held_ids,
@@ -331,7 +337,9 @@ impl RoutingInstances {
         if self.routable_ids == previous.routable_ids {
             self.routable_id_set = Arc::clone(&previous.routable_id_set);
         }
-        if self.dispatchable_ids == previous.dispatchable_ids {
+        if self.held_ids.is_empty() {
+            self.dispatchable_id_set = Arc::clone(&self.routable_id_set);
+        } else if self.dispatchable_ids == previous.dispatchable_ids {
             self.dispatchable_id_set = Arc::clone(&previous.dispatchable_id_set);
         }
         self
@@ -2428,6 +2436,43 @@ mod tests {
         assert_eq!(released.routable_ids(), &[1, 2, 3]);
         assert_eq!(released.free_ids(), &[1, 2, 3]);
         assert!(!released.is_held(2));
+    }
+
+    /// A reader that alternates between the routable and the dispatchable set tells snapshots
+    /// apart by pointer, so the two must be one allocation whenever they are equal.
+    #[test]
+    fn routable_and_dispatchable_sets_are_shared_while_nothing_is_held() {
+        let unheld = RoutingInstances::new(vec![1, 2], vec![]);
+        assert!(Arc::ptr_eq(
+            &unheld.available_ids().unwrap(),
+            &unheld.dispatchable_id_set().unwrap()
+        ));
+
+        let held = unheld
+            .reconcile_discovered(vec![1, 2], vec![2])
+            .sharing_unchanged_sets(&unheld);
+        assert_eq!(*held.available_ids().unwrap(), HashSet::from([1]));
+        assert_eq!(*held.dispatchable_id_set().unwrap(), HashSet::from([1, 2]));
+
+        // The sets are shared again after the release, and stay put across a no-op rebuild.
+        let released = held
+            .reconcile_discovered(vec![1, 2], vec![])
+            .sharing_unchanged_sets(&held);
+        assert!(Arc::ptr_eq(
+            &released.available_ids().unwrap(),
+            &released.dispatchable_id_set().unwrap()
+        ));
+        let rebuilt = released
+            .reconcile_discovered(vec![1, 2], vec![])
+            .sharing_unchanged_sets(&released);
+        assert!(Arc::ptr_eq(
+            &rebuilt.available_ids().unwrap(),
+            &released.available_ids().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &rebuilt.dispatchable_id_set().unwrap(),
+            &released.dispatchable_id_set().unwrap()
+        ));
     }
 
     #[test]
