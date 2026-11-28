@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+command:
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+goldens:
+- index.json
+- candidate-000/kustomization.yaml
+- candidate-000/deploy.yaml
+- candidate-001/kustomization.yaml
+- candidate-001/deploy.yaml
+- candidate-002/kustomization.yaml
+- candidate-002/deploy.yaml
+- candidate-003/kustomization.yaml
+- candidate-003/deploy.yaml

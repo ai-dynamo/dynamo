@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+traffic:
+  source:
+    type: synthetic
+    input_tokens: 1024
+    output_tokens: 1024
+  load:
+    type: constant_rate
+    requests_per_second: 10
+  stop:
+    requests: 1
+engine:
+  mode: disaggregated
+  model: model
+  hardware: h200_sxm
+  backend: vllm
+  workers:
+    prefill:
+      parallelism:
+        preset: default
+    decode:
+      parallelism:
+        preset: default
+optimization:
+  target: goodput_per_gpu
+  constraints:
+    max_candidate_gpus: 8
+optimizer:
+  algorithm: bayesian
+  max_trials: 1
+  parallelism: 1
+  candidate_timeout_seconds: 120
+  seed: 42
+evaluation:
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
+dgd:
+  name: llama-3-3-70b-fp8-v-5060d201
+  output_file: deployment.yaml
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+  num_gpus_per_node: 8

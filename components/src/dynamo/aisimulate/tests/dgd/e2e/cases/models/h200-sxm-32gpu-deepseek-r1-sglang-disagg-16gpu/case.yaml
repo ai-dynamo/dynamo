@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# AISim 0.15 no longer lists 0.5.20 as queryable, but retains the exact
+# performance data this historical case covers. Opt in explicitly rather than
+# allowing the symbolic "previous" alias to drift.
+command:
+- env
+- AIC_ALLOW_UNLISTED_VERSIONS=1
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+goldens:
+- index.json
+- deployment.yaml
+mirrors:
+  model/config.json: https://huggingface.co/deepseek-ai/DeepSeek-R1/resolve/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/config.json

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+command:
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+goldens:
+- index.json
+- deployment.yaml
+mirrors:
+  model/config.json: https://huggingface.co/nvidia/Kimi-K2.5-NVFP4/resolve/0fd0a5e6879298d3476e3b61852a79792a35ae3d/config.json

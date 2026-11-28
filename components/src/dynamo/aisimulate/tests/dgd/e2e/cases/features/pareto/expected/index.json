@@ -1,0 +1,18 @@
+{
+  "artifacts": [
+    {
+      "path": "candidate-000"
+    },
+    {
+      "path": "candidate-001"
+    },
+    {
+      "path": "candidate-002"
+    },
+    {
+      "path": "candidate-003"
+    }
+  ],
+  "output": "kustomize",
+  "renderer": "aic"
+}

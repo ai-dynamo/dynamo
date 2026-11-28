@@ -315,19 +315,94 @@ spec:
         containers:
         - name: main
           args: []
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
 """,
-        _candidate(backend="trtllm", model_name="Qwen/Qwen3-32B"),
+        _candidate(
+            backend="trtllm",
+            model_name="Qwen/Qwen3-32B",
+            deployment_mode="agg",
+            tp=1,
+            pp=1,
+            attention_dp=2,
+            moe_tp=1,
+            moe_ep=2,
+            cp=1,
+        ),
         _options(),
         dgd_name="sweeper-dgd",
     )
 
     dgd = yaml.safe_load(patched)
-    args = dgd["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["args"]
+    worker = dgd["spec"]["components"][0]
+    container = worker["podTemplate"]["spec"]["containers"][0]
+    args = container["args"]
     index = args.index("--trtllm.enable_chunked_prefill")
     assert args[index + 1] == "true"
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "2"
+    assert container["resources"]["requests"]["nvidia.com/gpu"] == "2"
     assert len(calls) == 1
     assert calls[0][0].value == "final output"
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
+
+
+@pytest.mark.parametrize("backend", ["trtllm", "vllm"])
+def test_worker_resources_follow_disaggregated_candidate_topology(
+    backend: str,
+) -> None:
+    def worker(component_type: str) -> dict:
+        return {
+            "type": component_type,
+            "multinode": {"nodeCount": 4},
+            "podTemplate": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "main",
+                            "resources": {
+                                "limits": {"nvidia.com/gpu": "32"},
+                                "requests": {"nvidia.com/gpu": "32"},
+                            },
+                        }
+                    ]
+                }
+            },
+        }
+
+    dgd = {"spec": {"components": [worker("prefill"), worker("decode")]}}
+    candidate = _candidate(
+        backend=backend,
+        deployment_mode="disagg",
+        prefill_tp=16,
+        prefill_pp=1,
+        prefill_attention_dp=16,
+        prefill_moe_tp=1,
+        prefill_moe_ep=16,
+        prefill_cp=1,
+        decode_tp=1,
+        decode_pp=1,
+        decode_attention_dp=8,
+        decode_moe_tp=1,
+        decode_moe_ep=8,
+        decode_cp=1,
+    )
+
+    base_module._apply_worker_resources(dgd, candidate, num_gpus_per_node=8)
+
+    prefill, decode = dgd["spec"]["components"]
+    assert prefill["multinode"] == {"nodeCount": 2}
+    assert prefill["podTemplate"]["spec"]["containers"][0]["resources"] == {
+        "limits": {"nvidia.com/gpu": "8"},
+        "requests": {"nvidia.com/gpu": "8"},
+    }
+    assert "multinode" not in decode
+    assert decode["podTemplate"]["spec"]["containers"][0]["resources"] == {
+        "limits": {"nvidia.com/gpu": "8"},
+        "requests": {"nvidia.com/gpu": "8"},
+    }
 
 
 def test_patch_manifest_router_configuration_round_trips_through_frontend(

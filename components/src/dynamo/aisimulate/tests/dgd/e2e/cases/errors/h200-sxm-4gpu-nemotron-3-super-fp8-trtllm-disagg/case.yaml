@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Expected rejection: Every TensorRT-LLM shape in the four-GPU budget has
+# insufficient KV capacity for the case-owned 2,048-token context.
+# Evidence: the repository-pinned AISim preflight emits the exact diagnostic below.
+command:
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+exit_code: nonzero
+diagnostic: (?s)Excluded 5 parallel shape.*2048-token sequence.*backend=trtllm.*no deployment_mode has a viable parallel config.*gpu_budget=4
+mirrors:
+  model/config.json: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8/resolve/744b1880a37996c5d56bf454ae164dfd74d77c4e/config.json

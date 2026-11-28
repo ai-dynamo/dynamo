@@ -3,52 +3,46 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Recommend-to-DGD CLI tests
+# AISimulate CLI golden tests
 
-`test_dgd_cli.py` runs every YAML in `configs/` through the installed AISimulate
-CLI with `recommend --stack dynamo --output dgd`. The real Dynamo replay stack,
-search, AIC renderer, and DGD output adapter run together. The local tiny-model
-fixture contains metadata only; fixed timings keep these CPU tests independent
-of model weights, GPUs, and external performance databases.
+This directory contains one automatic CPU suite for AISimulate's public CLI.
+Feature, model/backend/hardware, and expected-error scenarios use the same case
+format and the same parametrized test entrypoint.
 
-The table covers aggregated and disaggregated manifests, router configuration
-with Kustomize output, and a Pareto front with different scheduler limits. It
-checks emitted manifests and `index.json` against the selected Candidates in
-`recommendation.json`: model, role-specific replicas, scheduler/cache limits,
-runtime image, namespace, runtime override, and total GPU use. The Pareto checks
-reject rendering the same Candidate repeatedly under different names.
+Each directory under `cases/` owns:
 
-The aggregated case omits the runtime block size, and the router case explicitly
-sets it to `null`; both must omit `--block-size` from the generated worker args.
-The other cases retain explicit block sizes.
+- `case.yaml`: the command, expected outcome, declared output files, and optional
+  immutable model-metadata mirrors.
+- `config.yaml`: a complete native AISim configuration that can be passed to the
+  CLI without translation.
+- `expected/`: every reviewed public artifact for a successful case.
 
-The fixed aggregated and disaggregated cases also compare the complete DGD to
-`goldens/`. Run the table from the repository root:
+The runner stages a case in a private temporary workspace, substitutes only
+`{python}` and `{output}`, executes the command without a shell, and compares
+declared YAML and JSON files structurally. It does not parse AISim
+configurations, Candidates, backends, hardware, or DGD roles.
 
-```bash
-python -m pytest components/src/dynamo/aisimulate/tests/dgd/e2e/test_dgd_cli.py -v
-```
+Model metadata mirrors are downloaded from immutable revision URLs into the
+gitignored `.cache/aisimulate-golden-tests/` directory and copied into each
+staged case. Authored fixtures, native configurations, and expected outputs
+remain committed.
 
-When a golden is missing or differs semantically, the test writes the actual CLI
-output beside it as `<stem>.new.yaml` and fails. The reviewed golden is never
-rewritten. Golden comparison runs before detailed Candidate assertions so a
-changed model or runtime image also produces a reviewable proposal. The failure
-includes the unified diff in the test log, so CI review does not depend on
-retaining files from the container. It also prints exact per-file diff and
-acceptance commands. For example:
+When a golden is missing or differs, the test fails with a unified diff and
+writes the actual output beside the expected file as `<stem>.new.<suffix>`.
+Reviewed goldens are never overwritten. Replace a golden only after inspecting
+its corresponding proposal.
+
+Run the full table from the repository root:
 
 ```bash
-diff -u \
-  components/src/dynamo/aisimulate/tests/dgd/e2e/goldens/aggregated.yaml \
-  components/src/dynamo/aisimulate/tests/dgd/e2e/goldens/aggregated.new.yaml
+python3 -m pytest \
+  components/src/dynamo/aisimulate/tests/dgd/e2e/test_cases.py -v
 ```
 
-Inspect each proposal separately. If the change is intended, replace only its
-corresponding golden with the reviewed `.new.yaml` file and rerun the case. If the
-change is unintended, fix the regression and discard that proposal. Proposal
-files remain visible in the working tree; there is no batch-update mode. Passing
-tests never rewrite a golden.
+Run one group or case with pytest's normal selectors:
 
-The [comparison corpus](../comparison/README.md) is a separate, manually invoked
-recipe/performance-database comparison. Replay CLI prediction and recommendation
-round trips remain in the Replay test suite.
+```bash
+python3 -m pytest \
+  components/src/dynamo/aisimulate/tests/dgd/e2e/test_cases.py \
+  -k 'features or deepseek-r1-vllm' -v
+```

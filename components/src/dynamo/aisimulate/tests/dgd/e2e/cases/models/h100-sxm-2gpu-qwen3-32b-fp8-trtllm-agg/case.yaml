@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+command:
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+goldens:
+- index.json
+- deployment.yaml
+mirrors:
+  model/config.json: https://huggingface.co/Qwen/Qwen3-32B-FP8/resolve/aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df/config.json

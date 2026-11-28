@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import yaml
+
+from dynamo.common.gpu_topology import physical_gpu_count
 
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
 _EVALUATION_CONTEXT_ANNOTATION = "nvidia.com/sweeper-evaluation-context"
@@ -256,6 +259,102 @@ def _apply_context_length(dgd: dict[str, Any], candidate: CandidateLike) -> None
         )
 
 
+def _apply_worker_resources(
+    dgd: dict[str, Any],
+    candidate: CandidateLike,
+    *,
+    num_gpus_per_node: int,
+) -> None:
+    """Keep AIC worker resources faithful to the evaluated topology."""
+    config = candidate.config
+    deployment_mode = config.get("deployment_mode")
+    if deployment_mode is None:
+        return
+    if deployment_mode == "agg":
+        roles = {"worker": "agg"}
+    elif deployment_mode == "disagg":
+        roles = {"prefill": "prefill", "decode": "decode"}
+    else:
+        raise CandidateMaterializationError(
+            f"candidate deployment_mode must be agg or disagg, got {deployment_mode!r}"
+        )
+    workers = {
+        component.get("type"): component
+        for component in dgd.get("spec", {}).get("components", [])
+        if isinstance(component, dict) and component.get("type") in roles
+    }
+    if workers.keys() != roles.keys():
+        raise CandidateMaterializationError(
+            "renderer output workers do not match the candidate deployment mode"
+        )
+
+    for component_type, role in roles.items():
+        prefix = "" if role == "agg" else f"{role}_"
+        try:
+            dimensions = {
+                field: int(config.get(f"{prefix}{field}", 1))
+                for field in (
+                    "tp",
+                    "pp",
+                    "attention_dp",
+                    "moe_tp",
+                    "moe_ep",
+                    "cp",
+                )
+            }
+        except (TypeError, ValueError) as exc:
+            raise CandidateMaterializationError(
+                f"candidate {role} parallelism must contain integer dimensions"
+            ) from exc
+        if any(value < 1 for value in dimensions.values()):
+            raise CandidateMaterializationError(
+                f"candidate {role} parallelism must use at least one GPU"
+            )
+
+        gpus_per_worker = physical_gpu_count(
+            tensor=dimensions["tp"],
+            pipeline=dimensions["pp"],
+            attention_data=dimensions["attention_dp"],
+            moe_tensor=dimensions["moe_tp"],
+            moe_expert=dimensions["moe_ep"],
+        )
+        node_count = math.ceil(gpus_per_worker / num_gpus_per_node)
+        if gpus_per_worker % node_count:
+            raise CandidateMaterializationError(
+                f"candidate {role} topology uses {gpus_per_worker} GPUs across "
+                f"{node_count} equal-width nodes"
+            )
+        gpus_per_node = str(gpus_per_worker // node_count)
+
+        component = workers[component_type]
+        if node_count > 1:
+            component["multinode"] = {"nodeCount": node_count}
+        else:
+            component.pop("multinode", None)
+
+        containers = (
+            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        )
+        container = next(
+            (
+                item
+                for item in containers
+                if isinstance(item, dict) and item.get("name") == "main"
+            ),
+            None,
+        )
+        if container is None:
+            raise CandidateMaterializationError(
+                f"renderer output {component_type} worker has no main container"
+            )
+        resources = container.setdefault("resources", {})
+        limits = resources.setdefault("limits", {})
+        limits["nvidia.com/gpu"] = gpus_per_node
+        requests = resources.get("requests")
+        if isinstance(requests, dict) and "nvidia.com/gpu" in requests:
+            requests["nvidia.com/gpu"] = gpus_per_node
+
+
 def patch_dgd_manifest(
     rendered: str,
     candidate: CandidateLike,
@@ -307,6 +406,11 @@ def patch_dgd_manifest(
 
     _apply_router_config(dgd, candidate)
     _apply_context_length(dgd, candidate)
+    _apply_worker_resources(
+        dgd,
+        candidate,
+        num_gpus_per_node=options.num_gpus_per_node,
+    )
 
     documents[dgd_index] = dgd
     metadata = dgd.setdefault("metadata", {})

@@ -1,0 +1,9 @@
+{
+  "renderer": "aic",
+  "output": "kustomize",
+  "artifacts": [
+    {
+      "path": "deployment"
+    }
+  ]
+}
