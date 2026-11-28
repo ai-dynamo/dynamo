@@ -259,6 +259,9 @@
 /dev/docker-observability.yml                                                                           @ai-dynamo/dynamo-observability-codeowners
 /dev/docker-observability-xpu.yml                                                                       @ai-dynamo/dynamo-observability-codeowners
 
+# === fault-tolerance  (@ai-dynamo/dynamo-fault-tolerance-codeowners) ===
+/lib/ft-controller/                                                                                     @ai-dynamo/dynamo-fault-tolerance-codeowners
+
 # === ops  (@ai-dynamo/dynamo-ops-codeowners) ===
 /.cargo/                                                                                                @ai-dynamo/dynamo-ops-codeowners
 /.github/                                                                                               @ai-dynamo/dynamo-ops-codeowners

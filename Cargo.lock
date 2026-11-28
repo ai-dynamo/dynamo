@@ -2626,6 +2626,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-ft-controller"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "futures",
+ "humantime",
+ "rand 0.9.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dynamo-generate-format-catalog"
 version = "1.8.0"
 dependencies = [

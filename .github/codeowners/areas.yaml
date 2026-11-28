@@ -290,6 +290,7 @@ areas:
 - label: fault-tolerance
   github_team: '@ai-dynamo/dynamo-fault-tolerance-codeowners'
   path_globs:
+  - lib/ft-controller/
   - tests/fault_tolerance/
   - tests/fault_tolerance/cancellation/
   - tests/fault_tolerance/deploy/
