@@ -277,8 +277,8 @@ def test_stream_embeds_typed_llm_metrics(module_stubs):
 
 def test_stream_emits_multimodal_counts(module_stubs):
     # Mixed-media request: assert the SGLang extraction branch reports nonzero
-    # counts (2 images + 1 video), mirroring the vLLM processor test so the
-    # extract_mm_urls wiring cannot silently regress to zero.
+    # counts (2 images + 1 video + 1 inline audio), mirroring the vLLM processor
+    # test so the extract_mm_urls wiring cannot silently regress to zero.
     module = _load_processor_module(module_stubs)
     processor = module.SglangProcessor(
         tokenizer=None,
@@ -310,6 +310,10 @@ def test_stream_emits_multimodal_counts(module_stubs):
                     {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
                     {"type": "image_url", "image_url": {"url": "http://x/b.png"}},
                     {"type": "video_url", "video_url": {"url": "http://x/c.mp4"}},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": "AA==", "format": "wav"},
+                    },
                 ],
             }
         ],
@@ -332,8 +336,7 @@ def test_stream_emits_multimodal_counts(module_stubs):
     metrics = items[0]["data"]["llm_metrics"]
     assert metrics["image_count"] == 2
     assert metrics["video_count"] == 1
-    # audio has zero parts, so the key is omitted from the emitted metrics.
-    assert metrics.get("audio_count") is None
+    assert metrics["audio_count"] == 1
 
 
 @pytest.mark.parametrize("stream_interval", [1, 2])

@@ -26,7 +26,7 @@ from .sglang_tool_call_markers import (
     tool_call_marker_strings,
     tool_call_marker_token_ids,
 )
-from .utils import PreprocessError, extract_mm_urls
+from .utils import PreprocessError, extract_mm_urls, input_audio_data_url
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +619,10 @@ def _normalize_messages_for_template(
     rendered prompt has no slot for the media bytes that
     ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
     step in sglang's own OpenAI server and dynamo's Rust default path.
+
+    sglang drops ``input_audio`` parts, so a user ``input_audio`` part is
+    first rewritten to the ``audio_url`` part that ``extract_mm_urls()``
+    forwards for it. The caller's messages are not modified.
     """
     chat_template = getattr(tokenizer, "chat_template", None) or ""
     content_format = detect_jinja_template_content_format(chat_template)
@@ -637,8 +641,30 @@ def _normalize_messages_for_template(
             audio_data=audio_sink,
             modalities=modality_sink,
         )
-        for msg in messages
+        for msg in map(_input_audio_as_audio_url, messages)
     ]
+
+
+def _input_audio_as_audio_url(msg: dict[str, Any]) -> dict[str, Any]:
+    """Return ``msg`` with user ``input_audio`` parts as ``audio_url`` parts.
+
+    An invalid part is left as is; ``extract_mm_urls()`` rejects the request.
+    """
+    content = msg.get("content")
+    if msg.get("role") != "user" or not isinstance(content, list):
+        return msg
+    if not any(
+        isinstance(part, dict) and part.get("type") == "input_audio" for part in content
+    ):
+        return msg
+    new_content = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "input_audio":
+            url = input_audio_data_url(part)
+            if url is not None:
+                part = {"type": "audio_url", "audio_url": {"url": url}}
+        new_content.append(part)
+    return {**msg, "content": new_content}
 
 
 # A content span is swapped for ``\ue100<index>\ue101`` while the template is

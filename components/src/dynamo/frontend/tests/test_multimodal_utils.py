@@ -60,6 +60,72 @@ def test_extracts_audio_urls():
     )
 
 
+@pytest.mark.parametrize(
+    "audio_format,expected_url",
+    [
+        # Same string as the Rust preprocessor test
+        # `input_audio_is_forwarded_once_as_audio_url`.
+        ("wav", "data:audio/wav;base64,AA=="),
+        ("mp3", "data:audio/mpeg;base64,AA=="),
+    ],
+)
+def test_extracts_input_audio_as_data_url(audio_format, expected_url):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe this"},
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "AA==", "format": audio_format},
+                },
+            ],
+        }
+    ]
+    assert extract_mm_urls(messages) == ({"audio_url": [{"Url": expected_url}]}, None)
+
+
+def test_input_audio_keeps_order_and_uuid_alignment():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio_url", "audio_url": {"url": "https://x/a.wav"}},
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "Qg==", "format": "wav"},
+                },
+                {
+                    "type": "audio_url",
+                    "audio_url": {"url": "https://x/c.wav"},
+                    "uuid": "aud-c",
+                },
+            ],
+        },
+        # Rust has no input_audio part for tool messages, so it is ignored.
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "RA==", "format": "wav"},
+                }
+            ],
+        },
+    ]
+    assert extract_mm_urls(messages) == (
+        {
+            "audio_url": [
+                {"Url": "https://x/a.wav"},
+                {"Url": "data:audio/wav;base64,Qg=="},
+                {"Url": "https://x/c.wav"},
+            ]
+        },
+        {"audio_url": [None, None, "aud-c"]},
+    )
+
+
 def test_extracts_video_urls():
     messages = [
         {
@@ -96,6 +162,10 @@ def test_extracts_mixed_modalities():
                     "type": "video_url",
                     "video_url": {"url": "https://example.com/video.mp4"},
                 },
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "AA==", "format": "mp3"},
+                },
                 {"type": "text", "text": "Describe all of these."},
             ],
         }
@@ -104,7 +174,10 @@ def test_extracts_mixed_modalities():
     assert result == (
         {
             "image_url": [{"Url": "https://example.com/img.jpg"}],
-            "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            "audio_url": [
+                {"Url": "https://example.com/audio.wav"},
+                {"Url": "data:audio/mpeg;base64,AA=="},
+            ],
             "video_url": [{"Url": "https://example.com/video.mp4"}],
         },
         None,
@@ -279,10 +352,15 @@ def test_rejects_uuid_only_audio_video(part_type: str) -> None:
             "image_url": {"url": "https://example.com/a.png"},
             "uuid": "",
         },
+        {"type": "input_audio", "input_audio": {"data": "AA==", "format": "flac"}},
+        {"type": "input_audio", "input_audio": {"data": "", "format": "wav"}},
+        {"type": "input_audio", "input_audio": "AA=="},
     ],
 )
 def test_rejects_media_parts_without_valid_url_or_uuid(part):
     messages = [{"role": "user", "content": [part]}]
 
-    with pytest.raises(ValueError, match=r"URL or uuid|non-empty string"):
+    with pytest.raises(
+        ValueError, match=r"URL or uuid|non-empty string|non-empty data"
+    ):
         extract_mm_urls(messages)
