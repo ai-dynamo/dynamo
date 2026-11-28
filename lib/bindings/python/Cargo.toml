@@ -31,6 +31,8 @@ jemalloc = ["dep:tikv-jemallocator"]
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
 # its policies are added alongside the shipped ones rather than displacing them.
 custom-policy = ["dep:dynamo-worker-selection-policy-catalog"]
+# Link a parser catalog and register its families when the runtime module loads.
+static-parser-catalog = ["dep:dynamo-parser-plugin-catalog"]
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/http", "dynamo-kv-router/ingest-zmq", "dynamo-kv-router/peer-recovery"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
@@ -117,6 +119,7 @@ dynamo-router-policies = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 # The replaceable /generate format catalog; custom images point this name at their own.
 dynamo-generate-format-catalog = { path = "../../generate-format-catalog" }
+dynamo-parser-plugin-catalog = { path = "../../../examples/parser-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 

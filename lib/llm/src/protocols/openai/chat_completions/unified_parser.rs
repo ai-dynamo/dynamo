@@ -69,9 +69,11 @@ use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 /// the same XML grammar; `qwen3` is the canonical registry name and the one the
 /// conformance corpus uses, so it is what this module passes and logs.
 pub(crate) const QWEN3_UNIFIED_FAMILY: &str = "qwen3";
+#[cfg(test)]
 pub(crate) const KIMI_K2_UNIFIED_FAMILY: &str = "kimi_k2";
 pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
+#[cfg(test)]
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 /// The empty thought channel Gemma 4 opens with thinking off.
@@ -88,9 +90,11 @@ pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 /// with `--dyn-reasoning-parser nemotron_v3`.
 pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The `dynamo-parsers-v2` unified family for Mistral v11+ (`[TOOL_CALLS]NAME[ARGS]{json}`).
-/// The `mistral` parser name maps to it through [`DYNAMO_FAMILY_ALIASES`], and
 /// [`FAMILY_REQUIRED_TOKENS`] rejects pre-v11 tokenizers at model setup.
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
+// Dynamo historically maps its v1 Mistral selector to the native v2 parser
+// when v2 is selected. Direct callers of the parser crate must opt in to mistral_4.
+const MISTRAL_LEGACY_SELECTOR: &str = "mistral";
 const MISTRAL_REASONING_START: &str = "[THINK]";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
@@ -110,30 +114,23 @@ fn shared_grammar_family(tool_family: &str, reasoning_family: &str) -> Option<&'
     }
 }
 
-const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
-    ("deepseek-v4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("deepseekv4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("muse", MUSE_UNIFIED_FAMILY),
-    ("gemma-4", GEMMA4_UNIFIED_FAMILY),
-    ("glm45", GLM47_UNIFIED_FAMILY),
-    ("kimi_k25", KIMI_K2_UNIFIED_FAMILY),
-    ("mistral", MISTRAL_UNIFIED_FAMILY),
-];
-
 /// Canonical family names and aliases share one route for registration, stream, and batch.
+/// The parser crate owns the names, built-in and vendor alike.
 pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
-    let parser = DYNAMO_FAMILY_ALIASES
-        .iter()
-        .find_map(|(alias, family)| (*alias == parser).then_some(*family))
-        .unwrap_or(parser);
-    dynamo_parsers_v2::canonical_unified_family(parser)
+    let parser = match parser {
+        MISTRAL_LEGACY_SELECTOR => MISTRAL_UNIFIED_FAMILY,
+        parser => parser,
+    };
+    dynamo_parsers_v2::unified_family_info(parser)
+        .map(|info| info.family)
+        .or_else(|| dynamo_parsers_v2::canonical_unified_family(parser))
 }
 
 /// Aliases that still route but are scheduled for removal, paired with the family
 /// to configure instead. `muse` predates Muse Spark Open and now reads as "any Muse
 /// model" while it selects only Muse Glimmer; a Spark deployment configured with it
 /// starts without complaint and runs the wrong parser.
-/// TODO(next minor): remove these from `DYNAMO_FAMILY_ALIASES` and `FAMILY_NAMES` so
+/// TODO(next minor): remove these from the parser crate's aliases so
 /// the alias becomes a startup error.
 pub(crate) const DEPRECATED_FAMILY_ALIASES: &[(&str, &str)] = &[("muse", MUSE_UNIFIED_FAMILY)];
 
@@ -152,10 +149,10 @@ pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
-    names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
-    names.sort_unstable();
-    names.dedup();
+    let mut names = dynamo_parsers_v2::unified_family_names();
+    if let Err(index) = names.binary_search(&MISTRAL_LEGACY_SELECTOR) {
+        names.insert(index, MISTRAL_LEGACY_SELECTOR);
+    }
     names
 });
 
@@ -270,7 +267,7 @@ const FAMILY_REQUIRED_TOKENS: &[RequiredToken] = &[RequiredToken {
     family: MISTRAL_UNIFIED_FAMILY,
     token: "[ARGS]",
     tokenizers: "Mistral tokenizer v11 or later",
-    v1_parser: "mistral",
+    v1_parser: MISTRAL_LEGACY_SELECTOR,
 }];
 
 fn required_token(family: &str) -> Option<&'static RequiredToken> {
@@ -989,11 +986,9 @@ fn bare_guided_json_prefill(
 
 /// The starting state that lets a bare guided JSON payload reach the tool parser.
 fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
-    if family == NEMOTRON_V3_UNIFIED_FAMILY {
-        UnifiedParserStartingState::Response
-    } else {
-        UnifiedParserStartingState::None
-    }
+    dynamo_parsers_v2::unified_family_info(family)
+        .map(|info| info.bare_json_starting_state)
+        .unwrap_or_default()
 }
 
 /// Which channel the prompt opened, inferred from complete output text.
@@ -1006,8 +1001,9 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
         | "nemotron_v3" | "hermes" => {
-            let (opener_marker, closer_marker) = reasoning_marker_pair(family)
-                .expect("think-marker families have a configured reasoning pair");
+            let Some((opener_marker, closer_marker)) = reasoning_marker_pair(family) else {
+                return Ok(UnifiedParserStartingState::Response);
+            };
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
             // pre-opened reasoning produces a leading `</think>` with no opener before
             // it, but a later `<think>...</think>` pair from the model can still follow
@@ -1046,11 +1042,6 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 (None, None) => UnifiedParserStartingState::Response,
             })
         }
-        "gemma4" => {
-            let (opener, closer) = reasoning_marker_pair(family)
-                .expect("Gemma 4 has a configured reasoning marker pair");
-            Ok(infer_marker_prefill(content, opener, closer))
-        }
         "kimi_k3" => Ok(
             match (
                 kimi_channel_marker_position(content, "<|open|>", "think"),
@@ -1069,7 +1060,12 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
             MISTRAL_REASONING_START,
             "[/THINK]",
         )),
-        other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
+        // A family with plain open/close reasoning markers needs no detector of its own.
+        other if canonical_family(other).is_some() => match reasoning_marker_pair(other) {
+            Some((opener, closer)) => Ok(infer_marker_prefill(content, opener, closer)),
+            None => Ok(UnifiedParserStartingState::None),
+        },
+        other => anyhow::bail!("unknown unified parser family '{other}'"),
     }
 }
 
@@ -1105,13 +1101,9 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 }
 
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
-    match family {
-        "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
-        | "hermes" => Some(("<think>", "</think>")),
-        "gemma4" => Some(("<|channel>", "<channel|>")),
-        _ => None,
-    }
+    dynamo_parsers_v2::unified_family_info(family)?
+        .reasoning
+        .map(|markers| (markers.open, markers.close))
 }
 
 fn kimi_channel_marker_position(content: &str, prefix: &str, channel: &str) -> Option<usize> {
@@ -1515,40 +1507,16 @@ fn contains_native_envelope(content: &str, family: &str) -> bool {
 }
 
 fn unified_parser_control_markers(family: &str) -> Vec<String> {
-    let mut markers = reasoning_marker_pair(family)
-        .map(|(opener, closer)| vec![opener.to_string(), closer.to_string()])
-        .unwrap_or_default();
-    if family == "kimi_k3" {
-        for channel in ["think", "response", "tools", "call"] {
-            markers.push(format!("<|open|>{channel}"));
-            markers.push(format!("<|close|>{channel}"));
+    let mut markers = Vec::new();
+    if let Some(info) = dynamo_parsers_v2::unified_family_info(family) {
+        if let Some(markers_pair) = info.reasoning {
+            markers.extend([
+                markers_pair.open.to_string(),
+                markers_pair.close.to_string(),
+            ]);
         }
-        markers.push("<|sep|>".to_string());
-    }
-    if matches!(family, "muse_glimmer" | "muse_spark") {
-        markers.extend(
-            ["<|start|>", "<|message|>", "<|eom|>", "<|eot|>"]
-                .into_iter()
-                .map(str::to_string),
-        );
-    }
-    if family == BEAM_UNIFIED_FAMILY {
-        markers.extend(
-            [
-                "<|start|>",
-                "<|channel|>",
-                "<|message|>",
-                "<|constrain|>",
-                "<|end|>",
-                "<|return|>",
-                "<|call|>",
-            ]
-            .into_iter()
-            .map(str::to_string),
-        );
-    }
-    if let Some(marker) = native_family_marker(family) {
-        markers.push(marker.to_string());
+        markers.extend(info.control_markers.iter().map(|marker| marker.to_string()));
+        markers.extend(info.tool_call_opener.map(str::to_string));
     }
     if let Some(native_markers) = native_tool_call_start_tokens(family) {
         markers.extend(native_markers);
@@ -1556,21 +1524,6 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
     markers.sort_by_key(|marker| std::cmp::Reverse(marker.len()));
     markers.dedup();
     markers
-}
-
-fn native_family_marker(family: &str) -> Option<&'static str> {
-    match family {
-        "minimax_m3" => Some("]<]minimax[>[<tool_call>"),
-        "qwen3" | "glm47" | "nemotron_v3" => Some("<tool_call>"),
-        "deepseek_v4" => Some("<｜DSML｜tool_calls>"),
-        "deepseek_v41" => Some("<｜DSML｜ calls>"),
-        "gemma4" => Some("<|tool_call>"),
-        "kimi_k2" => Some("<|tool_call_begin|>"),
-        "kimi_k3" => Some("<|open|>call"),
-        "muse_glimmer" | "muse_spark" => Some("<atem:invoke"),
-        "beam" => Some("<|start|>assistant to="),
-        _ => None,
-    }
 }
 
 /// Merge adjacent same-kind text/reasoning deltas so one `push` does not become three

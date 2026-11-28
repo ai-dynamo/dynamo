@@ -2202,6 +2202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-dummy-parser"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "dynamo-parsers-v2",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-error"
 version = "1.8.0"
 dependencies = [
@@ -2617,6 +2626,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-parser-plugin-catalog"
+version = "1.8.0"
+dependencies = [
+ "dynamo-dummy-parser",
+ "dynamo-parsers-v2",
+]
+
+[[package]]
 name = "dynamo-parsers"
 version = "11.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2644,8 +2661,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1211739971e54b388ccfe341e9cabb5cb77dfe0c17c43effae542d5c76640ec"
+source = "git+https://github.com/ai-dynamo/frontend-crates?rev=47a0827ba31965c22e4cc2ba853055cf62040be8#47a0827ba31965c22e4cc2ba853055cf62040be8"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2719,6 +2735,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
+ "dynamo-parser-plugin-catalog",
  "dynamo-parsers",
  "dynamo-router-policies",
  "dynamo-router-protocol",
