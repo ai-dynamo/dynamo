@@ -231,7 +231,7 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
     assert result == {"image": image, "video": video, "audio": [audio_a, audio_b]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
@@ -253,7 +253,7 @@ async def test_image_cache_uses_frontend_scope():
     )
 
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope="session-42", preserve_uuid_slots=True
+        image_items, cache_scope="session-42", preserve_uuid_slots=True, to_rgb=None
     )
 
 
@@ -272,7 +272,7 @@ async def test_image_cache_has_no_scope_for_malformed_scope():
     )
 
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
 
 
@@ -316,8 +316,16 @@ def _pixels(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
     return image.mode, image.size, image.tobytes()
 
 
-def _vllm_pixels(content: bytes) -> tuple[str, tuple[int, int], bytes]:
-    return _pixels(ImageMediaIO(image_mode="RGB").load_bytes(content).media)
+def _vllm_pixels(
+    content: bytes, image_kwargs: dict | None = None
+) -> tuple[str, tuple[int, int], bytes]:
+    image_io = ImageMediaIO(image_mode="RGB", **(image_kwargs or {}))
+    return _pixels(image_io.load_bytes(content).media)
+
+
+def _red_background() -> dict:
+    # A new dict on each call, so a test cannot change another test's options.
+    return {"rgba_background_color": [255, 0, 0]}
 
 
 @pytest.mark.asyncio
@@ -336,23 +344,23 @@ async def test_worker_transparent_pixels_become_white():
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "build_image",
-    [
-        pytest.param(_rgba_ink_png, id="rgba"),
-        pytest.param(lambda: _encode_image(_ink_on_transparent("LA")), id="grey_alpha"),
-        pytest.param(_palette_with_transparent_entry, id="palette_transparent_entry"),
-        pytest.param(
-            lambda: _encode_image(_ink_on_transparent("RGBA"), "WEBP", lossless=True),
-            id="webp_alpha",
-        ),
-        pytest.param(
-            lambda: _encode_image(_ink_on_transparent("RGBA"), exif=_exif_rotate_90()),
-            id="rgba_with_exif_rotation",
-        ),
-    ],
+_TRANSPARENT_IMAGES = (
+    pytest.param(_rgba_ink_png, id="rgba"),
+    pytest.param(lambda: _encode_image(_ink_on_transparent("LA")), id="grey_alpha"),
+    pytest.param(_palette_with_transparent_entry, id="palette_transparent_entry"),
+    pytest.param(
+        lambda: _encode_image(_ink_on_transparent("RGBA"), "WEBP", lossless=True),
+        id="webp_alpha",
+    ),
+    pytest.param(
+        lambda: _encode_image(_ink_on_transparent("RGBA"), exif=_exif_rotate_90()),
+        id="rgba_with_exif_rotation",
+    ),
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_image", _TRANSPARENT_IMAGES)
 async def test_worker_image_matches_vllm_loader(build_image):
     content = build_image()
     processor = _processor(real_image_loader=True)
@@ -362,6 +370,100 @@ async def test_worker_image_matches_vllm_loader(build_image):
     )
 
     assert _pixels(result["image"]) == _vllm_pixels(content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_image", _TRANSPARENT_IMAGES)
+async def test_worker_applies_request_rgba_background_color(build_image):
+    content = build_image()
+    processor = _processor(real_image_loader=True)
+    request = {
+        **_image_request(content),
+        "media_io_kwargs": {"image": _red_background()},
+    }
+
+    result = await processor.extract_multimodal_data(request, "request-1", None)
+
+    assert _pixels(result["image"]) == _vllm_pixels(content, _red_background())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image_kwargs",
+    [
+        pytest.param("white", id="not_an_object"),
+        pytest.param({"rgba_background_color": [256, 0, 0]}, id="out_of_range"),
+        pytest.param({"rgba_background_color": [255, 0]}, id="two_values"),
+        pytest.param({"image_mode": "L"}, id="grey_mode"),
+        pytest.param({"image_mode": None}, id="keep_alpha"),
+        pytest.param({"decoded_budget": None}, id="loader_argument"),
+    ],
+)
+async def test_worker_rejects_malformed_image_media_io_kwargs(image_kwargs):
+    processor = _processor(real_image_loader=True)
+    request = {
+        **_image_request(_rgba_ink_png()),
+        "media_io_kwargs": {"image": image_kwargs},
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="media_io_kwargs"):
+        await processor.extract_multimodal_data(request, "request-1", None)
+
+
+def test_worker_prompt_keys_vllm_cache_on_background():
+    """With frontend hashes, vLLM's cache key must still change with the background."""
+    from vllm.multimodal.parse import MultiModalDataParser
+    from vllm.multimodal.processing.inputs import ProcessorInputs
+
+    processor = _processor()
+
+    def vllm_hash(media_io_kwargs: dict | None) -> list[str]:
+        request = {
+            **_image_request(_rgba_ink_png()),
+            "token_ids": [1, 2, 3],
+            "extra_args": {"mm_hashes": ["0123456789abcdef"]},
+        }
+        if media_io_kwargs is not None:
+            request["media_io_kwargs"] = media_io_kwargs
+        prompt = processor.build_tokens_prompt(
+            request, {"image": Image.new("RGB", (4, 2))}, None
+        )
+        inputs = ProcessorInputs(
+            prompt=prompt["prompt_token_ids"],
+            mm_data_items=MultiModalDataParser().parse_mm_data(
+                prompt["multi_modal_data"]
+            ),
+            mm_uuid_items=prompt.get("multi_modal_uuids"),
+            media_io_kwargs=prompt.get("media_io_kwargs") or {},
+        )
+        return inputs.get_mm_hashes("test-model", "blake3")["image"]
+
+    white = vllm_hash(None)
+    assert vllm_hash({"image": {"rgba_background_color": [255, 255, 255]}}) == white
+    assert vllm_hash({"image": _red_background()}) != white
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bare_url", [False, True], ids=["url_variant", "bare_url"])
+async def test_worker_loads_image_itself_when_request_sets_image_options(bare_url):
+    """The encode worker gets no media_io_kwargs, so the worker loads such an image itself."""
+    processor = _processor(real_image_loader=True)
+    processor.embedding_loader = SimpleNamespace(
+        load_multimodal_embeddings=AsyncMock(return_value={"image": object()})
+    )
+    request = {
+        **_image_request(_rgba_ink_png()),
+        "media_io_kwargs": {"image": _red_background()},
+    }
+    if bare_url:
+        # The encoder path also takes an image item as a bare URL string.
+        items = request["multi_modal_data"]["image_url"]
+        items[0] = items[0]["Url"]
+
+    result = await processor.extract_multimodal_data(request, "request-1", None)
+
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+    assert _pixels(result["image"]) == _vllm_pixels(_rgba_ink_png(), _red_background())
 
 
 @pytest.mark.asyncio
@@ -575,7 +677,7 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
     assert result == {"image": [image, None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
     processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
@@ -594,7 +696,7 @@ async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
 
     assert result == {"vision_chunk": [None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
 
 
@@ -1627,7 +1729,7 @@ async def test_non_qwen_decode_keeps_original_tokens_when_image_loads():
     assert "cache_salt" not in prepared.prompt
     assert prepared.prompt.get("type") != "multimodal"
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
 
 
@@ -1768,7 +1870,7 @@ async def test_non_qwen_decode_awaits_image_loader_for_url():
     assert prepared.prompt["multi_modal_data"] == {"image": image}
     assert "cache_salt" not in prepared.prompt
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
     called_items = processor.image_loader.load_image_batch.call_args[0][0]
     assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
@@ -1804,7 +1906,7 @@ async def test_non_qwen_decode_loads_data_url_via_image_loader():
     assert prepared.prompt["multi_modal_data"] == {"image": image}
     assert "cache_salt" not in prepared.prompt
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
     called_items = processor.image_loader.load_image_batch.call_args[0][0]
     assert called_items[0]["Url"] == data_url
@@ -1844,7 +1946,7 @@ async def test_non_qwen_decode_loads_decoded_nixl_when_frontend_decoding():
     assert prepared.prompt["multi_modal_data"] == {"image": image}
     assert "cache_salt" not in prepared.prompt
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, cache_scope=None, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True, to_rgb=None
     )
 
 

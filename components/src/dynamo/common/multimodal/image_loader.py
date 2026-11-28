@@ -303,7 +303,11 @@ class ImageLoader:
             self._image_cache[key] = image
 
     async def _fetch_and_process(
-        self, key: str | None, image_url: str, max_pixels: int | None = None
+        self,
+        key: str | None,
+        image_url: str,
+        max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] | None = None,
     ) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 
@@ -323,7 +327,7 @@ class ImageLoader:
                         return await self._open_image(
                             BytesIO(cached_content),
                             max_pixels if max_pixels is not None else self._max_pixels,
-                            self._to_rgb,
+                            to_rgb or self._to_rgb,
                         )
                     except (OSError, ValueError) as exc:
                         logger.warning(
@@ -350,7 +354,7 @@ class ImageLoader:
                 image = await self._open_image(
                     image_data,
                     max_pixels if max_pixels is not None else self._max_pixels,
-                    self._to_rgb,
+                    to_rgb or self._to_rgb,
                 )
             except Image.UnidentifiedImageError:
                 raise
@@ -472,12 +476,18 @@ class ImageLoader:
         *,
         cache_scope: str | None = None,
         max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] | None = None,
     ) -> Image.Image:
         """Load one image, optionally with a request-specific remaining pixel budget.
 
         A request-specific budget uses a cancellable private fetch on cache miss;
         it cannot join an in-flight decode with a different budget. Completed
         cache entries remain shareable and are checked against the caller's limit.
+
+        A request-specific ``to_rgb`` replaces the loader's conversion. Cached
+        images were converted with the loader's own, so such a load neither
+        reads nor fills the converted-image cache. The shared cache holds
+        encoded bytes and is still used.
         """
         private_fetch = max_pixels is not None
         if self._max_pixels is not None:
@@ -500,8 +510,10 @@ class ImageLoader:
         if parsed_url.scheme in ("http", "https"):
             key = self._cache_key(normalized_url, cache_scope)
 
-            if key is None:
-                return await self._fetch_and_process(None, normalized_url, max_pixels)
+            if key is None or to_rgb is not None:
+                return await self._fetch_and_process(
+                    key, normalized_url, max_pixels, to_rgb
+                )
 
             if key in self._image_cache:
                 if logger.isEnabledFor(logging.DEBUG):
@@ -542,7 +554,9 @@ class ImageLoader:
                         normalized_url, max_bytes=self._max_bytes()
                     )
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data, max_pixels, self._to_rgb)
+                return await self._open_image(
+                    image_data, max_pixels, to_rgb or self._to_rgb
+                )
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",
@@ -582,6 +596,7 @@ class ImageLoader:
         *,
         preserve_uuid_slots: Literal[False] = False,
         cache_scope: str | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] | None = None,
     ) -> list[Image.Image]:
         ...
 
@@ -592,6 +607,7 @@ class ImageLoader:
         *,
         preserve_uuid_slots: Literal[True],
         cache_scope: str | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] | None = None,
     ) -> list[Image.Image | None]:
         ...
 
@@ -601,6 +617,7 @@ class ImageLoader:
         *,
         preserve_uuid_slots: bool = False,
         cache_scope: str | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] | None = None,
     ) -> list[Any]:
         """
         Load a batch of images from multimodal data items.
@@ -617,6 +634,7 @@ class ImageLoader:
                 as None. This is enabled only by backends that resolve such slots.
             cache_scope: Stable session or request identifier used when
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
+            to_rgb: Request-specific conversion for URL images; see load_image.
 
         Returns:
             Loaded images, with None for UUID-only cache slots
@@ -644,7 +662,9 @@ class ImageLoader:
                 # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
                 slot_to_future_idx.append(len(image_futures))
-                image_futures.append(self.load_image(url, cache_scope=cache_scope))
+                image_futures.append(
+                    self.load_image(url, cache_scope=cache_scope, to_rgb=to_rgb)
+                )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "Preparing to load image from URL: %s",

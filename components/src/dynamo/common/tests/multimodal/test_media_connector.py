@@ -15,6 +15,11 @@ from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import MediaSizeError, UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
+try:
+    from vllm.multimodal.media.image import ImageMediaIO
+except ImportError:  # vLLM is optional here; the vllm-marked tests skip without it
+    ImageMediaIO = None  # type: ignore[assignment,misc]
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -43,6 +48,7 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
     parent_fetch = AsyncMock()
     monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
     connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
     connector.allowed_media_domains = None
     connector._image_loader = AsyncMock()
     connector._image_loader.load_image.side_effect = client_error
@@ -64,6 +70,7 @@ async def test_connector_applies_allowed_media_domains_to_images():
         pytest.skip("vLLM is not installed")
 
     connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
     connector.allowed_media_domains = ["example.com"]
     connector._image_loader = AsyncMock()
     connector._image_loader.load_image.return_value = _make_pil_image()
@@ -303,6 +310,61 @@ async def test_connector_image_matches_vllm_connector(exif_orientation, monkeypa
         expected.mode,
         expected.tobytes(),
     )
+
+
+@pytest.mark.vllm
+@pytest.mark.multimodal
+@pytest.mark.asyncio
+async def test_connector_applies_rgba_background_color_like_vllm_connector(
+    monkeypatch,
+):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setattr(media_connector_module, "_shared_image_loader", None)
+    image = Image.new("RGBA", (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    media_io_kwargs = {"image": {"rgba_background_color": [255, 0, 0]}}
+
+    loaded = await connector_class(media_io_kwargs=media_io_kwargs).fetch_image_async(
+        url
+    )
+
+    vllm_connector_class = connector_class.__mro__[1]
+    expected = await vllm_connector_class(
+        media_io_kwargs=media_io_kwargs
+    ).fetch_image_async(url)
+    assert (loaded.size, loaded.mode, loaded.tobytes()) == (
+        expected.size,
+        expected.mode,
+        expected.tobytes(),
+    )
+
+
+@pytest.mark.vllm
+@pytest.mark.multimodal
+@pytest.mark.asyncio
+async def test_connector_keeps_rgb_when_options_set_image_mode(monkeypatch):
+    """vLLM's Kimi K3 renderer sets image_mode None on every request; the image stays RGB."""
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+    monkeypatch.setattr(media_connector_module, "_shared_image_loader", None)
+    image = Image.new("RGBA", (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    connector = connector_class(media_io_kwargs={"image": {"image_mode": None}})
+
+    loaded = await connector.fetch_image_async(url)
+
+    expected = ImageMediaIO(image_mode="RGB").load_bytes(buf.getvalue()).media
+    assert (loaded.mode, loaded.tobytes()) == (expected.mode, expected.tobytes())
 
 
 class TestImageLoaderCache:

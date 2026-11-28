@@ -11,18 +11,18 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import TokensPrompt
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import convert_image_mode, normalize_image
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.media.image import ImageMediaIO
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -41,6 +41,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.multimodal.vllm_image import vllm_rgb
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm.exceptions import InvalidArgument
 
@@ -125,19 +126,14 @@ def _build_forwarded_mm_uuids(
     return None
 
 
-def _vllm_rgb(image: Image.Image) -> Image.Image:
-    """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
-    return convert_image_mode(normalize_image(image), "RGB")
-
-
-def _video_media_io_kwargs(request: dict) -> dict:
-    """Request-level video decode options, shape-checked the way vLLM does.
+def _media_io_kwargs(request: dict, modality: str) -> dict:
+    """Request-level options for one modality, shape-checked the way vLLM does.
 
     vLLM types this field as `dict[str, dict[str, Any]] | None` on its own
     OpenAI schemas, so pydantic rejects a malformed value before any handler
     runs. Dynamo's frontend forwards the field verbatim by design, so the
-    same check has to land here -- otherwise a non-object reaches
-    `VideoMediaIO(**kwargs)` and surfaces as a server error instead of a
+    same check has to land here -- otherwise a non-object reaches a media
+    loader as keyword arguments and surfaces as a server error instead of a
     request error.
     """
     media_io_kwargs = request.get("media_io_kwargs")
@@ -146,12 +142,33 @@ def _video_media_io_kwargs(request: dict) -> dict:
     if not isinstance(media_io_kwargs, dict):
         raise InvalidArgument("media_io_kwargs must be an object")
 
-    video_kwargs = media_io_kwargs.get("video")
-    if video_kwargs is None:
+    modality_kwargs = media_io_kwargs.get(modality)
+    if modality_kwargs is None:
         return {}
-    if not isinstance(video_kwargs, dict):
-        raise InvalidArgument("media_io_kwargs['video'] must be an object")
-    return video_kwargs
+    if not isinstance(modality_kwargs, dict):
+        raise InvalidArgument(f"media_io_kwargs['{modality}'] must be an object")
+    return modality_kwargs
+
+
+def _request_background(request: dict) -> tuple[int, int, int] | None:
+    """The colour that media_io_kwargs['image'] pastes transparency on.
+
+    Checked as vLLM checks it. None means white, the default. The worker
+    supports no image_mode other than RGB, so it rejects any other.
+    """
+    image_kwargs = _media_io_kwargs(request, "image")
+    if not image_kwargs:
+        return None
+    try:
+        image_io = ImageMediaIO(
+            **({"image_mode": "RGB"} | image_kwargs), decoded_budget=None
+        )
+    except (TypeError, ValueError) as exc:
+        raise InvalidArgument(f"media_io_kwargs['image']: {exc}") from exc
+    if image_io.image_mode != "RGB":
+        raise InvalidArgument("media_io_kwargs['image']['image_mode'] must be 'RGB'")
+    background = image_io.rgba_background_color
+    return None if background == (255, 255, 255) else background
 
 
 def _build_user_mm_uuids(
@@ -393,7 +410,7 @@ class VllmMultimodalRequestProcessor:
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=vllm_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -719,6 +736,13 @@ class VllmMultimodalRequestProcessor:
                 return None
 
             vllm_mm_data: dict[str, Any] = {}
+            image_items = mm_map.get(IMAGE_URL_KEY, [])
+            background = _request_background(request) if image_items else None
+            image_to_rgb = (
+                None
+                if background is None
+                else functools.partial(vllm_rgb, background=background)
+            )
 
             # A separate encoder consumes URL images and, when frontend
             # decoding is enabled, frontend-decoded pixels read via NIXL.
@@ -726,8 +750,9 @@ class VllmMultimodalRequestProcessor:
             # requests preserve all of their inputs.
             if self.embedding_loader is not None:
                 image_items_for_encoder: list[Any] = []
-                supported = True
-                for item in mm_map.get(IMAGE_URL_KEY, []):
+                # The encode worker gets no media_io_kwargs.
+                supported = background is None
+                for item in image_items:
                     if isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
                         supported = False
                         break
@@ -747,14 +772,19 @@ class VllmMultimodalRequestProcessor:
                         )
                     )
 
-            image_items = mm_map.get(IMAGE_URL_KEY, [])
             image_key = "vision_chunk" if self.use_unified_vision_chunk else "image"
             if image_key not in vllm_mm_data and image_items:
+                # The encoder path also takes bare URL strings; the loader takes variants.
+                local_items = [
+                    {URL_VARIANT_KEY: item} if isinstance(item, str) else item
+                    for item in image_items
+                ]
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items,
+                        local_items,
                         cache_scope=image_cache_scope_from_request(request),
                         preserve_uuid_slots=True,
+                        to_rgb=image_to_rgb,
                     )
                 if images:
                     if self.use_unified_vision_chunk:
@@ -782,7 +812,7 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                video_io_kwargs = _video_media_io_kwargs(request)
+                video_io_kwargs = _media_io_kwargs(request, "video")
                 videos = await self.video_loader.load_video_batch(
                     video_items, video_io_kwargs
                 )
@@ -1023,6 +1053,15 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
         if mm_processor_kwargs is not None:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        background = (
+            _request_background(request) if raw_mm_data.get(IMAGE_URL_KEY) else None
+        )
+        if background is not None:
+            # vLLM hashes media_io_kwargs with each item, so a cached item
+            # with another background is not reused under the same UUID.
+            prompt_kwargs["media_io_kwargs"] = {
+                "image": {"rgba_background_color": list(background)}
+            }
         if custom_data:
             media = multi_modal_data or {}
             if media.keys() & custom_data.keys():
