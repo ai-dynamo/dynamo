@@ -22,6 +22,7 @@ impl WorkerCapacityExt for WorkerCapacity {
     fn of<C: WorkerConfigLike>(config: &C) -> Self {
         Self::new(config.max_num_batched_tokens(), config.total_kv_blocks())
             .with_cache_owner_capacity_blocks(config.cache_owner_capacity_blocks())
+            .with_max_num_seqs(config.max_num_seqs())
     }
 }
 

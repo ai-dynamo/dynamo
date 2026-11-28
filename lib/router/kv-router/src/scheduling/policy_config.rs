@@ -306,6 +306,7 @@ struct RawPolicyClassConfig {
     prefill_busy_threshold: Option<usize>,
     prefill_busy_threshold_frac: Option<f64>,
     decode_busy_threshold_frac: Option<f64>,
+    request_busy_threshold_frac: Option<f64>,
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
@@ -376,6 +377,16 @@ fn resolve_policy_class(
             )));
         }
     }
+    // At zero a rank would be full with no request on it, and the class could never dispatch.
+    if raw
+        .request_busy_threshold_frac
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} policy class {:?} request_busy_threshold_frac must be finite and greater than zero",
+            raw.name
+        )));
+    }
     let slo_ttft_ms = match raw.slo_ttft_ms {
         None => None,
         Some(slo_ttft_ms) => Some(NonZeroU32::new(slo_ttft_ms).ok_or_else(|| {
@@ -401,7 +412,8 @@ fn resolve_policy_class(
         busy_thresholds: BusyThresholds::default()
             .with_prefill_busy_threshold(raw.prefill_busy_threshold)
             .with_prefill_busy_threshold_frac(raw.prefill_busy_threshold_frac)
-            .with_decode_busy_threshold_frac(raw.decode_busy_threshold_frac),
+            .with_decode_busy_threshold_frac(raw.decode_busy_threshold_frac)
+            .with_request_busy_threshold_frac(raw.request_busy_threshold_frac),
         request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
         raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
         cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -782,6 +794,66 @@ policy_classes:
                 .to_string()
                 .contains("decode_busy_threshold_frac must be finite and non-negative")
         );
+    }
+
+    #[test]
+    fn request_limit_fills_a_rank_at_its_request_slots() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+policy_classes:
+  - name: seats
+    quantum: 4
+    queue_policy: wspt
+    request_busy_threshold_frac: 1.0
+"#,
+        )
+        .unwrap();
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        let class = profile.default_class();
+        assert!(class.queueing_enabled());
+
+        let limits = class.busy_thresholds;
+        let running = |active_requests| {
+            WorkerLoadInput::from_projection(WorkerLoadProjection {
+                active_requests,
+                ..Default::default()
+            })
+        };
+        let slots = |max_num_seqs| WorkerCapacity::default().with_max_num_seqs(max_num_seqs);
+        // Unlike the token and block limits, the rank is full at the limit, not past it.
+        assert!(limits.has_room(&running(0), slots(Some(1))));
+        assert!(!limits.has_room(&running(1), slots(Some(1))));
+        assert!(limits.has_room(&running(4), slots(Some(5))));
+        assert!(!limits.has_room(&running(5), slots(Some(5))));
+        // An unreported or zero request-slot count skips the limit.
+        assert!(limits.has_room(&running(1_000), slots(None)));
+        assert!(limits.has_room(&running(1_000), slots(Some(0))));
+
+        // A fraction of the slots: half of eight is full at four requests.
+        let half = BusyThresholds::default().with_request_busy_threshold_frac(Some(0.5));
+        assert!(half.has_room(&running(3), slots(Some(8))));
+        assert!(!half.has_room(&running(4), slots(Some(8))));
+        // 0.55 of 100 computes to just above 55; the rank is still full at 55.
+        let inexact = BusyThresholds::default().with_request_busy_threshold_frac(Some(0.55));
+        assert!(inexact.has_room(&running(54), slots(Some(100))));
+        assert!(!inexact.has_room(&running(55), slots(Some(100))));
+        // A fraction below one slot still lets an idle rank take a request.
+        let tiny = BusyThresholds::default().with_request_busy_threshold_frac(Some(1e-7));
+        assert!(tiny.has_room(&running(0), slots(Some(1))));
+        assert!(!tiny.has_room(&running(1), slots(Some(1))));
+
+        for invalid in ["0", "-1.0", ".nan", ".inf"] {
+            let error = RouterPolicyConfig::from_yaml(&format!(
+                "policy_classes:\n  - name: seats\n    quantum: 4\n    request_busy_threshold_frac: {invalid}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("request_busy_threshold_frac must be finite and greater than zero"),
+                "{invalid}: {error}"
+            );
+        }
     }
 
     #[test]

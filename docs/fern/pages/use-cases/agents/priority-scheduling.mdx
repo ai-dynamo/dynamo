@@ -113,12 +113,37 @@ request_classifier:
 ```
 
 - Turn on engine priority scheduling as described in [Backend engine](#2-backend-engine). An engine that does not order by priority ignores the prediction.
-- The prediction replaces any `priority` the client sent. `strict_priority` and the router queue order are unchanged.
+- With the classifier on, every request reaches the engine with a priority. Do not enable it for an engine that is set to reject such requests while its priority scheduling is off, such as SGLang started with `--abort-on-priority-when-disabled`.
+- The prediction replaces the `priority` the engine receives, including one the client sent. The router's own queue priority and `strict_priority` are unchanged.
+- The prediction is also the request's scheduling cost in the router queue, in every policy class. Among requests of equal router priority, a `wspt` class dispatches the shortest predicted reply first, and deficit round robin charges each class in predicted reply tokens, so size `quantum` in those; see [Hold requests in the router](#hold-requests-in-the-router).
 - Predictions use the [session ID](session-ids.mdx). A request without one is predicted from its prompt length and the replies of all sessions.
 - Each frontend learns on its own and starts from scratch when it restarts. The first requests use a fixed prior of 400 tokens.
 - Long replies wait longer. Bound that wait with the engine's own starvation control, if it has one.
 
 The classifier takes no parameters. It runs on aggregated and decode routing with the embedded KV router.
+
+### Hold requests in the router
+
+By default the router sends each request to a worker as soon as it arrives, and the request waits inside that worker. A short request can then wait behind a long reply while another worker becomes free. To keep requests in the router while every worker is full, and dispatch them in the class's order as workers free up, add a policy class that queues on request slots:
+
+```yaml title="policy.yaml"
+policy_classes:
+  - name: standard
+    quantum: 1
+    queue_policy: wspt
+    slo_ttft_ms: 60000
+    request_busy_threshold_frac: 1.0
+request_classifier:
+  type: output_length_prediction
+```
+
+- `request_busy_threshold_frac: 1.0` holds a request while every worker already runs as many requests as its engine runs together (`max_num_seqs`). Once a worker has room, worker selection places the request by its usual cost.
+- `queue_policy: wspt` dispatches the shortest predicted reply first among requests of equal router priority.
+- `slo_ttft_ms` bounds how long a long reply is held back: a request that has waited that long moves ahead of the requests in its priority tier that have not.
+
+Workers that advertise their own router mode (`--router-mode` on the worker) replace the frontend's router settings for their worker set, the policy file path included. Give those workers the same `--router-policy-config` path: the worker reads the file when it starts, and each frontend reads that path from its own filesystem. The request classifier always comes from the frontend's own policy file.
+
+[Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) describes the fields, what the threshold does with cache-overlap scoring, and how it applies in disaggregated serving.
 
 ## Check That It Works
 
@@ -152,7 +177,7 @@ A policy class defaults to the `edf` queue policy, which dispatches the earliest
 (strict_priority, due_at, configured_policy_key)
 ```
 
-The strict tier is compared first. Within a tier, every request with a request classifier's `due_at` goes ahead of every request without one, and then the configured policy applies. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
+The strict tier is compared first. Within a tier, every request with a request classifier's `due_at` goes ahead of every request without one, then, in a `wspt` class that sets `slo_ttft_ms`, every request that has waited past that budget, and then the configured policy applies. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
 
 The `fcfs` policy treats `priority` as a positive arrival-time bump: higher values move the request earlier. Negative values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come ordering. The `wspt` policy orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT.
 
@@ -179,6 +204,7 @@ Hints and session IDs are separate. A session ID is passive identity for traces 
 | Higher `priority` means higher priority across the API | Dynamo v1.1.0 and later |
 | EPP and Inference Gateway forwarding fixes for priority hints | Dynamo v1.2.0 and later |
 | TensorRT-LLM engine priority scheduling | Dynamo v1.8.0 and later |
+| Holding requests in the router on request slots (`request_busy_threshold_frac`), and `wspt` aging by `slo_ttft_ms` | Dynamo v1.8.0 and later |
 
 ## Related
 

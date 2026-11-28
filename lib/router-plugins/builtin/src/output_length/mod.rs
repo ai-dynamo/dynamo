@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shortest-predicted-reply-first admission on the backend engine.
+//! Shortest-predicted-reply-first admission, on the backend engine and in the router queue.
 //!
 //! Predicts each request's output length from its session's earlier replies and its prompt
 //! length, and forwards the negated prediction as the request's backend priority. An engine whose
 //! waiting queue orders by priority then admits the shortest predicted reply first; an engine
 //! that does not order by priority is unaffected. The prediction replaces any priority the client
 //! sent.
+//!
+//! The prediction is also the request's scheduling cost, so a `wspt` policy class that holds
+//! requests in the router dispatches the shortest predicted reply first among requests of equal
+//! router priority, and deficit round robin charges classes in predicted reply tokens.
 //!
 //! Ported from TensorRT-LLM's `tensorrt_llm/serve/output_length_predictor.py`.
 
@@ -79,11 +83,16 @@ fn backend_priority(predicted_tokens: f64) -> i32 {
     -(predicted_tokens.clamp(0.0, MAX_TOKENS).round() as i32)
 }
 
+// The queue rejects a zero cost.
+fn scheduling_cost(predicted_tokens: f64) -> usize {
+    predicted_tokens.clamp(1.0, MAX_TOKENS).round() as usize
+}
+
 impl OutputLengthClassifier {
     pub fn new() -> Self {
         tracing::info!(
             target: "output_length_prediction",
-            "output-length prediction enabled: backend priority follows the predicted reply length"
+            "output-length prediction enabled: backend priority and queue cost follow the predicted reply length"
         );
         Self {
             predictor: Predictor::new(),
@@ -107,6 +116,7 @@ impl OutputLengthClassifier {
             "predicted output length"
         );
         request.set_backend_priority(backend_priority(prediction.tokens));
+        request.set_scheduling_cost_tokens(scheduling_cost(prediction.tokens));
         if let Some(request_id) = request.info().request_id()
             && self.pending.len() < MAX_PENDING
         {
@@ -248,6 +258,21 @@ mod tests {
         let long = priority(&mut classifier, "b2", "long", 4_100, now);
         assert_eq!((short, long), (-50, -3_000));
         assert!(short > long);
+    }
+
+    #[test]
+    fn the_queue_cost_is_the_predicted_reply_length() {
+        let now = Instant::now();
+        let mut classifier = OutputLengthClassifier::new();
+        let mut first = request("a1", "s", 1_000);
+        classifier.predict(&mut first, now);
+        assert_eq!(first.scheduling_cost_tokens(), 400);
+        complete(&mut classifier, "a1", Some(1_050), now);
+
+        let mut next = request("a2", "s", 1_100);
+        classifier.predict(&mut next, now);
+        assert_eq!(next.scheduling_cost_tokens(), 50);
+        assert_eq!(scheduling_cost(0.0), 1);
     }
 
     #[test]

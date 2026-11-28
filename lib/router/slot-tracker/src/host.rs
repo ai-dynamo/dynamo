@@ -52,6 +52,10 @@ pub trait BusyThresholdsHostExt: sealed::Sealed + Sized {
     /// KV blocks make it full.
     fn with_decode_busy_threshold_frac(self, decode_busy_threshold_frac: Option<f64>) -> Self;
 
+    /// Set the fraction of the rank's `max_num_seqs` its active requests fill before it is
+    /// full.
+    fn with_request_busy_threshold_frac(self, request_busy_threshold_frac: Option<f64>) -> Self;
+
     /// Booked prefill tokens above which a rank is full.
     fn prefill_busy_threshold(&self) -> Option<usize>;
 
@@ -60,4 +64,7 @@ pub trait BusyThresholdsHostExt: sealed::Sealed + Sized {
 
     /// Fraction of the rank's `total_kv_blocks` above which it is full.
     fn decode_busy_threshold_frac(&self) -> Option<f64>;
+
+    /// Fraction of the rank's `max_num_seqs` its active requests fill before it is full.
+    fn request_busy_threshold_frac(&self) -> Option<f64>;
 }

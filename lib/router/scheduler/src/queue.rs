@@ -1245,6 +1245,9 @@ impl<
                 quantum = class.quantum,
                 prefill_busy_threshold = ?class.busy_thresholds.prefill_busy_threshold(),
                 prefill_busy_threshold_frac = ?class.busy_thresholds.prefill_busy_threshold_frac(),
+                decode_busy_threshold_frac = ?class.busy_thresholds.decode_busy_threshold_frac(),
+                request_busy_threshold_frac = ?class.busy_thresholds.request_busy_threshold_frac(),
+                slo_ttft_ms = ?class.slo_ttft_ms,
                 "Router policy class configured"
             );
         }
@@ -2651,6 +2654,7 @@ impl<
             let decay_now = Instant::now();
             // An expired head is rejected here rather than dispatched.
             self.expire_due_classes(decay_now);
+            self.pending.promote_overdue(decay_now);
             // Load is read after the previous admission booked, so this one sees that
             // reservation. Frees and peer bookings from other tasks can land between
             // two reads, as they can right after the gate.
@@ -3478,7 +3482,7 @@ impl<
         })
     }
 
-    /// Whether every eligible rank is past `limits`, judged on the same `LOAD` row worker
+    /// Whether every eligible rank is full under `limits`, judged on the same `LOAD` row worker
     /// selection reads.
     fn all_eligible_workers_full(
         worker_loads: &WorkerLoadReader<'_>,
@@ -7236,18 +7240,24 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn wspt_class_budget_neither_reorders_nor_expires_queued_requests() {
+    async fn wspt_class_budget_promotes_overdue_requests_and_never_expires_them() {
         let profile = policy_profile(
             None,
             vec![PolicyClassConfig {
                 queue_policy: RouterQueuePolicy::Wspt,
-                slo_ttft_ms: NonZeroU32::new(1),
+                slo_ttft_ms: NonZeroU32::new(10_000),
                 busy_thresholds: BusyThresholds::default()
                     .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
         let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        let finish = |request_id: &str| {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        };
         let (active, active_rx) = make_request("active", 64);
         queue.enqueue(active).await;
         active_rx.await.unwrap().unwrap();
@@ -7255,38 +7265,19 @@ mod tests {
         let (long, mut long_rx) = make_request("long", 64);
         let ingress_at = Instant::now();
         let metadata = queue.default_queue_metadata(&long, ingress_at).unwrap();
-        // The class due time is resolved for every class, but only EDF orders by it.
+        // The class due time is resolved for every class; it is not an explicit deadline.
         assert_eq!(metadata.due_at, None);
         assert_eq!(
             metadata.class_due_at,
-            Some(ingress_at + Duration::from_millis(1))
+            Some(ingress_at + Duration::from_secs(10))
         );
         queue.enqueue(long).await;
         let (short, mut short_rx) = make_request("short", 16);
         queue.enqueue(short).await;
-        let (explicit, explicit_rx) = make_request("explicit", 64);
-        queue
-            .enqueue_with_due_at_for_test(explicit, Instant::now() + Duration::from_secs(30))
-            .await;
-        assert_eq!(queue.pending_count(), 3);
-
-        // Far past the 1 ms class budget, only the explicit deadline expires, at its own time.
-        tokio::time::advance(Duration::from_secs(29)).await;
-        queue.update().await;
-        assert_eq!(queue.pending_count(), 3);
-        tokio::time::advance(Duration::from_secs(2)).await;
-        assert!(matches!(
-            explicit_rx.await.unwrap(),
-            Err(KvSchedulerError::DeadlineExceeded)
-        ));
         assert_eq!(queue.pending_count(), 2);
 
-        // WSPT still orders the class, not arrival plus the budget: the later, shorter
-        // request is admitted first.
-        slots
-            .mark_prefill_completed(&"active".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"active".to_string(), decay_now()).unwrap();
+        // Within the budget WSPT orders by cost: the later, shorter request is admitted first.
+        finish("active");
         queue.update().await;
         short_rx.try_recv().unwrap().unwrap();
         assert!(matches!(
@@ -7294,16 +7285,113 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
 
-        slots
-            .mark_prefill_completed(&"short".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"short".to_string(), decay_now()).unwrap();
+        // `long` runs out of budget while a newer, shorter request is still within its own.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let (newer, mut newer_rx) = make_request("newer", 16);
+        queue.enqueue(newer).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        finish("short");
         queue.update().await;
         long_rx.try_recv().unwrap().unwrap();
+        assert!(matches!(
+            newer_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        // Far past every class budget, only an explicit deadline expires, at its own time.
+        let (explicit, explicit_rx) = make_request("explicit", 64);
+        queue
+            .enqueue_with_due_at_for_test(explicit, Instant::now() + Duration::from_secs(30))
+            .await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 2);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(matches!(
+            explicit_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        assert_eq!(queue.pending_count(), 1);
+
+        finish("long");
+        queue.update().await;
+        newer_rx.try_recv().unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0);
         let stats = queue.class_queue_stats(0).unwrap();
-        assert_eq!(stats.received_total, 4);
+        assert_eq!(stats.received_total, 5);
         assert_eq!(stats.rejected_due_time_passed_total, 1);
+    }
+
+    #[tokio::test]
+    async fn request_threshold_holds_requests_until_a_request_slot_frees() {
+        let profile = policy_profile(
+            None,
+            vec![PolicyClassConfig {
+                queue_policy: RouterQueuePolicy::Wspt,
+                busy_thresholds: BusyThresholds::default()
+                    .with_request_busy_threshold_frac(Some(1.0)),
+                ..class("standard", 1)
+            }],
+        );
+        let (queue, slots, cfg_tx) =
+            make_queue_with_profile_sender_and_reject(2, 16, 1_000_000, profile, None);
+        let worker_config = SimpleWorkerConfig {
+            max_num_batched_tokens: Some(1_000_000),
+            max_num_seqs: Some(1),
+            ..Default::default()
+        };
+        cfg_tx
+            .send(HashMap::from([
+                (0, worker_config.clone()),
+                (1, worker_config),
+            ]))
+            .unwrap();
+        set_worker_capacities_from_configs(&slots, &cfg_tx.borrow());
+
+        let (first, first_rx) = make_request("first", 64);
+        queue.enqueue(first).await;
+        let first_worker = first_rx.await.unwrap().unwrap().best_worker;
+        let (second, second_rx) = make_request("second", 64);
+        queue.enqueue(second).await;
+        let second_worker = second_rx.await.unwrap().unwrap().best_worker;
+        assert_ne!(first_worker, second_worker);
+
+        // Every request slot is taken, so later requests wait in the router.
+        let (long, mut long_rx) = make_request("long", 640);
+        queue.enqueue(long).await;
+        let (short, mut short_rx) = make_request("short", 16);
+        queue.enqueue(short).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        // A request past its prefill still holds its slot.
+        slots
+            .mark_prefill_completed(&"first".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 2);
+
+        // The freed slot goes to the cheaper waiter, on the worker that freed it.
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        assert_eq!(
+            short_rx.try_recv().unwrap().unwrap().best_worker,
+            first_worker
+        );
+        assert!(matches!(
+            long_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        slots
+            .mark_prefill_completed(&"second".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"second".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        assert_eq!(
+            long_rx.try_recv().unwrap().unwrap().best_worker,
+            second_worker
+        );
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]

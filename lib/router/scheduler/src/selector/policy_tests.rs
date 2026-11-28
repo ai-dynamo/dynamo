@@ -402,6 +402,7 @@ fn worker_info_reaches_every_component_without_declaration() {
         ) -> Result<bool, WorkerSelectionPolicyError> {
             let info = candidate.info();
             assert_eq!(info.worker(), candidate.worker());
+            assert_eq!(info.capacity().max_num_seqs(), Some(8));
             Ok(info.total_kv_blocks().is_some())
         }
     }
@@ -449,6 +450,7 @@ fn worker_info_reaches_every_component_without_declaration() {
     let config = |max_num_batched_tokens, total_kv_blocks| crate::test_utils::SimpleWorkerConfig {
         max_num_batched_tokens,
         total_kv_blocks,
+        max_num_seqs: Some(8),
         ..Default::default()
     };
     // Worker 2 reports no KV capacity, so the filter drops it.

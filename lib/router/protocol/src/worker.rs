@@ -50,6 +50,7 @@ pub struct WorkerCapacity {
     /// `NonZeroU64` so the option adds 8 bytes, not 16: classifier rows copy one
     /// `WorkerCapacity` per rank.
     cache_owner_capacity_blocks: Option<NonZeroU64>,
+    max_num_seqs: Option<NonZeroU64>,
 }
 
 impl WorkerCapacity {
@@ -60,6 +61,7 @@ impl WorkerCapacity {
             max_num_batched_tokens: max_num_batched_tokens.filter(|&value| value > 0),
             total_kv_blocks: total_kv_blocks.filter(|&value| value > 0),
             cache_owner_capacity_blocks: None,
+            max_num_seqs: None,
         }
     }
 
@@ -67,6 +69,13 @@ impl WorkerCapacity {
     /// a reported zero means unreported.
     pub fn with_cache_owner_capacity_blocks(mut self, blocks: Option<u64>) -> Self {
         self.cache_owner_capacity_blocks = blocks.and_then(NonZeroU64::new);
+        self
+    }
+
+    /// The same capacity with the rank's `max_num_seqs`. A reported zero means unreported,
+    /// as for the other values.
+    pub fn with_max_num_seqs(mut self, max_num_seqs: Option<u64>) -> Self {
+        self.max_num_seqs = max_num_seqs.and_then(NonZeroU64::new);
         self
     }
 
@@ -89,6 +98,12 @@ impl WorkerCapacity {
     #[doc(hidden)]
     pub fn cache_owner_capacity_blocks(self) -> Option<u64> {
         self.cache_owner_capacity_blocks.map(NonZeroU64::get)
+    }
+
+    /// Requests the rank runs at once, when reported: the engine's batch size, by whatever
+    /// name it has there.
+    pub fn max_num_seqs(self) -> Option<u64> {
+        self.max_num_seqs.map(NonZeroU64::get)
     }
 
     /// The budget fractional prefill thresholds are taken of: `max_num_batched_tokens`, or

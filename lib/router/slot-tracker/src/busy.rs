@@ -23,6 +23,8 @@ pub trait RankLoad {
     fn active_prefill_tokens(&self) -> usize;
     /// KV blocks the rank's active requests hold.
     fn active_decode_blocks(&self) -> usize;
+    /// Requests booked on the rank and not yet finished.
+    fn active_requests(&self) -> usize;
 }
 
 impl RankLoad for WorkerLoadProjection {
@@ -33,9 +35,18 @@ impl RankLoad for WorkerLoadProjection {
     fn active_decode_blocks(&self) -> usize {
         self.active_decode_blocks
     }
+
+    fn active_requests(&self) -> usize {
+        self.active_requests
+    }
 }
 
-/// Per-rank load limits. A rank is full once its booked load passes any configured limit.
+/// A fraction times a slot count can land a rounding error above the whole number it stands for
+/// (0.55 of 100 is 55.00000000000001), which would let one request past the limit.
+const REQUEST_LIMIT_SLACK: f64 = 1e-6;
+
+/// Per-rank load limits. A rank is full once its booked load passes any configured token or
+/// block limit, or reaches its request limit.
 /// A plugin asks [`has_room`](Self::has_room); a host builds one and reads its limits
 /// through [`BusyThresholdsHostExt`](crate::host::BusyThresholdsHostExt).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -49,6 +60,11 @@ pub struct BusyThresholds {
     /// Fraction of the rank's `total_kv_blocks` above which the KV blocks its active
     /// requests hold make it full. A rank that does not report `total_kv_blocks` skips it.
     decode_busy_threshold_frac: Option<f64>,
+    /// Fraction of the rank's `max_num_seqs` its active requests fill before it is full: at
+    /// 1.0 the rank holds as many requests as it runs at once, and the rest wait for one to
+    /// finish. Unlike the other limits the rank is full at the limit, not past it, so that
+    /// a count has an exact setting. A rank that does not report `max_num_seqs` skips it.
+    request_busy_threshold_frac: Option<f64>,
 }
 
 impl BusyThresholds {
@@ -58,6 +74,7 @@ impl BusyThresholds {
         self.prefill_busy_threshold.is_some()
             || self.prefill_busy_threshold_frac.is_some()
             || self.decode_busy_threshold_frac.is_some()
+            || self.request_busy_threshold_frac.is_some()
     }
 
     /// Whether `load` is under every configured limit for a rank of `capacity`.
@@ -77,7 +94,16 @@ impl BusyThresholds {
             .is_some_and(|(threshold, total_kv_blocks)| {
                 (load.active_decode_blocks() as f64) > threshold * (total_kv_blocks as f64)
             });
-        !(absolute_full || fractional_full || decode_full)
+        let requests_full = self
+            .request_busy_threshold_frac
+            .zip(capacity.max_num_seqs())
+            .is_some_and(|(threshold, max_num_seqs)| {
+                let active = load.active_requests();
+                // An idle rank has room however small the fraction, or the class never dispatches.
+                active > 0
+                    && (active as f64) >= threshold * (max_num_seqs as f64) - REQUEST_LIMIT_SLACK
+            });
+        !(absolute_full || fractional_full || decode_full || requests_full)
     }
 }
 
@@ -104,6 +130,15 @@ impl crate::host::BusyThresholdsHostExt for BusyThresholds {
     }
 
     #[inline]
+    fn with_request_busy_threshold_frac(
+        mut self,
+        request_busy_threshold_frac: Option<f64>,
+    ) -> Self {
+        self.request_busy_threshold_frac = request_busy_threshold_frac;
+        self
+    }
+
+    #[inline]
     fn prefill_busy_threshold(&self) -> Option<usize> {
         self.prefill_busy_threshold
     }
@@ -116,6 +151,11 @@ impl crate::host::BusyThresholdsHostExt for BusyThresholds {
     #[inline]
     fn decode_busy_threshold_frac(&self) -> Option<f64> {
         self.decode_busy_threshold_frac
+    }
+
+    #[inline]
+    fn request_busy_threshold_frac(&self) -> Option<f64> {
+        self.request_busy_threshold_frac
     }
 }
 
@@ -244,7 +284,8 @@ mod tests {
         let limits = BusyThresholds::default()
             .with_prefill_busy_threshold(Some(64))
             .with_prefill_busy_threshold_frac(Some(0.5))
-            .with_decode_busy_threshold_frac(Some(0.9));
+            .with_decode_busy_threshold_frac(Some(0.9))
+            .with_request_busy_threshold_frac(Some(1.0));
 
         // Names every field: a new limit fails to compile here until it has a builder and
         // an accessor in `host::BusyThresholdsHostExt`.
@@ -254,11 +295,13 @@ mod tests {
                 prefill_busy_threshold: Some(64),
                 prefill_busy_threshold_frac: Some(0.5),
                 decode_busy_threshold_frac: Some(0.9),
+                request_busy_threshold_frac: Some(1.0),
             }
         );
         assert_eq!(limits.prefill_busy_threshold(), Some(64));
         assert_eq!(limits.prefill_busy_threshold_frac(), Some(0.5));
         assert_eq!(limits.decode_busy_threshold_frac(), Some(0.9));
+        assert_eq!(limits.request_busy_threshold_frac(), Some(1.0));
         assert!(limits.is_configured());
     }
 }

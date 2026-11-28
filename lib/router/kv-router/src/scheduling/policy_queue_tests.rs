@@ -1003,7 +1003,7 @@ async fn due_times_before_the_queue_origin_clamp_to_it() {
 }
 
 #[test]
-fn fcfs_and_wspt_do_not_order_by_class_due_times() {
+fn fcfs_never_orders_by_class_due_times_and_wspt_not_before_promotion() {
     let now = Instant::now();
     let at = |secs| Some(now + std::time::Duration::from_secs(secs));
     let queue_for = |policy: &str| {
@@ -1020,7 +1020,8 @@ fn fcfs_and_wspt_do_not_order_by_class_due_times() {
         lane_key: None,
     };
 
-    // FCFS keeps arrival order although the later arrival's class due time is earlier.
+    // FCFS keeps arrival order although the later arrival's class due time is earlier, also
+    // once both due times have passed.
     let mut fcfs = queue_for("fcfs");
     for (payload, arrival_offset_secs, class_due_at) in
         [("first", 0.0, at(30)), ("second", 1.0, at(1))]
@@ -1036,13 +1037,14 @@ fn fcfs_and_wspt_do_not_order_by_class_due_times() {
         .unwrap();
     }
     assert!((fcfs.due_entry_count(0) == 0));
+    fcfs.promote_overdue(now + std::time::Duration::from_secs(60));
     assert_eq!(
         drain_payloads(&mut fcfs, |_, _, _| true),
         ["first", "second"]
     );
 
-    // WSPT dispatches the shorter request first although the longer one's class due time
-    // is earlier. An explicit deadline still precedes the score.
+    // Until a class due time passes, WSPT dispatches the shorter request first although the
+    // longer one's is earlier. An explicit deadline still precedes the score.
     let mut wspt = queue_for("wspt");
     for (payload, tokens, due_at, class_due_at) in [
         ("long", 50, None, at(1)),

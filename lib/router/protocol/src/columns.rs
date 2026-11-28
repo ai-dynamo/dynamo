@@ -115,7 +115,7 @@ impl WorkerInfo {
         self.capacity.total_kv_blocks()
     }
 
-    /// Both advertised values, as a fullness check takes them.
+    /// The advertised limits, as a fullness check takes them.
     #[inline]
     pub fn capacity(&self) -> WorkerCapacity {
         self.capacity

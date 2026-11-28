@@ -31,8 +31,14 @@ The router uses the clamped `scheduling_cost` for DRR and WSPT. Cache state
 does not choose the request's class. The snapshot is not recomputed while the
 request waits.
 
-Each policy class defines a positive `quantum`, measured in uncached
-tokens. A class with quantum `4096` earns four times as much DRR credit per
+A request classifier can replace this cost. With `output_length_prediction`
+the cost of every request is its predicted reply length in tokens, so DRR
+charges each class in predicted reply tokens.
+
+Each policy class defines a positive `quantum`, measured in the unit of the
+scheduling cost: uncached tokens by default, predicted reply tokens with
+`output_length_prediction`.
+A class with quantum `4096` earns four times as much DRR credit per
 round as a class with quantum `1024`. This weighting controls token service,
 not request count: variable-size requests consume correspondingly different
 amounts of credit.

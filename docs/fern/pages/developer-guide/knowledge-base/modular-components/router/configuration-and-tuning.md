@@ -91,12 +91,12 @@ rejects a request that is still waiting when its due time passes, and an explici
 a waiting request in every class; see [Policy-Class Queues](#policy-class-queues).
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
-`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. The CLI accepts `fcfs`, its
+`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)` unless a request classifier sets the cost. In a `wspt` class that sets `slo_ttft_ms`, a request still queued when its budget runs out moves ahead of the requests in its strict-priority tier that are still within budget, earliest due time first, so cost cannot hold a request back for much longer than the budget. The router looks for such requests each time it dispatches, with no timer of its own, and after a pass that moves one it waits 100 ms before it moves the next. Moving ahead changes the request's place in the queue. It still waits for a worker with room, so the budget is not a bound on its time to first token. The CLI accepts `fcfs`, its
 default, and `wspt`; policy-class YAML accepts `edf`, `fcfs`, and `wspt`.
 
 For `fcfs` and `wspt`, the complete pending-queue key is
-`(strict_priority, due_at, policy_key)`, where `due_at` is only a request classifier's explicit
-deadline. Higher strict tiers always win; see
+`(strict_priority, due_at, policy_key)`, where `due_at` is a request classifier's explicit
+deadline or, in a `wspt` class, a class due time that has passed, which orders after every explicit deadline. Higher strict tiers always win; see
 [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how due-time
 ordering applies within a tier.
 
@@ -345,7 +345,8 @@ removed in v1.7; use `prefill_busy_threshold_frac`.
 blocks its active requests hold exceed that fraction of its `total_kv_blocks`,
 so a worker filled by long-running decodes stops taking new work even after
 their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
-not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
+not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate.
+`request_busy_threshold_frac` marks a worker busy when its active requests reach that fraction of its `max_num_seqs`, the number of requests the engine runs together. At `1.0` the class holds a request while every eligible worker already runs that many, so the request waits in the router's order instead of inside whichever worker it was first sent to. The value must be greater than zero, and unlike the other thresholds a worker is busy at the limit, not past it. A worker with no active requests is never busy by this threshold, however small the fraction. Like the other thresholds, it decides only when a request leaves the queue: once some worker has room, worker selection places the request by its usual cost, and with cache-overlap scoring that can be a worker already at its limit. A worker that does not report `max_num_seqs` is never busy by this threshold, so the class does not hold while such a worker is eligible. In disaggregated serving each hop applies the threshold to its own workers. A request waits for a decode slot after its prefill was dispatched, so the engine must keep the prefilled KV for as long as the request waits. The prefill hop reads the same policy file and holds a request while every prefill worker is at its own `max_num_seqs`. Replay does not model this threshold. A class queues only
 when at least one threshold is configured and every eligible worker is busy
 for that class, or when an installed dispatch gate holds the request, but a
 new arrival cannot bypass an existing backlog in the same class.
@@ -362,15 +363,15 @@ A class with any queue limit set to `0` never queues: it admits a request
 while an eligible worker is below the class's busy thresholds. If every
 eligible worker is busy, it rejects the request with HTTP 529. Use this for
 a class that should fail fast instead of waiting when its workers are full.
-DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
-and uncached snapshots remain unchanged for limits, WSPT, counters, and later
+DRR charges the scheduling cost captured at enqueue, which is the uncached-token snapshot unless a request classifier set the cost, while raw, cached,
+and uncached snapshots remain unchanged for limits, counters, and later
 dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
 bulk-credit behavior, see
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
 
 Class names must be unique within a profile and use metric-safe identifiers
-(`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in uncached
-input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. An `edf`
+(`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in scheduling-cost tokens: uncached
+input tokens unless a request classifier sets the cost. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. An `edf`
 class ignores the `strict_priority` and soft `priority` request hints when it
 orders its queue; to let these hints reorder a class's queue, set its
 `queue_policy` to `fcfs` or `wspt`. The soft `priority` can still affect a
@@ -398,7 +399,7 @@ scheduling credit, and is counted in
 when the router checks it is dropped uncounted. Each class queue keeps its own
 expiry timer, so a request expires on time even when no request arrives and no
 capacity frees. Without `controlled_delay`, the budget only orders the class.
-`fcfs` and `wspt` classes neither order by the budget nor expire on it. In
+An `fcfs` class neither orders by the budget nor expires on it. A `wspt` class never expires on it and orders by it only once it has run out, as described under the queue policies above. In
 every class, a classifier's explicit deadline expires a waiting request,
 including one waiting behind an `edf` head whose class due time only orders
 it. The budget bounds waiting for router admission only: it does not limit an
@@ -408,7 +409,7 @@ admitted request or predict its TTFT.
 > Older frontends without `controlled_delay` support reject a policy YAML that contains the key,
 > even `controlled_delay: false`. Workers that advertise `--router-policy-config` publish only the
 > path, and each frontend reads the file from its own filesystem. Omit the key until every frontend
-> that reads the file supports it.
+> that reads the file supports it. The same holds for `request_busy_threshold_frac`.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root

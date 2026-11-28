@@ -37,6 +37,7 @@ pub struct SimpleWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub max_num_seqs: Option<u64>,
     pub taints: HashSet<String>,
 }
 
@@ -47,6 +48,7 @@ impl Default for SimpleWorkerConfig {
             data_parallel_size: 1,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            max_num_seqs: None,
             taints: HashSet::new(),
         }
     }
@@ -67,6 +69,10 @@ impl WorkerConfigLike for SimpleWorkerConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn max_num_seqs(&self) -> Option<u64> {
+        self.max_num_seqs
     }
 
     fn taints(&self) -> &HashSet<String> {
