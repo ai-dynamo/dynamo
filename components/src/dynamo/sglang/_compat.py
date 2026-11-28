@@ -95,6 +95,16 @@ except ImportError:
     APIServerReqTimeStats = None
 
 
+@lru_cache(maxsize=1)
+def supports_fpm_idle_heartbeat() -> bool:
+    """SGLang 0.5.23 gates FPM heartbeats on scheduler idle."""
+    name = "sglang.srt.observability.forward_pass_metrics"
+    if importlib.util.find_spec(name) is None:
+        return False
+    publisher = getattr(importlib.import_module(name), "_FpmPublisherThread", None)
+    return callable(getattr(publisher, "set_idle", None))
+
+
 def supports_disagg_prefill_cancel_anytime(engine: Any) -> bool:
     """Return whether aborts can be ordered after scheduler dispatch."""
     tokenizer_manager = getattr(engine, "tokenizer_manager", None)
