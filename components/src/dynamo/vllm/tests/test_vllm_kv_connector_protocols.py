@@ -33,6 +33,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.core,
 ]
 
 _MOONCAKE_MOD = (
@@ -40,11 +41,15 @@ _MOONCAKE_MOD = (
 )
 
 
-def _config(connector: Optional[str], **kv_extra) -> SimpleNamespace:
+def _config(
+    connector: Optional[str], data_parallel_size: int = 1, **kv_extra
+) -> SimpleNamespace:
+    parallel_config = SimpleNamespace(data_parallel_size=data_parallel_size)
     if connector is None:
-        return SimpleNamespace(kv_transfer_config=None)
+        return SimpleNamespace(kv_transfer_config=None, parallel_config=parallel_config)
     return SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector=connector, **kv_extra)
+        kv_transfer_config=SimpleNamespace(kv_connector=connector, **kv_extra),
+        parallel_config=parallel_config,
     )
 
 
@@ -194,6 +199,49 @@ def test_mooncake_init_raises_clear_error_when_vllm_mooncake_unavailable(monkeyp
 
     with pytest.raises(RuntimeError, match="MooncakeConnector PD requires vLLM"):
         MooncakeConnectorProtocol(_config("MooncakeConnector"))
+
+
+def test_mooncake_without_dp_does_not_need_dp_rank(fake_mooncake):
+    """DP=1 engines keep vLLM's plain engine_id, so no rank is needed."""
+    proto = MooncakeConnectorProtocol(
+        _config("MooncakeConnector", data_parallel_size=1, engine_id="eng-1")
+    )
+    assert proto.needs_dp_rank is False
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params["remote_engine_id"] == "eng-1"
+
+
+@pytest.mark.parametrize("dp_rank", [0, 3, 6])
+def test_mooncake_dp_decode_appends_dp_rank_to_engine_id(fake_mooncake, dp_rank):
+    """With DP, vLLM registers ``<engine_id>_dp<rank>`` with the bootstrap
+    server (``run_engine_core``), so decode must look that id up."""
+    proto = MooncakeConnectorProtocol(
+        _config("MooncakeConnector", data_parallel_size=8, engine_id="eng-1")
+    )
+    assert proto.needs_dp_rank is True
+    proto.set_dp_rank(dp_rank)
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params["remote_engine_id"] == f"eng-1_dp{dp_rank}"
+
+
+def test_mooncake_dp_decode_without_dp_rank_raises(fake_mooncake):
+    """Guessing a rank would send decode to the wrong engine; fail loudly."""
+    proto = MooncakeConnectorProtocol(
+        _config("MooncakeConnector", data_parallel_size=2, engine_id="eng-1")
+    )
+    with pytest.raises(RuntimeError, match="set_dp_rank"):
+        proto.decode_request_kv_transfer_params(
+            SimpleNamespace(kv_transfer_params=None)
+        )
+
+
+def test_nixl_and_lmcache_mp_do_not_need_dp_rank():
+    for cls in (NixlConnectorProtocol, LMCacheMPConnectorProtocol):
+        assert cls(_config(None, data_parallel_size=4)).needs_dp_rank is False
 
 
 def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
@@ -447,6 +495,29 @@ def test_multiconnector_decode_uses_child_engine_id_not_wrapper(fake_mooncake):
         SimpleNamespace(kv_transfer_params=None)
     )
     assert params["remote_engine_id"] == "mooncake-eng"
+
+
+def test_multiconnector_mooncake_child_appends_dp_rank(fake_mooncake):
+    """The child config keeps the wrapper's parallel config, so the DP
+    suffix is added to the child's engine_id too."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            data_parallel_size=4,
+            engine_id="wrapper-eng",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "MooncakeConnector", "engine_id": "mooncake-eng"}
+                ]
+            },
+        )
+    )
+    assert proto.needs_dp_rank is True
+    proto.set_dp_rank(2)
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params["remote_engine_id"] == "mooncake-eng_dp2"
 
 
 def test_multiconnector_child_engine_id_falls_back_to_wrapper(fake_mooncake):

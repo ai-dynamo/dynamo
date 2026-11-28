@@ -1892,6 +1892,7 @@ async def test_prefill_non_probe_keeps_protocol_handoff(
     if marker is not None:
         request[HEALTH_CHECK_KEY] = marker
     protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.needs_dp_rank = False
     protocol.prefill_request_kv_transfer_params.return_value = {
         "do_remote_decode": True
     }
@@ -1903,10 +1904,62 @@ async def test_prefill_non_probe_keeps_protocol_handoff(
     assert sampling.extra_args["kv_transfer_params"] == {"do_remote_decode": True}
     protocol.prefill_request_kv_transfer_params.assert_called_once_with()
     protocol.decode_request_kv_transfer_params.assert_called_once()
+    protocol.set_dp_rank.assert_not_called()
     assert chunks[0]["disaggregated_params"] == {
         "kv_transfer_params": decode_params,
         "embedding_params": {"embeddings": "handoff"},
     }
+
+
+def _dp_prefill_handler(dp_range):
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    handler.dp_range = dp_range
+    handler._next_pinned_dp_rank = 0
+    return handler
+
+
+def test_prefill_dp_rank_keeps_routing_when_protocol_needs_no_rank():
+    handler = _dp_prefill_handler((4, 4))
+    protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.needs_dp_rank = False
+    assert handler._prefill_dp_rank(protocol, None) is None
+    assert handler._prefill_dp_rank(protocol, 6) == 2
+    assert handler._prefill_dp_rank(None, 6) == 2
+    protocol.set_dp_rank.assert_not_called()
+
+
+def test_prefill_dp_rank_reports_routed_rank_as_global():
+    """A routed global rank is passed to vLLM as local and reported as global."""
+    handler = _dp_prefill_handler((4, 4))
+    protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.needs_dp_rank = True
+    assert handler._prefill_dp_rank(protocol, 6) == 2
+    protocol.set_dp_rank.assert_called_once_with(6)
+
+
+def test_prefill_dp_rank_pins_unrouted_requests_round_robin():
+    """Without a routed rank, vLLM would pick an engine the protocol cannot
+    see, so the handler pins one, cycling over this worker's ranks."""
+    handler = _dp_prefill_handler((4, 3))
+    local_ranks = []
+    reported = []
+    for _ in range(4):
+        protocol = MagicMock(spec=mod.KvConnectorProtocol)
+        protocol.needs_dp_rank = True
+        local_ranks.append(handler._prefill_dp_rank(protocol, None))
+        reported.append(protocol.set_dp_rank.call_args.args[0])
+    assert local_ranks == [0, 1, 2, 0]
+    assert reported == [4, 5, 6, 4]
+
+
+def test_prefill_dp_rank_pins_out_of_range_routed_rank():
+    """A routed rank outside this worker's range falls back to the pinned
+    rank, and the protocol gets the rank actually used, not the routed one."""
+    handler = _dp_prefill_handler((4, 3))
+    protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.needs_dp_rank = True
+    assert handler._prefill_dp_rank(protocol, 9) == 0
+    protocol.set_dp_rank.assert_called_once_with(4)
 
 
 @pytest.mark.asyncio
@@ -2066,6 +2119,7 @@ async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens, n):
     handler._generate_with_lora_admission_lock = MagicMock(return_value=responses())
     handler._log_with_lora_context = MagicMock()
     protocol = MagicMock()
+    protocol.needs_dp_rank = False
     protocol.prefill_request_kv_transfer_params.return_value = {}
     protocol.decode_request_kv_transfer_params.return_value = None
     monkeypatch.setattr(mod, "make_kv_connector_protocol", lambda _: protocol)
