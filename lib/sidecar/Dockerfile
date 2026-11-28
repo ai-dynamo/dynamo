@@ -86,6 +86,10 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 # half the time. Published images keep the shipping profile.
 ARG FAST_RELEASE_PROFILE=false
 
+# Copied in this stage, not builder-base, so stages that do not harvest
+# licenses keep their cache when it changes.
+COPY container/compliance/harvest_cargo_licenses.sh /tmp/harvest_cargo_licenses.sh
+
 # Build all four sidecars and their compliance inventory in one RUN. The target
 # directory exists only during this RUN. The final step removes it so the
 # intermediate layer retains only the installed binaries and metadata.
@@ -142,16 +146,8 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
             "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
         test -s "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
     done; \
-    for src in /usr/local/cargo/registry/src/*; do \
-        [ -d "${src}" ] || continue; \
-        find "${src}" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r crate; do \
-            dest="/out/rust-licenses/$(basename "${crate}")"; \
-            for license in "${crate}"/LICENSE* "${crate}"/LICENCE* "${crate}"/COPYING* "${crate}"/NOTICE* "${crate}"/UNLICENSE*; do \
-                [ -f "${license}" ] || continue; \
-                mkdir -p "${dest}" && cp "${license}" "${dest}/"; \
-            done; \
-        done; \
-    done; \
+    sh /tmp/harvest_cargo_licenses.sh --policy strict --out /out/rust-licenses \
+        /usr/local/cargo/registry/src; \
     rm -rf target
 
 # ---- runtime base ------------------------------------------------------------

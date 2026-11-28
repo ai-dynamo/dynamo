@@ -501,18 +501,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # to match generators/rust.py. Best-effort: unreadable/absent files are skipped
 # and the generator falls back to canonical SPDX text. cargo's registry lives
 # under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
+# Only the helper is copied here, so other container/compliance changes do not
+# re-run this step.
+COPY container/compliance/harvest_cargo_licenses.sh /tmp/harvest_cargo_licenses.sh
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
-        [ -d "$src" ] || continue; \
-        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
-            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
-            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
-                [ -e "$lf" ] || continue; \
-                mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
-            done; \
-        done; \
-    done; \
-    echo "rust license harvest: $(find /opt/dynamo/rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files"; \
+    sh /tmp/harvest_cargo_licenses.sh --policy best-effort --out /opt/dynamo/rust-licenses \
+        "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; \
     true
 
 # Compliance: bundle the human-readable third-party Rust NOTICES into the
