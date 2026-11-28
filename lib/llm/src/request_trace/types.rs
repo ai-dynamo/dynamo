@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse, allowed_tools,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +63,12 @@ pub struct RequestTracePayload {
     pub request_id: String,
     pub endpoint: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The client request. An `allowed_tools` request serializes with the
+    /// client's full `tools` catalog and `allowed_tools` choice.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_client_request"
+    )]
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
@@ -73,6 +78,27 @@ pub struct RequestTracePayload {
     pub payload_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_drop_reason: Option<String>,
+}
+
+// Runs in the sinks, off the request path. Puts back the client's `tools`
+// catalog and `allowed_tools` choice that normalization replaced.
+fn serialize_client_request<S: Serializer>(
+    request: &Option<Arc<NvCreateChatCompletionRequest>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let Some((catalog, tool_choice)) = request.as_deref().and_then(allowed_tools::client_tools)
+    else {
+        return request.serialize(serializer);
+    };
+    let mut value = serde_json::to_value(request).map_err(serde::ser::Error::custom)?;
+    if let Some(fields) = value.as_object_mut() {
+        fields.insert(
+            "tools".to_string(),
+            serde_json::to_value(catalog).map_err(serde::ser::Error::custom)?,
+        );
+        fields.insert("tool_choice".to_string(), tool_choice);
+    }
+    value.serialize(serializer)
 }
 
 /// Per-candidate costs for one router worker selection, emitted when the
@@ -386,9 +412,12 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "lookup"}}],
+            "tool_choice": "auto",
             "store": true
         }))
         .unwrap();
+        let expected_request = serde_json::to_value(&request).unwrap();
         let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -430,6 +459,8 @@ mod tests {
         assert!(value["payload"].get("requested_streaming").is_none());
         assert_eq!(value["payload"]["payload_complete"], true);
         assert_eq!(value["payload"]["request"]["model"], "test-model");
+        // Only an `allowed_tools` request is rewritten on serialization.
+        assert_eq!(value["payload"]["request"], expected_request);
         assert_eq!(
             value["payload"]["response"]["choices"][0]["message"]["content"],
             "hi"
