@@ -897,7 +897,8 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 		// Worker runs API server + coordinator + local engines on its node
 		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
 		nodeRank, _ := multinodeDeployer.GetNodeRank()
-		startRank := fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, nodeRank)
+		// Kubelet does not expand nested $(VAR) references inside shell arithmetic.
+		startRank := fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, k8sToShellVarSyntax(nodeRank))
 		needsShell = true // Need shell for arithmetic expansion
 
 		flags = []string{"--data-parallel-hybrid-lb"}
