@@ -5,6 +5,10 @@ title: DynamoGraphDeployment (DGD) Reference
 subtitle: Field reference for the DynamoGraphDeployment custom resource — the canonical, live description of a Dynamo inference graph.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 A `DynamoGraphDeployment` (DGD) is the canonical description of a running Dynamo inference graph. You list the components that make up the graph — frontend, workers, prefill and decode workers, planner, EPP — and the [operator](../../kubernetes/installation/install-dynamo.md) reconciles them into [`DynamoComponentDeployment`](dynamo-component-deployment.mdx) resources, pods, and Services.
 
 A DGD is the resource that persists and serves traffic. Author one directly when you have a known-good configuration or a tuned [recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes); generate one from intent with a [`DynamoGraphDeploymentRequest`](dynamo-graph-deployment-request.mdx) (DGDR).
