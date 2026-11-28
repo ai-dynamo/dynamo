@@ -94,11 +94,11 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 | --------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `priority`            | Router queue ordering when `--router-queue-threshold` is set.                                              | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
 | `osl`                 | Output block tracking for routing decisions (requires `--router-track-output-blocks`)                      | No direct engine effect.                                                                                                                  |
-| `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache.                                                                |
+| `speculative_prefill` | With the default `dynamo` chat processor, after response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. No prefill is sent with `--dyn-chat-processor sglang`. | SGLang processes the prefill request normally, populating the radix cache.                                                                |
 
 ### Example: Agentic Request with Hints
 
-Port-forward the Frontend Service (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`), then send a request carrying `nvext.agent_hints`:
+Port-forward the Frontend Service (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`), then send a request carrying `nvext.agent_hints`. The `speculative_prefill` hint warms the cache only when the frontend uses the default `dynamo` chat processor:
 
 ```python
 from openai import OpenAI
