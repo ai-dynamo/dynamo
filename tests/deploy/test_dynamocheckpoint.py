@@ -207,17 +207,8 @@ CHECKPOINT_BACKENDS = {
                 "nvidia.com/gpu": "1",
             },
         },
-        extra_volumes=(
-            {"name": "criu-work", "emptyDir": {}},
-            {
-                "name": "dev-net-tun",
-                "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
-            },
-        ),
-        extra_volume_mounts=(
-            {"name": "criu-work", "mountPath": "/var/criu-work"},
-            {"name": "dev-net-tun", "mountPath": "/dev/net/tun"},
-        ),
+        extra_volumes=({"name": "criu-work", "emptyDir": {}},),
+        extra_volume_mounts=({"name": "criu-work", "mountPath": "/var/criu-work"},),
     ),
 }
 
