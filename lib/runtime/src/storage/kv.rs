@@ -526,6 +526,7 @@ pub trait Bucket: Send + Sync {
 
     /// Delete an item from the bucket
     /// The Key should be the name of the item, not including the bucket name.
+    /// Deleting a key that does not exist succeeds with `Ok(())`.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
     /// An atomic initial snapshot followed by changes newer than that snapshot.

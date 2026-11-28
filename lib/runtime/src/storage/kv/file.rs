@@ -317,8 +317,11 @@ impl Directory {
             .map_err(anyhow::Error::from)?;
         let mut errs = Vec::new();
         for p in self.owned_files.lock().drain() {
-            if let Err(err) = fs::remove_file(&p) {
-                errs.push(format!("{}: {err}", p.display()));
+            match fs::remove_file(&p) {
+                Err(err) if err.kind() != ErrorKind::NotFound => {
+                    errs.push(format!("{}: {err}", p.display()));
+                }
+                _ => {}
             }
         }
         if !errs.is_empty() {
@@ -494,15 +497,14 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
         let _mutation_lock = self.lock_mutations().await?;
-        if !full_path.exists() {
-            return Err(StoreError::MissingKey(str_path));
-        }
 
         self.owned_files.lock().remove(&full_path);
 
-        fs::remove_file(&full_path)
-            .context(str_path)
-            .map_err(a_to_fs_err)
+        match fs::remove_file(&full_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(a_to_fs_err(anyhow::Error::new(err).context(str_path))),
+        }
     }
 
     async fn watch(
@@ -769,6 +771,26 @@ mod tests {
         }
 
         release_thread.join().unwrap();
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn delete_missing_key_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), temp_dir.path());
+        let bucket = store.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("missing".to_string());
+
+        bucket.delete(&key).await.unwrap();
+
+        // An owned file that is already gone is still dropped from `owned_files`,
+        // so `keep_alive` stops touching it.
+        bucket.insert(&key, "value".into(), 0).await.unwrap();
+        std::fs::remove_file(bucket.p.join(key.url_safe().as_ref())).unwrap();
+        bucket.delete(&key).await.unwrap();
+        assert!(bucket.owned_files.lock().is_empty());
+
         cancel_token.cancel();
     }
 
