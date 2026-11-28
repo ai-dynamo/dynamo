@@ -25,15 +25,16 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
       - command:
-        - /bin/sh
+        - /bin/bash
         - -c
         - |
+          set -euo pipefail
           # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
           # GB200 benchmark pods need build tools to compile it from source.
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
-          pip install "aiperf==0.12.0";
+          pip install "aiperf==0.13.0";
           echo "aiperf installation completed";
-          sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" || echo "WARNING: keeping the existing ephemeral port range" >&2
           cat /proc/sys/net/ipv4/ip_local_port_range
           export COLUMNS=200
           EPOCH=$(date +%s)
@@ -48,6 +49,7 @@ spec:
             echo "Model '$TARGET_MODEL' is now available!"
             curl -s "http://$ENDPOINT/v1/models" | jq .
           }
+          # BEGIN benchmark-function
           run_perf() {
             local concurrency=$1
             local isl=$2
@@ -82,9 +84,29 @@ spec:
                 -H 'Accept: text/event-stream'\
                 --record-processors 32 \
                 --ui simple
+            python3 - "$ARTIFACT_DIR" "$((10*concurrency))" <<'PY'
+          import csv
+          import json
+          import pathlib
+          import sys
+
+          directory = pathlib.Path(sys.argv[1])
+          with (directory / "profile_export_aiperf.json").open() as stream:
+              summary = json.load(stream)
+          successful = summary["request_count"]["avg"]
+          errors = summary.get("error_request_count", {"avg": 0})["avg"]
+          if successful + errors != int(sys.argv[2]):
+              raise ValueError("Benchmark request count does not match the requested count")
+          with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
+              counts = [float(row[1]) for row in csv.reader(stream, strict=True)
+                        if row and row[0] == "Request Count"]
+          if counts != [successful]:
+              raise ValueError("Benchmark CSV request count does not match JSON")
+          PY
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"
-            ls -la $ARTIFACT_DIR
+            ls -la "$ARTIFACT_DIR"
           }
+          # END benchmark-function
           #### Actual execution ####
           wait_for_model_ready
           mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
