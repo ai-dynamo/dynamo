@@ -500,3 +500,6 @@ fn runs_within_a_trace_block_are_cached_and_evicted_together() {
     assert_eq!(removed(&events[0]), vec![5, output, 4, 3]);
     assert_eq!(stored(&events[1]), (None, vec![7, 8, 9, 10]));
 }
+
+#[path = "selection_replay/decode_progress_snapshot_replay.rs"]
+mod decode_progress_snapshot_replay;
