@@ -103,6 +103,9 @@ ROUTER_AIS_CONFIG = {
     "worker_type": "aggregated",
 }
 
+# One token of the mocker's default 8,192-token prefill budget: any in-flight
+# prompt marks the worker busy.
+_ONE_PREFILL_TOKEN_FRAC = 1 / 8192
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -114,9 +117,7 @@ ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
             "blocks_threshold": "None",
-            "tokens_threshold": 1,
-            "tokens_threshold_frac": "None",
-            "router_queue_threshold": "None",
+            "tokens_threshold_frac": _ONE_PREFILL_TOKEN_FRAC,
             "max_tokens": 1,
         },
         id="prefill-tokens",
@@ -144,9 +145,7 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
             "decode_speedup": _FAST_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": "None",
-                "tokens_threshold": 1,
-                "tokens_threshold_frac": "None",
-                "router_queue_threshold": "None",
+                "tokens_threshold_frac": _ONE_PREFILL_TOKEN_FRAC,
             },
         },
         id="prefill-tokens",
@@ -162,7 +161,6 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
             "decode_speedup": _SLOW_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": 0.2,
-                "tokens_threshold": "None",
                 "tokens_threshold_frac": "None",
             },
         },
@@ -1259,7 +1257,7 @@ def test_mocker_disagg_router_overload_529(
 ):
     """Disaggregated load shedding: clients get 529 when the gated pool is busy.
 
-    - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
+    - prefill-tokens: a low ``--active-prefill-tokens-threshold-frac`` must gate the
       PREFILL pool. This was previously a silent no-op in disagg (the
       overloaded set landed on the decode pool and the prefill router never saw
       it), so this case is the regression guard for that fix.

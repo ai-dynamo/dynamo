@@ -239,15 +239,32 @@ policy_classes:
     quantum: 128
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024
+# Route on load alone: no cache credit, no KV events, and active load tracked
+# without assuming KV reuse.
+router:
+  use_kv_events: false
+  router_track_active_blocks: true
+  router_track_prefill_tokens: true
+  router_assume_kv_reuse: false
+  use_remote_indexer: false
+  serve_indexer: false
+  shared_cache_type: none
+  router_predicted_ttl_secs: null
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      overlap_score_credit: 0
+      shared_cache_multiplier: 0
 ```
 
-Start the backend worker, then launch the frontend with load tracking and the
-policy configuration:
+Start the backend worker, then launch the frontend with the policy
+configuration. Its `router` and `worker_selection` sections select
+[load-only routing](configuration-and-tuning.md#replace-the-load-aware-preset):
 
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --load-aware \
     --router-policy-config ./policy-classes.yaml
 ```
 

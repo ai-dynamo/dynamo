@@ -82,7 +82,7 @@ python3 -m dynamo.sglang \
   --skip-tokenizer-init
 ```
 
-- For the Mooncake shared pool: add `--hicache-storage-backend mooncake` (plus its extra config) on the workers and `--shared-cache-type hicache --shared-cache-multiplier 0.5` on the frontend.
+- For the Mooncake shared pool: add `--hicache-storage-backend mooncake` (plus its extra config) on the workers and `--shared-cache-type hicache` on the frontend. Shared-cache hits then earn the default `shared_cache_multiplier` of `0.5`.
 - Versions: SGLang 0.5.11 or later emits host-tier (`CPU_PINNED`) events; earlier versions offload engine-side but the router only sees the GPU tier. With Mooncake, use SGLang 0.5.13 or later to avoid a bundled-Mooncake crash.
 
 See [Using HiCache](../backends/sglang/hicache.md) for full setup, scoring, verification, and troubleshooting.
