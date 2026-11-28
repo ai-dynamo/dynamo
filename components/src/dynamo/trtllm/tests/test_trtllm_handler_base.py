@@ -1909,8 +1909,9 @@ class TestGenerateLocally:
         assert sampling_params.prompt_logprobs == 0
 
     @pytest.mark.asyncio
-    async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
+    async def test_default_max_tokens_uses_processed_prompt_token_ids(self, monkeypatch):
         """DECODE-style processed tokens size the remaining context correctly."""
+        monkeypatch.setenv("DYN_TRTLLM_MAX_SEQ_LEN_RESERVE", "0")
         handler = self._make_handler()
         handler.max_seq_len = 100
         handler._prepare_input_for_generation = mock.AsyncMock(
@@ -1933,6 +1934,51 @@ class TestGenerateLocally:
 
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["sampling_params"].max_tokens == 60
+
+    @pytest.mark.parametrize(
+        "max_seq_len, requested, reserve, expected",
+        [
+            (164, None, None, 60),  # omitted: fill context minus the default reserve (64)
+            (100, None, "8", 52),
+            (100, 1000, "8", 52),  # explicit max_tokens past the limit is clamped
+            (100, 10, "8", 10),  # within the limit: unchanged
+            (100, 1000, "0", 60),  # reserve disabled: clamp to the remaining context
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_max_tokens_respects_max_seq_len_reserve(
+        self, monkeypatch, max_seq_len, requested, reserve, expected
+    ):
+        """Output never reaches the last reserve tokens below max_seq_len.
+
+        A speculative decoding step can append max_draft_len + 1 tokens at once,
+        so a request sized to end exactly at max_seq_len can overrun it.
+        """
+        if reserve is None:
+            monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN_RESERVE", raising=False)
+        else:
+            monkeypatch.setenv("DYN_TRTLLM_MAX_SEQ_LEN_RESERVE", reserve)
+        handler = self._make_handler()
+        handler.max_seq_len = max_seq_len
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": list(range(40))}
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": requested},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].max_tokens == expected
 
     @pytest.mark.asyncio
     async def test_expanded_prompt_len_is_not_forwarded_to_engine(self):
@@ -2124,6 +2170,10 @@ class TestDefaultMaxTokens:
 
     def test_image_zero_expanded_len_is_valid(self):
         assert HandlerBase._default_max_tokens(100, [], True, 0) == 100
+
+    def test_reserve_is_left_free(self):
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], False, None, reserve=8) == 89
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, 40, reserve=8) == 52
 
     def test_floors_at_one(self):
         # Prompt already at/over context -> never returns <= 0
