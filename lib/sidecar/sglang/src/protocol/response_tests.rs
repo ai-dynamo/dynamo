@@ -334,6 +334,18 @@ fn prompt_logprobs_from_the_first_frame_attach_to_the_terminal_only() {
 }
 
 #[test]
+fn empty_prompt_logprobs_are_omitted() {
+    let meta = pb::GenerateMetaInfo {
+        input_token_logprobs: Some(entries(Vec::new())),
+        ..meta_with_finish(length())
+    };
+    let FrameOutput::Terminal(terminal) = converter().frame(frame(&[], meta)).unwrap() else {
+        panic!("expected a terminal");
+    };
+    assert!(terminal.engine_data.is_none());
+}
+
+#[test]
 fn terminal_engine_data_handles_prompt_logprob_encodings() {
     let native = prompt_logprobs_value(
         &[entry(None, 10, None), entry(Some(-0.2), 11, Some("b"))],
