@@ -49,10 +49,10 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use dynamo_runtime::component::Component;
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
+use dynamo_runtime::metrics::{MetricsHierarchy, format_instance_id_label};
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
 fn router_metric(suffix: &str) -> String {
@@ -650,7 +650,7 @@ impl WorkerLoadMetrics {
     }
 
     pub fn observe(&self, worker_id: u64, dp_rank: u32, worker_type: &str, load: LocalWorkerLoad) {
-        let worker_id = worker_id.to_string();
+        let worker_id = format_instance_id_label(worker_id);
         let dp_rank = dp_rank.to_string();
         let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
         self.active_decode_blocks
@@ -672,7 +672,7 @@ impl WorkerLoadMetrics {
 
     /// Remove every load series for one worker/dp_rank.
     pub fn remove(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
-        let worker_id = worker_id.to_string();
+        let worker_id = format_instance_id_label(worker_id);
         let dp_rank = dp_rank.to_string();
         let labels = [worker_id.as_str(), dp_rank.as_str(), worker_type];
         let _ = self.active_decode_blocks.remove_label_values(&labels);
@@ -887,7 +887,7 @@ impl RoutingOverheadMetrics {
         let m = ROUTING_OVERHEAD_METRICS.get_or_init(|| {
             let compute_buckets = compute_overhead_buckets();
             let async_buckets = async_overhead_buckets();
-            let router_id = instance_id.to_string();
+            let router_id = format_instance_id_label(instance_id);
             let make = |suffix: &str, help: &str, buckets: Vec<f64>| {
                 let name = format!("{}_{}", name_prefix::ROUTER, suffix);
                 prometheus::Histogram::with_opts(
@@ -1083,17 +1083,14 @@ impl RouterRequestMetrics {
     /// Called eagerly by `RoutingHost::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
-            .get_or_init(|| {
-                let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
-                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
-
-                Arc::new(Self::build(component, extra_labels))
-            })
+            .get_or_init(|| Arc::new(Self::build(component)))
             .clone()
     }
 
-    fn build<H: MetricsHierarchy>(hierarchy: &H, extra_labels: &[(&str, &str)]) -> Self {
+    fn build<H: MetricsHierarchy>(hierarchy: &H) -> Self {
+        let router_id = hierarchy.connection_id().map(format_instance_id_label);
+        let router_label = router_id.as_deref().map(|id| (labels::ROUTER_ID, id));
+        let extra_labels = router_label.as_slice();
         let metrics = hierarchy.metrics();
         let requests_started_total = metrics
             .create_intcounter(
@@ -1250,7 +1247,7 @@ impl RouterRequestMetrics {
         let mut hierarchy = kv_publisher_registration_tests::FakeHierarchy::component("", "", 0);
         hierarchy.registry = registry.clone();
         hierarchy.connection_id = None;
-        Arc::new(Self::build(&hierarchy, &[]))
+        Arc::new(Self::build(&hierarchy))
     }
 
     /// Record a selection that sacrificed KV cache overlap.
@@ -1480,7 +1477,7 @@ impl RemoteIndexerMetrics {
         REMOTE_INDEXER_METRICS
             .get_or_init(|| {
                 let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
+                let router_id = format_instance_id_label(instance_id);
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
                 let metrics = component.metrics();
@@ -1526,7 +1523,7 @@ mod tests {
     fn router_request_metrics_register_with_component_labels() {
         let hierarchy =
             kv_publisher_registration_tests::FakeHierarchy::component("dynamo", "frontend", 0x123);
-        let metrics = RouterRequestMetrics::build(&hierarchy, &[(labels::ROUTER_ID, "291")]);
+        let metrics = RouterRequestMetrics::build(&hierarchy);
         metrics
             .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
             .inc_by(72);
@@ -1550,7 +1547,7 @@ mod tests {
                 (labels::NAMESPACE, "dynamo"),
                 (labels::COMPONENT, "frontend"),
                 (labels::WORKER_ID, "123"),
-                (labels::ROUTER_ID, "291"),
+                (labels::ROUTER_ID, "123"),
                 (KV_PHASE_LABEL, "prefill"),
                 (labels::MODEL, "m"),
             ] {
@@ -1628,14 +1625,14 @@ mod tests {
         let expected = "\
 # HELP dynamo_frontend_worker_active_decode_blocks Active KV cache decode blocks per worker
 # TYPE dynamo_frontend_worker_active_decode_blocks gauge
-dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 42
+dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"7b\",worker_type=\"decode\"} 42
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
-dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"7b\",worker_type=\"decode\"} 100
 # HELP dynamo_frontend_worker_active_requests Active requests booked per worker, by request phase
 # TYPE dynamo_frontend_worker_active_requests gauge
-dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"decode\",worker_id=\"123\",worker_type=\"decode\"} 3
-dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",worker_id=\"123\",worker_type=\"decode\"} 2
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"decode\",worker_id=\"7b\",worker_type=\"decode\"} 3
+dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",worker_id=\"7b\",worker_type=\"decode\"} 2
 ";
         assert_eq!(
             output, expected,
@@ -1708,7 +1705,7 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
         let output = gather_pef(&registry);
         assert!(
             output.contains(
-                "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"123\",worker_type=\"decode\"} 1"
+                "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"7b\",worker_type=\"decode\"} 1"
             ),
             "\nActual PEF:\n{output}"
         );
@@ -1728,7 +1725,7 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
         workers_tx.send(std::collections::HashMap::new()).unwrap();
         let output = gather_pef(&registry);
         assert!(
-            !output.contains("router_worker_id=\"123\""),
+            !output.contains("router_worker_id=\"7b\""),
             "\nActual PEF after remove:\n{output}"
         );
     }

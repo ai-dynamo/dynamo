@@ -109,6 +109,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             prefill=prefill_stats,
             decode=decode_stats,
             unavailable_reasons=unavailable_reasons,
+            worker_ids_are_discovery_ids=True,
         )
 
     def get_worker_info(

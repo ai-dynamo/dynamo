@@ -21,6 +21,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.8.0 - Upcoming
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Prometheus labels for discovery instance IDs now use lowercase hexadecimal.** This affects `worker_id` on frontend per-worker gauges and runtime-backed Planner per-engine gauges, and the `router_worker_id` and `router_id` labels ([#19460](https://github.com/ai-dynamo/dynamo/pull/19460)).
+
+  > **Migrate:** Update exact-match selectors in dashboards and alerts. For worker 123, change `worker_id="123"` to `worker_id="7b"`. During a rolling upgrade, scope per-worker queries to one exporter version because the same digit-only label can identify different workers. See [Metric Labels](../../observability/metric-labels.mdx#runtime-injected-labels).
+
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **The frontend rejects `--router-policy-config` combined with a `--router-mode` other than `kv`.** A policy file now selects each role's worker-selection policy without `--router-mode kv`. Previously, a policy file passed with `round-robin`, `random`, `least-loaded`, `direct`, or `device-aware-weighted` was silently ignored, and so was a policy file passed with no `--router-mode`: that frontend ran `round-robin` and now routes by the file. `--router-mode kv` still works, with or without a policy file.
 
   > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.

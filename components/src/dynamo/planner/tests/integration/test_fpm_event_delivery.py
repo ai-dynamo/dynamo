@@ -211,6 +211,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
         assert tick_input is not None
         observations = tick_input.fpm_observations
         assert observations.decode is not None
+        assert observations.worker_ids_are_discovery_ids
         assert (worker_id, 0) in observations.decode
 
         scaling = PlannerScalingState(

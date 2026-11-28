@@ -889,32 +889,30 @@ class NativePlannerBase:
         self.prometheus_metrics.observed_input_sequence_tokens.set(m.isl)
         self.prometheus_metrics.observed_output_sequence_tokens.set(m.osl)
 
-    def _emit_per_engine_fpm(
-        self,
-        prefill_stats: Optional[dict] = None,
-        decode_stats: Optional[dict] = None,
-    ) -> None:
+    def _emit_per_engine_fpm(self, observations: FpmObservations) -> None:
+        def labels_for(worker_id: str, dp_rank: int) -> dict[str, str]:
+            if observations.worker_ids_are_discovery_ids:
+                worker_id = format(int(worker_id), "x")
+            return {"worker_id": worker_id, "dp_rank": str(dp_rank)}
+
         pm = self.prometheus_metrics
         pm.engine_queued_prefill_tokens.clear()
         pm.engine_queued_decode_kv_tokens.clear()
         pm.engine_inflight_decode_kv_tokens.clear()
 
-        if prefill_stats:
-            for (wid, dp), fpm in prefill_stats.items():
-                labels = dict(worker_id=wid, dp_rank=str(dp))
-                pm.engine_queued_prefill_tokens.labels(**labels).set(
-                    fpm.queued_requests.sum_prefill_tokens
-                )
+        for (wid, dp), fpm in (observations.prefill or {}).items():
+            pm.engine_queued_prefill_tokens.labels(**labels_for(wid, dp)).set(
+                fpm.queued_requests.sum_prefill_tokens
+            )
 
-        if decode_stats:
-            for (wid, dp), fpm in decode_stats.items():
-                labels = dict(worker_id=wid, dp_rank=str(dp))
-                pm.engine_queued_decode_kv_tokens.labels(**labels).set(
-                    fpm.queued_requests.sum_decode_kv_tokens
-                )
-                pm.engine_inflight_decode_kv_tokens.labels(**labels).set(
-                    fpm.scheduled_requests.sum_decode_kv_tokens
-                )
+        for (wid, dp), fpm in (observations.decode or {}).items():
+            labels = labels_for(wid, dp)
+            pm.engine_queued_decode_kv_tokens.labels(**labels).set(
+                fpm.queued_requests.sum_decode_kv_tokens
+            )
+            pm.engine_inflight_decode_kv_tokens.labels(**labels).set(
+                fpm.scheduled_requests.sum_decode_kv_tokens
+            )
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         state = self.environment.deployment_state()
@@ -1003,10 +1001,7 @@ class NativePlannerBase:
         if tick_input.traffic is not None:
             self._emit_observed_traffic_metrics()
         if tick_input.fpm_observations is not None and self.prometheus_port != 0:
-            self._emit_per_engine_fpm(
-                tick_input.fpm_observations.prefill,
-                tick_input.fpm_observations.decode,
-            )
+            self._emit_per_engine_fpm(tick_input.fpm_observations)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass

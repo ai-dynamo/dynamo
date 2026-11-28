@@ -1209,7 +1209,7 @@ mod tests {
         );
         // The first chunk attributes TTFT and its input tokens to the prefill worker.
         // With the prefill and decode fields crossed, these two series stay at 0.
-        let prefill_labels = &["7011", "1", WORKER_TYPE_PREFILL];
+        let prefill_labels = &["1b63", "1", WORKER_TYPE_PREFILL];
         assert!(
             WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                 .with_label_values(prefill_labels)
@@ -1250,7 +1250,7 @@ mod tests {
         )
         .unwrap();
         let decode_labels = [
-            ("worker_id", "7022"),
+            ("worker_id", "1b6e"),
             ("dp_rank", "2"),
             ("worker_type", WORKER_TYPE_DECODE),
         ];

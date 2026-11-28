@@ -94,6 +94,8 @@ class FpmObservations:
     prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
     decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
     unavailable_reasons: dict[str, str] = field(default_factory=dict)
+    # Runtime FPM keys are joined to decimal discovery instance IDs; other providers own their IDs.
+    worker_ids_are_discovery_ids: bool = False
 
 
 @dataclass

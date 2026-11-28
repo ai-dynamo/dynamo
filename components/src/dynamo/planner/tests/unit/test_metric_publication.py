@@ -21,9 +21,11 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.core.types import (
+    FpmObservations,
     ScheduledTick,
     TickDiagnostics,
     TickInput,
@@ -96,6 +98,36 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     # Gate the methods under test without binding a real port.
     planner.prometheus_port = 1 if prometheus_enabled else 0
     return planner
+
+
+@pytest.mark.parametrize(
+    ("options", "prefill_label", "decode_label"),
+    [
+        pytest.param({"worker_ids_are_discovery_ids": True}, "7b", "10", id="runtime"),
+        pytest.param({}, "123", "16", id="custom"),
+    ],
+)
+def test_per_engine_fpm_worker_labels(options, prefill_label, decode_label):
+    planner = _make_planner()
+    # Custom providers can use numeric-looking strings as opaque worker IDs.
+    observations = FpmObservations(
+        prefill={("123", 0): ForwardPassMetrics()},
+        decode={("16", 1): ForwardPassMetrics()},
+        **options,
+    )
+    planner._publish_observation_metrics(
+        TickInput(now_s=0, fpm_observations=observations)
+    )
+
+    pm = planner.prometheus_metrics
+    pm.engine_queued_prefill_tokens.labels.assert_called_once_with(
+        worker_id=prefill_label, dp_rank="0"
+    )
+    for gauge in (
+        pm.engine_queued_decode_kv_tokens,
+        pm.engine_inflight_decode_kv_tokens,
+    ):
+        gauge.labels.assert_called_once_with(worker_id=decode_label, dp_rank="1")
 
 
 def _tick_input(now_s: float, num_p: int = 2, num_d: int = 3) -> TickInput:

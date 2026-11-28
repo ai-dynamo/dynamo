@@ -149,7 +149,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 ### Per-Worker Load and Timing Gauges
 
-`dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id` (the worker's discovery ID in decimal), `dp_rank`, and `worker_type`.
+`dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id` (the worker's discovery ID in lowercase hexadecimal), `dp_rank`, and `worker_type`.
 
 Only the KV router writes the three `dynamo_frontend_worker_active_*` gauges, so they have no series in other router modes; the three `dynamo_frontend_worker_last_*` gauges are populated in every mode. At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the [router worker inventory](#router-worker-inventory) gauges below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
 
@@ -171,7 +171,7 @@ Admission uses first-wins semantics within each Frontend's model and target grou
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_frontend_router_workers` | gauge | — | Number of unique physical worker IDs in a model and target group, by state. DP ranks do not increase the count. | Experimental |
-| `dynamo_frontend_router_worker_state` | gauge | `router_worker_id`, `reason` | One sample with value `1` for each discovered worker, labeled with its current state and reason. The sample changes with the worker's state and disappears when discovery removes the ID. | Experimental |
+| `dynamo_frontend_router_worker_state` | gauge | `router_worker_id`, `reason` | One sample with value `1` for each discovered worker, labeled with its hexadecimal discovery ID, current state, and reason. The sample changes with the worker's state and disappears when discovery removes the ID. | Experimental |
 
 The `available`, `pending`, and `excluded` states are disjoint; `discovered`, which only `dynamo_frontend_router_workers` reports, is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
 
@@ -434,11 +434,11 @@ vLLM workers with `--gms-shadow-mode` (GPU Memory Service shadow failover). Thes
 
 ## Router Metrics
 
-Emitted by every process that routes requests: the frontend, which serves them on its HTTP port, and the standalone router (`python -m dynamo.router`), which serves them on `DYN_SYSTEM_PORT`. The router adds `dynamo_namespace` and `dynamo_component` of the first worker component the process routes to (one value per process, even when it routes to both prefill and decode workers), and `worker_id`, which is the router's own ID in hex. The request metrics also carry `router_id`, the same ID in decimal. Not every metric appears in every deployment — see [Availability by Configuration](#availability-by-configuration).
+Emitted by every process that routes requests: the frontend, which serves them on its HTTP port, and the standalone router (`python -m dynamo.router`), which serves them on `DYN_SYSTEM_PORT`. The router adds `dynamo_namespace` and `dynamo_component` of the first worker component the process routes to (one value per process, even when it routes to both prefill and decode workers), and `worker_id`, which is the router's own ID in hex. The request metrics also carry `router_id`, the same hexadecimal ID. Not every metric appears in every deployment — see [Availability by Configuration](#availability-by-configuration).
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_worker_registered` | gauge | `router_worker_id`, `dp_rank`, `worker_type` | A sample with value `1` for each worker and DP rank in the KV router scheduler's current registration and hard-availability view; absent in other router modes. Removed or unavailable workers disappear from the output rather than emitting `0`. | |
+| `dynamo_component_router_worker_registered` | gauge | `router_worker_id`, `dp_rank`, `worker_type` | The `router_worker_id` label identifies the worker by its hexadecimal discovery ID. A sample with value `1` for each worker and DP rank in the KV router scheduler's current registration and hard-availability view; absent in other router modes. Removed or unavailable workers disappear from the output rather than emitting `0`. | |
 
 The `dynamo_component_router_worker_registered` sample can appear during scheduler preparation, before worker-set materialization commits, so it does not indicate committed model readiness. Late request bookkeeping cannot restore a removed worker's series. Prefer the [Router Worker Inventory](#router-worker-inventory) metrics for committed available-worker counts and exclusion reasons on the frontend.
 
@@ -613,6 +613,8 @@ With the QUIC response plane (`--response-plane quic` or `DYN_RESPONSE_PLANE=qui
 Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `metric_reporting_prometheus_port`. It defaults to the `PLANNER_PROMETHEUS_PORT` environment variable, or to `0`, which disables the server, when that variable is unset. The Kubernetes operator sets the port to `9085`. Planner metrics carry no automatic labels. See [Planner Configuration](../components/planner-configuration.mdx).
 
 ### Replicas, Traffic, and SLA
+
+On the three per-engine forward-pass gauges, `worker_id` is the worker's lowercase hexadecimal discovery ID when the Planner uses runtime discovery. Custom observation providers with their own worker IDs retain those identifiers.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|

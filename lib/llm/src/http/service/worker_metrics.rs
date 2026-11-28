@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use dynamo_runtime::metrics::format_instance_id_label;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use prometheus::{
     IntGaugeVec, Opts, Registry,
@@ -160,7 +161,8 @@ impl WorkerMetricsCollector {
                 .find(|label| label.name() == name)
                 .map(|label| label.value())
         };
-        let Some(worker) = label("worker_id").and_then(|id| id.parse::<u64>().ok()) else {
+        let Some(worker) = label("worker_id").and_then(|id| u64::from_str_radix(id, 16).ok())
+        else {
             return false;
         };
         let (Some(worker_type), Some(rank)) = (label("worker_type"), label("dp_rank")) else {
@@ -237,7 +239,7 @@ impl Collector for WorkerMetricsCollector {
                 metrics.counts.with_label_values(&values).set(count as i64);
             }
             for (id, worker) in pool.workers {
-                let id = id.to_string();
+                let id = format_instance_id_label(id);
                 let mut values = base.clone();
                 values.extend([&id, worker.state, worker.reason]);
                 metrics.states.with_label_values(&values).set(1);
@@ -561,19 +563,30 @@ mod tests {
 
     #[test]
     fn first_wins_metrics_preserve_local_incumbent_and_track_succession() {
-        for (incumbent, rejected) in [(1, 2), (2, 1)] {
+        // The digit-only hex label "10" must match worker 16 even when worker 10 exists.
+        for ((incumbent, incumbent_id), (rejected, rejected_id)) in
+            [((10, "a"), (16, "10")), ((16, "10"), (10, "a"))]
+        {
             let f = Fixture::new();
-            let incumbent_id = incumbent.to_string();
-            let rejected_id = rejected.to_string();
-            *f.available.lock() = HashSet::from([1, 2]);
-            f.observe_with_rejections(&[1, 2], &[], &[rejected], WorkerGroupState::Pending);
+            *f.available.lock() = HashSet::from([incumbent, rejected]);
+            f.observe_with_rejections(
+                &[incumbent, rejected],
+                &[],
+                &[rejected],
+                WorkerGroupState::Pending,
+            );
             assert_eq!(f.count("discovered"), Some(2.0));
             assert_eq!(f.count("available"), Some(0.0));
             assert_eq!(f.count("pending"), Some(1.0));
             assert_eq!(f.count("excluded"), Some(1.0));
-            f.observe_with_rejections(&[1, 2], &[incumbent], &[rejected], WorkerGroupState::Ready);
+            f.observe_with_rejections(
+                &[incumbent, rejected],
+                &[incumbent],
+                &[rejected],
+                WorkerGroupState::Ready,
+            );
             for gauge in &f.values {
-                for id in [&incumbent_id, &rejected_id] {
+                for id in [incumbent_id, rejected_id] {
                     gauge.with_label_values(&[id, "0", "decode"]).set(7);
                 }
             }
@@ -585,7 +598,7 @@ mod tests {
                 f.sample(
                     "dynamo_frontend_router_worker_state",
                     &[
-                        ("router_worker_id", &incumbent_id),
+                        ("router_worker_id", incumbent_id),
                         ("state", "available"),
                         ("reason", "none")
                     ]
@@ -596,7 +609,7 @@ mod tests {
                 f.sample(
                     "dynamo_frontend_router_worker_state",
                     &[
-                        ("router_worker_id", &rejected_id),
+                        ("router_worker_id", rejected_id),
                         ("state", "excluded"),
                         ("reason", "checksum_mismatch")
                     ]
@@ -605,8 +618,8 @@ mod tests {
             );
             for gauge in &f.values {
                 let name = &gauge.desc()[0].fq_name;
-                assert_eq!(f.sample(name, &[("worker_id", &incumbent_id)]), Some(7.0));
-                assert_eq!(f.sample(name, &[("worker_id", &rejected_id)]), None);
+                assert_eq!(f.sample(name, &[("worker_id", incumbent_id)]), Some(7.0));
+                assert_eq!(f.sample(name, &[("worker_id", rejected_id)]), None);
             }
 
             f.observe(&[rejected], &[], WorkerGroupState::Pending);
@@ -622,7 +635,7 @@ mod tests {
             assert_eq!(
                 f.sample(
                     "dynamo_frontend_router_worker_state",
-                    &[("router_worker_id", &incumbent_id)]
+                    &[("router_worker_id", incumbent_id)]
                 ),
                 None
             );

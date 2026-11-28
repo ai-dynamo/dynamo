@@ -46,6 +46,11 @@ use crate::stream::StreamExt;
 // Prometheus imports
 use prometheus::Encoder;
 
+/// Encode a discovery instance ID for a Prometheus label in lowercase hexadecimal.
+pub fn format_instance_id_label(id: u64) -> String {
+    format!("{id:x}")
+}
+
 /// Validate that a label slice has no duplicate keys.
 /// Returns Ok(()) when all keys are unique; otherwise returns an error naming the duplicate key.
 fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<()> {
@@ -377,7 +382,10 @@ pub fn create_metric_with_options<T: PrometheusMetric, H: MetricsHierarchy + ?Si
     // This provides a stable per-worker identity label so metrics from different workers
     // serving the same endpoint can be distinguished without relying on Kubernetes labels.
     if let Some(conn_id) = hierarchy.connection_id() {
-        updated_labels.push((labels::WORKER_ID.to_string(), format!("{:x}", conn_id)));
+        updated_labels.push((
+            labels::WORKER_ID.to_string(),
+            format_instance_id_label(conn_id),
+        ));
     }
 
     // Add user labels
