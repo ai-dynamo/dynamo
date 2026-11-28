@@ -2492,8 +2492,34 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     avg_accept_length: Optional[float]
     accept_length_forward_count: int
 
+class ReplaySlaThresholds(TypedDict):
+    ttft_ms: Optional[float]
+    itl_ms: Optional[float]
+    e2e_ms: Optional[float]
+
+class ReplayCompletionFeedback(TypedDict):
+    """Measured outcomes for closed-loop scaling policies.
+
+    Counters and ``gpu_seconds`` are cumulative. ``latency_samples`` holds up
+    to 64 ``(TTFT ms, mean ITL ms)`` pairs from requests completed since the
+    previous sample, drawn from ``latency_population`` completions; mean ITL is
+    ``None`` for a single-token completion.
+    """
+
+    schema_version: int
+    sla: ReplaySlaThresholds
+    terminal_requests: int
+    completed_requests: int
+    good_requests: int
+    good_requests_strict_itl: int
+    gpu_seconds: float
+    latency_samples: list[tuple[float, Optional[float]]]
+    latency_population: int
+
 class ReplayTelemetrySnapshot(TypedDict):
     host_caches: list[dict[str, Any]]
+    # Present once the pinned simulator emits completion feedback to observers.
+    completion_feedback: NotRequired[ReplayCompletionFeedback]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
