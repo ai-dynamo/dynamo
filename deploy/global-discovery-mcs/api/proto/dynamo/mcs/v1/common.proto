@@ -1,0 +1,151 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+// The Multi-Cluster Services (KEP-1645) registry API of the Dynamo Global
+// Router.
+//
+// The API is additive only; a breaking change means a new v2 package. Every
+// RPC is served over gRPC and mirrored as REST/JSON through the
+// google.api.http annotations. JSON follows the proto3 JSON mapping
+// (lowerCamelCase field names, enums as strings, 64-bit integers as strings).
+// Server streams are rendered as newline-delimited JSON objects of the form
+// {"result": {...}}.
+//
+// Errors are google.rpc.Status values carrying a google.rpc.ErrorInfo with
+// domain "mcs.dynamo.nvidia.com" and one of these reasons:
+//
+//   STALE_GENERATION        FAILED_PRECONDITION. The write carried a
+//                           generation that does not exceed the stored one.
+//                           ErrorInfo.metadata["current_generation"] holds the
+//                           stored generation; a PreconditionFailure detail
+//                           repeats it.
+//   LEASE_EPOCH_MISMATCH    ABORTED. A heartbeat carried an epoch other than
+//                           the current lease epoch. Register again.
+//   CLUSTER_NOT_REGISTERED  FAILED_PRECONDITION or NOT_FOUND. The cluster has
+//                           no registration in the clusterset.
+//   TOO_MANY_ENDPOINTS      INVALID_ARGUMENT. An endpoint set exceeds 1000
+//                           endpoints.
+//   TOO_MANY_WATCHERS       RESOURCE_EXHAUSTED. The replica serves
+//                           --max-watchers streams already.
+//   STORE_UNAVAILABLE       UNAVAILABLE. The backing store did not answer.
+//                           Retry with backoff.
+//   SHUTTING_DOWN           UNAVAILABLE. The replica is draining. Reconnect;
+//                           another replica serves the request.
+//
+// Invalid input is INVALID_ARGUMENT with a google.rpc.BadRequest detail.
+//
+// Limits: identifiers (clusterset, cluster, namespace, name) are DNS-1123
+// labels; 64 labels; 32 annotations totalling at most 16 KiB; 64 ports; 1000
+// endpoints per export per cluster; 16 attributes per endpoint; 4 MiB per
+// message.
+package dynamo.mcs.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ai-dynamo/dynamo/deploy/global-discovery-mcs/api/gen/go/dynamo/mcs/v1;mcsv1";
+
+// ClusterKey identifies a member cluster of a clusterset.
+message ClusterKey
+{
+  // Name of the clusterset, a DNS label.
+  string clusterset = 1;
+  // KEP-1645 cluster id, a DNS label unique within the clusterset.
+  string cluster = 2;
+}
+
+// ServiceKey identifies an exported Service clusterset wide (namespace
+// sameness).
+message ServiceKey
+{
+  string clusterset = 1;
+  string namespace = 2;
+  string name = 3;
+}
+
+// ExportKey identifies the export of one Service from one cluster.
+message ExportKey
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string namespace = 3;
+  string name = 4;
+}
+
+// LeaseState is the state of a lease evaluated at read time.
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+  // The lease was renewed within ttl plus the skew allowance.
+  LEASE_STATE_ACTIVE = 1;
+  // The lease is past expires_at plus the skew allowance.
+  LEASE_STATE_EXPIRED = 2;
+}
+
+// Lease is a server-assigned liveness lease of a cluster. Nothing writes
+// expiry to the store; state is computed from renewed_at, ttl and the server
+// clock when the object is read.
+message Lease
+{
+  // Incarnation number minted by the server on every registration as
+  // max(previous + 1, unix milliseconds). Heartbeats must carry it.
+  uint64 epoch = 1;
+  // Lease duration.
+  google.protobuf.Duration ttl = 2;
+  // Server time of the last registration or heartbeat.
+  google.protobuf.Timestamp renewed_at = 3;
+  // renewed_at plus ttl.
+  google.protobuf.Timestamp expires_at = 4;
+  LeaseState state = 5;
+}
+
+// ConditionStatus mirrors the Kubernetes condition status.
+enum ConditionStatus {
+  CONDITION_STATUS_UNSPECIFIED = 0;
+  CONDITION_STATUS_TRUE = 1;
+  CONDITION_STATUS_FALSE = 2;
+  CONDITION_STATUS_UNKNOWN = 3;
+}
+
+// Condition mirrors metav1.Condition. Types and reasons follow sigs.k8s.io/mcs-api
+// (Valid, Ready, Conflict; NoConflicts, PortConflict, TypeConflict,
+// SessionAffinityConflict, SessionAffinityConfigConflict, AnnotationsConflict,
+// LabelsConflict, InternalTrafficPolicyConflict, TrafficDistributionConflict)
+// plus IPFamilyConflict and ClusterLeaseExpired.
+message Condition
+{
+  string type = 1;
+  ConditionStatus status = 2;
+  string reason = 3;
+  string message = 4;
+  google.protobuf.Timestamp last_transition_at = 5;
+}
+
+// LabelSelector selects objects whose labels contain every entry.
+message LabelSelector
+{
+  map<string, string> match_labels = 1;
+}
+
+// EventType is the kind of a watch event.
+//
+// A watch sends SNAPSHOT_START, one UPSERT per object, SNAPSHOT_END with the
+// revision, then UPSERT and DELETE deltas, and a BOOKMARK every 5 s. A watch
+// opened with a usable resume_revision skips the snapshot and receives only
+// the deltas after that revision; an unknown or stale revision yields a new
+// snapshot, never an error. A slow watcher is re-snapshotted, not
+// disconnected.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  // Start of a full snapshot. Clients discard their local state.
+  EVENT_TYPE_SNAPSHOT_START = 1;
+  // The object was created or changed; it carries the full object.
+  EVENT_TYPE_UPSERT = 2;
+  // The object was removed; it carries the last known object.
+  EVENT_TYPE_DELETE = 3;
+  // End of a full snapshot; revision is set.
+  EVENT_TYPE_SNAPSHOT_END = 4;
+  // Keepalive carrying the current revision; no object.
+  EVENT_TYPE_BOOKMARK = 5;
+}

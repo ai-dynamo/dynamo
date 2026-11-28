@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generates the checked-in Go, grpc-gateway and OpenAPI code under api/gen.
+# The plugins are local binaries that make proto-tools installs into bin/ at
+# the versions pinned in the Makefile.
+# The vendored google/api protos are inputs only: their Go code comes from
+# google.golang.org/genproto/googleapis/api.
+version: v2
+inputs:
+  - directory: api/proto
+    paths:
+      - api/proto/dynamo
+plugins:
+  - local: protoc-gen-go
+    out: api/gen/go
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: api/gen/go
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-grpc-gateway
+    out: api/gen/go
+    opt:
+      - paths=source_relative
+      - generate_unbound_methods=false
+  - local: protoc-gen-openapiv2
+    out: api/gen/openapi
+    opt:
+      - allow_merge=true
+      - merge_file_name=mcs
+      - output_format=json

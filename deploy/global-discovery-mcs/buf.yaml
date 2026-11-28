@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The Multi-Cluster Services registry API contract. google/api is vendored
+# from buf.build/googleapis so that generation needs no BSR dependency.
+version: v2
+modules:
+  - path: api/proto
+lint:
+  use:
+    - STANDARD
+  ignore:
+    - api/proto/google
+breaking:
+  use:
+    - FILE
+  ignore:
+    - api/proto/google
