@@ -16,7 +16,9 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::local_model::runtime_config::{
+    VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_GENERATE_CONTENT_PARTS_CAPABILITY,
+};
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
@@ -91,6 +93,7 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+    pub(crate) supports_content_parts: bool,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -818,6 +821,8 @@ impl Model {
                         .card()
                         .runtime_config
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+                    supports_content_parts: ws
+                        .supports_runtime_capability(VLLM_GENERATE_CONTENT_PARTS_CAPABILITY),
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))

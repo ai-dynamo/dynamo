@@ -13,6 +13,7 @@ fn routing_metadata(
         kv_cache_block_size,
         tower_connector_lora_enabled,
         lora_name,
+        supports_content_parts: true,
     }
 }
 
@@ -664,4 +665,54 @@ fn generate_projects_training_text_controls() {
         Some(&serde_json::json!(-1))
     );
     assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+}
+
+#[test]
+fn content_parts_become_the_workers_multimodal_input() {
+    let screenshot = "data:image/png;base64,AAAA";
+    let raw = json!({
+        "token_ids": [1, 2, 3],
+        "sampling_params": {},
+        "content_parts": [
+            {"type": "image_url", "url": screenshot},
+            {"type": "image_url", "uuid": "seen-before"},
+            {"type": "image_url", "url": "https://example.com/a.png"},
+        ],
+        "return_token_ids": true,
+    });
+    let preprocessed = project(&raw, &routing_metadata(16, false, None));
+
+    let envelope = &preprocessed.extra_args.as_ref().unwrap()["vllm_tito"];
+    assert!(
+        envelope.get("content_parts").is_none(),
+        "media must reach the worker as multimodal input, not in the opaque envelope"
+    );
+    assert_eq!(envelope["return_token_ids"], json!(true));
+    assert_eq!(
+        serde_json::to_value(preprocessed.multi_modal_data.as_ref().unwrap()).unwrap(),
+        json!({"image_url": [
+            {"Url": screenshot},
+            {"UuidOnly": "seen-before"},
+            {"Url": "https://example.com/a.png"},
+        ]})
+    );
+    assert_eq!(
+        preprocessed.multi_modal_uuids,
+        Some(std::collections::HashMap::from([(
+            "image_url".to_string(),
+            vec![
+                data_url_identity(screenshot),
+                Some("seen-before".to_string()),
+                None,
+            ],
+        )]))
+    );
+
+    // Older workers would drop the media and answer without it.
+    let old_worker = Worker {
+        supports_content_parts: false,
+        ..routing_metadata(16, false, None)
+    };
+    let request = serde_json::from_value(raw).unwrap();
+    assert!(preprocessed_from_generate(request, "test-model", None, "id", &old_worker).is_err());
 }

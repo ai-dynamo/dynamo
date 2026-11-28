@@ -125,6 +125,8 @@ pub struct Worker<'a> {
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
     pub tower_connector_lora_enabled: bool,
+    /// The workers advertise `VLLM_GENERATE_CONTENT_PARTS_CAPABILITY`.
+    pub supports_content_parts: bool,
 }
 
 /// A started client request.

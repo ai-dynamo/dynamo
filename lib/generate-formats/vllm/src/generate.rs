@@ -19,6 +19,8 @@ use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorT
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use dynamo_llm::preprocessor::media::max_data_url_bytes;
+use dynamo_llm::protocols::TokenIdType;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use dynamo_llm::protocols::openai::validate;
@@ -65,10 +67,69 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<Map<String, Value>>,
 
+    /// Raw media for the multimodal placeholders in `token_ids`, in prompt
+    /// order. The worker expands each placeholder while rendering the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<GenerateContentPart>>,
+
+    /// Return the prompt the engine ran, with multimodal placeholders
+    /// expanded, and the placeholder ranges within it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_token_ids: Option<bool>,
+
     /// Future top-level fields, including Python-frontend-only fields such as
     /// `features`, are retained and forwarded to the worker.
     #[serde(flatten)]
     pub passthrough: Map<String, Value>,
+}
+
+/// One raw media item of `content_parts`, as vLLM's Generate API accepts it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GenerateContentPart {
+    /// `image_url`, `video_url`, or `audio_url`.
+    #[serde(rename = "type")]
+    pub kind: String,
+
+    /// Media URL, including inline `data:` URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Cache identity of the media. Without `url`, the item must already be in
+    /// the worker's multimodal cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+}
+
+impl GenerateContentPart {
+    /// Apply the chat preprocessor's media rules to one content part.
+    fn validate(&self) -> Result<(), String> {
+        let kind = self.kind.as_str();
+        if !matches!(kind, "image_url" | "video_url" | "audio_url") {
+            return Err(format!(
+                "content_parts type {kind:?} is not supported; use image_url, video_url, or audio_url."
+            ));
+        }
+        if self.uuid.as_deref().is_some_and(str::is_empty) {
+            return Err(format!("{kind} uuid must be a non-empty string."));
+        }
+        match (&self.url, &self.uuid) {
+            (None, None) => Err(format!(
+                "{kind} part has neither url nor uuid; at least one is required."
+            )),
+            (None, Some(_)) if kind != "image_url" => Err(format!(
+                "UUID-only cache reuse is not supported for {kind}; provide a media url."
+            )),
+            (Some(url), _) if url.starts_with("data:") && url.len() > max_data_url_bytes() => {
+                Err(format!(
+                    "{kind} data: URL is {} bytes, exceeds the {}-byte limit. To raise the limit, \
+                     set DYN_MM_MAX_DATA_URL_MB (in megabytes) on both the frontend and the workers.",
+                    url.len(),
+                    max_data_url_bytes()
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl GenerateRequest {
@@ -76,6 +137,7 @@ impl GenerateRequest {
         GenerateResponseOptions {
             include_logprobs: self.sampling_params.logprobs().is_some(),
             include_prompt_logprobs: self.sampling_params.prompt_logprobs().is_some(),
+            include_prompt_token_ids: self.return_token_ids.unwrap_or(false),
         }
     }
 
@@ -132,6 +194,21 @@ impl GenerateRequest {
             return Err(format!(
                 "sampling_params.min_tokens ({min_tokens}) exceeds max_tokens ({max_tokens})."
             ));
+        }
+
+        if let Some(content_parts) = &self.content_parts {
+            // As in vLLM, an empty list does not conflict with features.
+            if !content_parts.is_empty()
+                && self
+                    .passthrough
+                    .get("features")
+                    .is_some_and(|f| !f.is_null())
+            {
+                return Err("content_parts and features are mutually exclusive.".to_string());
+            }
+            for part in content_parts {
+                part.validate()?;
+            }
         }
 
         Ok(())
@@ -299,9 +376,11 @@ impl GenerateRoutedExperts {
         let Self::Tensor(tensor) = self else {
             return Ok(());
         };
+        // No routed tokens is valid: vLLM accepts a start at the prompt's end,
+        // and with one output token it returns no rows.
         anyhow::ensure!(
-            tensor.shape.len() == 3 && tensor.shape.iter().all(|dimension| *dimension > 0),
-            "structured routed_experts shape must contain three positive dimensions"
+            tensor.shape.len() == 3 && tensor.shape[1..].iter().all(|dimension| *dimension > 0),
+            "structured routed_experts shape must have three dimensions, the last two positive"
         );
         let width = match tensor.dtype.as_str() {
             "uint8" | "int8" => 1,
@@ -362,12 +441,21 @@ pub struct GenerateResponse {
     pub prompt_logprobs: Option<PromptLogprobs>,
 
     pub kv_transfer_params: Option<serde_json::Value>,
+
+    /// Prompt the engine ran, with multimodal placeholders expanded. Set when
+    /// the request asks for `return_token_ids`.
+    pub prompt_token_ids: Option<Vec<TokenIdType>>,
+
+    /// Per-modality `{offset, length}` ranges within `prompt_token_ids`, or
+    /// `null` for a text-only prompt.
+    pub mm_placeholders: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct GenerateResponseOptions {
     include_logprobs: bool,
     include_prompt_logprobs: bool,
+    include_prompt_token_ids: bool,
 }
 
 /// Per-index accumulation state while folding a stream of
@@ -540,6 +628,8 @@ pub(crate) struct GenerateAggregator {
     prompt_logprobs: Option<PromptLogprobs>,
     kv_transfer_params: Option<Value>,
     kv_transfer_params_from_engine_data: bool,
+    prompt_token_ids: Option<Vec<TokenIdType>>,
+    mm_placeholders: Option<Value>,
 }
 
 impl GenerateAggregator {
@@ -550,6 +640,8 @@ impl GenerateAggregator {
             prompt_logprobs: None,
             kv_transfer_params: None,
             kv_transfer_params_from_engine_data: false,
+            prompt_token_ids: None,
+            mm_placeholders: None,
         }
     }
 
@@ -568,6 +660,19 @@ impl GenerateAggregator {
             && let Some(prompt_logprobs) = engine_data.remove("prompt_logprobs")
         {
             self.prompt_logprobs = Some(parse_prompt_logprobs(prompt_logprobs)?);
+        }
+        if options.include_prompt_token_ids
+            && self.prompt_token_ids.is_none()
+            && let Some(prompt_token_ids) = engine_data.remove("prompt_token_ids")
+        {
+            self.prompt_token_ids = serde_json::from_value(prompt_token_ids).map_err(|error| {
+                anyhow::anyhow!("invalid generate prompt_token_ids payload: {error}")
+            })?;
+        }
+        if options.include_prompt_token_ids
+            && let Some(mm_placeholders) = engine_data.remove("mm_placeholders")
+        {
+            self.mm_placeholders = Some(mm_placeholders);
         }
         if !self.kv_transfer_params_from_engine_data
             && output.finish_reason.is_some()
@@ -614,6 +719,8 @@ impl GenerateAggregator {
             prompt_logprobs,
             kv_transfer_params,
             kv_transfer_params_from_engine_data: _,
+            prompt_token_ids,
+            mm_placeholders,
         } = self;
 
         let mut choices: Vec<GenerateResponseChoice> = choices
@@ -636,11 +743,18 @@ impl GenerateAggregator {
             "generate stream ended without a complete choice"
         );
 
+        anyhow::ensure!(
+            !options.include_prompt_token_ids || prompt_token_ids.is_some(),
+            "generate response requested return_token_ids but returned no prompt_token_ids"
+        );
+
         Ok(GenerateResponse {
             request_id,
             choices,
             prompt_logprobs,
             kv_transfer_params,
+            prompt_token_ids,
+            mm_placeholders,
         })
     }
 }

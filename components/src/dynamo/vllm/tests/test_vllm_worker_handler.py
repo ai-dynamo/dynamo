@@ -936,6 +936,44 @@ async def test_engine_data_uses_effective_engine_prompt(
 
 
 @pytest.mark.asyncio
+async def test_tito_images_take_the_multimodal_path():
+    from vllm.multimodal.inputs import PlaceholderRange
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    tito = {"sampling_params": {"max_tokens": 2}, "return_token_ids": True}
+    request = {
+        "token_ids": [1, 99, 2],
+        "multi_modal_data": {"image_url": [{"Url": "data:image/png;base64,AAAA"}]},
+        "extra_args": {"vllm_tito": tito},
+    }
+    prompt = {"multi_modal_data": {"image": ["loaded-image"]}}
+    prepare_input = handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(request, None, None, prompt)
+    )
+    placeholders = {"image": [PlaceholderRange(offset=1, length=3)]}
+    rendered = {"type": "multimodal", "mm_placeholders": placeholders}
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=1)),
+        renderer=SimpleNamespace(render_cmpl_async=AsyncMock(return_value=[rendered])),
+    )
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+
+    async def generate_tokens(*args, **kwargs):
+        yield {"token_ids": [11]}
+        yield {"token_ids": [12], "finish_reason": "stop"}
+
+    handler.generate_tokens = generate_tokens
+    chunks = [c async for c in handler._generate_token_mode(request, MagicMock(), "r")]
+
+    # The token-only TITO prompt would drop the images.
+    prepare_input.assert_awaited_once()
+    expected = {"image": [{"offset": 1, "length": 3}]}
+    assert chunks[0]["engine_data"]["mm_placeholders"] == expected
+    assert "engine_data" not in chunks[1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.timeout(5)
 @pytest.mark.parametrize("case", ["grammar_rejected", "engine_error"])
 async def test_generate_engine_failure_status(case):

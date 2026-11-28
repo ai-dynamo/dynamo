@@ -17,6 +17,7 @@ from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_re
 from dynamo.llm import HttpError, ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
+VLLM_GENERATE_CONTENT_PARTS_CAPABILITY = "vllm_generate_content_parts"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
 JSON_MULTIMODAL_CAPABILITY = "custom_json_v1"
 DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
@@ -34,6 +35,10 @@ def publish_json_multimodal_capability(
         and worker_type == WorkerType.Aggregated
     ):
         runtime_config.set_engine_specific(JSON_MULTIMODAL_CAPABILITY, json.dumps(True))
+        # The frontend sends Generate content_parts only to workers that load them.
+        runtime_config.set_engine_specific(
+            VLLM_GENERATE_CONTENT_PARTS_CAPABILITY, json.dumps(True)
+        )
 
 
 def publish_engine_generate_capability(
@@ -68,6 +73,22 @@ class EngineGenerateInput:
     prompt: Any
     sampling_params: SamplingParams
     priority: int
+    return_token_ids: bool = False
+
+
+def response_mm_placeholders(prompt: Any) -> dict[str, list[dict]] | None:
+    """A rendered prompt's placeholder ranges, as vLLM's Generate API returns them."""
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+        placeholder_ranges_from_engine_input,
+    )
+
+    placeholders = placeholder_ranges_from_engine_input(prompt)
+    if placeholders is None:
+        return None
+    return {
+        modality: [r.model_dump() for r in ranges]
+        for modality, ranges in placeholders.items()
+    }
 
 
 @lru_cache(maxsize=1)
@@ -202,14 +223,18 @@ def adapt_engine_generate_request(
     if not decode_capable:
         raise ValueError("TITO requests require an aggregated or decode vLLM worker")
     if envelope.get("content_parts"):
-        raise ValueError("TITO raw multimodal content_parts are not supported")
+        raise ValueError(
+            "TITO content_parts must arrive as multimodal input; upgrade the frontend"
+        )
 
     raw_sampling_params = envelope.get("sampling_params")
     if not isinstance(raw_sampling_params, dict):
         raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
     features = envelope.get("features")
-    if features is not None and not allow_multimodal_features:
-        raise ValueError("TITO multimodal features require an aggregated vLLM worker")
+    if (
+        features is not None or request.get("multi_modal_data") is not None
+    ) and not allow_multimodal_features:
+        raise ValueError("TITO multimodal input requires an aggregated vLLM worker")
     if isinstance(features, dict):
         kwargs_data = features.get("kwargs_data")
         if not isinstance(kwargs_data, dict):
@@ -224,7 +249,8 @@ def adapt_engine_generate_request(
         raise ValueError(
             "sampling_params.routed_experts_prompt_start must be a non-negative integer"
         )
-    if raw_prompt_start >= len(token_ids):
+    # Image tokens are not expanded yet, so vLLM checks the offset once they are.
+    if request.get("multi_modal_data") is None and raw_prompt_start >= len(token_ids):
         raise ValueError(
             "sampling_params.routed_experts_prompt_start must be smaller than "
             "the prompt token count"
@@ -313,4 +339,5 @@ def adapt_engine_generate_request(
             if routing_priority is None
             else -int(routing_priority)
         ),
+        return_token_ids=bool(envelope.get("return_token_ids")),
     )

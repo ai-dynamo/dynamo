@@ -115,6 +115,7 @@ from .engine_generate import (
     adapt_engine_generate_request,
     publish_engine_generate_capability,
     publish_json_multimodal_capability,
+    response_mm_placeholders,
 )
 from .engine_monitor import VllmEngineMonitor
 from .errors import uuid_image_cache_miss_error, vllm_client_error_to_http_error
@@ -3765,7 +3766,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
-        elif engine_generate_input is not None:
+        elif engine_generate_input is not None and not has_mm_data:
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = engine_generate_input.prompt
@@ -3984,6 +3985,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     raise InvalidArgument(str(exc)) from None
                 raise
 
+        return_token_ids = (
+            engine_generate_input is not None and engine_generate_input.return_token_ids
+        )
+        if return_token_ids and prompt.get("multi_modal_data"):
+            # Expand the images to return their token positions in the prompt.
+            # This caches the images, so only do it once all checks passed.
+            (prompt,) = await self.engine_client.renderer.render_cmpl_async([prompt])
+
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()
         ):
@@ -4003,6 +4012,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if want_engine_data
                     else None
                 )
+                response_placeholders = (
+                    response_mm_placeholders(prompt) if return_token_ids else None
+                )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
                 try:
@@ -4020,7 +4032,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         # Transferred prefill KV counts as cached in vLLM, so a
                         # decode attempt's count would not be local reuse.
                         report_kv_cache_hit=kv_params is None,
-                        want_engine_data=want_engine_data,
+                        want_engine_data=want_engine_data or return_token_ids,
                         kv_hints=kv_hints,
                         artifact_session=artifact_session,
                         emit_routed_experts=(
@@ -4053,6 +4065,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 accumulated_token_ids,
                                 accumulated_log_probs,
                             )
+                        if response_placeholders is not None:
+                            tok.setdefault("engine_data", {})[
+                                "mm_placeholders"
+                            ] = response_placeholders
+                            response_placeholders = None
                         yield tok
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")
