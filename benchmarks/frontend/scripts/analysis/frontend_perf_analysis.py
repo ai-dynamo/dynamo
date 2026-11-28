@@ -67,7 +67,6 @@ class PrometheusSnapshot:
     tokio_event_loop_stall_total: float = 0.0
     tokio_global_queue_depth: float = 0.0
     tokio_budget_forced_yield_total: float = 0.0
-    tokio_worker_busy_ratio: list = field(default_factory=list)
     tcp_pool_active: float = 0.0
     tcp_pool_idle: float = 0.0
     compute_pool_active: float = 0.0
@@ -271,7 +270,7 @@ def print_tokio_health(points: list[TestPoint]) -> None:
     print(f"{'='*80}")
     print(
         f"{'Key':>20} {'Avg Poll ns':>12} {'Max Poll ns':>12} "
-        f"{'Stalls':>8} {'Queue':>8} {'Yields':>8} {'Busy Avg':>10}"
+        f"{'Stalls':>8} {'Queue':>8} {'Yields':>8}"
     )
     print("-" * 90)
 
@@ -286,11 +285,6 @@ def print_tokio_health(points: list[TestPoint]) -> None:
             else 0
         )
         max_poll = max(pm.tokio_worker_mean_poll_time_ns, default=0)
-        avg_busy = (
-            sum(pm.tokio_worker_busy_ratio) / len(pm.tokio_worker_busy_ratio)
-            if pm.tokio_worker_busy_ratio
-            else 0
-        )
 
         # Health indicators
         poll_status = ""
@@ -303,8 +297,7 @@ def print_tokio_health(points: list[TestPoint]) -> None:
             f"{p.key:>20} {avg_poll:>12.0f} {max_poll:>12.0f} "
             f"{pm.tokio_event_loop_stall_total:>8.0f} "
             f"{pm.tokio_global_queue_depth:>8.0f} "
-            f"{pm.tokio_budget_forced_yield_total:>8.0f} "
-            f"{avg_busy:>10.3f}{poll_status}"
+            f"{pm.tokio_budget_forced_yield_total:>8.0f}{poll_status}"
         )
 
 

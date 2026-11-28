@@ -189,11 +189,14 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
 
 
 def read_trtllm_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
-    """Read the worker's successful-transfer count and transferred-byte sum."""
+    """Read the worker's successful-transfer count and transferred-byte sum.
+
+    The transfer count is the bytes histogram's `_count`.
+    """
     response = requests.get(f"http://localhost:{worker_system_port}/metrics", timeout=1)
     response.raise_for_status()
     return (
-        sum_metric_samples(response.text, "trtllm_kv_transfer_success_total"),
+        sum_metric_samples(response.text, "trtllm_kv_transfer_bytes_count"),
         sum_metric_samples(response.text, "trtllm_kv_transfer_bytes_sum"),
     )
 
