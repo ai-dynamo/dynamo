@@ -715,6 +715,7 @@ fn build_llm_metric_annotation(
         input_tokens,
         output_tokens,
         chunk_tokens,
+        text_after_think_opener: None,
         cached_tokens,
         image_count: mm_counts.image,
         video_count: mm_counts.video,
@@ -771,7 +772,8 @@ struct ChoiceReasoningState {
 /// This is intentionally chunk-granular: if one decoded chunk contains both reasoning
 /// and visible content, every token in that chunk is counted as reasoning. The estimate
 /// therefore overcounts visible-content tokens in mixed chunks. A positive count supplied
-/// by the backend remains authoritative.
+/// by the backend remains authoritative. Only parsers that consume the literal
+/// `<think>` opener get the one-token adjustment for a coalesced opening chunk.
 #[derive(Debug, Default)]
 struct ReasoningUsageEstimator {
     total: u32,
@@ -808,7 +810,22 @@ impl ReasoningUsageEstimator {
 
         if token_count > 0 {
             if has_reasoning || usage_chunk_while_reasoning {
-                self.total = self.total.saturating_add(token_count);
+                // The parser can consume a leading <think> and emit the rest of
+                // the same chunk as reasoning. A separately streamed opener
+                // contributes zero, so exclude it here as well.
+                let stripped_opener = chunk
+                    .llm_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.text_after_think_opener.as_deref())
+                    .is_some_and(|tail| {
+                        matches!(chunk.inner.choices.as_slice(), [choice]
+                        if !self.active_choices.contains(&choice.index)
+                            && !choice_has_visible_output(choice)
+                            && choice.delta.reasoning_content.as_deref() == Some(tail))
+                    });
+                self.total = self
+                    .total
+                    .saturating_add(token_count - u32::from(stripped_opener));
             } else if let Some(index) = held_choice {
                 let held = self.held.entry(index).or_default();
                 *held = held.saturating_add(token_count);
@@ -2125,6 +2142,8 @@ impl EmbeddingTokenizerState {
 }
 
 pub struct OpenAIPreprocessor {
+    /// Vocabulary ID of a standalone reasoning opener, when the model has one.
+    think_opener_id: Option<TokenIdType>,
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
@@ -3525,6 +3544,7 @@ impl OpenAIPreprocessor {
         };
 
         Ok(Arc::new(Self {
+            think_opener_id: tokenizer.token_to_id("<think>").ok().flatten(),
             formatter,
             tokenizer,
             embedding_tokenizers,
@@ -6606,6 +6626,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             None,
+            None,
         )
     }
 
@@ -6620,6 +6641,7 @@ impl OpenAIPreprocessor {
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
+        think_opener_id: Option<TokenIdType>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
@@ -6669,6 +6691,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
             mm_counts: MultimodalCounts,
             image_tokens: Option<usize>,
+            think_opener_id: Option<TokenIdType>,
         }
 
         let tracker = generator.tracker();
@@ -6688,6 +6711,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            think_opener_id,
         };
 
         /// The response stream. `state` is `None` once the stream has ended, so the state,
@@ -6806,6 +6830,18 @@ impl OpenAIPreprocessor {
                     };
 
                     let current_osl = self.cumulative_output_tokens;
+                    let text_after_think_opener = response.data.as_ref().and_then(|output| {
+                        if chunk_tokens <= 1 {
+                            return None;
+                        }
+                        let tail = output.text.as_deref()?.strip_prefix("<think>")?;
+                        // Per-token text is optional when logprobs are disabled.
+                        let starts_with_opener = match self.think_opener_id {
+                            Some(id) => output.token_ids.first() == Some(&id),
+                            None => output.tokens.first()?.as_deref() == Some("<think>"),
+                        };
+                        starts_with_opener.then(|| Box::from(tail))
+                    });
 
                     let mut response = response.map_data(|data| {
                         self.response_generator
@@ -6825,7 +6861,7 @@ impl OpenAIPreprocessor {
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
                     let tracker = self.detokenize_metrics.tracker();
-                    let llm_metrics = build_llm_metric_annotation(
+                    let mut llm_metrics = build_llm_metric_annotation(
                         tracker,
                         isl.unwrap_or(0),
                         current_osl,
@@ -6834,6 +6870,7 @@ impl OpenAIPreprocessor {
                         self.mm_counts,
                         self.image_tokens,
                     );
+                    llm_metrics.text_after_think_opener = text_after_think_opener;
                     if self.trace_tokens_enabled {
                         crate::request_trace::record_llm_metric_tokens(
                             tracker,
@@ -9171,6 +9208,7 @@ impl
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            self.think_opener_id,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream_with_constraint(
@@ -9401,6 +9439,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
+            None,
             None,
         );
 

@@ -1942,6 +1942,7 @@ mod tests {
             input_tokens: 7,
             output_tokens,
             chunk_tokens,
+            text_after_think_opener: None,
             cached_tokens: None,
             image_count: 0,
             video_count: 0,
