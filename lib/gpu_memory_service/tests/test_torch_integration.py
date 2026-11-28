@@ -455,3 +455,51 @@ def test_integration_helper_without_explicit_init_vmm(tmp_path):
 
     # Clean up
     _reset_vmm_singleton()
+
+
+@pytest.mark.timeout(30)
+def test_materialize_meta_module_with_post_processed_weights(running_gms):
+    """RO meta-model materialization accepts post-load reshaped/repacked weights."""
+    socket_path = running_gms
+    reshaped = torch.arange(32, device=_DEVICE, dtype=torch.float32).reshape(2, 2, 8)
+    repacked_scale = torch.arange(4, device=_DEVICE, dtype=torch.float32)
+    extra = torch.arange(1, 5, device=_DEVICE, dtype=torch.float32)
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    committed = False
+    try:
+        gms_model = _TinyModule().to(_DEVICE)
+        _, gms_weight = _make_gms_tensor(writer, reshaped, tag="weights")
+        gms_model.linear.weight = torch.nn.Parameter(gms_weight, requires_grad=False)
+        _, gms_scale = _make_gms_tensor(writer, repacked_scale, tag="weights")
+        gms_model._buffers["scale"] = gms_scale
+        _, gms_extra = _make_gms_tensor(writer, extra, tag="weights")
+        gms_model.extra = gms_extra
+
+        register_module_tensors(writer, gms_model)
+        committed = writer.commit()
+        del gms_weight, gms_scale, gms_extra, gms_model
+    finally:
+        writer.close()
+    assert committed
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    try:
+        materialized = _TinyModule().to("meta")
+        assert materialized.linear.weight.is_meta
+        assert materialized.linear.weight.shape == (4, 8)
+
+        materialize_module_from_gms(reader, materialized, device_index=0)
+
+        assert not materialized.linear.weight.is_meta
+        assert isinstance(materialized.linear.weight, torch.nn.Parameter)
+        assert materialized.linear.weight.shape == (2, 2, 8)
+        _assert_exact_tensor_equal(reshaped, materialized.linear.weight.data)
+        _assert_exact_tensor_equal(
+            repacked_scale, cast(torch.Tensor, materialized.scale)
+        )
+        _assert_exact_tensor_equal(extra, cast(torch.Tensor, materialized.extra))
+    finally:
+        reader.close()
