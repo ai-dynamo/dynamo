@@ -5,6 +5,7 @@
 Test Execution Times (Last Run: 2026-08-28):
 - test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
 - test_request_cancellation_vllm_decode_cancel: ~130s (gpu_2)
+- test_request_cancellation_vllm_decode_cancel_during_kv_receive: ~123s [nats] / ~128s [tcp] (gpu_2, 2026-11-24)
 - test_request_cancellation_vllm_prefill_cancel: ~108s [nats] / ~123s [tcp] (gpu_2)
 """
 
@@ -12,25 +13,31 @@ import json
 import logging
 import os
 import shutil
+import time
 from enum import Enum
+from pathlib import Path
 
 import pytest
 
 from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
+    read_log_content,
     read_streaming_responses,
     read_worker_generate_summary,
     send_cancellable_request,
+    send_completion_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
+    build_nixl_kv_transfer_config,
     build_nixl_kv_transfer_config_json,
     detect_target_device,
     get_default_vllm_block_size,
 )
+from tests.utils.engine_metrics import VllmMetricsChecker
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -55,6 +62,18 @@ DECODE_CANCEL_TEST_TIMEOUT_S = 900
 # See read_streaming_responses.
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
+
+# Long enough to observe and abort the held request. Decode notifies prefill
+# when the real read completes, before the hold starts, so prefill frees its
+# blocks without waiting for the hold or the NIXL KV lease.
+KV_RECEIVE_HOLD_S = 15.0
+KV_RECEIVE_RELEASE_ALLOWANCE_S = 10.0
+KV_RECEIVE_WARMUP_PROMPT = "Name three primary colors."
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DELAYED_NIXL_CONNECTOR_MODULE = (
+    "tests.fault_tolerance.cancellation.delayed_nixl_connector"
+)
 
 
 class WorkerMode(Enum):
@@ -81,6 +100,7 @@ class DynamoWorkerProcess(ManagedProcess):
         frontend_port: int,
         mode: WorkerMode = WorkerMode.AGGREGATED,
         timeout_s: int = 300,
+        hold_kv_receive_s: float | None = None,
     ):
         self.mode = mode
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
@@ -127,12 +147,19 @@ class DynamoWorkerProcess(ManagedProcess):
             ]
         elif mode == WorkerMode.DECODE:
             command.extend(["--disaggregation-mode", "decode"])
-            command.extend(
-                [
-                    "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json("kv_consumer"),
-                ]
-            )
+            kv_transfer_config = build_nixl_kv_transfer_config("kv_consumer")
+            if hold_kv_receive_s is not None:
+                kv_transfer_config[
+                    "kv_connector_module_path"
+                ] = DELAYED_NIXL_CONNECTOR_MODULE
+                kv_transfer_config["kv_connector_extra_config"] = {
+                    "dynamo_test_recv_hold_s": hold_kv_receive_s
+                }
+                # EngineCore imports the connector module from the repository.
+                env["PYTHONPATH"] = os.pathsep.join(
+                    [str(REPO_ROOT), *filter(None, [env.get("PYTHONPATH")])]
+                )
+            command.extend(["--kv-transfer-config", json.dumps(kv_transfer_config)])
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -450,6 +477,227 @@ def test_request_cancellation_vllm_decode_cancel(
                 logger.info(
                     "Chat completion stream cancellation in decode phase detected successfully"
                 )
+
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="chat_completion_stream",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    max_wait_ms=15000,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
+                )
+
+
+@pytest.mark.timeout(DECODE_CANCEL_TEST_TIMEOUT_S)
+@pytest.mark.nightly
+@pytest.mark.gpu_2
+@pytest.mark.profiled_vram_gib(8.6)
+@pytest.mark.requested_vllm_kv_cache_bytes(2_147_483_648)
+def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
+):
+    """Cancel a decode request whose NIXL receive is held in WAITING_FOR_REMOTE_KVS.
+
+    The decode worker loads delayed_nixl_connector, which reports each finished
+    receive only after KV_RECEIVE_HOLD_S. The abort must land promptly while the
+    receive is held, vLLM must keep the blocks until the receive is reported,
+    and both workers must then return to idle with no KV in use.
+    """
+
+    def kv_cache_usage(metrics: VllmMetricsChecker) -> float:
+        return sum(metrics.samples(metrics.scrape(), "vllm:kv_cache_usage_perc"))
+
+    def wait_for_kv_cache_released(metrics: VllmMetricsChecker) -> None:
+        deadline = time.monotonic() + metrics.settle_timeout
+        while (usage := kv_cache_usage(metrics)) > 0:
+            assert time.monotonic() < deadline, (
+                f"KV cache still in use after the receive settled: {usage=}; "
+                f"metrics={metrics.url}"
+            )
+            time.sleep(0.05)
+
+    with DynamoFrontendProcess(request) as frontend:
+        logger.info("Frontend started successfully")
+
+        with DynamoWorkerProcess(
+            request,
+            frontend.frontend_port,
+            mode=WorkerMode.PREFILL,
+        ) as prefill_worker:
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+
+            with DynamoWorkerProcess(
+                request,
+                frontend.frontend_port,
+                mode=WorkerMode.DECODE,
+                hold_kv_receive_s=KV_RECEIVE_HOLD_S,
+            ) as decode_worker:
+                logger.info("Decode Worker PID: %s", decode_worker.get_pid())
+
+                decode_metrics = VllmMetricsChecker(port_env="DYN_SYSTEM_PORT")
+                decode_metrics.bind_environment(decode_worker.env)
+                prefill_metrics = VllmMetricsChecker(port_env="DYN_SYSTEM_PORT")
+                prefill_metrics.bind_environment(prefill_worker.env)
+
+                # Warm up: an abort before the first NIXL handshake waits for the
+                # prefill KV lease (#17871). A new prompt avoids the prefix cache.
+                warmup = send_completion_request(
+                    KV_RECEIVE_WARMUP_PROMPT, 8, frontend.frontend_port
+                )
+                warmup_response = warmup.get_response(
+                    timeout=KV_RECEIVE_HOLD_S + KV_RECEIVE_RELEASE_ALLOWANCE_S
+                )
+                assert (
+                    warmup_response.status_code == 200
+                ), f"Warm-up failed: {warmup_response.status_code} {warmup_response.text}"
+                decode_metrics.wait_for_scheduler(is_active=False)
+                # The hold line can follow "Decode Request ID" within
+                # milliseconds, so later polls search from here.
+                request_log_offset = len(read_log_content(decode_worker.log_path))
+
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=CANCELLATION_MAX_TOKENS,
+                    timeout_s=DECODE_CANCEL_STREAM_READ_TIMEOUT_S,
+                )
+
+                request_id, _ = poll_for_pattern(
+                    process=decode_worker,
+                    pattern="Decode Request ID: ",
+                    log_offset=request_log_offset,
+                    match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
+                )
+
+                poll_for_pattern(
+                    process=prefill_worker,
+                    pattern=f"Prefill Request ID: {request_id}",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                )
+
+                # vLLM may suffix the engine request ID, so match by prefix.
+                hold_pattern = f"Holding KV receive for request {request_id}"
+                release_pattern = f"Released held KV receive for request {request_id}"
+                _, hold_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern=hold_pattern,
+                    log_offset=request_log_offset,
+                    match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
+                )
+                held_at = time.monotonic()
+
+                # A held receive keeps the request in WAITING_FOR_REMOTE_KVS until
+                # the connector releases it.
+                running, waiting = decode_metrics.scheduler_counts()
+                deadline = time.monotonic() + 3
+                while (running, waiting) != (0, 1):
+                    assert time.monotonic() < deadline, (
+                        "Decode request is not waiting for its KV receive: "
+                        f"{running=}, {waiting=}"
+                    )
+                    time.sleep(0.05)
+                    running, waiting = decode_metrics.scheduler_counts()
+
+                cancelled_at = time.monotonic()
+                cancellable_req.cancel()
+                logger.info("Cancelled request ID: %s", request_id)
+
+                poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Aborted Request ID: {request_id}",
+                    log_offset=request_log_offset,
+                    max_wait_ms=5000,
+                    poll_interval_ms=50,
+                )
+                # poll_for_pattern bounds iterations, not wall time.
+                abort_latency_s = time.monotonic() - cancelled_at
+                assert (
+                    abort_latency_s <= 5
+                ), f"Abort took {abort_latency_s:.2f}s after cancellation"
+                aborted_after_s = time.monotonic() - held_at
+
+                decode_metrics.wait_for_scheduler(is_active=False)
+                usage_after_abort = kv_cache_usage(decode_metrics)
+                decode_log = read_log_content(decode_worker.log_path)
+                assert release_pattern not in decode_log[hold_log_offset:], (
+                    f"KV receive was released {aborted_after_s:.1f}s after the "
+                    "hold started, before the abort was checked; the abort did "
+                    "not land while the receive was in flight"
+                )
+                assert usage_after_abort > 0, (
+                    "vLLM freed the decode blocks while the KV receive was "
+                    f"still in flight: {usage_after_abort=}"
+                )
+                logger.info(
+                    "Aborted %.2fs after the hold started; decode KV usage %s",
+                    aborted_after_s,
+                    usage_after_abort,
+                )
+
+                poll_for_pattern(
+                    process=frontend,
+                    pattern="issued control message control_msg=Kill",
+                    max_wait_ms=5000,
+                    poll_interval_ms=50,
+                )
+
+                poll_for_pattern(
+                    process=decode_worker,
+                    pattern=release_pattern,
+                    log_offset=hold_log_offset,
+                    match_type="contains",
+                    max_wait_ms=int(
+                        (KV_RECEIVE_HOLD_S + KV_RECEIVE_RELEASE_ALLOWANCE_S) * 1000
+                    ),
+                    poll_interval_ms=100,
+                )
+                logger.info(
+                    "Held receive released %.2fs after the hold started",
+                    time.monotonic() - held_at,
+                )
+
+                # The engine keeps stepping for delayed block frees, so both
+                # workers settle without new traffic.
+                for metrics in (decode_metrics, prefill_metrics):
+                    metrics.wait_for_scheduler(is_active=False)
+                    wait_for_kv_cache_released(metrics)
+
+                assert (
+                    decode_worker.proc.poll() is None
+                ), "Decode worker exited after the abort"
+                decode_log = read_log_content(decode_worker.log_path)
+                for crash_pattern in ("EngineDeadError", "EngineCore encountered"):
+                    assert (
+                        crash_pattern not in decode_log
+                    ), f"Decode EngineCore failed: found {crash_pattern!r}"
+
+                followup = send_completion_request(
+                    KV_RECEIVE_WARMUP_PROMPT, 8, frontend.frontend_port
+                )
+                followup_response = followup.get_response(
+                    timeout=KV_RECEIVE_HOLD_S + KV_RECEIVE_RELEASE_ALLOWANCE_S
+                )
+                assert followup_response.status_code == 200, (
+                    f"Follow-up request failed: {followup_response.status_code} "
+                    f"{followup_response.text}"
+                )
+                assert followup_response.json()["choices"][0][
+                    "text"
+                ], "Follow-up request returned no text"
 
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
