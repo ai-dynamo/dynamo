@@ -26,6 +26,21 @@ on:
         required: false
         type: string
         default: ''
+      pytest_keyword:
+        description: 'Optional pytest -k expression; when set, only test-xpu runs (fork-only)'
+        required: false
+        type: string
+        default: ''
+      models_dir:
+        description: 'Optional pre-populated HF cache for pytest --models-dir (offline, read-only) (fork-only)'
+        required: false
+        type: string
+        default: ''
+      hf_home:
+        description: 'Host HF cache dir for the test container (default /models)'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       framework:
@@ -45,6 +60,21 @@ on:
         default: ''
       pytest_markers:
         description: 'Pytest marker expression for test selection'
+        required: false
+        type: string
+        default: ''
+      pytest_keyword:
+        description: 'Optional pytest -k expression; when set, only test-xpu runs (fork-only)'
+        required: false
+        type: string
+        default: ''
+      models_dir:
+        description: 'Optional pre-populated HF cache for pytest --models-dir (offline, read-only) (fork-only)'
+        required: false
+        type: string
+        default: ''
+      hf_home:
+        description: 'Host HF cache dir for the test container (default /models)'
         required: false
         type: string
         default: ''
@@ -84,6 +114,13 @@ jobs:
               --output-short-filename
           echo "::endgroup::"
 
+      # Fork-only: skip TLS verification for downloads on runners behind a TLS-inspecting proxy.
+      - name: Disable TLS verification for downloads
+        shell: bash
+        run: |
+          perl -pi -e 's/\bwget (?=-|"?https?:\/\/|"?\$)/wget --no-check-certificate /g; s/\bcurl (?=-)/curl -k /g; s/^RUN wget (?=.*\| gpg --dearmor)/RUN set -o pipefail \&\& wget /' ./container/rendered.Dockerfile
+          grep -n -E 'no-check-certificate|curl -k' ./container/rendered.Dockerfile
+
 
       - name: Build XPU image
         id: build
@@ -99,6 +136,8 @@ jobs:
 
           docker build \
             --progress=plain \
+            --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy \
+            --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
             --tag "${IMAGE_TAG}" \
             -f ./container/rendered.Dockerfile \
             . 2>&1 | tee build-xpu.log
@@ -119,6 +158,8 @@ jobs:
 
           docker build \
             --progress=plain \
+            --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy \
+            --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
             --target test_image \
             --tag "${TEST_IMAGE_TAG}" \
             -f container/Dockerfile.test \
@@ -137,7 +178,7 @@ jobs:
 
   test-xpu-gms:
     needs: [build-xpu]
-    if: ${{ !cancelled() && needs.build-xpu.result == 'success' && (inputs.framework || 'vllm') == 'vllm' }}
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' && (inputs.framework || 'vllm') == 'vllm' && inputs.pytest_keyword == '' }}
     runs-on: xpu
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
@@ -192,6 +233,9 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
           start_minio: 'false'
+          models_dir: ${{ inputs.models_dir }}
+          hf_home: ${{ inputs.hf_home || '/models' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
       - name: Collect XPU diagnostics
         if: always()
@@ -280,6 +324,7 @@ jobs:
         uses: $/.github/actions/pytest
         with:
           pytest_marks: '${{ inputs.pytest_markers }} and xpu_1'
+          pytest_keyword: ${{ inputs.pytest_keyword }}
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-${{ env.FRAMEWORK }}'
           test_type: 'e2e'
@@ -288,6 +333,9 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
           start_minio: 'false'
+          models_dir: ${{ inputs.models_dir }}
+          hf_home: ${{ inputs.hf_home || '/models' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
       - name: Cleanup Pytest Containers
         if: always()
@@ -304,7 +352,7 @@ jobs:
 
   test-xpu-2card:
     needs: [build-xpu]
-    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' && inputs.pytest_keyword == '' }}
     runs-on: xpu-2
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
@@ -336,6 +384,9 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
           start_minio: 'false'
+          models_dir: ${{ inputs.models_dir }}
+          hf_home: ${{ inputs.hf_home || '/models' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
       - name: Cleanup Pytest Containers
         if: always()
