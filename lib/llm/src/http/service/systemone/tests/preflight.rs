@@ -64,7 +64,7 @@ fn preflight_selection_with_tokenizer(
             .unwrap();
     SystemOneExecutionSelection {
         card,
-        preprocessor,
+        preprocessor: Some(preprocessor),
         ..selection
     }
 }

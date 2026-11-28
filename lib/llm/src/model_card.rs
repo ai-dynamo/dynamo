@@ -49,13 +49,15 @@ fn append_runtime_contract_checksum(
     let Some(value) = runtime_config.runtime_data.get(key) else {
         return;
     };
+    append_contract_checksum(bytes, key, value);
+}
+
+fn append_contract_checksum(bytes: &mut Vec<u8>, key: &str, value: &serde_json::Value) {
     let mut value = value.clone();
     canonicalize_json_object_keys(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
-    // This contract controls model-visible media prompt expansion. Workers
-    // with different contracts must not share a cohort whose preprocessor is
-    // built from one representative card.
+    // Execution and preprocessing contracts are bound to one representative card.
     bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
     bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
     bytes.extend_from_slice(key.as_bytes());
@@ -1361,8 +1363,45 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
-    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
-        self.systemone_backend().is_some()
+    pub(crate) fn supports_decisions(&self) -> bool {
+        self.decision_profile().is_some()
+    }
+
+    pub(crate) fn decision_profile(
+        &self,
+    ) -> Option<(
+        crate::protocols::systemone::DecisionExecution,
+        dynamo_decisions::Capabilities,
+    )> {
+        use crate::protocols::systemone::{
+            DecisionExecution, WORKER_CANONICAL_V1, WorkerDecisionCapabilities,
+        };
+        if let Some(value) = self.runtime_config.runtime_data.get(WORKER_CANONICAL_V1) {
+            // Presence is authoritative: malformed or ambiguous metadata cannot fall back to causal scoring.
+            if self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1)
+                || self.runtime_config.supports_runtime_capability(
+                    crate::local_model::runtime_config::VLLM_CAUSAL_DECISION_V1,
+                )
+                || self.model_input != ModelInput::Tokens
+                || self.worker_type != Some(crate::worker_type::WorkerType::Aggregated)
+                || !self.needs.is_empty()
+            {
+                return None;
+            }
+            let capabilities = WorkerDecisionCapabilities::parse(value).ok()?;
+            return Some((
+                DecisionExecution::WorkerCanonicalV1,
+                capabilities.decision_capabilities(),
+            ));
+        }
+        self.systemone_backend().map(|backend| {
+            (
+                DecisionExecution::DynamoFrontend(backend),
+                backend.decision_capabilities(),
+            )
+        })
     }
 
     pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
@@ -1535,6 +1574,13 @@ impl ModelDeploymentCard {
                         crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
                         crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
                     }
+                }
+
+                if let Some(value) = self.runtime_config.runtime_data.get(crate::protocols::systemone::WORKER_CANONICAL_V1) {
+                    let normalized = crate::protocols::systemone::WorkerDecisionCapabilities::parse(value)
+                        .ok().and_then(|caps| serde_json::to_value(caps).ok())
+                        .unwrap_or_else(|| value.clone());
+                    append_contract_checksum(&mut bytes_to_hash, crate::protocols::systemone::WORKER_CANONICAL_V1, &normalized);
                 }
 
                 // Opaque JSON cannot be dispatched to older workers that ignore it.
@@ -4183,8 +4229,8 @@ mod ownership_tests {
         }
 
         let enabled = card(|_| {});
-        assert!(enabled.is_systemone_serial_eligible());
-        assert!(card(|card| card.migration_limit = 1).is_systemone_serial_eligible());
+        assert!(enabled.supports_decisions());
+        assert!(card(|card| card.migration_limit = 1).supports_decisions());
         let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
             |card| {
                 card.runtime_config
@@ -4216,7 +4262,7 @@ mod ownership_tests {
         ];
         for configure in unsupported {
             let unsupported = card(configure);
-            assert!(!unsupported.is_systemone_serial_eligible());
+            assert!(!unsupported.supports_decisions());
             assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
             let feature_off = card(|card| {
                 configure(card);
@@ -4239,14 +4285,14 @@ mod ownership_tests {
         card.runtime_config
             .runtime_data
             .insert("vllm_causal_decision_v1".into(), true.into());
-        assert!(card.is_systemone_serial_eligible());
+        assert!(card.supports_decisions());
         let checksum = card.mdcsum().to_string();
         for key in ["vllm_inference_v1_generate", "vllm_causal_decision_v1"] {
             let mut unsupported = ModelDeploymentCard::with_name_only("model");
             unsupported.worker_type = card.worker_type;
             unsupported.runtime_config = card.runtime_config.clone();
             unsupported.runtime_config.runtime_data.remove(key);
-            assert!(!unsupported.is_systemone_serial_eligible());
+            assert!(!unsupported.supports_decisions());
             assert_ne!(checksum, unsupported.mdcsum());
         }
     }
@@ -4603,5 +4649,61 @@ mod worker_type_tests {
         );
         let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
         assert!(restored.indexer_identity.is_none());
+    }
+    #[test]
+    fn canonical_worker_profiles_normalize_descriptors_and_isolate_capabilities() {
+        use crate::protocols::systemone::{DecisionExecution, WORKER_CANONICAL_V1};
+        fn card(value: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("generic-model");
+            card.model_input = ModelInput::Tokens;
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(16);
+            card.runtime_config.data_parallel_size = 4;
+            card.runtime_config
+                .runtime_data
+                .insert(WORKER_CANONICAL_V1.into(), value);
+            card
+        }
+        let descriptor = serde_json::json!({"max_questions":8,"max_candidates":64,
+            "question_types":["Predicate","Choice"],"measured_cache_reads":false,
+            "prompt_format_version":1,"routing":"round_robin"});
+        let object = card(descriptor.clone());
+        let string = card(serde_json::json!(
+            serde_json::to_string(&descriptor).unwrap()
+        ));
+        let (execution, caps) = object.decision_profile().unwrap();
+        assert_eq!(execution, DecisionExecution::WorkerCanonicalV1);
+        assert_eq!(caps.max_candidates, 64);
+        assert!(caps.supports_choice && caps.supports_predicate && !caps.supports_score);
+        assert!(!caps.measured_cache_reads);
+        assert_eq!(object.mdcsum(), string.mdcsum());
+        let mut reordered = descriptor.clone();
+        reordered["question_types"] = serde_json::json!(["Choice", "Predicate"]);
+        assert_eq!(object.mdcsum(), card(reordered).mdcsum());
+        let mut smaller = descriptor.clone();
+        smaller["max_candidates"] = serde_json::json!(2);
+        assert_ne!(object.mdcsum(), card(smaller).mdcsum());
+        for invalid in [
+            serde_json::Value::Bool(true),
+            serde_json::json!({}),
+            {
+                let mut value = descriptor.clone();
+                value["max_questions"] = serde_json::json!(0);
+                value
+            },
+            {
+                let mut value = descriptor.clone();
+                value["routing"] = serde_json::json!("kv");
+                value
+            },
+        ] {
+            assert!(card(invalid).decision_profile().is_none());
+        }
+        let mut ambiguous = card(descriptor);
+        ambiguous
+            .runtime_config
+            .runtime_data
+            .insert("sglang_systemone_serial_v1".into(), true.into());
+        assert!(ambiguous.decision_profile().is_none());
     }
 }

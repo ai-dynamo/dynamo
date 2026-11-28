@@ -10,6 +10,19 @@ import time
 import pytest
 import requests
 
+# (profile, output tokens per question, chat-template overrides)
+DECISION_EXECUTION_PROFILES = (
+    ("sglang", 0, True),
+    ("vllm_causal", 1, True),
+)
+
+
+def decision_profile(name):
+    for profile, tokens_per_question, template_overrides in DECISION_EXECUTION_PROFILES:
+        if profile == name:
+            return tokens_per_question, template_overrides
+    raise ValueError(f"Unknown decision execution profile: {name!r}")
+
 
 def post_with_capacity_retry(url, payload):
     for attempt in range(3):
@@ -33,13 +46,18 @@ def _is_capacity_rejection(response):
     return isinstance(error, dict) and error.get("code") == "rate_limit_exceeded"
 
 
-def decision_payload(model, dialect="oai"):
+def decision_payload(model, dialect="oai", *, execution_profile="sglang"):
+    _, template_overrides = decision_profile(execution_profile)
     state = "A customer was charged twice and requests a refund today."
     if dialect == "systemone":
         return {
             "model": model,
             "state": state,
-            "chat_template_kwargs": {"enable_thinking": False},
+            **(
+                {"chat_template_kwargs": {"enable_thinking": False}}
+                if template_overrides
+                else {}
+            ),
             "questions": {
                 "route": {
                     "type": "choice",

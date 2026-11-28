@@ -19,6 +19,8 @@ KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "router_hint_source_control_endpoints"
 )
 
+WORKER_CANONICAL_V1 = "worker_canonical_decision_v1"
+
 
 class DisaggregationMode(Enum):
     """Disaggregation mode for LLM workers."""

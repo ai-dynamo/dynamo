@@ -561,8 +561,30 @@ impl ModelWatcher {
             &router_config,
         );
 
+        let worker_decision = self.systemone_enabled
+            && matches!(
+                card.decision_profile(),
+                Some((
+                    crate::protocols::systemone::DecisionExecution::WorkerCanonicalV1,
+                    _
+                ))
+            );
+        if self.systemone_enabled
+            && card
+                .runtime_config
+                .runtime_data
+                .contains_key(crate::protocols::systemone::WORKER_CANONICAL_V1)
+            && card.decision_profile().is_none()
+        {
+            anyhow::bail!("invalid or unsupported canonical decision worker capability");
+        }
+        if worker_decision && router_config.router_mode != RouterMode::RoundRobin {
+            anyhow::bail!("canonical worker decision execution requires round-robin routing");
+        }
         if card.model_input == ModelInput::Tokens
-            && (card.model_type.supports_chat() || card.model_type.supports_completions())
+            && (card.model_type.supports_chat()
+                || card.model_type.supports_completions()
+                || worker_decision)
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
@@ -578,7 +600,7 @@ impl ModelWatcher {
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
             let needs_systemone_preprocessor =
-                self.systemone_enabled && card.is_systemone_serial_eligible();
+                self.systemone_enabled && card.supports_decisions() && !worker_decision;
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
@@ -621,7 +643,8 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline = needs_systemone_preprocessor
+            let needs_generate_pipeline = worker_decision
+                || needs_systemone_preprocessor
                 || supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
@@ -3624,7 +3647,7 @@ request_classifier:
                     as crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine)
             })
         }));
-        assert!(!spec.representative.card.is_systemone_serial_eligible());
+        assert!(!spec.representative.card.supports_decisions());
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
             .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
