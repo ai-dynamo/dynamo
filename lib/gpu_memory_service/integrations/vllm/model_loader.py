@@ -10,6 +10,8 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import copy
+import inspect
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -247,6 +249,248 @@ def register_gms_loader(load_format: str = "gms") -> None:
 # =============================================================================
 
 
+_KV_SCALE_PLACEHOLDERS = (
+    "k_scale",
+    "v_scale",
+    "q_scale",
+    "prob_scale",
+    "k_zero_point",
+    "v_zero_point",
+    "q_zero_point",
+)
+_DEFERRED_QUANT_MODULES_ATTR = "_gms_deferred_quant_modules"
+_DEFERRED_HOOK_MODULES_ATTR = "_gms_deferred_hook_modules"
+_META_TENSOR_ERRORS = (NotImplementedError, RuntimeError)
+
+
+def _pop_attr_list(model: torch.nn.Module, attr: str) -> list[torch.nn.Module]:
+    return model.__dict__.pop(attr, [])
+
+
+def _import_is_deferred_attention_layer():
+    """Resolve ``is_deferred_attention_layer`` across vLLM 0.33 and 0.34+."""
+    # Deferred import: gpu_memory_service can be imported without vLLM installed.
+    try:
+        from vllm.model_executor.layers.attention import (
+            is_deferred_attention_layer,
+        )
+
+        return is_deferred_attention_layer
+    except ImportError:
+        from vllm.model_executor.model_loader.utils import (
+            is_deferred_attention_layer,
+        )
+
+        return is_deferred_attention_layer
+
+
+def _iter_children_first(
+    root: torch.nn.Module, quant_base: type
+) -> list[torch.nn.Module]:
+    """Traverse modules child-first, stopping before children of quantized layers."""
+    seen: set[torch.nn.Module] = set()
+    ordered: list[torch.nn.Module] = []
+
+    def _visit(node: torch.nn.Module) -> None:
+        quantized = isinstance(getattr(node, "quant_method", None), quant_base)
+        for child in () if quantized else node.children():
+            if child not in seen:
+                seen.add(child)
+                _visit(child)
+        ordered.append(node)
+
+    _visit(root)
+    return ordered
+
+
+def _call_post_load_hook(hook, dtype, *, is_attn: bool) -> bool:
+    """Invoke a module post-load hook matching 0-arg (0.34+) or 1-arg (0.33) signatures."""
+    try:
+        sig = inspect.signature(hook)
+    except (TypeError, ValueError):
+        return False
+
+    if is_attn:
+        for args in ((dtype,), ()):
+            try:
+                sig.bind(*args)
+            except TypeError:
+                continue
+            hook(*args)
+            return True
+        return False
+
+    try:
+        sig.bind()
+    except TypeError:
+        return False
+    hook()
+    return True
+
+
+def _run_deferred_module_hooks(
+    model: torch.nn.Module,
+    model_config,
+    quant_base: type,
+    *,
+    fail_on_error: bool = False,
+    target_modules: set[int] | None = None,
+) -> list[torch.nn.Module]:
+    """Invoke module-level post-load hooks child-first, isolating or raising errors."""
+    is_deferred_attention = _import_is_deferred_attention_layer()
+    dtype = getattr(model_config, "dtype", None)
+    failed_modules: list[torch.nn.Module] = []
+
+    for module in _iter_children_first(model, quant_base):
+        if target_modules is not None and id(module) not in target_modules:
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if not callable(hook):
+            continue
+        is_attn = is_deferred_attention(module)
+        if not is_attn and module is not model:
+            try:
+                inspect.signature(hook).bind()
+            except (TypeError, ValueError):
+                continue
+        try:
+            _call_post_load_hook(hook, dtype, is_attn=is_attn)
+        except _META_TENSOR_ERRORS as e:
+            if fail_on_error:
+                raise
+            failed_modules.append(module)
+            logger.debug(
+                "[GMS] Deferred post-processing hook for %s (%s): %s",
+                type(module).__name__,
+                "attention" if is_attn else "module",
+                e,
+            )
+        except Exception:
+            logger.exception(
+                "[GMS] Unexpected error in post-processing hook for %s",
+                type(module).__name__,
+            )
+            raise
+
+    return failed_modules
+
+
+def _finalize_kv_cache_layer(
+    layer: torch.nn.Module,
+    quant_method,
+    base_kv_cls: type,
+) -> None:
+    """Rebuild host-side FP8 KV-cache scale state from materialized GMS tensors."""
+    for placeholder_name in _KV_SCALE_PLACEHOLDERS:
+        for registry in (layer._parameters, layer._buffers):
+            tensor = registry.get(placeholder_name)
+            if tensor is not None and tensor.is_meta:
+                del registry[placeholder_name]
+
+    for scale_name in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+        scale = getattr(layer, scale_name, None)
+        if torch.is_tensor(scale):
+            if scale.is_meta:
+                raise RuntimeError(
+                    f"[GMS] Read-only attach left KV-cache scale {scale_name!r} "
+                    "on meta device after materialization"
+                )
+            if scale.numel() != 1:
+                raise RuntimeError(
+                    "[GMS] Read-only attach cannot rebuild per-head KV-cache "
+                    "scales: vLLM's pre-processed weights path supports only "
+                    "per-tensor scales"
+                )
+
+    # Call BaseKVCacheMethod explicitly: CompressedTensorsKVCacheMethod
+    # overrides process_weights_after_loading without checking
+    # is_weights_pre_processed().
+    base_kv_cls.process_weights_after_loading(quant_method, layer)
+
+    prob_scale = getattr(layer, "_prob_scale", None)
+    if torch.is_tensor(prob_scale) and prob_scale.numel() == 1:
+        layer._prob_scale_float = prob_scale.item()
+
+
+def _finalize_post_materialized_modules(
+    model: torch.nn.Module,
+    deferred_quant_modules: list[torch.nn.Module],
+    deferred_hook_modules: list[torch.nn.Module],
+    model_config,
+) -> None:
+    """Finalize KV scales, pre-processed quant modules, and deferred hooks after attach."""
+    deferred_quant_ids = {id(m) for m in deferred_quant_modules}
+    deferred_hook_ids = {id(m) for m in deferred_hook_modules}
+    has_quant_methods = bool(deferred_quant_ids) or any(
+        getattr(mod, "quant_method", None) is not None for mod in model.modules()
+    )
+    if not has_quant_methods and not deferred_hook_ids:
+        return
+
+    # Deferred imports: gpu_memory_service can be imported without vLLM installed.
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.utils import weights_already_processed
+
+    rebuilt_kv = 0
+    rebuilt_quant = 0
+    kv_modules: list[tuple[torch.nn.Module, object]] = []
+    quant_modules: list[tuple[torch.nn.Module, object]] = []
+
+    for _mod_name, mod in model.named_modules():
+        qm = getattr(mod, "quant_method", None)
+        if qm is None:
+            continue
+        if isinstance(qm, BaseKVCacheMethod):
+            kv_modules.append((mod, qm))
+        elif getattr(qm, "supports_pre_processed_weights", False) and (
+            id(mod) in deferred_quant_ids
+            or any(
+                hasattr(qm, attr) and getattr(qm, attr) is None
+                for attr in ("moe_kernel", "kernel")
+            )
+        ):
+            quant_modules.append((mod, qm))
+
+    with weights_already_processed():
+        # Finalize KV-cache scales before any deferred hooks read host float copies.
+        for mod, qm in kv_modules:
+            _finalize_kv_cache_layer(mod, qm, BaseKVCacheMethod)
+            rebuilt_kv += 1
+
+        for mod, qm in quant_modules:
+            qm.process_weights_after_loading(mod)
+            if hasattr(mod, "update_param_tp_status"):
+                mod.update_param_tp_status()
+            rebuilt_quant += 1
+
+    # Replay only hooks that previously failed on meta tensors; re-running
+    # already-succeeded attention hooks would overwrite read-only GMS weights.
+    if deferred_hook_ids:
+        with weights_already_processed():
+            _run_deferred_module_hooks(
+                model,
+                model_config,
+                QuantizeMethodBase,
+                fail_on_error=True,
+                target_modules=deferred_hook_ids,
+            )
+
+    if rebuilt_quant:
+        logger.info(
+            "[GMS] Finalized %d pre-processed quantized module(s) after "
+            "GMS materialization",
+            rebuilt_quant,
+        )
+    if rebuilt_kv:
+        logger.info(
+            "[GMS] Finalized %d KV-cache scale module(s) after GMS materialization",
+            rebuilt_kv,
+        )
+
+
 def _load_read_mode(
     gms_client: "GMSClientMemoryManager",
     vllm_config,
@@ -262,7 +506,12 @@ def _load_read_mode(
 
     try:
         model = _create_meta_model(vllm_config, model_config)
+        deferred_quant_modules = _pop_attr_list(model, _DEFERRED_QUANT_MODULES_ATTR)
+        deferred_hook_modules = _pop_attr_list(model, _DEFERRED_HOOK_MODULES_ATTR)
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+        _finalize_post_materialized_modules(
+            model, deferred_quant_modules, deferred_hook_modules, model_config
+        )
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -350,10 +599,12 @@ def _load_write_mode(
 
 def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     """Create model on meta device for RO mode materialization."""
-    from vllm.model_executor.model_loader.utils import (
-        initialize_model,
-        process_weights_after_loading,
+    # Deferred imports: gpu_memory_service can be imported without vLLM installed.
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
     )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.model_loader import utils as vllm_loader_utils
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     setup_meta_tensor_workaround()
@@ -361,11 +612,76 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
 
     with set_default_torch_dtype(model_config.dtype):
         with meta_device:
-            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+            model = vllm_loader_utils.initialize_model(
+                vllm_config=vllm_config, model_config=model_config
+            )
 
-    try:
-        process_weights_after_loading(model, model_config, meta_device)
-    except Exception as e:
-        logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+    # The writer already decided whether lm_head ties to embed_tokens; comparing
+    # meta tensors inside maybe_retie_word_embeddings would raise and abort the
+    # entire post-processing pass.
+    meta_config = copy.copy(model_config)
+    if hasattr(meta_config, "word_embeddings_untied_by_checkpoint"):
+        meta_config.word_embeddings_untied_by_checkpoint = False
+    maybe_retie = getattr(vllm_loader_utils, "maybe_retie_word_embeddings", None)
+    if callable(maybe_retie):
+        try:
+            maybe_retie(model, meta_config)
+        except _META_TENSOR_ERRORS as e:
+            logger.debug("[GMS] Meta word-embedding retie skipped: %s", e)
+        except Exception:
+            logger.exception("[GMS] Unexpected error in meta word-embedding retie")
+            raise
+
+    deferred_quant_modules: list[torch.nn.Module] = []
+    skipped_non_preprocessed = 0
+    for mod_name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, QuantizeMethodBase):
+            continue
+        # KV-cache quant methods read scale values (unavailable on meta) or
+        # consume/overwrite placeholders; finalize them after GMS materialization.
+        if isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        try:
+            quant_method.process_weights_after_loading(module)
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
+        except _META_TENSOR_ERRORS as e:
+            if getattr(quant_method, "supports_pre_processed_weights", False):
+                deferred_quant_modules.append(module)
+                logger.debug(
+                    "[GMS] Deferred pre-processed quant module %s from meta pass: %s",
+                    mod_name,
+                    e,
+                )
+            else:
+                skipped_non_preprocessed += 1
+                if skipped_non_preprocessed <= 5:
+                    logger.debug(
+                        "[GMS] Meta quant post-processing skipped for %s: %s",
+                        mod_name,
+                        e,
+                    )
+        except Exception:
+            logger.exception(
+                "[GMS] Unexpected error in meta quant post-processing for %s",
+                mod_name,
+            )
+            raise
+
+    if skipped_non_preprocessed:
+        logger.info(
+            "[GMS] Meta pass skipped %d quantized module(s) needing concrete tensors",
+            skipped_non_preprocessed,
+        )
+
+    deferred_hook_modules = _run_deferred_module_hooks(
+        model, meta_config, QuantizeMethodBase, fail_on_error=False
+    )
+
+    if deferred_quant_modules:
+        setattr(model, _DEFERRED_QUANT_MODULES_ATTR, deferred_quant_modules)
+    if deferred_hook_modules:
+        setattr(model, _DEFERRED_HOOK_MODULES_ATTR, deferred_hook_modules)
 
     return model
