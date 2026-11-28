@@ -52,6 +52,7 @@ jobs:
         env:
           INPUT_COMMAND: ${{ inputs.command }}
           INPUT_VERSION: ${{ inputs.version }}
+          BRANCH_CREATED: ${{ github.event.created }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -71,18 +72,112 @@ jobs:
             echo "::error::Unsupported trigger ref: $GITHUB_REF"
             exit 1
           fi
+          # Stage moves run only when the release branch is created, so later
+          # cherry-pick pushes never move a release backwards. A minor cut puts
+          # that release in QA and main's next release In Development; a patch
+          # cut puts the patch In Development. Both releases must already exist.
+          QA_VERSION=""
+          DEV_VERSION=""
+          PLAN_VERSION=""
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$BRANCH_CREATED" == "true" && "$COMMAND" == "sync" ]]; then
+            IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+            if [[ "$PATCH" == "0" ]]; then
+              QA_VERSION="$VERSION"
+              if (( MINOR >= 9 )); then
+                DEV_VERSION="$((MAJOR + 1)).0.0"
+              else
+                DEV_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              fi
+              IFS=. read -r DEV_MAJOR DEV_MINOR _ <<< "$DEV_VERSION"
+              if (( DEV_MINOR >= 9 )); then
+                PLAN_VERSION="$((DEV_MAJOR + 1)).0.0"
+              else
+                PLAN_VERSION="${DEV_MAJOR}.$((DEV_MINOR + 1)).0"
+              fi
+              PLAN_VERSION="${PLAN_VERSION} ${MAJOR}.${MINOR}.1"
+            else
+              DEV_VERSION="$VERSION"
+            fi
+          fi
           {
             echo "command=${COMMAND}"
             echo "version=${VERSION}"
             echo "name=Dynamo v${VERSION}"
+            echo "qa_version=${QA_VERSION}"
+            echo "dev_version=${DEV_VERSION}"
+            echo "plan_version=${PLAN_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run Linear Release
         # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
         # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
-        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f  # v0.14.5
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
         with:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: ${{ steps.params.outputs.command }}
           version: ${{ steps.params.outputs.version }}
           name: ${{ steps.params.outputs.name }}
+
+      - name: Create missing releases in Planned
+        # The stage moves below target a release by version, so the release
+        # must exist first, and a missing patch release is created here too. A
+        # minor cut also creates the release after next, so PMs can plan a
+        # whole cycle ahead, and the cut release's first patch. The IDs are the
+        # Dynamo pipeline and its Planned stage in Linear.
+        if: steps.params.outputs.dev_version != ''
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          PIPELINE_ID: f9c6223b-eb31-4d30-bd20-30359a48f184
+          PLANNED_STAGE_ID: 13c52be3-063d-4db1-a69d-b12b48ed565d
+          VERSIONS: ${{ steps.params.outputs.dev_version }} ${{ steps.params.outputs.plan_version }}
+        run: |
+          set -euo pipefail
+          linear() {
+            curl -sS --fail-with-body https://api.linear.app/graphql \
+              -H "Authorization: ${LINEAR_API_KEY}" -H "Content-Type: application/json" -d "$1"
+          }
+          page=$(linear "$(jq -n --arg id "$PIPELINE_ID" \
+            '{query: "query($id: String!) { releasePipeline(id: $id) { releases(first: 250) { nodes { version } pageInfo { hasNextPage } } } }", variables: {id: $id}}')")
+          if [[ "$(jq -r '.data.releasePipeline.releases.pageInfo.hasNextPage' <<< "$page")" != "false" ]]; then
+            echo "::error::Could not read every Dynamo release in one page: ${page}"
+            exit 1
+          fi
+          existing=$(jq -r '.data.releasePipeline.releases.nodes[].version' <<< "$page")
+          for version in $VERSIONS; do
+            if grep -qx -e "$version" <<< "$existing"; then
+              echo "Dynamo v${version} exists"
+              continue
+            fi
+            # The stage moves match the bare version, so a "v"-prefixed one
+            # would block them. Fail instead of creating a duplicate.
+            if grep -qx -e "v$version" <<< "$existing"; then
+              echo "::error::Dynamo v${version} has version 'v${version}'; set it to '${version}' in Linear"
+              exit 1
+            fi
+            result=$(linear "$(jq -n --arg name "Dynamo v${version}" --arg version "$version" \
+              --arg pipeline "$PIPELINE_ID" --arg stage "$PLANNED_STAGE_ID" \
+              '{query: "mutation($input: ReleaseCreateInput!) { releaseCreate(input: $input) { success } }", variables: {input: {name: $name, version: $version, pipelineId: $pipeline, stageId: $stage}}}')")
+            if [[ "$(jq -r '.data.releaseCreate.success' <<< "$result")" != "true" ]]; then
+              echo "::error::Could not create Dynamo v${version}: ${result}"
+              exit 1
+            fi
+            echo "Created Dynamo v${version} in Planned"
+          done
+
+      - name: Move the cut release to QA
+        if: steps.params.outputs.qa_version != ''
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: update
+          stage: QA
+          version: ${{ steps.params.outputs.qa_version }}
+
+      - name: Move the next release to In Development
+        if: steps.params.outputs.dev_version != ''
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: update
+          stage: In Development
+          version: ${{ steps.params.outputs.dev_version }}
