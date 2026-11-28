@@ -1,0 +1,9 @@
+{
+  "id": "batch_f962abe4-dbf2-420e-b3c5-582ed2bccd9a",
+  "request_counts": {
+    "completed": 100,
+    "failed": 0,
+    "total": 100
+  },
+  "status": "completed"
+}

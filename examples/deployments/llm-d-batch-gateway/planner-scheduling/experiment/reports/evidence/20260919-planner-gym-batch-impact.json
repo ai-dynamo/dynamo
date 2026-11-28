@@ -1,0 +1,264 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-09-19T15:26:34Z",
+  "campaign": {
+    "name": "planner-gym-batch-impact-r5",
+    "compiler_status": "valid",
+    "compiler_exit_code": 0,
+    "decision_ready": true,
+    "input_run_count": 15,
+    "valid_run_count": 15,
+    "invalid_run_count": 0,
+    "data_quality_issue_count": 0,
+    "minimum_batch_overlap_fraction": 0.95,
+    "canonical_serving_signature_sha256": "08164e8dc59e18411742aee8ce4155305eaf1c85ea77f15a2fce1293a100d3f3",
+    "canonical_deployment_signature_sha256": "08164e8dc59e18411742aee8ce4155305eaf1c85ea77f15a2fce1293a100d3f3",
+    "canonical_async_signature_sha256_by_arm": {
+      "online-only": "4f6cd7b63ffef55654f7570f780630b512c4ad397173931e344c531ced9b25be",
+      "stock": "4f6cd7b63ffef55654f7570f780630b512c4ad397173931e344c531ced9b25be",
+      "planner-native": "4f6cd7b63ffef55654f7570f780630b512c4ad397173931e344c531ced9b25be"
+    },
+    "canonical_planner_signature_sha256_by_arm": {
+      "planner-native": "939dfc3ffb9c3c62410ffa96eafa1ddf63582593f70d2f0a29dd08e8d81a5924"
+    },
+    "canonical_control_plane_signature_sha256_by_arm": {
+      "online-only": "40d85212e6e00ae4fab99522df37bf649c75538b4e0b59736c4f672100f6c6a6",
+      "stock": "40d85212e6e00ae4fab99522df37bf649c75538b4e0b59736c4f672100f6c6a6",
+      "planner-native": "411ec488606411ada7cfaeb677c5bf1144df7637a5635e54868fc34426532d0b"
+    },
+    "canonical_image_identities": {
+      "serving": {
+        "frontend": {
+          "image_ref": "dynamo-planner:planner-batch-impact-full-3cbab809d8-arm64-local-20260919",
+          "image_id": "sha256:4b3b12d536a501037ab2cf661154fd7ca21fee39b10a17465f87478efd840165",
+          "observed_image_id": "<redacted-url>",
+          "image_id_attested": true
+        },
+        "worker": {
+          "image_ref": "dynamo-planner:planner-batch-impact-full-3cbab809d8-arm64-local-20260919",
+          "image_id": "sha256:4b3b12d536a501037ab2cf661154fd7ca21fee39b10a17465f87478efd840165",
+          "observed_image_id": "<redacted-url>",
+          "image_id_attested": true
+        }
+      },
+      "control_plane_by_arm": {
+        "online-only": {
+          "async": {
+            "image_ref": "ghcr.io/llm-d/llm-d-async:v0.10.0",
+            "image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "observed_image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "image_id_attested": false
+          }
+        },
+        "stock": {
+          "async": {
+            "image_ref": "ghcr.io/llm-d/llm-d-async:v0.10.0",
+            "image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "observed_image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "image_id_attested": false
+          }
+        },
+        "planner-native": {
+          "async": {
+            "image_ref": "ghcr.io/llm-d/llm-d-async:v0.10.0",
+            "image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "observed_image_id": "docker-pullable://ghcr.io/llm-d/llm-d-async@sha256:07c0d8655626679d417c62e39568fe3d6b74c5b889ecf1ab7f31771fe21a8ed8",
+            "image_id_attested": false
+          },
+          "planner": {
+            "image_ref": "dynamo-planner:planner-batch-impact-full-3cbab809d8-arm64-local-20260919",
+            "image_id": "sha256:4b3b12d536a501037ab2cf661154fd7ca21fee39b10a17465f87478efd840165",
+            "observed_image_id": "<redacted-url>",
+            "image_id_attested": true
+          }
+        }
+      }
+    },
+    "canonical_workload_signature_sha256": "aac276e255f079e82cad3a8a6b3d91b5295f9415ec7f2ee855cb971ad040e321",
+    "compiler_sha256": "66ee08667b9eb06d362b28e3df3817cf3ea8f97370f9965a48da49f43a83f408",
+    "image_id_attestations": [
+      {
+        "image_ref": "dynamo-planner:planner-batch-impact-full-3cbab809d8-arm64-local-20260919",
+        "image_id": "sha256:4b3b12d536a501037ab2cf661154fd7ca21fee39b10a17465f87478efd840165",
+        "used_for_sanitized_observation": true
+      }
+    ],
+    "local_compiled_summary": "results/compiled/20260919-planner-gym-batch-impact-r5-identity-attested-v5/summary.json",
+    "local_compiled_summary_sha256": "28957ee313b4c6dc4dbd2252186e0055b458835a8e8f6a357653db72763a24d3",
+    "local_compiled_readme_sha256": "5eaa4fdcc2924cea8015e22a5c8a01121949c8858e9aed168b30dbf0d6ce6c91",
+    "local_run_index_sha256": "5dacb076ac079fc8e22cb243972f40e59b8029354d8a9d965fc2caf6118ad2cb"
+  },
+  "environment": {
+    "kubernetes_context": "minikube",
+    "namespace": "sachalm",
+    "architecture": "linux/arm64",
+    "runtime_image_id": "sha256:4b3b12d536a501037ab2cf661154fd7ca21fee39b10a17465f87478efd840165",
+    "dynamo_revision": "3cbab809d8cea98fee0778e8621ea6ed075fd23a",
+    "dynamo_source_dirty": true,
+    "planner_gym_revision": "cd8e42b04aa8389d5f66d8d765513bd5308f3fdc",
+    "planner_gym_source_dirty": false,
+    "mocker": {
+      "cpu_only": true,
+      "prefill_ms": 75.0,
+      "decode_ms": 12.0,
+      "max_num_seqs": 16
+    }
+  },
+  "workload": {
+    "model": "Qwen/Qwen3-0.6B",
+    "online": {
+      "request_count": 1080,
+      "phase_rps": [5, 8, 5],
+      "phase_request_counts": [300, 480, 300],
+      "ttft_slo_ms": 300,
+      "itl_slo_ms": 50,
+      "trace_sha256": "b8dcdd7c630831dbd37f4d49a4d7f347c256941626f347d737ee50162d9ad314"
+    },
+    "batch": {
+      "requests_per_run": 1500,
+      "temperature": 0,
+      "max_output_tokens": 128,
+      "dataset_sha256": "488c0fb6b64ce349e8d8da1ea001ccec4f8339194949aec7a03b6fcddaaeab8f"
+    }
+  },
+  "arms": {
+    "online-only": {
+      "valid_runs": 5,
+      "run_ids": [
+        "20260919T125311Z-planner-gym-batch-impact-435e93",
+        "20260919T134023Z-planner-gym-batch-impact-ba18a2",
+        "20260919T135655Z-planner-gym-batch-impact-db44a6",
+        "20260919T141434Z-planner-gym-batch-impact-0c9d95",
+        "20260919T150213Z-planner-gym-batch-impact-c5ff6f"
+      ],
+      "online": {
+        "goodput_rps_mean": 5.979160718491407,
+        "goodput_rps_cv_percent": 0.003798780019798157,
+        "good_rate_mean": 1.0,
+        "mean_ttft_ms_mean": 112.89436409074074,
+        "p99_ttft_ms_mean": 211.6300899740002,
+        "p99_ttft_ms_cv_percent": 2.6604317780677382,
+        "error_rate_mean": 0.0
+      }
+    },
+    "stock": {
+      "valid_runs": 5,
+      "run_ids": [
+        "20260919T125726Z-planner-gym-batch-impact-bb9871",
+        "20260919T131858Z-planner-gym-batch-impact-80eebe",
+        "20260919T140110Z-planner-gym-batch-impact-864627",
+        "20260919T141853Z-planner-gym-batch-impact-43892a",
+        "20260919T144026Z-planner-gym-batch-impact-9a1ec3"
+      ],
+      "online": {
+        "goodput_rps_mean": 2.2751844588212196,
+        "goodput_rps_cv_percent": 2.6121656201128394,
+        "good_rate_mean": 0.3814814814814815,
+        "mean_ttft_ms_mean": 2508.4471228774073,
+        "p99_ttft_ms_mean": 7165.317810086,
+        "p99_ttft_ms_cv_percent": 2.6252350839779464,
+        "error_rate_mean": 0.0
+      },
+      "batch": {
+        "completed_per_run": 1500,
+        "failed_per_run": 0,
+        "duration_seconds_mean": 487.57637320000003,
+        "average_completion_rate_rps_mean": 3.076542185889465,
+        "completion_rate_during_online_rps_mean": 2.1050478064253495
+      }
+    },
+    "planner-native": {
+      "valid_runs": 5,
+      "run_ids": [
+        "20260919T130726Z-planner-gym-batch-impact-0393a4",
+        "20260919T132853Z-planner-gym-batch-impact-b993af",
+        "20260919T134522Z-planner-gym-batch-impact-4ee374",
+        "20260919T142855Z-planner-gym-batch-impact-a95259",
+        "20260919T145025Z-planner-gym-batch-impact-d69000"
+      ],
+      "online": {
+        "goodput_rps_mean": 5.919620244389227,
+        "goodput_rps_cv_percent": 0.49634079015573274,
+        "good_rate_mean": 0.9901851851851852,
+        "mean_ttft_ms_mean": 118.78304753666666,
+        "p99_ttft_ms_mean": 291.46094638000017,
+        "p99_ttft_ms_cv_percent": 10.393234488381697,
+        "error_rate_mean": 0.0
+      },
+      "batch": {
+        "completed_per_run": 1500,
+        "failed_per_run": 0,
+        "duration_seconds_mean": 576.9200466,
+        "average_completion_rate_rps_mean": 2.600015921674692,
+        "completion_rate_during_online_rps_mean": 0.5127295145826375
+      },
+      "control": {
+        "valid_runs": 5,
+        "checks_per_run": 26,
+        "passed_checks": 130,
+        "failed_checks": 0,
+        "high_phase_planner_cap_median_rps_per_run": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "high_phase_async_cap_median_rps_per_run": [0.0, 0.0, 0.0, 0.0, 0.0]
+      }
+    }
+  },
+  "paired_effects": {
+    "stock_vs_online-only": {
+      "valid_pairs": 5,
+      "goodput_delta_rps_mean": -3.703976259670187,
+      "goodput_relative_change_percent_mean": -61.9481045355334,
+      "p99_ttft_delta_ms_mean": 6953.687720111999,
+      "p99_ttft_relative_change_percent_mean": 3288.1469740680272
+    },
+    "planner-native_vs_online-only": {
+      "valid_pairs": 5,
+      "goodput_delta_rps_mean": -0.059540474102179886,
+      "goodput_relative_change_percent_mean": -0.99579887822455,
+      "p99_ttft_delta_ms_mean": 79.830856406,
+      "p99_ttft_relative_change_percent_mean": 37.62605747834268
+    },
+    "planner-native_vs_stock": {
+      "valid_pairs": 5,
+      "goodput_delta_rps_mean": 3.6444357855680076,
+      "goodput_relative_change_percent_mean": 160.31459312001496,
+      "p99_ttft_delta_ms_mean": -6873.856863705999,
+      "p99_ttft_relative_change_percent_mean": -95.92196503936661,
+      "batch_completion_rate_relative_change_percent_mean": -15.486429876405776,
+      "batch_duration_relative_change_percent_mean": 18.327663313765562,
+      "batch_rate_during_online_relative_change_percent_mean": -75.61811820208912
+    }
+  },
+  "stopping_assessment": {
+    "cv_threshold_percent": 5.0,
+    "instability_triggered": true,
+    "target_valid_repetitions_per_arm": 5,
+    "minimum_valid_arm_count": 5,
+    "extra_repetitions_recommended": false,
+    "minimum_additional_balanced_repetitions": 0,
+    "residual_findings": [
+      "planner-native online p99_ttft_ms CV 10.393234488381697%",
+      "planner-native batch completion_rate_during_online_rps CV 8.50625919598142%",
+      "planner-native_vs_online-only request_throughput_rps paired effect changed direction",
+      "planner-native_vs_online-only p99_itl_ms paired effect changed direction"
+    ]
+  },
+  "scope": {
+    "cpu_mocker_only": true,
+    "gpu_model_performance_evaluated": false,
+    "gsm8k_accuracy_evaluated": false,
+    "fault_recovery_evaluated": false,
+    "raw_and_compiled_artifacts_are_git_ignored": true
+  },
+  "cleanup": {
+    "restored_namespace": "dyn",
+    "restored_dgds": [
+      "gp-ctrl",
+      "gp-decode-0",
+      "gp-decode-1",
+      "gp-prefill-0",
+      "gp-prefill-1"
+    ],
+    "replicas_per_component": 1,
+    "generated_deployments_ready": 15
+  }
+}
