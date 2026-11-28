@@ -408,3 +408,57 @@ fn no_stop_trim_preserves_seed_order_and_special_token_policy() {
         ));
     }
 }
+
+// When several stop strings complete within the text released by one step, the stop that
+// completes earliest in the text wins, regardless of where it sits in the `stop` list. Ties
+// on the end position fall back to list order. Regression test for #18622.
+#[test]
+fn earliest_completing_stop_sequence_wins() {
+    // (stop list, include_stop_str, expected text, expected trigger)
+    let cases: &[(&[&str], bool, Option<&str>, &str)] = &[
+        // "he" completes at byte 3 of "there", "re" at byte 5.
+        (&["re", "he"], false, Some("t"), "he"),
+        (&["he", "re"], false, Some("t"), "he"),
+        (&["re", "he"], true, Some("the"), "he"),
+        (&["he", "re"], true, Some("the"), "he"),
+        // "ere" and "re" both complete at byte 5: list order decides.
+        (&["ere", "re"], false, Some("th"), "ere"),
+        (&["re", "ere"], false, Some("the"), "re"),
+        (&["ere", "re"], true, Some("there"), "ere"),
+        (&["re", "ere"], true, Some("there"), "re"),
+    ];
+    for &(stop, include, expected_text, expected_stop) in cases {
+        let mut decoder = make_decoder(None, None, None, Some(stop.to_vec()), include);
+        let result = decoder.process_token_ids(&[THERE]).unwrap();
+        assert_eq!(
+            result.text.as_deref(),
+            expected_text,
+            "stop={stop:?} include={include}"
+        );
+        let matched = match &result.stop_trigger {
+            Some(StopTrigger::HiddenStopSequenceDetected(s)) if !include => s.as_str(),
+            Some(StopTrigger::VisibleStopSequenceDetected(s)) if include => s.as_str(),
+            other => panic!("stop={stop:?} include={include}: unexpected trigger {other:?}"),
+        };
+        assert_eq!(matched, expected_stop, "stop={stop:?} include={include}");
+    }
+}
+
+// The earliest-completing rule also applies when the winning stop began in text withheld
+// by an earlier step: "o" is held back as a prefix of "ot", then "there" completes both
+// "ot" (end 2) and "her" (end 5). "ot" must win even though "her" is listed first, and
+// nothing is released because the whole withheld prefix belongs to the stop.
+#[test]
+fn earliest_completing_stop_sequence_wins_across_withheld_prefix() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["her", "ot"]), false);
+    let first = decoder.process_token_ids(&[OH]).unwrap();
+    assert_eq!(first.text, None);
+    assert!(first.stop_trigger.is_none());
+
+    let second = decoder.process_token_ids(&[THERE]).unwrap();
+    assert_eq!(second.text, None);
+    assert!(matches!(
+        second.stop_trigger,
+        Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "ot"
+    ));
+}
