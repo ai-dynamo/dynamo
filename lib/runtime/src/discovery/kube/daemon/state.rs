@@ -13,6 +13,7 @@ pub(super) struct CachedCrMetadata {
     pub(super) metadata: Arc<DiscoveryMetadata>,
     pub(super) uid: Option<String>,
     pub(super) owner_pod_uid: Option<String>,
+    pub(super) resource_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -360,6 +361,7 @@ mod tests {
             metadata: Arc::new(metadata),
             uid: Some(cr_uid.to_string()),
             owner_pod_uid: Some(owner_pod_uid.to_string()),
+            resource_version: None,
         }
     }
 
@@ -534,6 +536,7 @@ mod tests {
             metadata: Arc::new(updated_metadata),
             uid: Some("C-new".to_string()),
             owner_pod_uid: Some(TEST_POD_UID.to_string()),
+            resource_version: None,
         };
 
         let mut changes = BatchChanges::default();
@@ -578,6 +581,7 @@ mod tests {
                     metadata: Arc::new(meta),
                     uid: Some("C1".to_string()),
                     owner_pod_uid: Some(TEST_POD_UID.to_string()),
+                    resource_version: None,
                 },
             )]),
         );
@@ -601,6 +605,7 @@ mod tests {
                     metadata: Arc::new(updated_meta),
                     uid: Some("C2".to_string()),
                     owner_pod_uid: Some(TEST_POD_UID.to_string()),
+                    resource_version: None,
                 },
             )]),
         );
