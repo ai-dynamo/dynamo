@@ -112,6 +112,11 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 	container.VolumeMounts = append(container.VolumeMounts, sshVolumeMount)
 }
 
+// escapeSingleQuotes makes s safe to embed inside a single-quoted shell string.
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
 func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, mapByNode bool) {
 	// Generate the list of all hostnames
@@ -133,11 +138,12 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		}
 		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
-		// Shell command (sh -c): args contains the full command
-		originalCommand = strings.Join(container.Args, " ")
+		// Shell command (sh -c): args contains the full script. It is embedded in a
+		// single-quoted bash -c argument below, so a literal ' must be escaped.
+		originalCommand = escapeSingleQuotes(strings.Join(container.Args, " "))
 	} else if len(container.Command) > 0 {
 		// Fallback: just command
-		originalCommand = strings.Join(container.Command, " ")
+		originalCommand = escapeSingleQuotes(strings.Join(container.Command, " "))
 	}
 
 	// Setup SSH and run mpirun command
