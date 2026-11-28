@@ -16,10 +16,13 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import torch
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.llm as dynamo_llm
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm import decision_execution as decisions
-from dynamo.vllm import envs
+from dynamo.vllm import envs, errors
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
@@ -32,6 +35,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -1943,6 +1947,80 @@ def test_vllm_validation_error_public_message_is_truncated():
     assert isinstance(public_error, InvalidArgument)
     assert len(str(public_error)) == _MAX_MESSAGE_LENGTH
     assert str(public_error).startswith("bad_words entry rejected: ")
+
+
+@pytest.mark.parametrize(
+    ("processor_error", "expect_client_error"),
+    [
+        (ValueError("absolute aspect ratio must be smaller than 200, got 400.0"), True),
+        (TypeError("'NoneType' object is not subscriptable"), False),
+        (None, False),
+        ("memory_error", False),
+        ("cpu_allocation_error", False),
+    ],
+    ids=[
+        "processor_rejects_input",
+        "processor_bug",
+        "engine_fault",
+        "processor_out_of_memory",
+        "processor_cpu_allocation_failure",
+    ],
+)
+@pytest.mark.asyncio
+async def test_translate_vllm_client_errors_processor_rejection(
+    processor_error, expect_client_error
+):
+    # vLLM's chain: EngineGenerateError wraps ValueError("Failed to apply ..."),
+    # which wraps the processor error and embeds the request data in its text.
+    if processor_error in ("memory_error", "cpu_allocation_error"):
+        # Transformers' BatchFeature.convert_to_tensors re-raises any
+        # tensor-creation failure as ValueError.
+        if processor_error == "memory_error":
+            allocation_error: BaseException = MemoryError()
+        else:
+            # PyTorch's CPU allocator raises a plain RuntimeError.
+            with pytest.raises(
+                RuntimeError,
+                match="DefaultCPUAllocator: (can't allocate memory|not enough memory)",
+            ) as alloc:
+                torch.empty(2**62, dtype=torch.uint8)
+            allocation_error = alloc.value
+        processor_error = ValueError("Unable to convert output 'pixel_values'")
+        processor_error.__cause__ = allocation_error
+    if processor_error is None:
+        cause: Exception = RuntimeError("engine step failed")
+    else:
+        cause = ValueError(
+            "Failed to apply Qwen2VLProcessor on data={'text': 'secret prompt', "
+            "'images': [<PIL.Image.Image size=1x400>]} with kwargs={}"
+        )
+        cause.__cause__ = processor_error
+    error = EngineGenerateError()
+    error.__cause__ = cause
+
+    async def failing_generator():
+        yield "first"
+        raise error
+
+    chunks = []
+    with (
+        patch.object(errors.logger, "warning") as warning,
+        pytest.raises((InvalidArgument, EngineGenerateError)) as raised,
+    ):
+        async for chunk in _translate_vllm_client_errors(
+            failing_generator(), {}, "req-123"
+        ):
+            chunks.append(chunk)
+
+    assert chunks == ["first"]
+    if expect_client_error:
+        assert isinstance(raised.value, InvalidArgument)
+        assert raised.value.__cause__ is error
+        assert "data=" not in str(raised.value)
+        assert "secret prompt" not in str(raised.value)
+        assert warning.call_args.args[1] == "req-123"
+    else:
+        assert raised.value is error
 
 
 def test_build_sampling_params_accepts_productive_recursive_guided_json():

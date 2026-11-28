@@ -1026,7 +1026,8 @@ async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
     )
     with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
         await asyncio.wait_for(
-            anext(_translate_vllm_client_errors(stream, request)), timeout=5
+            anext(_translate_vllm_client_errors(stream, request, "req-cache-miss")),
+            timeout=5,
         )
     assert isinstance(raised.value.__cause__, EngineGenerateError)
     assert type(raised.value.__cause__.__cause__) is ValueError
