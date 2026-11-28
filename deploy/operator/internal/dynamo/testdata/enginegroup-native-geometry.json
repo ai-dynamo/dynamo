@@ -1,0 +1,36 @@
+{
+  "vllm": [
+    {
+      "name": "explicit TP4 single-member allocation",
+      "args": ["--tensor-parallel-size=4", "--data-parallel-size=8", "--data-parallel-size-local=1", "--data-parallel-rank=0", "--data-parallel-external-lb", "--data-parallel-backend=mp", "--distributed-executor-backend=mp", "--enable-expert-parallel", "--enable-eplb", "--enable-elastic-ep", "--elastic-ep-max-dp-size=16", "--eplb-config={\"use_async\":false,\"communicator\":\"pynccl\"}"],
+      "gpus": 4, "initial": 8, "maximum": 16, "members": 1,
+      "native": {"tensor_parallel_size": 4, "data_parallel_size": 8, "data_parallel_size_local": 1, "data_parallel_rank": 0, "data_parallel_external_lb": true, "data_parallel_hybrid_lb": false}
+    },
+    {
+      "name": "automatic packed TP1 allocation",
+      "args": ["--tensor-parallel-size=1", "--data-parallel-size-local=2", "--elastic-ep-allocation-index=0", "--elastic-ep-auto-bootstrap", "--elastic-ep-initial-dp-size=2", "--elastic-ep-max-dp-size=4", "--data-parallel-backend=mp", "--distributed-executor-backend=mp", "--enable-expert-parallel", "--enable-eplb", "--enable-elastic-ep", "--eplb-config={\"use_async\":false,\"communicator\":\"pynccl\"}"],
+      "gpus": 2, "initial": 1, "maximum": 2, "members": 2,
+      "native": {"tensor_parallel_size": 1, "data_parallel_size": 2, "data_parallel_size_local": 2, "data_parallel_rank": 0, "data_parallel_external_lb": false, "data_parallel_hybrid_lb": false}
+    },
+    {
+      "name": "automatic packed TP2 allocation",
+      "args": ["-tp=2", "--data-parallel-size-local=2", "--elastic-ep-allocation-index=0", "--elastic-ep-auto-bootstrap", "--elastic-ep-initial-dp-size=4", "--elastic-ep-max-dp-size=8", "--data-parallel-backend=mp", "--distributed-executor-backend=mp", "--enable-expert-parallel", "--enable-eplb", "--enable-elastic-ep", "--eplb-config={\"use_async\":false,\"communicator\":\"pynccl\"}"],
+      "gpus": 4, "initial": 2, "maximum": 4, "members": 2,
+      "native": {"tensor_parallel_size": 2, "data_parallel_size": 4, "data_parallel_size_local": 2, "data_parallel_rank": 0, "data_parallel_external_lb": false, "data_parallel_hybrid_lb": true}
+    }
+  ],
+  "sglang": [
+    {
+      "name": "automatic single-member allocation",
+      "args": ["--elastic-ep-join-mode=auto", "--elastic-ep-allocation-index=0", "--elastic-ep-allocation-id=parity-pod", "--elastic-ep-initial-size=2", "--max-ep-size=4", "--dist-init-addr=127.0.0.1:29500", "--moe-dense-tp-size=1", "--enable-dp-lm-head", "--elastic-ep-backend=mooncake", "--moe-a2a-backend=nixl", "--load-balance-method=round_robin", "--enable-eplb", "--disable-cuda-graph"],
+      "gpus": 1, "initial": 2, "maximum": 4, "members": 1,
+      "native": {"tp_size": 2, "dp_size": 1, "attn_dp_size": 2, "ep_size": 2, "nnodes": 2, "node_rank": 0, "elastic_ep_allocation_width": 1}
+    },
+    {
+      "name": "automatic packed allocation",
+      "args": ["--elastic-ep-join-mode=auto", "--elastic-ep-allocation-index=0", "--elastic-ep-allocation-id=parity-pod", "--elastic-ep-initial-size=2", "--max-ep-size=4", "--dist-init-addr=127.0.0.1:29500", "--moe-dense-tp-size=1", "--enable-dp-lm-head", "--elastic-ep-backend=mooncake", "--moe-a2a-backend=nixl", "--load-balance-method=round_robin", "--enable-eplb", "--disable-cuda-graph"],
+      "gpus": 2, "initial": 1, "maximum": 2, "members": 2,
+      "native": {"tp_size": 2, "dp_size": 1, "attn_dp_size": 2, "ep_size": 2, "nnodes": 1, "node_rank": 0, "elastic_ep_allocation_width": 2}
+    }
+  ]
+}
