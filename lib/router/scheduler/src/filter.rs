@@ -105,6 +105,11 @@ impl<'a> RoutingEligibility<'a> {
         self
     }
 
+    #[inline]
+    pub(crate) fn has_affinity_target(&self) -> bool {
+        self.affinity_target.is_some()
+    }
+
     /// Attach hard availability. Unlike transient overload, unavailability is
     /// enforced on every path, including affinity-derived pins.
     #[inline]
