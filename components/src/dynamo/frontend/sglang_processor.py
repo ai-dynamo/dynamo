@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
@@ -81,6 +82,22 @@ except ModuleNotFoundError as exc:
 
 
 logger = logging.getLogger(__name__)
+
+_SGLANG_INPUT_LENGTH_RE = re.compile(
+    r"(?:InvalidRequest: |BackendInvalidArgument: )?"
+    r"(?P<message>Input length \([0-9]+ tokens\) exceeds "
+    r"the maximum allowed length \([0-9]+ tokens\)\. "
+    r"Use a shorter input or enable --allow-auto-truncate\.)"
+)
+
+
+def _scheduler_input_limit_error(message: str) -> InvalidArgument | None:
+    """Recover only the scheduler's complete, public input-limit sentence."""
+    # The scheduler's KV capacity can be below the model context limit. Expose
+    # only its complete validation message, without wrappers or diagnostics.
+    if match := _SGLANG_INPUT_LENGTH_RE.fullmatch(message):
+        return InvalidArgument(match.group("message"))
+    return None
 
 
 def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
@@ -1191,6 +1208,8 @@ class SglangProcessor:
                 if dynamo_response.is_error():
                     comments = dynamo_response.comments() or []
                     message = "; ".join(comments) or "unknown routed_engine error"
+                    if error := _scheduler_input_limit_error(message):
+                        raise error
                     logger.error(
                         "routed_engine error for request %s: %s",
                         request_id,
@@ -1323,9 +1342,15 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (InvalidArgument, RoutedEngineError, Unknown, WorkerUnavailable):
+        except InvalidArgument as e:
+            if error := _scheduler_input_limit_error(str(e)):
+                raise error from e
+            raise
+        except (RoutedEngineError, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
+            if error := _scheduler_input_limit_error(str(e)):
+                raise error from e
             logger.exception("Error generating response for request %s", request_id)
             raise Unknown(
                 f"Error generating response for request {request_id}: {e}"
