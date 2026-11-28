@@ -8,6 +8,8 @@ Patches:
   - request_memory: bypasses the free>=requested check during deferred-KV init.
   - NixlBaseConnector KV registration: defers registration during the scratch
     phase and stashes it for replay at wake.
+  - ExpertMapManager._calculate_expert_maps: builds EP expert maps on a given
+    device while a load-diff reader constructs the model on meta.
 
 The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 """
@@ -16,6 +18,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Iterator
 
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
@@ -24,11 +29,18 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import is_scratch_kv_enabled
 
+if TYPE_CHECKING:
+    import torch
+
 logger = logging.getLogger(__name__)
 
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
+_expert_map_device_patched = False
+_expert_map_device: ContextVar["torch.device | None"] = ContextVar(
+    "gms_expert_map_device", default=None
+)
 _NIXL_MODULE = "vllm.distributed.kv_transfer.kv_connector.v1.nixl"
 
 
@@ -193,6 +205,54 @@ def patch_register_kv_caches() -> None:
     nixl_base_connector.register_kv_caches = patched_register_kv_caches
     _register_kv_caches_patched = True
     logger.info("[GMS Patch] Patched NixlBaseConnector KV registration")
+
+
+# =============================================================================
+# Load-diff reader patch
+# =============================================================================
+
+
+def patch_expert_map_device() -> None:
+    """Let a meta-device construction build EP expert maps on a real device.
+
+    vLLM builds the maps on the CPU when the default device is meta, while a
+    writer's are on the GPU. The load-diff reader copies the writer's maps
+    into the tensors construction made, because the ExpertMapManager and the
+    MoE layer's ``_expert_map`` buffer hold the same tensor, so those tensors
+    must be on the GPU too. Inactive outside ``expert_maps_on``.
+    """
+    global _expert_map_device_patched
+
+    if _expert_map_device_patched:
+        return
+
+    # Imported here: this module is imported without vLLM's MoE layers, and
+    # only a load-diff reader needs them.
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+
+    original_calculate = ExpertMapManager._calculate_expert_maps
+
+    def patched_calculate(self) -> None:
+        device = _expert_map_device.get()
+        if device is None:
+            return original_calculate(self)
+        with device:
+            return original_calculate(self)
+
+    ExpertMapManager._calculate_expert_maps = patched_calculate
+    _expert_map_device_patched = True
+    logger.info("[GMS Patch] Patched ExpertMapManager._calculate_expert_maps")
+
+
+@contextmanager
+def expert_maps_on(device: "torch.device") -> Iterator[None]:
+    """Build EP expert maps on ``device`` inside this block."""
+    patch_expert_map_device()
+    token = _expert_map_device.set(device)
+    try:
+        yield
+    finally:
+        _expert_map_device.reset(token)
 
 
 # =============================================================================
