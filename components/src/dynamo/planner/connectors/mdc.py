@@ -113,6 +113,25 @@ def _parse_speculative_nextn(runtime_cfg: dict) -> Optional[int]:
     return nextn if nextn > 0 else None
 
 
+def _parse_prefill_kv_allocation(
+    runtime_cfg: dict,
+) -> Optional[tuple[int, Optional[int], int]]:
+    data = runtime_cfg.get("runtime_data")
+    allocation = data.get("prefill_kv_allocation") if isinstance(data, dict) else None
+    if not isinstance(allocation, dict) or "max_admission_blocks" not in allocation:
+        return None
+    size = allocation.get("block_size")
+    cap = allocation["max_admission_blocks"]
+    if type(size) is not int or size < 1:
+        return None
+    if cap is not None and (type(cap) is not int or cap < 1):
+        return None
+    reserved = allocation.get("reserved_blocks", 0)
+    if type(reserved) is not int or reserved < 0:
+        return None
+    return size, cap, reserved
+
+
 def worker_info_from_mdc(
     entry: MdcEntry,
     sub_component_type: SubComponentType,
@@ -159,6 +178,9 @@ def worker_info_from_mdc(
         model_name=model_name,
         total_kv_blocks=runtime_cfg.get("total_kv_blocks"),
         kv_cache_block_size=card.get("kv_cache_block_size"),
+        prefill_kv_allocation=_parse_prefill_kv_allocation(runtime_cfg)
+        if backend == "vllm"
+        else None,
         max_num_seqs=runtime_cfg.get("max_num_seqs"),
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
         context_length=context_length,

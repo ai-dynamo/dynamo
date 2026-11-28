@@ -124,6 +124,26 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    @pytest.mark.parametrize(
+        ("allocation", "expected"),
+        [
+            ({"block_size": 16, "max_admission_blocks": None}, (16, None, 0)),
+            (
+                {"block_size": 16, "max_admission_blocks": 261, "reserved_blocks": 1},
+                (16, 261, 1),
+            ),
+            ({"block_size": 16}, None),
+        ],
+    )
+    def test_prefill_kv_allocation_metadata(self, allocation, expected):
+        entry = MdcEntry(
+            card_json=_card(runtime_data={"prefill_kv_allocation": allocation}),
+            component="backend",
+            endpoint="generate",
+        )
+        info = worker_info_from_mdc(entry, SubComponentType.PREFILL, backend="vllm")
+        assert info.prefill_kv_allocation == expected
+
     def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
         entry = MdcEntry(
             card_json=_card(

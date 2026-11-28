@@ -63,6 +63,7 @@ def _model(
     max_num_seqs: int = 16,
     max_kv_tokens: int = 100_000,
     attention_dp_size: int = 1,
+    prefill_kv_allocation: Optional[tuple[int, Optional[int], int]] = None,
 ) -> tuple[AISCoreEnginePerfModel, _FakeForwardPassModel]:
     forward_pass_model = _FakeForwardPassModel(estimate)
     model = AISCoreEnginePerfModel(
@@ -72,6 +73,7 @@ def _model(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
+            prefill_kv_allocation=prefill_kv_allocation,
         ),
         attention_dp_size=attention_dp_size,
         max_observations=16,
@@ -230,6 +232,167 @@ def test_aggregated_capacity_derives_ttft_itl_and_e2e():
     assert capacity.itl_s == pytest.approx(0.001)
     assert capacity.e2e_latency_s == pytest.approx(0.004)
     assert capacity.eligible
+
+
+def _prefill_query_shapes(
+    forward: _FakeForwardPassModel,
+) -> list[list[tuple[int, int]]]:
+    return [
+        [
+            (scheduled["num_prefill_requests"], scheduled["sum_prefill_tokens"])
+            for scheduled in (rank["scheduled_requests"] for rank in call)
+        ]
+        for call in forward.estimate_calls
+    ]
+
+
+@pytest.mark.parametrize(
+    ("isl", "max_num_seqs", "expected_batch"),
+    [
+        (32, 16, 4),
+        (24, 16, 4),
+        (32, 3, 4),
+        (32, 1, 2),
+    ],
+    ids=["exact-fit", "per-rank-remainder", "sequence-slack", "sequence-bound"],
+)
+def test_attention_dp_prefill_capacity_assigns_whole_requests(
+    isl: int, max_num_seqs: int, expected_batch: int
+) -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        max_num_seqs=max_num_seqs,
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=isl, osl=0))
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(expected_batch / 0.01)
+    expected_requests = [(1, 0), (1, 1), (2, 1), (2, 2)]
+    assert _prefill_query_shapes(forward) == [
+        [(num_requests, num_requests * isl) for num_requests in request_counts]
+        for request_counts in expected_requests[:expected_batch]
+    ]
+
+
+@pytest.mark.parametrize("kv_hit_rate, fresh_tokens", [(0.0, 64), (0.5, 32)])
+def test_attention_dp_prefill_capacity_respects_kv_per_rank(
+    kv_hit_rate: float, fresh_tokens: int
+) -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=1024,
+        max_num_seqs=64,
+        max_kv_tokens=512,
+        prefill_kv_allocation=(16, None, 0),
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        EngineCapacityRequest(isl=64, osl=0, kv_hit_rate=kv_hit_rate)
+    )
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(16 / 0.01)
+    assert _prefill_query_shapes(forward)[-1] == [(8, 8 * fresh_tokens)] * 2
+
+
+@pytest.mark.parametrize(
+    ("isl", "budget", "pool", "admission_cap", "reserved_blocks", "expected"),
+    [
+        (33, 512, 512, None, 0, 20),
+        (16384, 64, 8192, 261, 0, 2),
+        (64, 512, 512, None, 1, 14),
+    ],
+    ids=["whole-block-rounding", "sliding-window-residency", "reserved-null-block"],
+)
+def test_attention_dp_prefill_capacity_uses_reported_block_allocation(
+    isl, budget, pool, admission_cap, reserved_blocks, expected
+):
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=budget,
+        max_num_seqs=64,
+        max_kv_tokens=pool,
+        attention_dp_size=2,
+        prefill_kv_allocation=(16, admission_cap, reserved_blocks),
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=isl, osl=0))
+    assert capacity is not None and capacity.ttft_s is not None
+    assert capacity.rps * capacity.ttft_s == pytest.approx(expected)
+    assert sum(count for count, _ in _prefill_query_shapes(forward)[-1]) == expected
+
+
+def test_attention_dp_prefill_capacity_keeps_long_prompt_on_one_rank() -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=160, osl=0))
+
+    assert capacity is not None
+    # Two equal full chunks share one estimate, with a third round for the tail.
+    assert capacity.ttft_s == pytest.approx(0.03)
+    assert capacity.rps == pytest.approx(2 / 0.03)
+    assert _prefill_query_shapes(forward) == [
+        [(1, 64), (0, 0)],
+        [(1, 32), (0, 0)],
+        [(1, 64), (1, 64)],
+        [(1, 32), (1, 32)],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ranks", "priced_batches", "expected_batch", "attempt_count"),
+    [
+        (2, (1, 2), 2, 4),
+        (2, (2, 4), 4, 4),
+        (2, (), None, 4),
+        (1, (1, 2), None, 3),
+    ],
+    ids=["larger-out-of-profile", "holes-in-profile", "no-estimates", "single-rank"],
+)
+def test_prefill_capacity_with_partial_estimator_coverage(
+    ranks: int,
+    priced_batches: tuple[int, ...],
+    expected_batch: Optional[int],
+    attempt_count: int,
+) -> None:
+    isl = 32
+    attempted: list[int] = []
+
+    def estimate(metrics_by_rank: list[dict[str, Any]]) -> Optional[float]:
+        tokens = sum(
+            rank["scheduled_requests"]["sum_prefill_tokens"] for rank in metrics_by_rank
+        )
+        batch = tokens // isl
+        attempted.append(batch)
+        return 10.0 if batch in priced_batches else None
+
+    model, _ = _model(
+        worker_type="prefill",
+        estimate=estimate,
+        max_num_batched_tokens=128 // ranks,
+        attention_dp_size=ranks,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=isl, osl=0))
+
+    if expected_batch is None:
+        assert capacity is None
+    else:
+        assert capacity is not None
+        assert capacity.rps == pytest.approx(expected_batch / 0.01)
+    assert attempted == list(range(1, attempt_count + 1))
 
 
 def test_attention_dp_synthetic_work_is_split_across_ranks():

@@ -40,6 +40,7 @@ class WorkerInfo:
     model_name: Optional[str] = None
     total_kv_blocks: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
+    prefill_kv_allocation: Optional[tuple[int, Optional[int], int]] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     context_length: Optional[int] = None
