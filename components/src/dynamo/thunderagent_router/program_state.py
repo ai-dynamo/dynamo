@@ -77,6 +77,8 @@ class RequestSnapshot:
 
 @dataclass
 class ProgramTable:
+    program_cls = Program
+
     programs: dict[str, Program] = field(default_factory=dict)
     # Insertion-ordered: ties in `_greedy_resume_locked`'s sort resolve oldest-paused
     # first, mirroring upstream TA. Values are unused.
@@ -87,7 +89,7 @@ class ProgramTable:
     ) -> Program:
         program = self.programs.get(program_id)
         if program is None:
-            program = Program(program_id=program_id)
+            program = self.program_cls(program_id=program_id)
             self.programs[program_id] = program
         program.step_count += 1
         program.admission_epoch += 1

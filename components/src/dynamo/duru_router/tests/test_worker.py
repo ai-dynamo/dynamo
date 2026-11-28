@@ -1,0 +1,445 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Exercise Duru accounting against CPU-only native scheduler callbacks."""
+
+import importlib.util
+import sys
+import threading
+from collections import deque
+from contextlib import nullcontext
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from dynamo.duru_router import events, scoring
+from dynamo.duru_router.transport import InProcessChannel
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+class NativeQueue(deque):
+    def remove_request(self, request):
+        self.remove(request)
+
+    def remove_requests(self, requests):
+        removed = set(requests)
+        retained = [request for request in self if request not in removed]
+        self.clear()
+        self.extend(retained)
+
+    def prepend_requests(self, requests):
+        self.extendleft(requests)
+
+
+class NativeScheduler:
+    def __init__(self, num_spec_tokens=0, num_sampled_tokens_per_step=1):
+        self.num_spec_tokens = num_spec_tokens
+        self.num_sampled_tokens_per_step = num_sampled_tokens_per_step
+        self.waiting = NativeQueue()
+        self.kv_holding_waiting = NativeQueue()
+        self.requests = {}
+        self.selected_queues = None
+        self.failure = None
+        self.output_calls = 0
+        self.stopped = False
+
+    def add_request(self, request):
+        self.requests[request.request_id] = request
+
+    def schedule(self):
+        self.selected_queues = (list(self.waiting), list(self.kv_holding_waiting))
+        if self.failure is not None:
+            raise self.failure
+        return self.selected_queues
+
+    def _update_after_schedule(self, scheduler_output):
+        for request_id, count in scheduler_output.num_scheduled_tokens.items():
+            self.requests[request_id].num_computed_tokens += count
+
+    def update_from_output(self, scheduler_output, runner_output):
+        self.output_calls += 1
+        for request_id, count in runner_output.generated.items():
+            request = self.requests.get(request_id)
+            if request is None or request.is_finished():
+                continue
+            if request.num_stale_output_tokens and request.drop_stale_output:
+                request.num_stale_output_tokens = 0
+                continue
+            request.num_output_tokens += count
+            if request_id in runner_output.finished:
+                request.finished = True
+                del self.requests[request_id]
+        if self.failure is not None:
+            raise self.failure
+        return "native-output"
+
+    def finish_requests(self, request_ids, status=None):
+        finished = [
+            self.requests.pop(rid) for rid in request_ids if rid in self.requests
+        ]
+        for request in finished:
+            request.finished = True
+        return finished
+
+    def shutdown(self):
+        self.stopped = True
+        if self.failure is not None:
+            raise self.failure
+
+
+class Feed:
+    def __init__(self, directory):
+        self.lock = threading.RLock()
+        self.events = []
+        self.closed = False
+
+    def capture(self, event, fields):
+        if not self.lock._is_owned():
+            raise RuntimeError("Capture must hold the clock lock")
+        self.events.append((event, fields))
+
+    def emit(self, event, **fields):
+        self.capture(event, fields)
+
+    def close(self):
+        self.closed = True
+
+
+class Request:
+    def __init__(self, request_id="r", *, computed=0, prompt=8, extra=None):
+        self.request_id = request_id
+        self.sampling_params = SimpleNamespace(extra_args=extra)
+        self.resumable = False
+        self.status = SimpleNamespace(name="WAITING")
+        self.arrival_time = 1
+        self.num_computed_tokens = computed
+        self.num_prompt_tokens = prompt
+        self.num_output_tokens = 0
+        self.num_stale_output_tokens = 0
+        self.drop_stale_output = False
+        self.finished = False
+
+    def is_finished(self):
+        return self.finished
+
+
+@pytest.fixture
+def worker(monkeypatch):
+    """Replace GPU imports only; execute the actual Duru adapter."""
+    native = ModuleType("vllm.v1.core.sched.async_scheduler")
+    native.AsyncScheduler = NativeScheduler
+    queues = ModuleType("vllm.v1.core.sched.request_queue")
+    queues.FCFSRequestQueue = NativeQueue
+    monkeypatch.setitem(sys.modules, native.__name__, native)
+    monkeypatch.setitem(sys.modules, queues.__name__, queues)
+    path = Path(__file__).parents[1] / "worker.py"
+    spec = importlib.util.spec_from_file_location("duru_worker_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("DURU_SCORES", "unused")
+    monkeypatch.delenv("DURU_ENABLE_SCORING", raising=False)
+    monkeypatch.setenv("DURU_WORK_DIR", "unused")
+    monkeypatch.setattr(module, "CompactFeed", Feed)
+    return module
+
+
+@pytest.fixture
+def scheduler(worker):
+    return worker.DuruScheduler()
+
+
+def scheduled(count=1):
+    return SimpleNamespace(
+        num_scheduled_tokens={"r": count}, scheduled_spec_decode_tokens={}
+    )
+
+
+def output(count=1, *, finished=False):
+    return SimpleNamespace(
+        kv_connector_output=None,
+        generated={"r": count},
+        finished={"r"} if finished else set(),
+    )
+
+
+@pytest.fixture
+def batch(scheduler):
+    scheduler.add_request(Request(computed=8))
+    result = scheduled()
+    scheduler._update_after_schedule(result)
+    return result
+
+
+def test_queue_order_and_allocated_identity(worker):
+    requests = [Request(str(i)) for i in range(3)]
+    for request, rank in zip(requests, [(-1, 1), (-3, 3), (-3, 2)]):
+        request.rank = rank
+    queue = worker.Queue(requests, SimpleNamespace(key=lambda r, i: (*r.rank, i)))
+    assert queue.peek_request() is requests[2]
+    requests[0].rank = (-10, 1)
+    # Keep the identity whose KV was allocated.
+    assert queue.pop_request() is requests[2]
+    assert [queue.pop_request() for _ in range(2)] == [requests[0], requests[1]]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail):
+    ready, missing, holder = [Request(name) for name in ("ready", "missing", "holder")]
+    scheduler.waiting.extend([ready, missing])
+    scheduler.kv_holding_waiting.append(holder)
+    snapshot = {"requests": {"ready": {"score": 3}, "holder": {"score": 1}}}
+    monkeypatch.setattr(scheduler.u_reader, "refresh", lambda **kw: snapshot)
+    scheduler.failure = RuntimeError("native failure") if fail else None
+    with pytest.raises(RuntimeError, match="native failure") if fail else nullcontext():
+        scheduler.schedule()
+    assert scheduler.selected_queues == ([ready], [holder])
+    assert list(scheduler.waiting) == [missing, ready]
+    assert list(scheduler.kv_holding_waiting) == [holder]
+    assert scheduler.u_reader.pinned is None
+
+
+def test_calibration_without_scores_keeps_native_scheduling_and_work_records(
+    worker, monkeypatch
+):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "0")
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+
+    def unexpected_reader():
+        pytest.fail("Calibration must not create a score reader")
+
+    monkeypatch.setattr(worker, "Reader", unexpected_reader)
+    scheduler = worker.DuruScheduler()
+    probe = Request(extra={"duru_request_id": "duru-calibration-probe"})
+    holder = Request("holder")
+    try:
+        scheduler.add_request(probe)
+        scheduler.waiting.append(probe)
+        scheduler.kv_holding_waiting.append(holder)
+        assert type(scheduler.waiting) is NativeQueue
+        assert type(scheduler.kv_holding_waiting) is NativeQueue
+        assert scheduler.schedule() == ([probe], [holder])
+        batch = scheduled(count=8)
+        scheduler._update_after_schedule(batch)
+        scheduler.update_from_output(batch, output(count=1))
+        event, fields = scheduler.compact_feed.events[0]
+        assert event == "accepted_output"
+        assert fields["steps"][0]["client_request_id"] == "duru-calibration-probe"
+        assert fields["steps"][0]["generated_tokens"] == 1
+    finally:
+        scheduler.shutdown()
+    assert scheduler.stopped
+    assert scheduler.compact_feed.closed
+
+
+@pytest.mark.parametrize("setting", [None, "1"])
+def test_serving_still_requires_score_channel(worker, monkeypatch, setting):
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+    if setting is not None:
+        monkeypatch.setenv("DURU_ENABLE_SCORING", setting)
+    with pytest.raises(ValueError, match="DURU_SCORES"):
+        worker.DuruScheduler()
+
+
+def test_invalid_scoring_switch_is_rejected(worker, monkeypatch):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "invalid")
+    with pytest.raises(ValueError, match="DURU_ENABLE_SCORING"):
+        worker.DuruScheduler()
+
+
+def test_identity_and_priority_exclude_running_requests(scheduler, monkeypatch):
+    high = Request("native")
+    assert scheduler.identity(high) == dict(
+        client_request_id="native", root="native", agent="native"
+    )
+    high.sampling_params.extra_args = dict(
+        duru_request_id="client", duru_root_id="root", duru_agent_id="child"
+    )
+    assert scheduler.identity(high) == dict(
+        client_request_id="client", root="root", agent="child"
+    )
+    low = Request("low")
+    scheduler.waiting.extend([low, high])
+    snapshot = {"requests": {"client": {"score": 4}, "low": {"score": 1}}}
+    monkeypatch.setattr(scheduler.u_reader, "refresh", lambda: snapshot)
+    assert scheduler.waiting.pop_request() is high
+    high.status.name = "RUNNING"
+    scheduler.waiting.append(high)
+    assert scheduler.waiting.pop_request() is low
+
+
+@pytest.mark.parametrize(
+    "computed,count,phase,tokens,finished",
+    [
+        (3, 5, "prefill", 1, True),
+        (0, 4, "prefill", 0, False),
+        (8, 1, "decode", 0, False),
+    ],
+)
+def test_coordinates_and_accepted_work(
+    scheduler, computed, count, phase, tokens, finished
+):
+    request = Request(computed=computed)
+    scheduler.add_request(request)
+    batch = scheduled(count)
+    scheduler._update_after_schedule(batch)
+    assert scheduler.compact_feed.events == []
+    assert request.num_computed_tokens == computed + count
+    assert (
+        scheduler.update_from_output(batch, output(tokens, finished=finished))
+        == "native-output"
+    )
+    accepted = next(
+        fields["steps"][0]
+        for event, fields in scheduler.compact_feed.events
+        if event == "accepted_output"
+    )
+    assert (accepted["p"], accepted["d"], accepted["k"], accepted["phase"]) == (
+        count,
+        computed,
+        computed + count,
+        phase,
+    )
+    if finished:
+        assert scheduler.compact_feed.events[-1] == (
+            "worker_request_finished",
+            {"requests": [scheduler.identity(request)]},
+        )
+    assert accepted["accepted"] and accepted["generated_tokens"] == tokens
+    assert accepted["end"] >= accepted["scheduled_at"]
+    assert ("r" not in scheduler.requests) == finished
+    assert not scheduler._pending_work
+
+
+@pytest.mark.parametrize(
+    "state", ["cancelled", "replaced", "finished", "drop_stale", "deliver_stale"]
+)
+def test_output_acceptance(scheduler, batch, state):
+    request = scheduler.requests["r"]
+    if state == "cancelled":
+        scheduler.requests.pop("r")
+    elif state == "replaced":
+        scheduler.requests["r"] = Request()
+    elif state == "finished":
+        request.finished = True
+    else:
+        request.num_stale_output_tokens = 1
+        request.drop_stale_output = state == "drop_stale"
+    scheduler.update_from_output(batch, output())
+    step = scheduler.compact_feed.events[-1][1]["steps"][0]
+    assert step["accepted"] == (state == "deliver_stale")
+    assert step["generated_tokens"] == (1 if state == "deliver_stale" else 0)
+
+
+@pytest.mark.parametrize("wall_jump", [-60, 60])
+def test_accounting_progress_survives_wall_clock_jump(worker, monkeypatch, wall_jump):
+    clock = SimpleNamespace(wall=1000.0, elapsed=100.0)
+    clock_api = SimpleNamespace(
+        time=lambda: clock.wall, monotonic=lambda: clock.elapsed
+    )
+    monkeypatch.setattr(worker, "time", clock_api)
+    monkeypatch.setattr(events, "time", clock_api)
+    channel = InProcessChannel()
+    monkeypatch.setattr(events, "open_feed", lambda *args, **kwargs: channel)
+    monkeypatch.setattr(worker, "CompactFeed", events.CompactFeed)
+    scheduler = worker.DuruScheduler()
+    reader = scoring.EventStreamReader("unused", receiver=channel)
+    try:
+        scheduler.add_request(Request(computed=8))
+        batch = scheduled()
+        scheduler._update_after_schedule(batch)
+        with scheduler.compact_feed.lock:
+            scheduler.compact_feed.emit("u_clock")
+            reader.read()
+            cutoff = reader.received_through
+            clock.wall += wall_jump
+            clock.elapsed += 0.25
+        scheduler.update_from_output(batch, output())
+        rows = reader.read()
+        step = next(row for row in rows if row["event"] == "accepted_output")["steps"][
+            0
+        ]
+
+        assert step["scheduled_at"] == 100.0
+        assert cutoff == 100.0
+        assert step["end"] == 100.25
+        assert cutoff < step["end"] <= reader.received_through
+        assert all(row["time"] == 100.25 for row in rows)
+    finally:
+        scheduler.shutdown()
+        reader.close()
+
+
+def test_inflight_batches_retain_coordinates(scheduler, batch):
+    second = scheduled()
+    scheduler._update_after_schedule(second)
+    for pending in (batch, second):
+        scheduler.update_from_output(pending, output())
+    steps = [
+        fields["steps"][0]
+        for event, fields in scheduler.compact_feed.events
+        if event == "accepted_output"
+    ]
+    assert [(step["d"], step["generated_tokens"]) for step in steps] == [(8, 1), (9, 1)]
+    assert not scheduler._pending_work
+
+
+@pytest.mark.parametrize(
+    "kwargs", [dict(num_spec_tokens=1), dict(num_sampled_tokens_per_step=0)]
+)
+def test_unsupported_modes_fail_before_feed_opens(worker, kwargs):
+    with patch.object(worker, "CompactFeed") as feed:
+        with pytest.raises(ValueError, match="non-speculative"):
+            worker.DuruScheduler(**kwargs)
+        feed.assert_not_called()
+
+
+@pytest.mark.parametrize("pooling", [False, True])
+def test_unsupported_requests_fail_before_admission(scheduler, pooling):
+    request = Request()
+    request.resumable = not pooling
+    if pooling:
+        request.sampling_params = None
+    with pytest.raises(ValueError, match="non-resumable"):
+        scheduler.add_request(request)
+    assert not scheduler.requests
+
+
+@pytest.mark.parametrize("failure", ["invalid_kv", "failed_transfer", "speculative"])
+def test_invalid_outputs_fail_before_native_acceptance(scheduler, batch, failure):
+    result = output()
+    result.kv_connector_output = SimpleNamespace(
+        invalid_block_ids={1} if failure == "invalid_kv" else set(),
+        failed_recving={"r"} if failure == "failed_transfer" else set(),
+    )
+    if failure == "speculative":
+        batch.scheduled_spec_decode_tokens = {"r": [2]}
+    with pytest.raises(ValueError):
+        scheduler.update_from_output(batch, result)
+    assert id(batch) in scheduler._pending_work
+    assert scheduler.output_calls == 0
+
+
+def test_native_failure_emits_no_work_and_closes_feed(scheduler, batch):
+    scheduler.failure = RuntimeError("native failure")
+    with pytest.raises(RuntimeError, match="native failure"):
+        scheduler.update_from_output(batch, output())
+    assert scheduler.compact_feed.events == []
+    with pytest.raises(RuntimeError, match="native failure"):
+        scheduler.shutdown()
+    assert scheduler.stopped and scheduler.compact_feed.closed
+
+
+def test_abort_acknowledges_native_removal_before_stale_output(scheduler, batch):
+    request = scheduler.requests["r"]
+    assert scheduler.finish_requests(["r"]) == [request]
+    assert scheduler.compact_feed.events[-1] == (
+        "worker_request_finished",
+        {"requests": [scheduler.identity(request)]},
+    )
+    scheduler.update_from_output(batch, output())
+    step = scheduler.compact_feed.events[-1][1]["steps"][0]
+    assert not step["accepted"]
+    assert step["generated_tokens"] == 0
