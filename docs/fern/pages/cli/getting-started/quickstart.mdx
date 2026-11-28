@@ -63,7 +63,38 @@ Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. 
   <Step title="Start a worker">
     In another terminal, select the hardware and backend you installed, then launch the worker:
 
-    <WorkerSelector />
+    {/* The picker renders its own UI. Keep its commands in sync with the MDX children Fern copies and exports. */}
+    <WorkerSelector>
+      <Tabs>
+        <Tab title="NVIDIA GPU">
+          <CodeBlocks>
+```bash title="SGLang"
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+```
+
+```bash title="TensorRT-LLM"
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
+```
+
+```bash title="vLLM"
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+```
+          </CodeBlocks>
+        </Tab>
+        <Tab title="Intel XPU">
+          <CodeBlocks>
+```bash title="SGLang"
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+```
+
+```bash title="vLLM"
+VLLM_TARGET_DEVICE=xpu \
+  python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+```
+          </CodeBlocks>
+        </Tab>
+      </Tabs>
+    </WorkerSelector>
   </Step>
 
   <Step title="Verify the endpoint">
