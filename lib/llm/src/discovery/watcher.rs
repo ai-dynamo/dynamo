@@ -476,6 +476,7 @@ impl ModelWatcher {
             .await?
             .with_admitted_instances_and_cancellation(admitted_ids.clone(), cancellation.clone());
         let instance_watcher = client.instance_avail_watcher();
+        let dispatch_watcher = client.instance_dispatch_watcher();
         tracing::debug!(
             model_name = card.name(),
             namespace = mcid.namespace,
@@ -503,6 +504,7 @@ impl ModelWatcher {
             admitted_ids,
         });
         worker_set.set_instance_watcher(instance_watcher);
+        worker_set.set_dispatch_watcher(dispatch_watcher);
 
         // A surface-less Encode worker is reached only through EncoderRouter.
         // Register it for serving readiness, publish its endpoint to any

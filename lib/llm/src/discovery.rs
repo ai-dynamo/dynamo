@@ -4,10 +4,10 @@
 pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
-pub use model::Model;
 pub(crate) use model::{
     GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
 };
+pub use model::{Model, NamedWorkers};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{

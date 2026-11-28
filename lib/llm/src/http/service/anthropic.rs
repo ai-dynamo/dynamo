@@ -621,7 +621,10 @@ async fn anthropic_messages(
     // configured status, not this lookup's 404/503.
     let (engine, parsing_options, input_policy) = state
         .manager()
-        .get_chat_completions_engine_with_input_policy(&model)
+        .get_chat_completions_engine_with_input_policy(
+            &model,
+            named_workers(&orig_request, &headers, state.nvext_enabled()),
+        )
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
@@ -1393,6 +1396,19 @@ fn apply_anthropic_template_args(
             .entry("truncate_history_thinking".to_string())
             .or_insert(serde_json::Value::Bool(false));
     }
+}
+
+/// The workers the request names, read before its `nvext` is converted. A malformed `nvext`
+/// names nothing here and is rejected by the conversion that follows.
+fn named_workers(
+    request: &AnthropicCreateMessageRequest,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) -> crate::discovery::NamedWorkers {
+    let nvext = request.nvext.as_ref().and_then(|nvext| {
+        serde_json::from_value::<crate::protocols::common::extensions::NvExt>(nvext.clone()).ok()
+    });
+    crate::discovery::NamedWorkers::from_request(nvext.as_ref(), headers, nvext_enabled)
 }
 
 fn apply_anthropic_nvext_policy(
