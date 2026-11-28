@@ -14,6 +14,7 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec};
 use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
@@ -47,6 +48,7 @@ use super::replay::{
 };
 use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
+use dynamo_runtime::namespace::NamespaceFilter;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::local_model::ModelRuntimeConfig;
@@ -539,13 +541,21 @@ pub(crate) struct EntrypointArgs {
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
     ais_perf_config: Option<AisPerfConfig>,
+    direct: Option<DirectEngines>,
+}
+
+/// Engines the frontend dials directly over their native gRPC API (`--direct`).
+#[derive(Clone, Debug)]
+struct DirectEngines {
+    backend: String,
+    urls: Vec<String>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None, direct_backend=None, engine_urls=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -585,6 +595,8 @@ impl EntrypointArgs {
         reject_media: Option<bool>,
         reject_media_status_code: Option<u16>,
         default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
+        direct_backend: Option<String>,
+        engine_urls: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -708,6 +720,10 @@ impl EntrypointArgs {
             migration_max_seq_len,
             chat_engine_factory,
             ais_perf_config,
+            direct: direct_backend.map(|backend| DirectEngines {
+                backend,
+                urls: engine_urls.unwrap_or_default(),
+            }),
         })
     }
 }
@@ -849,6 +865,53 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
     )
 }
 
+/// Start the engines a `--direct` frontend dials. Their dispatch is registered
+/// with the runtime, which routes every request for them through it.
+async fn serve_direct_engines(
+    drt: &dynamo_runtime::DistributedRuntime,
+    direct: DirectEngines,
+    namespace: String,
+    model_path: Option<String>,
+) -> anyhow::Result<()> {
+    let options = DirectEngineOptions {
+        namespace,
+        model_path,
+    };
+    let factory = match direct.backend.as_str() {
+        "sglang" => dynamo_sglang_sidecar::direct::direct_engine_factory(options),
+        other => anyhow::bail!("--direct-backend {other} is not supported; expected sglang"),
+    };
+    let specs = direct_engine_specs(&direct.urls)?;
+    dynamo_backend_common::direct::serve_direct_engines(drt, specs, factory).await?;
+    Ok(())
+}
+
+/// The namespace direct engines register in: the one this frontend's model
+/// filter admits. A namespace prefix takes precedence over the namespace
+/// there, so it does here.
+fn direct_namespace(namespace: Option<&str>, namespace_prefix: Option<&str>) -> String {
+    match NamespaceFilter::from_namespace_and_prefix(namespace, namespace_prefix) {
+        NamespaceFilter::Exact(admitted) | NamespaceFilter::Prefix(admitted) => admitted,
+        NamespaceFilter::Global => "dynamo".to_string(),
+    }
+}
+
+/// One engine per `--engine-url`, named by its endpoint's normal form, so
+/// every spelling of an address is the same engine. A malformed address fails
+/// startup.
+fn direct_engine_specs(
+    urls: &[String],
+) -> Result<Vec<DirectEngineSpec>, dynamo_runtime::error::DynamoError> {
+    urls.iter()
+        .map(|url| {
+            let endpoint = dynamo_sidecar_common::GrpcEndpoint::parse(url, "--engine-url")?;
+            Ok(DirectEngineSpec {
+                url: endpoint.as_str().to_string(),
+            })
+        })
+        .collect()
+}
+
 async fn select_engine(
     #[allow(unused_variables)] distributed_runtime: super::DistributedRuntime,
     args: EntrypointArgs,
@@ -872,6 +935,17 @@ async fn select_engine(
                     Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
+            if let Some(direct) = args.direct {
+                serve_direct_engines(
+                    &distributed_runtime.inner,
+                    direct,
+                    direct_namespace(args.namespace.as_deref(), args.namespace_prefix.as_deref()),
+                    args.model_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                )
+                .await?;
+            }
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,
@@ -1008,6 +1082,35 @@ where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+#[cfg(test)]
+mod direct_engine_tests {
+    use super::*;
+
+    #[test]
+    fn spellings_of_one_address_are_one_engine_and_a_malformed_one_fails() {
+        let urls = ["10.0.0.7:30001", "grpc://10.0.0.7:30001/"].map(String::from);
+        let specs = direct_engine_specs(&urls).unwrap();
+        assert_eq!(specs[0], specs[1]);
+
+        let rejected = direct_engine_specs(&["https://engine:30001".to_string()]).unwrap_err();
+        assert!(rejected.to_string().contains("--engine-url"), "{rejected}");
+    }
+
+    #[test]
+    fn direct_engines_register_in_a_namespace_the_frontend_filter_admits() {
+        for (namespace, prefix) in [
+            (None, None),
+            (Some("serving"), None),
+            (None, Some("production")),
+            (Some("serving"), Some("production")),
+        ] {
+            let filter = NamespaceFilter::from_namespace_and_prefix(namespace, prefix);
+            let registered = direct_namespace(namespace, prefix);
+            assert!(filter.matches(&registered), "{filter:?} drops {registered}");
+        }
+    }
 }
 
 #[cfg(test)]

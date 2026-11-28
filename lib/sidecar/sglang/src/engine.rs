@@ -675,6 +675,33 @@ fn resolve_bootstrap_host(
     resolve_bootstrap_host_with_local(explicit, endpoint, discovery, &local_host)
 }
 
+/// The bootstrap host of a prefill engine a frontend dials with no sidecar
+/// beside it: a routable host the engine reports, as for a sidecar, and
+/// otherwise the host the engine is dialed at. A sidecar falls back to its own
+/// address, which in the frontend is not the engine's. `--bootstrap-host` is
+/// not consulted: a sidecar's names the host of its one engine, and the
+/// frontend's would name one host for every prefill engine it lists.
+pub(crate) fn direct_bootstrap_host(endpoint: &GrpcEndpoint, discovery: &EngineInfo) -> String {
+    reported_bootstrap_host(discovery).unwrap_or_else(|| endpoint.authority_host().to_string())
+}
+
+/// A routable bootstrap host the engine reports: its `host`, then its
+/// `dist_init_addr`.
+fn reported_bootstrap_host(discovery: &EngineInfo) -> Option<String> {
+    let from_server = discovery
+        .host
+        .as_deref()
+        .filter(|host| is_routable_host(host));
+    if let Some(host) = from_server {
+        return Some(host.trim().to_string());
+    }
+    discovery
+        .dist_init_addr
+        .as_deref()
+        .and_then(host_from_address)
+        .filter(|host| is_routable_host(host))
+}
+
 fn resolve_bootstrap_host_with_local(
     explicit: Option<&str>,
     endpoint: &str,
@@ -684,19 +711,7 @@ fn resolve_bootstrap_host_with_local(
     if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
         return Ok(Some(host.trim().to_string()));
     }
-    let from_server = discovery
-        .host
-        .as_deref()
-        .filter(|host| is_routable_host(host));
-    if let Some(host) = from_server {
-        return Ok(Some(host.trim().to_string()));
-    }
-    let from_dist = discovery
-        .dist_init_addr
-        .as_deref()
-        .and_then(host_from_address)
-        .filter(|host| is_routable_host(host));
-    if let Some(host) = from_dist {
+    if let Some(host) = reported_bootstrap_host(discovery) {
         return Ok(Some(host));
     }
     if is_routable_host(local_host) {
@@ -913,10 +928,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Args, DisaggregationMode, DiscoveredKvEventSource, EngineConfig, EngineInfo,
-        SglangSidecarEngine, WORKER_GROUP_KEY, combined_token_limit, discovery_bootstrap_port,
-        lacks_draft_reserve, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
-        sglang_eagle_enabled,
+        Args, DisaggregationMode, DiscoveredKvEventSource, EngineConfig, EngineInfo, GrpcEndpoint,
+        SglangSidecarEngine, WORKER_GROUP_KEY, combined_token_limit, direct_bootstrap_host,
+        discovery_bootstrap_port, lacks_draft_reserve, omitted_max_tokens_default,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
     use crate::discovery;
     use crate::node::node_of;
@@ -1583,6 +1598,17 @@ mod tests {
         };
         assert!(enable_eagle(Some("EAGLE")));
         assert!(!enable_eagle(None));
+    }
+
+    #[test]
+    fn a_directly_dialed_engine_falls_back_to_the_host_it_is_dialed_at() {
+        let dialed = GrpcEndpoint::parse("[fd00::7]:30001", "--engine-url").unwrap();
+        let host = |info: EngineInfo| direct_bootstrap_host(&dialed, &info);
+        // A routable host the engine reports wins, as for a sidecar.
+        assert_eq!(host(hosts("10.0.0.1", None)), "10.0.0.1");
+        assert_eq!(host(hosts("", Some("10.0.0.2:20000"))), "10.0.0.2");
+        // Otherwise the dialed host, in the bracketed form the sidecar keeps.
+        assert_eq!(host(hosts("0.0.0.0", None)), "[fd00::7]");
     }
 
     #[test]

@@ -189,6 +189,11 @@ impl<P: Protocol> Controller<P> {
         handle
     }
 
+    /// How many requests this engine has opened.
+    pub fn opened(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
     /// Bind `plan` to the next request whose id was not registered with [`Self::request`].
     ///
     /// HTTP ingress mints the worker request id on the server, so a test driving the frontend

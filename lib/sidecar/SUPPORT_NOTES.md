@@ -44,6 +44,16 @@ The aggregated launcher does not accept custom configuration files. Add `guided_
 
 See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
+## Direct mode
+
+In direct mode (`python -m dynamo.frontend --direct --engine-url HOST:PORT`) the frontend runs the sidecar's engine code itself and dials each engine, so that engine's sidecar limits apply. Direct mode supports SGLang's Rust server only, and adds these limits:
+
+- The frontend subscribes to each engine's ZMQ KV-event publisher itself. The publisher must be reachable from the frontend: an engine on another host must publish on a routable address, not `127.0.0.1` or `ipc://`.
+- The frontend subscribes to every topic on a publisher's socket, not only the engine's topic.
+- A prefill engine's bootstrap host is a routable host the engine reports (its `host`, then its `dist_init_addr`), and otherwise the host in its `--engine-url`. If the engine reports a routable host, that host is used whatever its `--engine-url` says, so start the engine with a `--host` its decode engines can reach. If it reports only a loopback or wildcard host, list it by an address its decode engines can reach. `SGLANG_DISAGGREGATION_BOOTSTRAP_HOST` in the frontend's environment is not read, because it would name one host for every prefill engine.
+- The engines are registered in the frontend's own in-process discovery, so other components, such as the planner, do not see them.
+- Only the frontend's metrics exist. The frontend does not run the sidecar's worker, so the worker-side `dynamo_component_*` metrics, the lifecycle gauges, and the health-check canary are absent.
+
 ## Operational limits
 
 Dynamo provides runtime metrics, logs, and request spans. Collect native engine metrics separately. The sidecars do not provide full tracing inside the engine. They do not provide full support for existing dashboards.

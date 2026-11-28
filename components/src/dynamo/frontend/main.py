@@ -549,6 +549,10 @@ async def async_main():
     if config.router_prefill_load_model == "ais":
         kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
+    if config.direct:
+        kwargs["direct_backend"] = config.direct_backend
+        kwargs["engine_urls"] = list(config.engine_urls)
+
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
     frontend_route_extensions = load_frontend_route_extensions(
