@@ -1245,4 +1245,162 @@ mod tests {
         );
         assert!(metadata.read().await.get_all_endpoints().is_empty());
     }
+
+    #[tokio::test]
+    async fn kube_discovery_persists_compacted_lora_cards_within_etcd_limit() {
+        use axum::{
+            body::Body,
+            http::{Request, Response},
+        };
+
+        const ETCD_DEFAULT_MAX_REQUEST_BYTES: usize = 1_572_864;
+        const LORA_COUNT: usize = 120;
+
+        let stored_cr: Arc<parking_lot::Mutex<Option<Vec<u8>>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let max_request_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service_cr = stored_cr.clone();
+        let service_max = max_request_bytes.clone();
+
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+            let stored_cr = service_cr.clone();
+            let max_bytes = service_max.clone();
+            async move {
+                let response = match request.method().as_str() {
+                    "GET" => {
+                        if let Some(body) = stored_cr.lock().clone() {
+                            Response::builder()
+                                .status(200)
+                                .body(Body::from(body))
+                                .unwrap()
+                        } else {
+                            Response::builder()
+                                .status(404)
+                                .body(Body::from(
+                                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,"message":"not found"}"#,
+                                ))
+                                .unwrap()
+                        }
+                    }
+                    "POST" | "PUT" => {
+                        let status = if request.method() == "POST" { 201 } else { 200 };
+                        let body = axum::body::to_bytes(Body::new(request.into_body()), usize::MAX)
+                            .await
+                            .unwrap();
+                        if body.len() > ETCD_DEFAULT_MAX_REQUEST_BYTES {
+                            Response::builder()
+                                .status(500)
+                                .body(Body::from(
+                                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","code":500,"message":"etcdserver: request is too large"}"#,
+                                ))
+                                .unwrap()
+                        } else {
+                            max_bytes.fetch_max(body.len(), std::sync::atomic::Ordering::Relaxed);
+                            *stored_cr.lock() = Some(body.to_vec());
+                            Response::builder()
+                                .status(status)
+                                .body(Body::from(body))
+                                .unwrap()
+                        }
+                    }
+                    method => panic!("unexpected method: {method}"),
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+
+        let discovery = discovery_client(KubeClient::new(service, "default"));
+        let base_card = serde_json::json!({
+            "display_name": "Qwen/Qwen2.5-7B-Instruct",
+            "slug": "qwen-qwen2.5-7b-instruct",
+            "aliases": ["qwen-7b"],
+            "kv_cache_block_size": 16,
+            "runtime_config": {
+                "total_kv_blocks": 8192,
+                "max_gpu_lora_count": 64,
+                "taints": ["initial"],
+                "runtime_data": { "payload": "x".repeat(16 * 1024) }
+            }
+        });
+
+        discovery
+            .register_internal(DiscoverySpec::Model {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                endpoint: "generate".into(),
+                card_json: base_card.clone(),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        let mut registered_loras = Vec::with_capacity(LORA_COUNT);
+        for i in 0..LORA_COUNT {
+            let name = format!("adapter-{i:03}");
+            let mut lora_card = base_card.clone();
+            lora_card["display_name"] = serde_json::json!(name);
+            lora_card["slug"] = serde_json::json!(name);
+            lora_card["source_path"] = serde_json::json!("Qwen/Qwen2.5-7B-Instruct");
+            lora_card.as_object_mut().unwrap().remove("aliases");
+            lora_card["lora"] = serde_json::json!({"name": name, "max_gpu_lora_count": 64});
+            lora_card["user_data"] = serde_json::json!({"lora_adapter": true, "lora_id": i + 1});
+            let instance = discovery
+                .register_internal(DiscoverySpec::Model {
+                    namespace: "ns".into(),
+                    component: "worker".into(),
+                    endpoint: "generate".into(),
+                    card_json: lora_card,
+                    model_suffix: Some(name),
+                })
+                .await
+                .unwrap();
+            registered_loras.push(instance);
+        }
+
+        let base_id = ModelCardInstanceId {
+            namespace: "ns".into(),
+            component: "worker".into(),
+            endpoint: "generate".into(),
+            instance_id: discovery.instance_id(),
+            model_suffix: None,
+        };
+        discovery
+            .update_model_taints_internal(base_id, HashSet::from(["draining".into()]))
+            .await
+            .unwrap();
+        discovery
+            .unregister(registered_loras.pop().unwrap())
+            .await
+            .unwrap();
+
+        let raw_uncompacted = serde_json::to_vec(&*discovery.metadata.read().await).unwrap();
+        assert!(
+            raw_uncompacted.len() > ETCD_DEFAULT_MAX_REQUEST_BYTES,
+            "uncompacted metadata ({} B) should exceed 1.5 MiB",
+            raw_uncompacted.len()
+        );
+        let peak_wire_bytes = max_request_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            peak_wire_bytes < 256 * 1024,
+            "persisted CR ({peak_wire_bytes} B) should stay well below 256 KiB"
+        );
+
+        let last_cr: DynamoWorkerMetadata =
+            serde_json::from_slice(stored_cr.lock().as_ref().unwrap()).unwrap();
+        let restored = crd::deserialize_metadata(last_cr.spec.data).unwrap();
+        let expected: HashMap<_, _> = discovery
+            .metadata
+            .read()
+            .await
+            .get_all_model_cards()
+            .into_iter()
+            .map(|instance| (instance.id(), instance))
+            .collect();
+        let actual: HashMap<_, _> = restored
+            .get_all_model_cards()
+            .into_iter()
+            .map(|instance| (instance.id(), instance))
+            .collect();
+        assert_eq!(actual, expected);
+    }
 }
