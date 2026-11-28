@@ -16,11 +16,12 @@ from collections.abc import Sequence
 
 import torch
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
 
 from dynamo.vllm.benchmark_points import RANDOM_KDA_BOUND, RANDOM_KDA_REQUEST_PREFIX
+from dynamo.vllm.kv_groups import kv_group_is_state
 
 
 def fill_recurrent_states(
@@ -60,7 +61,8 @@ class BenchmarkWorker(Worker):
         self._benchmark_kda_layers = []
         context = self.vllm_config.compilation_config.static_forward_context
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, MambaSpec):
+            # Older vLLM: one kv_cache_spec per group; newer: per-layer specs.
+            if kv_group_is_state(group):
                 for name in group.layer_names:
                     self._benchmark_kda_layers.append(
                         (group_id, name, context[name].kv_cache)

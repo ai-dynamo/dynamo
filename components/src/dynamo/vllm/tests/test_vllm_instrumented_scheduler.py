@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
@@ -4189,9 +4190,7 @@ def test_prefill_real_seed_auto_follows_recurrent_state_layout(monkeypatch, valu
         monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     else:
         monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
-    state_subclass = type(
-        "GatedDeltaStateSpec", (instrumented_scheduler_module.MambaSpec,), {}
-    )
+    state_subclass = type("GatedDeltaStateSpec", (MambaSpec,), {})
     hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
     hybrid_subclass = _realseed_layout_stub(
         "FullAttentionSpec", state_subclass.__new__(state_subclass)
@@ -8911,7 +8910,7 @@ def test_random_kda_shadow_keeps_attention_prefix_but_owns_sparse_state(context)
     stub._bench_random_kda = True
     state_chain = [_FakeBlock(900)]  # a deep chain retains one current state
     kda = _FakeManager(state_chain)
-    kda.kv_cache_spec = instrumented_scheduler_module.MambaSpec(
+    kda.kv_cache_spec = MambaSpec(
         block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
     )
     pool.null_block = _FakeBlock(0)
@@ -8929,6 +8928,31 @@ def test_random_kda_shadow_keeps_attention_prefix_but_owns_sparse_state(context)
     assert pool.null_block.ref_cnt == 1
     assert table[0][: context // 16] == [b.block_id for b in chain[: context // 16]]
     assert set(table[0]).isdisjoint(zero_ids)
+
+
+def test_random_kda_state_manager_resolves_specs_through_group_binding():
+    """Newer vLLM managers carry kv_cache_group_id and no kv_cache_spec; the
+    random-state predicate must resolve them like the state-group detection."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_random_kda = True
+    state = MambaSpec(block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align")
+    groups = [
+        SimpleNamespace(kv_cache_specs={"mla": object()}, layer_names=["mla"]),
+        SimpleNamespace(kv_cache_specs={"kda": state}, layer_names=["kda"]),
+    ]
+    attention = SimpleNamespace(kv_cache_group_id=0, block_size=16)
+    kda = SimpleNamespace(kv_cache_group_id=1, block_size=16)
+    stub.kv_cache_manager = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        coordinator=SimpleNamespace(single_type_managers=[attention, kda]),
+    )
+    assert not stub._kvwarm_random_state_manager(attention)
+    assert stub._kvwarm_random_state_manager(kda)
+    assert stub._kvwarm_random_state_resolved()
+    # A state manager that cannot be bound to its group must not admit random mode.
+    kda.kv_cache_group_id = None
+    assert not stub._kvwarm_random_state_manager(kda)
+    assert not stub._kvwarm_random_state_resolved()
 
 
 def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeypatch):
