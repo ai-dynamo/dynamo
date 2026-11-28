@@ -4,7 +4,9 @@
 //! A Model represents a named model (e.g., "llama-3-70b") that may be served by
 //! one or more WorkerSets. Each WorkerSet corresponds to a namespace.
 //!
-//! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
+//! Requests are routed to a WorkerSet selected by weighted random, proportional to its serving
+//! capacity: worker count, capped for a disaggregated decode set by the prefill workers its
+//! namespace can reach.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -165,6 +167,82 @@ struct NamespaceReadinessEval {
     present: std::collections::HashSet<crate::worker_type::WorkerType>,
     missing: std::collections::HashSet<crate::worker_type::WorkerType>,
     ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
+}
+
+/// Live prefill and decode workers of one namespace (one worker generation).
+#[derive(Clone, Copy, Default)]
+struct DisaggregatedCohort {
+    prefill: usize,
+    decode: usize,
+}
+
+/// Serving capacity of disaggregated decode WorkerSets, in decode-worker units.
+///
+/// A decode set's prefill router reaches only the prefill workers in its own
+/// namespace, so during a worker rollout each generation serves from its own
+/// prefill pool. Weighting by decode count alone sends a generation with many
+/// decodes and one prefill more traffic than that prefill can take, while a
+/// sibling generation's prefill idles. A cohort of `p` prefill and `d` decode
+/// workers is instead credited `min(d, p × r)` decode workers, where `r` is the
+/// model's live decode:prefill ratio across ready cohorts.
+struct PrefillCapacity<'a> {
+    cohorts: HashMap<&'a str, DisaggregatedCohort>,
+    decode_per_prefill: f64,
+}
+
+impl<'a> PrefillCapacity<'a> {
+    fn new<C>(
+        snapshot: &[&'a WorkerSet],
+        ready_namespaces: &std::collections::HashSet<&str>,
+        count_workers: &C,
+    ) -> Self
+    where
+        C: Fn(&WorkerSet) -> usize,
+    {
+        use crate::worker_type::WorkerType;
+
+        let mut cohorts: HashMap<&'a str, DisaggregatedCohort> = HashMap::new();
+        for &ws in snapshot {
+            if !ready_namespaces.contains(ws.namespace()) {
+                continue;
+            }
+            let cohort = cohorts.entry(ws.namespace()).or_default();
+            match ws.card().worker_type {
+                Some(WorkerType::Prefill) => cohort.prefill += count_workers(ws),
+                Some(WorkerType::Decode) => cohort.decode += count_workers(ws),
+                _ => {}
+            }
+        }
+        cohorts.retain(|_, cohort| cohort.prefill > 0 && cohort.decode > 0);
+
+        let prefill: usize = cohorts.values().map(|cohort| cohort.prefill).sum();
+        let decode: usize = cohorts.values().map(|cohort| cohort.decode).sum();
+        let decode_per_prefill = if prefill == 0 {
+            0.0
+        } else {
+            decode as f64 / prefill as f64
+        };
+        Self {
+            cohorts,
+            decode_per_prefill,
+        }
+    }
+
+    /// Selection weight of an eligible WorkerSet with `count` live workers.
+    /// Sets without a prefill hop (aggregated, untyped, in-process) keep their
+    /// worker count. Decode sets sharing a cohort split its capacity by size.
+    fn weight(&self, ws: &WorkerSet, count: usize) -> f64 {
+        let disaggregated = ws.prefill_router.is_some()
+            && ws.card().worker_type == Some(crate::worker_type::WorkerType::Decode);
+        match self.cohorts.get(ws.namespace()) {
+            Some(cohort) if disaggregated => {
+                let capacity =
+                    (cohort.decode as f64).min(cohort.prefill as f64 * self.decode_per_prefill);
+                capacity * count as f64 / cohort.decode as f64
+            }
+            _ => count as f64,
+        }
+    }
 }
 
 type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
@@ -1016,8 +1094,9 @@ impl Model {
     /// Select a WorkerSet and extract a value from it.
     ///
     /// When there's only one set (steady state), returns from that set directly.
-    /// With multiple sets, uses weighted random selection proportional
-    /// to worker count, filtering to sets that have the requested engine.
+    /// With multiple sets, uses weighted random selection proportional to
+    /// serving capacity ([`PrefillCapacity`]), filtering to sets that have the
+    /// requested engine.
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
@@ -1073,14 +1152,14 @@ impl Model {
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let eligible: Vec<(T, &WorkerSet, usize)> = snapshot
             .iter()
             .filter_map(|&ws| {
                 let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (val, ws, count))
             })
             .collect();
 
@@ -1089,19 +1168,27 @@ impl Model {
         }
 
         if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+            return eligible.into_iter().next().map(|(val, _, _)| val);
         }
 
-        // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
-        let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
-            if pick < weight {
+        // Weighted random selection proportional to serving capacity. Every
+        // weight is positive: an eligible set has a live worker, and a
+        // disaggregated one is only capped when its cohort has a live prefill.
+        let capacity = PrefillCapacity::new(&snapshot, &ready_namespaces, &count_workers);
+        let weighted: Vec<(T, f64)> = eligible
+            .into_iter()
+            .map(|(val, ws, count)| (val, capacity.weight(ws, count)))
+            .collect();
+        let total_weight: f64 = weighted.iter().map(|(_, w)| w).sum();
+        let mut pick = rand::rng().random_range(0.0..total_weight);
+        let last = weighted.len() - 1;
+        for (i, (val, weight)) in weighted.into_iter().enumerate() {
+            // The last set absorbs any floating-point remainder.
+            if pick < weight || i == last {
                 return Some(val);
             }
             pick -= weight;
         }
-        // Should not reach here, but fallback to None
         None
     }
 }
@@ -2835,5 +2922,180 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    // -- Capacity-weighted selection across worker generations --
+
+    /// Add one disaggregated worker generation to `model`: a prefill set and a
+    /// decode set (chat engine plus prefill router) sharing `namespace`, with
+    /// `prefill` and `decode` live workers. Returns the decode set and the
+    /// watch senders, which keep the worker counts live.
+    fn add_disaggregated_cohort(
+        model: &Model,
+        namespace: &str,
+        prefill: u64,
+        decode: u64,
+    ) -> (Arc<WorkerSet>, [watch::Sender<Vec<u64>>; 2]) {
+        let (prefill_set, prefill_tx) = ws_with_type(
+            namespace,
+            &format!("{namespace}-prefill"),
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            (0..prefill).collect::<Vec<u64>>(),
+        );
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let (decode_tx, decode_rx) = watch::channel((100..100 + decode).collect::<Vec<u64>>());
+        let mut decode_set =
+            WorkerSet::new(namespace.to_string(), format!("{namespace}-decode"), card);
+        decode_set.set_instance_watcher(decode_rx);
+        decode_set.chat_engine = Some(make_test_chat_engine());
+        decode_set.prefill_router = Some(PrefillRouter::disabled(
+            Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            None,
+        ));
+        let decode_set = Arc::new(decode_set);
+        model.add_worker_set(format!("{namespace}:prefill"), prefill_set);
+        model.add_worker_set(namespace.to_string(), decode_set.clone());
+        (decode_set, [prefill_tx, decode_tx])
+    }
+
+    /// The selection weight `select_worker_set_with` would give `ws` right now.
+    fn selection_weight(model: &Model, ws: &WorkerSet) -> f64 {
+        let sets = model.worker_sets();
+        let snapshot: Vec<&WorkerSet> = sets.iter().map(Arc::as_ref).collect();
+        let ready: std::collections::HashSet<&str> = snapshot
+            .iter()
+            .map(|ws| ws.namespace())
+            .filter(|ns| model.is_workers_ready(ns))
+            .collect();
+        PrefillCapacity::new(&snapshot, &ready, &WorkerSet::worker_count)
+            .weight(ws, ws.worker_count())
+    }
+
+    fn assert_weight(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "selection weight {actual}, want {expected}"
+        );
+    }
+
+    /// Fraction of `samples` chat selections that land in `namespace`.
+    fn chat_share(model: &Model, namespace: &str, samples: usize) -> f64 {
+        let hits = (0..samples)
+            .filter(|_| {
+                model
+                    .select_worker_set_with(|ws| {
+                        ws.chat_engine.as_ref().map(|_| ws.namespace() == namespace)
+                    })
+                    .expect("a ready generation must be selectable")
+            })
+            .count();
+        hits as f64 / samples as f64
+    }
+
+    /// Mid-rollout: the new generation holds 4 decodes and 1 prefill, the old
+    /// one 1 decode and 1 prefill. Weighting by decode count sends 80% of
+    /// requests to the new generation's only prefill while the old prefill
+    /// idles. At 2.5 decodes per prefill, one prefill feeds 2.5 decodes, so the
+    /// new generation is credited 2.5 decodes and the old one 1: a 71/29 split.
+    #[test]
+    fn select_weights_generations_by_prefill_capped_capacity() {
+        let model = Model::new("llama".to_string());
+        let (new, _new_tx) = add_disaggregated_cohort(&model, "gen-new", 1, 4);
+        let (old, _old_tx) = add_disaggregated_cohort(&model, "gen-old", 1, 1);
+
+        assert_weight(selection_weight(&model, &new), 2.5);
+        assert_weight(selection_weight(&model, &old), 1.0);
+
+        let share = chat_share(&model, "gen-new", 20_000);
+        assert!(
+            (share - 2.5 / 3.5).abs() < 0.03,
+            "new generation got {share:.3} of requests, want ~0.714 (decode-count weighting gives 0.8)"
+        );
+    }
+
+    /// Mirror image, early in a rollout: the decode-limited generation is
+    /// capped by its decodes, the prefill-limited one by its prefill.
+    #[test]
+    fn select_caps_decode_limited_generation_by_decode_count() {
+        let model = Model::new("llama".to_string());
+        let (new, _new_tx) = add_disaggregated_cohort(&model, "gen-new", 1, 1);
+        let (old, _old_tx) = add_disaggregated_cohort(&model, "gen-old", 1, 4);
+
+        assert_weight(selection_weight(&model, &new), 1.0);
+        assert_weight(selection_weight(&model, &old), 2.5);
+    }
+
+    /// Generations provisioned at the same ratio keep decode-count weighting,
+    /// whatever their size.
+    #[test]
+    fn select_keeps_decode_count_weights_for_balanced_generations() {
+        let model = Model::new("llama".to_string());
+        let (large, _large_tx) = add_disaggregated_cohort(&model, "gen-large", 2, 4);
+        let (small, _small_tx) = add_disaggregated_cohort(&model, "gen-small", 1, 2);
+
+        assert_weight(selection_weight(&model, &large), 4.0);
+        assert_weight(selection_weight(&model, &small), 2.0);
+
+        let share = chat_share(&model, "gen-large", 20_000);
+        assert!(
+            (share - 2.0 / 3.0).abs() < 0.03,
+            "larger generation got {share:.3} of requests, want ~0.667"
+        );
+    }
+
+    /// Weights follow live worker counts, ratio included: a surged second
+    /// prefill in the new generation lowers the live ratio to 5/3, which then
+    /// caps the new generation's 4 decodes at 2 × 5/3.
+    #[test]
+    fn select_capacity_tracks_live_worker_counts() {
+        let model = Model::new("llama".to_string());
+        let (new, [new_prefill_tx, _new_decode_tx]) =
+            add_disaggregated_cohort(&model, "gen-new", 1, 4);
+        let (old, _old_tx) = add_disaggregated_cohort(&model, "gen-old", 1, 1);
+        assert_weight(selection_weight(&model, &new), 2.5);
+
+        new_prefill_tx.send(vec![0, 1]).unwrap();
+        assert_weight(selection_weight(&model, &new), 10.0 / 3.0);
+        assert_weight(selection_weight(&model, &old), 1.0);
+    }
+
+    /// Sets without a prefill hop keep weighting by worker count: aggregated
+    /// sets, and typed decode sets with no prefill router.
+    #[test]
+    fn select_keeps_worker_count_weights_without_prefill_hop() {
+        let model = Model::new("llama".to_string());
+        let (aggregated, _agg_tx) = ws_serving_role(
+            "agg",
+            "mdc-agg",
+            WorkerType::Aggregated,
+            Vec::new(),
+            vec![1, 2, 3],
+        );
+        model.add_worker_set("agg".to_string(), aggregated.clone());
+        let (_, _new_tx) = add_disaggregated_cohort(&model, "gen-new", 1, 4);
+        let (_, _old_tx) = add_disaggregated_cohort(&model, "gen-old", 1, 1);
+        let (plain_prefill, _plain_prefill_tx) = ws_with_type(
+            "plain",
+            "mdc-plain-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![7],
+        );
+        let (plain_decode, _plain_decode_tx) = ws_serving_role(
+            "plain",
+            "mdc-plain-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![8, 9],
+        );
+        model.add_worker_set("plain:prefill".to_string(), plain_prefill);
+        model.add_worker_set("plain".to_string(), plain_decode.clone());
+
+        assert_weight(selection_weight(&model, &aggregated), 3.0);
+        assert_weight(selection_weight(&model, &plain_decode), 2.0);
     }
 }
