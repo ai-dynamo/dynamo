@@ -3,9 +3,10 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
@@ -90,6 +91,11 @@ impl PromptTrieNode {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn has_child(&self, first_hash: SequenceHash) -> bool {
+        self.children.contains_key(&first_hash)
+    }
+
     #[cfg(any(test, feature = "testing"))]
     fn live_children(&self) -> Vec<SharedNode> {
         self.children
@@ -142,11 +148,16 @@ impl OverlapPath {
 #[derive(Default)]
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
-    cleanup: CleanupState,
+    cleanup: Arc<CleanupState>,
+    sweeper: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for PromptMembershipTrie {
     fn drop(&mut self) {
+        // A running sweep holds node references, so join it before draining the trie.
+        if let Some(sweeper) = self.sweeper.get_mut().take() {
+            let _ = sweeper.join();
+        }
         let mut stack: Vec<SharedNode> = Vec::new();
         {
             let mut root = self.root.write();
@@ -163,18 +174,36 @@ impl Drop for PromptMembershipTrie {
 }
 
 impl PromptMembershipTrie {
-    /// Run the stale-child sweep if the throttle interval has elapsed.
+    /// Start the stale-child sweep on its own thread if the throttle interval has elapsed.
     ///
-    /// Safe to call from any write path; the sweep is a no-op until
-    /// [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS) has passed
-    /// since the last completion, and only one sweep runs at a time.
+    /// Safe to call from any write path; it returns without waiting for the sweep.
+    /// The sweep walks the whole trie, and callers include the replica-sync task and paths that hold a worker slot lock.
+    /// Nothing happens until [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS) has passed since the last completion, and only one sweep runs at a time.
     pub(super) fn maybe_cleanup(&self) {
         if !self.cleanup.try_schedule() {
             return;
         }
-        let mut guard = CleanupGuard::new(&self.cleanup);
-        cleanup::sweep_stale_children(&self.root);
-        guard.mark_completed();
+        // Held across the spawn so a later sweep's handle cannot be overwritten by this one.
+        let mut sweeper = self.sweeper.lock();
+        let root = Arc::clone(&self.root);
+        let state = Arc::clone(&self.cleanup);
+        let spawned = std::thread::Builder::new()
+            .name("prompt-trie-sweep".to_string())
+            .spawn(move || {
+                let mut guard = CleanupGuard::new(&state);
+                cleanup::sweep_stale_children(&root);
+                // Release the trie before the next sweep can be scheduled and replace this handle.
+                drop(root);
+                guard.mark_completed();
+            });
+        match spawned {
+            Ok(handle) => *sweeper = Some(handle),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to spawn the prompt trie sweep thread");
+                // Count the attempt so the spawn is retried once per interval, not on every write.
+                CleanupGuard::new(&self.cleanup).mark_completed();
+            }
+        }
     }
 
     fn split_node(node: &mut PromptTrieNode, pos: usize) {
@@ -623,6 +652,18 @@ impl PromptMembershipTrie {
     pub(super) fn is_empty(&self) -> bool {
         let root = self.root.read();
         root.live_children().is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn make_cleanup_due(&mut self) {
+        Arc::get_mut(&mut self.cleanup)
+            .expect("no sweep thread holds the cleanup state")
+            .make_due();
+    }
+
+    #[cfg(test)]
+    pub(super) fn root_child(&self, first_hash: SequenceHash) -> Option<SharedNode> {
+        self.root.read().children.get(&first_hash).cloned()
     }
 }
 

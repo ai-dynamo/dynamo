@@ -78,6 +78,15 @@ impl CleanupState {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
+
+    /// Test hook: make the next [`Self::try_schedule`] due without waiting out the interval.
+    #[cfg(test)]
+    pub fn make_due(&mut self) {
+        self.clock_origin = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(CLEANUP_INTERVAL_MS))
+            .expect("monotonic clock must be older than the cleanup interval");
+        *self.last_cleanup_elapsed_ms.get_mut() = 0;
+    }
 }
 
 impl Default for CleanupState {
