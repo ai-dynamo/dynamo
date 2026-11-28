@@ -52,6 +52,7 @@ var _ = Describe("DynamoModel Controller", func() {
 		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoModelReconciler{
 			Client:         k8sClient,
+			PodReader:      k8sClient,
 			Recorder:       recorder,
 			EndpointClient: modelendpoint.NewClient(),
 		}

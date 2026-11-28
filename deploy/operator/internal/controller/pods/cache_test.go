@@ -57,7 +57,9 @@ func startCache(tb testing.TB, cfg *rest.Config) cache.Cache {
 	require.NoError(tb, podCache.IndexField(ctx, &corev1.Pod{}, ComponentIndex, ComponentIndexValues))
 	require.NoError(tb, podCache.IndexField(ctx, &corev1.Pod{}, SelectorIndex, SelectorIndexValues))
 	go func() { _ = podCache.Start(ctx) }()
-	require.True(tb, podCache.WaitForCacheSync(ctx))
+	syncCtx, stopSync := context.WithTimeout(ctx, 30*time.Second)
+	defer stopSync()
+	require.True(tb, podCache.WaitForCacheSync(syncCtx))
 	return podCache
 }
 

@@ -127,7 +127,7 @@ func TestRemoveReleasedAgentPods(t *testing.T) {
 				objects = append(objects, pclq)
 			}
 			base := newLPXTestClient(t, objects...)
-			r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+			r := &graphReconciler{apiReader: base, Client: interceptor.NewClient(base, interceptor.Funcs{
 				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 					if tc.deleteError {
 						return errors.New("delete temporarily unavailable")
@@ -171,7 +171,8 @@ func TestRemoveReleasedAgentPodsContinuesAfterMissingPod(t *testing.T) {
 	row := &request.Status.Committed.Execution.NodeLocal.PartitionSelections[0].SelectedRows[0]
 	row.Target = &lpxv1alpha1.BindingTarget{PodRef: row.Current.PodRef}
 	row.Current.PodRef.Name, row.Current.PodRef.UID = "already-gone", "already-gone-uid"
-	r := &graphReconciler{Client: newLPXTestClient(t, pclq, pod)}
+	base := newLPXTestClient(t, pclq, pod)
+	r := &graphReconciler{Client: base, apiReader: base}
 
 	t.Log("Request a retry for the missing observation while removing the remaining owned target")
 	err := r.removeReleasedAgentPods(t.Context(), pcsgs, map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request})
@@ -185,7 +186,7 @@ func TestRemoveReleasedAgentPodsConcurrentOwnershipChange(t *testing.T) {
 	request := newLPXTestReleaseRequest(pod)
 	requests := map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request}
 	base := newLPXTestClient(t, pclq, pod)
-	r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+	r := &graphReconciler{apiReader: base, Client: interceptor.NewClient(base, interceptor.Funcs{
 		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 			live := &corev1.Pod{}
 			require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(object), live))
@@ -576,4 +577,24 @@ func TestResolvePipelineRequestsSkipsAllLocalWorkload(t *testing.T) {
 	t.Log("An all-local workload publishes no LPU placement request")
 	_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
 	require.Empty(t, missing)
+}
+
+func TestRemoveReleasedAgentPodOutsideCache(t *testing.T) {
+	t.Log("Keep an unlabeled journal Agent Pod outside the workload cache")
+	pcsgs, clique, pod := newLPXTestAgentHierarchy()
+	request := newLPXTestReleaseRequest(pod)
+	base := newLPXTestClient(t, clique, pod)
+	cached := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if _, ok := object.(*corev1.Pod); ok {
+				t.Fatal("journal Agent Pod must be read through the API reader")
+			}
+			return delegated.Get(ctx, key, object, opts...)
+		},
+	})
+	reconciler := &graphReconciler{Client: cached, apiReader: base}
+
+	t.Log("Read the journal identity directly and delete it after cached ownership validation")
+	require.NoError(t, reconciler.removeReleasedAgentPods(t.Context(), pcsgs, map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request}))
+	require.True(t, apierrors.IsNotFound(base.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
 }

@@ -24,6 +24,7 @@ func Configure(options *cache.Options) error {
 	if options == nil {
 		return nil
 	}
+	configureRetention(options)
 	if options.ByObject == nil {
 		options.ByObject = make(map[client.Object]cache.ByObject)
 	}
