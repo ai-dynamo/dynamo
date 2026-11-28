@@ -882,7 +882,7 @@ async fn unsupported_features_fail_before_rpc_submission() {
 }
 
 #[tokio::test]
-async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
+async fn visible_and_hidden_stop_tokens_are_returned_once() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let engine = engine(&server.endpoint, 1);
     engine.start(0).await.expect("start");
@@ -899,6 +899,7 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     assert_eq!(token_ids(&outputs), [42]);
     let terminal = outputs.last().unwrap();
     assert_eq!(terminal.token_ids, [42], "held for the terminal's usage");
+    assert!(terminal.text.is_none());
     assert!(terminal.completion_usage.is_some());
     assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
 
@@ -907,8 +908,19 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     hidden.stop_conditions.stop_token_ids_hidden = Some(vec![42]);
     hidden.stop_conditions.stop_token_ids_visible = Some(vec![7]);
     let outputs = collect(&engine, hidden).await;
-    assert!(token_ids(&outputs).is_empty());
+    // Sent once, with empty text, so the frontend counts it without showing it.
+    assert_eq!(token_ids(&outputs), [42]);
     let terminal = outputs.last().unwrap();
+    assert_eq!(terminal.token_ids, [42]);
+    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert_eq!(
+        terminal
+            .completion_usage
+            .as_ref()
+            .unwrap()
+            .completion_tokens,
+        token_ids(&outputs).len() as u32
+    );
     assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
     assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
 }
