@@ -1772,17 +1772,24 @@ class _BenchmarkSynchronizer:
         protocol timeout it raises TimeoutError; a protocol violation or a
         peer abort raises RuntimeError, like the other phases.
 
-        Isolation from the point protocol: rounds run only in the DECODE_SWEEP
-        idle steps between a point's result commit (or the grid commit) and
-        the next point's injection, so no other protocol message is in flight;
-        the only traffic is stage_round/stage_round_result plus the
-        abort/error notices every phase honours.
+        The prefill sweep's real-seed shots (``_bench_realseed_wait_for_peers``) use
+        the same rounds once per PREFILL_SWEEP step, with the point's
+        ``benchmark_id`` as ``batch``, while a real-seed point is parked
+        between its staging shot and its measured shot.
+
+        Isolation from the point protocol: warm-up rounds run only in the
+        DECODE_SWEEP idle steps between a point's result commit (or the grid
+        commit) and the next point's injection, and real-seed rounds only
+        between a point's staging shot and the admission of its measured
+        shot, so no other protocol message is in flight; the only traffic
+        is stage_round/stage_round_result plus the abort/error notices every
+        phase honours.
         """
         if phase not in self.STAGE_PHASES:
-            raise ValueError(f"invalid attention-DP warm-up stage phase: {phase!r}")
+            raise ValueError(f"invalid attention-DP stage round phase: {phase!r}")
         if (phase == "done") != isinstance(ok, bool):
             raise ValueError(
-                f"attention-DP warm-up stage status {phase!r} with outcome {ok!r}"
+                f"attention-DP stage round status {phase!r} with outcome {ok!r}"
             )
         status = {
             "type": "stage_round",
@@ -1806,9 +1813,7 @@ class _BenchmarkSynchronizer:
             or (all_done and not isinstance(verdict, bool))
             or (not all_done and verdict is not None)
         ):
-            raise RuntimeError(
-                f"invalid attention-DP warm-up stage round result: {reply}"
-            )
+            raise RuntimeError(f"invalid attention-DP stage round result: {reply}")
         return _BenchmarkStageRound(all_done, verdict)
 
     def _coordinate_stage_round(self, local: dict) -> _BenchmarkStageRound:
@@ -1832,14 +1837,14 @@ class _BenchmarkSynchronizer:
                     or (phase != "done" and ok is not None)
                 ):
                     raise RuntimeError(
-                        f"invalid attention-DP warm-up stage status: {message}"
+                        f"invalid attention-DP stage round status: {message}"
                     )
                 if (
                     message.get("seq") != local["seq"]
                     or message.get("batch") != local["batch"]
                 ):
                     raise RuntimeError(
-                        "attention-DP warm-up ranks are not in lockstep: rank 0 is at "
+                        "attention-DP stage round ranks are not in lockstep: rank 0 is at "
                         f"round {local['seq']} batch={local['batch']}, rank {rank} at "
                         f"round {message.get('seq')} batch={message.get('batch')}"
                     )
@@ -4484,13 +4489,12 @@ class InstrumentedScheduler(AsyncScheduler):
         default auto).
 
         Auto: on when the KV-cache layout has a recurrent-state (Mamba/GDN/KDA)
-        group and there is a single attention-DP rank, off otherwise.
+        group, at any attention-DP size; off otherwise.
         Synthetic prefix blocks carry no recurrent state, so a hybrid layout in
         Mamba "align" mode never reports a hit on them: every past-KV prefill
-        point would be skipped and the run rejected. Auto stays off under
-        attention-DP because real-seed retries are not coordinated across
-        ranks: a rank that misses re-stages while a rank that hits waits at
-        the measured barrier.
+        point would be skipped and the run rejected. Under attention-DP the
+        ranks agree on each measured shot's hit before any of them admits it
+        (``_bench_realseed_wait_for_peers``).
 
         Off: a point that reads past KV gets synthetic prefix blocks that are
         registered in the prefix cache but never computed (see
@@ -4513,8 +4517,6 @@ class InstrumentedScheduler(AsyncScheduler):
         if value in ("on", "1", "true"):
             return True
         if value == "auto":
-            if getattr(self, "_bench_dp_size", 1) > 1:
-                return False
             config = getattr(
                 getattr(self, "kv_cache_manager", None), "kv_cache_config", None
             )
@@ -5042,12 +5044,15 @@ class InstrumentedScheduler(AsyncScheduler):
         expected_kv_read_tokens: Sequence[int] | None = None,
         prompt_token_ids_list: Sequence[Sequence[int]] | None = None,
         content_salts: Sequence[str] | None = None,
+        admit: bool = True,
     ) -> int:
         """Build and atomically enqueue a possibly heterogeneous prefill batch.
 
         ``prompt_token_ids_list`` overrides the salt-derived prompt per
         request (real-seed shots pair a seeded prefix with a fresh tail); the
-        salt still names the prefix-cache entry.
+        salt still names the prefix-cache entry. With ``admit=False`` the
+        batch is built and its ``expected_kv_read_tokens`` validated, but
+        nothing is enqueued and no state changes.
         """
         built = self._bench_build_prefill_requests(
             prompt_lens,
@@ -5060,6 +5065,8 @@ class InstrumentedScheduler(AsyncScheduler):
         if built is None:
             return 0
         requests, prompts = built
+        if not admit:
+            return len(requests)
         self._bench_record_prompt_evidence(prompts)
         self._bench_last_prefill = (
             prompts,
@@ -5140,8 +5147,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 actual_kv_read_tokens = self._bench_cached_kv_read_tokens(req)
                 if actual_kv_read_tokens != expected_tokens:
                     logger.warning(
-                        "Skipping benchmark point after seed cache validation "
-                        "failed: expected_kv_read_tokens=%d "
+                        "Benchmark seed cache validation failed: "
+                        "expected_kv_read_tokens=%d "
                         "actual_kv_read_tokens=%d",
                         expected_tokens,
                         actual_kv_read_tokens,
@@ -5820,8 +5827,11 @@ class InstrumentedScheduler(AsyncScheduler):
         miss the point is re-staged once (the depth registry lives in
         scheduler memory while the blocks live in vLLM's LRU prefix cache,
         so an evicted chain is healed by recomputing it) and skipped only on
-        a second miss. Returns True when a shot was issued (or the point was
-        skipped) and the caller must not start a new point.
+        a second miss. Under attention-DP the hit is a group decision
+        (``_bench_realseed_wait_for_peers``): the shot is admitted only when every rank
+        hits, and otherwise every rank re-stages or skips. Returns True when a
+        shot was issued (or the point was skipped) and the caller must not
+        start a new point.
         """
         pending = getattr(self, "_bench_realseed_ready", None)
         if pending is None:
@@ -5831,69 +5841,25 @@ class InstrumentedScheduler(AsyncScheduler):
         # Completion alone does not prove a cache hit or exact shape warming.
         self._bench_finish_warmup()
         chain = self._bench_realseed_chain(point.batch_size)
-        # Reproduce the proof tokens after the cached prefix too: either the
-        # legacy EAGLE block or the tokens covered by lookahead hashes. Only
-        # the remaining tail differs between the warm and measured shots.
+        # Staging computed each slot's seed, including the proof tokens
+        # (see ``_bench_realseed_shot``); record that depth.
         seed_lens = [
             self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
         ]
         for slot, seed_len in enumerate(seed_lens):
             if chain["depth"][slot] < seed_len:
                 chain["depth"][slot] = seed_len
-        prompt_lens = [
-            new_tokens + kv_read_tokens
-            for new_tokens, kv_read_tokens in zip(
-                new_token_lengths, kv_read_lengths, strict=True
-            )
-        ]
-
-        point_key = self._bench_point_content_key(point)
-
-        def prompts(tail_tag: str) -> list[list[int]]:
-            # Eager warmup must not leave the measured tail in the prefix
-            # cache: only the intentionally shared seed prefix may hit.
-            if EAGER_WARMUP_REASON in point.sample_reasons:
-                tail_tag = f"{tail_tag}_eager_warmup"
-            out: list[list[int]] = []
-            for slot, (prompt_len, seed_len) in enumerate(
-                zip(prompt_lens, seed_lens, strict=True)
-            ):
-                prefix = (
-                    list(
-                        self._bench_synthetic_token_ids(chain["salts"][slot], seed_len)
-                    )
-                    if seed_len > 0
-                    else []
-                )
-                tail = list(
-                    self._bench_synthetic_token_ids(
-                        f"point:{point_key}:{tail_tag}:slot{slot}",
-                        prompt_len - len(prefix),
-                    )
-                )
-                out.append(prefix + tail)
-            return out
-
-        # Stable prompt content must not turn a zero-KV slot into a prefix
-        # hit when aligned points repeat or content is all zeros. Isolate each
-        # warm/measured request; only positive-KV slots reuse the seeded chain.
-        cache_salts = [
-            chain["salts"][slot] if kv > 0 else f"__bench_{self._bench_seq + slot}"
-            for slot, kv in enumerate(kv_read_lengths)
-        ]
         if getattr(self, "_bench_realseed_stage", "warm") == "warm":
             self._bench_current_point = None
             self._bench_current_fpms = []
+            shot = self._bench_realseed_shot(
+                point, kv_read_lengths, new_token_lengths, "rswarm"
+            )
             self._bench_begin_warmup(
                 "real_prefix_shape",
-                {"point": asdict(point), "prompt_lengths": prompt_lens},
+                {"point": asdict(point), "prompt_lengths": shot["prompt_lens"]},
             )
-            injected = self._bench_inject_prefill(
-                prompt_lens=prompt_lens,
-                max_tokens=1,
-                cache_salts=cache_salts,
-                prompt_token_ids_list=prompts("rswarm"),
-            )
+            injected = self._bench_inject_prefill(max_tokens=1, **shot)
             if injected != point.batch_size:
                 self._bench_finish_warmup("real_seed_warm_injection_failed")
                 self._bench_realseed_ready = None
@@ -5907,28 +5873,50 @@ class InstrumentedScheduler(AsyncScheduler):
                 return True
             self._bench_realseed_stage = "measure"
             return True
+        # Under attention-DP, ``_bench_realseed_wait_for_peers`` already agreed whether
+        # every rank hits, so all ranks admit, re-stage or skip together.
+        group_hit = self._bench_realseed_group_hit
+        self._bench_realseed_group_hit = None
+        if self._bench_synchronizer is not None and group_hit is None:
+            raise RuntimeError(
+                f"benchmark_id={point.benchmark_id}: attention-DP real-seed "
+                "measured shot reached without a group verdict"
+            )
         self._bench_realseed_ready = None
         self._bench_realseed_stage = "warm"
         self._bench_current_fpms = []
         self._bench_current_point = point
         self._bench_expected_fpms = 1
         self._bench_extra_steps_left = 0
-        # No new_step_starts() here: the seeded blocks were produced by the
-        # staging/warm requests, whose forward passes completed before this
-        # pass, so vLLM's same-step hit guard does not apply (the fake-prefix
-        # path needs it because its blocks have no producer).
-        injected = self._bench_inject_prefill(
-            prompt_lens=prompt_lens,
-            max_tokens=1,
-            cache_salts=cache_salts,
-            expected_kv_read_tokens=list(kv_read_lengths),
-            prompt_token_ids_list=prompts("rsm"),
-        )
+        if group_hit is False:
+            injected = 0
+        else:
+            # No new_step_starts() here: the seeded blocks were produced by
+            # the staging/warm requests, whose forward passes completed before
+            # this pass, so vLLM's same-step hit guard does not apply (the
+            # fake-prefix path needs it because its blocks have no producer).
+            injected = self._bench_inject_prefill(
+                max_tokens=1,
+                expected_kv_read_tokens=list(kv_read_lengths),
+                **self._bench_realseed_shot(
+                    point, kv_read_lengths, new_token_lengths, "rsm"
+                ),
+            )
+            if group_hit and injected != point.batch_size:
+                # Nothing ran between the group's check and this admission;
+                # a local retry here would split the ranks again.
+                raise RuntimeError(
+                    f"benchmark_id={point.benchmark_id}: real-seed measured "
+                    "shot missed the prefix cache after every attention-DP "
+                    "rank reported a hit"
+                )
         if injected != point.batch_size:
             self._bench_current_point = None
             if not getattr(self, "_bench_realseed_retried", False):
                 # The chain the registry believed in is gone (evicted, or a
                 # stale depth after a shed): forget it and re-stage once.
+                # Under attention-DP every rank does this, including ranks
+                # that hit, so the next staging shot has one shape everywhere.
                 logger.warning(
                     "Benchmark prefill REAL-SEED hit validation missed; "
                     "re-staging the chain once: %s",
@@ -5959,7 +5947,139 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         return True
 
+    def _bench_realseed_shot(
+        self,
+        point: BenchmarkPoint,
+        kv_read_lengths: Sequence[int],
+        new_token_lengths: Sequence[int],
+        tail_tag: str,
+    ) -> dict:
+        """Prompt lengths, cache salts and prompts of a real-seed warm
+        (``"rswarm"``) or measured (``"rsm"``) shot: each slot's seeded
+        prefix followed by a tail drawn from ``tail_tag``."""
+        chain = self._bench_realseed_chain(point.batch_size)
+        # Reproduce the proof tokens after the cached prefix too: either the
+        # legacy EAGLE block or the tokens covered by lookahead hashes. Only
+        # the remaining tail differs between the warm and measured shots.
+        seed_lens = [
+            self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
+        ]
+        prompt_lens = [
+            new_tokens + kv_read_tokens
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
+        ]
+        point_key = self._bench_point_content_key(point)
+        # Eager warmup must not leave the measured tail in the prefix cache:
+        # only the intentionally shared seed prefix may hit.
+        if EAGER_WARMUP_REASON in point.sample_reasons:
+            tail_tag = f"{tail_tag}_eager_warmup"
+        prompts: list[list[int]] = []
+        for slot, (prompt_len, seed_len) in enumerate(
+            zip(prompt_lens, seed_lens, strict=True)
+        ):
+            prefix = (
+                list(self._bench_synthetic_token_ids(chain["salts"][slot], seed_len))
+                if seed_len > 0
+                else []
+            )
+            tail = list(
+                self._bench_synthetic_token_ids(
+                    f"point:{point_key}:{tail_tag}:slot{slot}",
+                    prompt_len - len(prefix),
+                )
+            )
+            prompts.append(prefix + tail)
+        # Stable prompt content must not turn a zero-KV slot into a prefix
+        # hit when aligned points repeat or content is all zeros. Isolate each
+        # warm/measured request; only positive-KV slots reuse the seeded chain.
+        cache_salts = [
+            chain["salts"][slot] if kv > 0 else f"__bench_{self._bench_seq + slot}"
+            for slot, kv in enumerate(kv_read_lengths)
+        ]
+        return {
+            "prompt_lens": prompt_lens,
+            "cache_salts": cache_salts,
+            "prompt_token_ids_list": prompts,
+        }
+
+    def _bench_realseed_wait_for_peers(self) -> bool:
+        """Attention-DP only: one round per prefill pass while a real-seed
+        point is parked, so every rank admits, re-stages or skips the
+        measured shot in the same step.
+
+        Each rank's prefix-cache hit is local: equal grids do not imply equal
+        cache residency. If ranks decided alone, a rank that hit would admit
+        its measured request and wait at the measured barrier while a rank
+        that missed re-staged, and the group would fail at the synchronization
+        timeout. Instead a rank reports ``building`` while its staging or warm
+        shot is in flight and ``done`` with its local hit once the warm shot
+        has drained; the hit is checked without admitting anything. The round
+        runs at the top of every pass, busy or idle, so a rank whose shot
+        drains later keeps its peers idling in step with it, and no rank waits
+        here while a peer is inside a forward pass (see
+        ``_kvwarm_stage_round``). The point's ``benchmark_id`` rides in the
+        round's ``batch`` field, so ranks on different points fail the
+        lockstep check instead of waiting.
+
+        Returns True while this rank is done and a peer is not (the step
+        idles). Once every rank is done the verdict (every rank hit) is left
+        in ``_bench_realseed_group_hit`` and the pass continues into
+        ``_bench_realseed_pending_step``, which applies it.
+        """
+        synchronizer = self._bench_synchronizer
+        pending = self._bench_realseed_ready
+        if synchronizer is None or pending is None:
+            return False
+        point, kv_read_lengths, new_token_lengths = pending
+        local_hit = self._bench_realseed_local_hit
+        if (
+            local_hit is None
+            and self._bench_realseed_stage == "measure"
+            and not self._bench_active_req_ids
+        ):
+            local_hit = (
+                self._bench_inject_prefill(
+                    max_tokens=1,
+                    expected_kv_read_tokens=list(kv_read_lengths),
+                    admit=False,
+                    **self._bench_realseed_shot(
+                        point, kv_read_lengths, new_token_lengths, "rsm"
+                    ),
+                )
+                == point.batch_size
+            )
+            self._bench_realseed_local_hit = local_hit
+        self._bench_realseed_round_seq += 1
+        view = synchronizer.stage_round(
+            self._bench_realseed_round_seq,
+            point.benchmark_id,
+            "building" if local_hit is None else "done",
+            local_hit,
+        )
+        if not view.all_done:
+            return local_hit is not None
+        if local_hit is None or not isinstance(view.ok, bool):
+            raise RuntimeError(
+                f"benchmark_id={point.benchmark_id}: attention-DP real-seed "
+                f"round settled without this rank's hit (view={view})"
+            )
+        self._bench_realseed_local_hit = None
+        self._bench_realseed_group_hit = view.ok
+        logger.info(
+            "Benchmark prefill REAL-SEED hit settled by the group: "
+            "benchmark_id=%d local_hit=%s group_hit=%s round=%d",
+            point.benchmark_id,
+            local_hit,
+            view.ok,
+            self._bench_realseed_round_seq,
+        )
+        return False
+
     def _bench_step_prefill(self) -> SchedulerOutput | None:
+        if self._bench_realseed_wait_for_peers():
+            return None  # done here; peers are still draining their shots
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
 
@@ -6165,6 +6285,9 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_realseed_stage: str = "warm"
     _bench_realseed_staged: bool = False
     _bench_realseed_retried: bool = False
+    _bench_realseed_local_hit: bool | None = None
+    _bench_realseed_group_hit: bool | None = None
+    _bench_realseed_round_seq: int = 0
 
     def _kvwarm_flag_on(self) -> bool:
         """KV warm-up master switch (``DYN_BENCH_KV_WARMUP``, default on)."""
