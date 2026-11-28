@@ -191,10 +191,12 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   back to an operating-system-assigned port.
 </ParamField>
 
-<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
+<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="DYN_TCP_RPC_HOST or auto-detected local address">
   Host for the TCP response-stream server. It accepts the same address syntax and uses the same
   address selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. Dynamo trims whitespace and
-  treats an empty value as unset. With a wildcard host, the TCP listener binds the selected wildcard,
+  treats an empty value as unset. If unset, it falls back to `DYN_TCP_RPC_HOST`; if both are unset,
+  Dynamo selects a local address automatically. Set this variable explicitly to use a different
+  interface for responses. With a wildcard host, the TCP listener binds the selected wildcard,
   while the QUIC response listener binds only the selected concrete address.
 
   The server resolves the address once at startup. A loopback fallback persists until restart, and
