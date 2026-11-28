@@ -147,6 +147,10 @@ def env_or_default(
     return target_type(value) if callable(target_type) else value  # type: ignore
 
 
+class _InvalidEnvValue(str):
+    """An env value outside an argument's choices, used as its default."""
+
+
 def nullable_float(value: str) -> Optional[float]:
     """Parse a float, or return None for empty/'None' values."""
     if value is None or value == "" or value == "None":
@@ -202,6 +206,43 @@ def add_argument(
     default_with_env = env_or_default(
         env_var, default, value_type=value_type_for_env, env=env
     )
+    # argparse checks `choices` only for command line values, never for a
+    # default. An env value outside the choices becomes a marked string default
+    # that `type` rejects: argparse converts a string default with `type` only
+    # when the flag is not given, so the flag still overrides the env value.
+    # Like `deprecated`, this is skipped for another process's env (`ArgEnv`).
+    # Only `store` actions convert their default this way: `append` and
+    # `extend` copy the default and add to it, so a string default would break.
+    choices = kwargs.get("choices")
+    if (
+        choices is not None
+        and env is None
+        and env_var in os.environ
+        and kwargs.get("action", "store") == "store"
+    ):
+        values = (
+            default_with_env
+            if isinstance(default_with_env, list)
+            else [default_with_env]
+        )
+        invalid = [value for value in values if value not in choices]
+        if invalid:
+            message = (
+                f"{env_var}: invalid choice: {invalid[0]!r} "
+                f"(choose from {', '.join(map(str, choices))})"
+            )
+            env_default = _InvalidEnvValue(os.environ[env_var])
+            convert = arg_type
+
+            def reject_env_value(value: str) -> Any:
+                if value is env_default:
+                    raise argparse.ArgumentTypeError(message)
+                return convert(value) if convert is not None else value
+
+            # argparse names the type in its "invalid <type> value" message.
+            reject_env_value.__name__ = getattr(convert, "__name__", "str")
+            default_with_env = env_default
+            arg_type = reject_env_value
     if env is not None:
         env.env_dests[env_var] = arg_dest
         deprecated = None
