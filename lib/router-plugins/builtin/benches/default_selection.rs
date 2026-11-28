@@ -59,7 +59,7 @@ fn bench(c: &mut Criterion) {
             .sample_size(30)
             .nresamples(1_000);
         for count in [8, 64, 256, 1024, 4096] {
-            let (workers, request) = support::fixture(count, 2048);
+            let (workers, mut request) = support::fixture(count, 2048);
             let config = KvRouterConfig {
                 router_temperature: temperature,
                 overlap_score_credit_decay: decay,
@@ -105,6 +105,19 @@ fn bench(c: &mut Criterion) {
                     )
                 })
             });
+            if temperature == 0.0 {
+                request.worker_loads.clear();
+                request.overlap = Default::default();
+                group.bench_function(BenchmarkId::new("plugin_idle", count), |b| {
+                    b.iter(|| {
+                        black_box(
+                            plugin
+                                .select_worker(support::selection_input(&workers, &request, 16))
+                                .unwrap(),
+                        )
+                    })
+                });
+            }
         }
         group.finish();
     }
