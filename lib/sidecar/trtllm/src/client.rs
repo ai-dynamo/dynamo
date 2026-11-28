@@ -197,6 +197,9 @@ impl TrtllmClient {
                     .map_err(|_| invalid_argument("invalid affinity signature"))?,
             );
         }
+        // W3C Trace Context metadata, which OpenEngine defines and the
+        // TensorRT-LLM servicer reads into its request tracing.
+        dynamo_sidecar_common::inject_trace_context(&mut rpc);
         self.inference()
             .generate(rpc)
             .await

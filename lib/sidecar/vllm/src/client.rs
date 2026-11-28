@@ -177,6 +177,10 @@ impl VllmClient {
                 .metadata_mut()
                 .insert(DATA_PARALLEL_RANK_METADATA_KEY, MetadataValue::from(rank));
         }
+        // W3C Trace Context metadata. vLLM's gRPC server (`vllm-rs serve`,
+        // `vllm serve --grpc-port`) does not read it yet; see
+        // vllm-project/vllm#44757 for the engine side.
+        dynamo_sidecar_common::v14::inject_trace_context(&mut request);
         client
             .generate_stream(request)
             .await
