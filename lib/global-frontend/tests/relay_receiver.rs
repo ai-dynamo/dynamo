@@ -7,7 +7,7 @@ use std::time::Duration;
 use dynamo_global_common::{PoolKey, grpc};
 mod common;
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, serve, serve_relay_views,
+    Failover, Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, serve, serve_relay_views,
 };
 use dynamo_global_router::{InFlightTracker, Pool, RoundRobinSelector};
 use grpc::pool_view_frame::Event;
@@ -126,6 +126,7 @@ async fn two_routers_forward_only_while_a_relay_is_live_and_reconnect_recovers()
                 in_flight,
                 reqwest::Client::new(),
                 metrics,
+                Failover::default(),
             );
             let http = tokio::spawn(serve(listener, frontend, cancel.clone()));
             routers.push((cancel, current, address, url, receiver, http));

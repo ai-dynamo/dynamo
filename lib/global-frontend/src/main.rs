@@ -13,8 +13,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, RouterRegistration, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, app_with_selection_core,
-    discover_pools, follow_relays, measure_round_trips, serve, serve_relay_views,
+    Failover, Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app,
+    app_with_selection_core, discover_pools, follow_relays, measure_round_trips, serve,
+    serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -75,6 +76,16 @@ struct Args {
     /// How long to wait for a pool frontend to accept a connection.
     #[arg(long, default_value_t = 5)]
     connect_timeout_secs: u64,
+    /// How many other pools a request may be sent to when its pool refuses
+    /// the connection, fails before answering, or answers 503 or
+    /// `--overload-status-code`. 0 turns failover off.
+    #[arg(long, default_value_t = 1)]
+    max_failovers: usize,
+    /// The status the pools answer when overloaded: set it to the pools'
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE`, or their overload answers pass
+    /// through instead of failing over.
+    #[arg(long, default_value_t = 529, value_parser = clap::value_parser!(u16).range(400..=599))]
+    overload_status_code: u16,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
     /// Select pools through the embedded router core (round-robin only for now).
@@ -277,6 +288,11 @@ async fn run() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    let failover = Failover {
+        max: args.max_failovers,
+        overload: reqwest::StatusCode::from_u16(args.overload_status_code)
+            .context("--overload-status-code")?,
+    };
     let app = if let Some(policy) = selection_core_policy {
         let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
         // Serve the pools the core has applied, from the first snapshot on,
@@ -299,7 +315,7 @@ async fn run() -> Result<()> {
             .changed()
             .await
             .context("the router core stopped before applying the first pool snapshot")?;
-        app_with_selection_core(applied, selection_core, in_flight, http, metrics)
+        app_with_selection_core(applied, selection_core, in_flight, http, metrics, failover)
     } else {
         // Only `affinity` has affinity metrics to export.
         let mut affinity_metrics = None;
@@ -345,7 +361,7 @@ async fn run() -> Result<()> {
         if let Some((counters, store_ms)) = affinity_metrics {
             metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
         }
-        app(pools, selector, in_flight, http, metrics)
+        app(pools, selector, in_flight, http, metrics, failover)
     };
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
@@ -449,6 +465,21 @@ mod tests {
         assert_eq!(args.router_policy, RouterPolicy::Affinity);
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.router_policy, RouterPolicy::RoundRobin);
+    }
+
+    #[test]
+    fn the_overload_status_code_is_an_error_status() {
+        let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
+        let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
+        assert_eq!(args.overload_status_code, 529);
+        let status = |code| {
+            Args::try_parse_from(["global-frontend", pool, "--overload-status-code", code])
+                .map(|args| args.overload_status_code)
+        };
+        assert_eq!(status("429").unwrap(), 429);
+        assert!(status("100").is_err());
+        assert!(status("200").is_err());
+        assert!(status("600").is_err());
     }
 
     #[test]

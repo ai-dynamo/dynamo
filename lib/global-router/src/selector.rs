@@ -28,6 +28,9 @@ pub struct RoutingRequest<'a> {
     /// tenants reusing one session ID are kept apart. Never the credential
     /// itself, and never an admission decision.
     pub tenant: &'a str,
+    /// The request goes to another pool because the one chosen before could
+    /// not take it. Round robin does not take a turn for it.
+    pub retry: bool,
 }
 
 impl<'a> RoutingRequest<'a> {
@@ -36,6 +39,7 @@ impl<'a> RoutingRequest<'a> {
             model,
             session: None,
             tenant: ANONYMOUS_TENANT,
+            retry: false,
         }
     }
 
@@ -47,6 +51,12 @@ impl<'a> RoutingRequest<'a> {
     /// `tenant` is an opaque identifier, not the caller's credential.
     pub fn with_tenant(mut self, tenant: &'a str) -> Self {
         self.tenant = tenant;
+        self
+    }
+
+    /// See [`retry`](Self::retry).
+    pub fn with_retry(mut self, retry: bool) -> Self {
+        self.retry = retry;
         self
     }
 }
@@ -103,7 +113,12 @@ impl PoolSelector for RoundRobinSelector {
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let reachable = || candidates.iter().copied().filter(|pool| reachable(pool));
-        let position = self.pools.next(request.model, reachable().count())?;
+        let count = reachable().count();
+        let position = if request.retry {
+            self.pools.peek(request.model, count)?
+        } else {
+            self.pools.next(request.model, count)?
+        };
         target(&self.frontends, reachable().nth(position)?)
     }
 }
@@ -198,6 +213,23 @@ impl<K: Eq + Hash> Cursors<K> {
         };
         Some(turn % count)
     }
+
+    /// The position `next` would choose after the last one, without
+    /// advancing.
+    pub(crate) fn peek<Q>(&self, key: &Q, count: usize) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        if count == 0 {
+            return None;
+        }
+        let turn = self
+            .0
+            .get(key)
+            .map_or(0, |cursor| cursor.load(Ordering::Relaxed));
+        Some(turn % count)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +297,34 @@ pub(crate) mod tests {
         assert_eq!(picks(&selector, "llama", &llama), "llama-a");
         assert_eq!(picks(&selector, "qwen", &qwen), "qwen-b");
         assert_eq!(picks(&selector, "llama", &llama), "llama-b");
+    }
+
+    #[test]
+    fn a_retry_does_not_take_a_turn() {
+        let pools = [
+            pool("blue", "qwen", &["http://blue:8000"]),
+            pool("green", "qwen", &["http://green:8000"]),
+            pool("red", "qwen", &["http://red:8000"]),
+        ];
+        let [blue, green, red] = &pools;
+        let selector = RoundRobinSelector::new();
+        let retry = |candidates: &[&Pool]| {
+            let request = RoutingRequest::new("qwen").with_retry(true);
+            let target = selector.select(&request, candidates).now_or_never();
+            target
+                .unwrap()
+                .unwrap()
+                .frontend
+                .host_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        assert_eq!(picks(&selector, "qwen", &[blue, green, red]), "blue");
+        assert_eq!(retry(&[green, red]), "red");
+        assert_eq!(retry(&[green]), "green");
+        assert_eq!(picks(&selector, "qwen", &[blue, green, red]), "green");
+        assert_eq!(picks(&selector, "qwen", &[blue, green, red]), "red");
     }
 
     #[test]
