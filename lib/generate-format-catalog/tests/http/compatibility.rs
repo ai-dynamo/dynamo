@@ -204,24 +204,27 @@ async fn formats_preserve_typed_validation_error_policy_before_and_after_dispatc
 
 #[tokio::test]
 async fn early_vllm_failures_keep_metrics_and_readiness_precedence() {
-    for (body, draining, status, error_type) in [
+    for (body, draining, status, error_type, request_type) in [
         (
             serde_json::json!({"token_ids":[],"sampling_params":{}}),
             false,
             StatusCode::BAD_REQUEST,
             ErrorType::Validation,
+            RequestType::Unary,
         ),
         (
-            serde_json::json!({"token_ids":[1],"sampling_params":{},"stream":true}),
+            serde_json::json!({"token_ids":[1],"sampling_params":{"prompt_logprobs":1},"stream":true}),
             false,
-            StatusCode::NOT_IMPLEMENTED,
-            ErrorType::NotImplemented,
+            StatusCode::BAD_REQUEST,
+            ErrorType::Validation,
+            RequestType::Stream,
         ),
         (
             serde_json::json!({"token_ids":[],"sampling_params":{}}),
             true,
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorType::Unavailable,
+            RequestType::Unary,
         ),
     ] {
         let state = state();
@@ -255,7 +258,7 @@ async fn early_vllm_failures_keep_metrics_and_readiness_precedence() {
             state.metrics_clone().get_request_counter(
                 state.manager().metric_model_for("test-model"),
                 &Endpoint::Generate,
-                &RequestType::Unary,
+                &request_type,
                 &Status::Error,
                 &error_type
             ),
