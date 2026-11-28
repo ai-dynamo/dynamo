@@ -25,7 +25,7 @@ from transformers import AutoTokenizer
 from dynamo._core import Client, Context
 from dynamo.common.http import fetch_bytes
 from dynamo.common.http.media_reference import max_media_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http.url_validator import UrlValidationPolicy, prepare_media_url
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -621,7 +621,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # Any failure at this stage is terminal. Passing the URL to SGLang would retry
         # the fetch without Dynamo's policy. Only failures that occur after bytes have
         # been successfully fetched will trigger a fallback to those bytes.
-        normalized = await validate_media_url(url, self._url_policy)
+        normalized = await prepare_media_url(url, self._url_policy)
         scheme = urlparse(normalized).scheme
         if scheme in ("http", "https"):
             content = await fetch_bytes(
@@ -713,21 +713,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # this deployment, since a request we reject is not the place to
             # report which decoders are installed.
             validated = [
-                await validate_media_url(media_input, self._url_policy)
+                await prepare_media_url(media_input, self._url_policy)
                 if isinstance(media_input, str)
                 else media_input
                 for media_input in media_inputs
             ]
-            # Without this preflight these deployments -- the ones MOST likely
-            # to lack a decoder entirely -- still get the deep
-            # "No module named 'decord'" with the payload repr embedded. No
-            # bytes were fetched here, so the codec cannot be named. Only str
-            # items count: pre-decoded frontend variants need no decoder.
-            if (
-                any(isinstance(media_input, str) for media_input in media_inputs)
-                and not _software_video_decoder_imports()
-            ):
-                raise video_decoder_missing("sglang", "decord2", "decord", None)
             fetched_inputs: list[Any] = []
             for media_input in validated:
                 if isinstance(media_input, str) and urlparse(media_input).scheme in (
@@ -741,6 +731,16 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         max_bytes=max_media_bytes(),
                     )
                 fetched_inputs.append(media_input)
+            # Without this preflight these deployments -- the ones MOST likely
+            # to lack a decoder entirely -- still get the deep
+            # "No module named 'decord'" with the payload repr embedded. This
+            # path does not probe the codec. Only original str inputs count:
+            # pre-decoded frontend variants need no decoder.
+            if (
+                any(isinstance(media_input, str) for media_input in media_inputs)
+                and not _software_video_decoder_imports()
+            ):
+                raise video_decoder_missing("sglang", "decord2", "decord", None)
             return fetched_inputs
         encode_inputs: list[Any] = []
         for media_input in media_inputs:
