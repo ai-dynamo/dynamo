@@ -116,6 +116,9 @@ hops.
   prefill survives a client disconnect once decode depends on its KV.
 - If the prefill worker publishes bootstrap information, prefill runs in the background and
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
+- If background prefill fails while decode streams, the hop stops decode and waits for its
+  stream to end before returning the failure. Decode's booking and classifier lifecycle are then
+  released before Migration retries under the same request id.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
 - Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
