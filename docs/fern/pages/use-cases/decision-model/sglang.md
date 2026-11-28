@@ -18,7 +18,7 @@ The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including 
 > Decision scoring requires `--max-running-requests 1 --disable-overlap-schedule`. The worker processes one inference request at a time, including any chat or completion requests sent to it. Dynamo does not advertise decision scoring if either scheduling requirement is violated. Use a separate worker for throughput-oriented chat traffic to avoid this serialization; separation is a serving recommendation, while the scheduling settings are requirements.
 
 > [!IMPORTANT]
-> Decision capability publication also requires an aggregated token-input worker, one data-parallel rank, and pipeline parallelism of one, with attention data parallelism, speculative decoding, diffusion execution, and priority preemption disabled. These are enforced eligibility checks, not tuning suggestions. CUDA is the qualified device for this guide; other devices and LoRA decision execution are not qualified here.
+> Decision capability publication also requires an aggregated token-input worker, one data-parallel rank, and pipeline parallelism of one, with attention data parallelism, speculative decoding, dLLM decoding, diffusion execution, and priority preemption disabled. Do not use `--use-sglang-tokenizer`, which makes the worker text-input. These are enforced eligibility checks, not tuning suggestions. CUDA is the qualified device for this guide; other devices and LoRA decision execution are not qualified here.
 
 ## Start the Frontend
 
@@ -45,10 +45,13 @@ python -m dynamo.sglang \
   --tp 1 --dp-size 1 --pp-size 1 \
   --max-running-requests 1 --disable-overlap-schedule \
   --context-length 2048 --max-total-tokens 2048 \
-  --disable-piecewise-cuda-graph
+  --disable-piecewise-cuda-graph \
+  --systemone-serial
 ```
 
-Wait for the `Published SGLang ... System One capability` message before sending requests. Ordinary generation can work even when the worker does not meet the decision eligibility requirements above.
+The worker advertises decision scoring only when started with `--systemone-serial` (or `DYN_SGL_SYSTEMONE_SERIAL=1`). Existing decision deployments must add this flag when they upgrade; without it, the frontend finds no decision worker. The profile is part of the model checksum, so an eligible serial worker that does not set the flag stops advertising the profile and gets a different checksum than releases that advertised it automatically.
+
+Wait for the `Published SGLang ... System One capability` message before sending requests. An opted-in worker with an ineligible configuration or an unsupported version logs a warning and does not advertise decision scoring. Ordinary generation can work even when the worker does not meet the decision eligibility requirements above.
 
 ## Verify Both APIs
 

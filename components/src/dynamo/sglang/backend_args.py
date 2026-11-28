@@ -199,6 +199,22 @@ class DynamoSGLangArgGroup(ArgGroup):
             ),
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--systemone-serial",
+            env_var="DYN_SGL_SYSTEMONE_SERIAL",
+            default=False,
+            help=(
+                "Advertise the serialized decision-scoring profile "
+                "(sglang_systemone_serial_v1) so the frontend Decisions API can "
+                "select this worker. The worker must still be aggregated with "
+                "--max-running-requests 1, --disable-overlap-schedule, DP1, PP1, "
+                "no speculative or dLLM decoding, no priority preemption, no "
+                "--use-sglang-tokenizer, and a qualified SGLang version. Advertising the profile changes the worker's "
+                "model checksum, so it only joins other opted-in workers."
+            ),
+        )
+
         add_argument(
             g,
             flag_name="--sglang-trace-level",
@@ -234,6 +250,7 @@ class DynamoSGLangConfig(ConfigBase):
     engine_routes: list[str]
     frontend_decoding: bool = False
     freeze_gc_after_init: bool = False
+    systemone_serial: bool = False
     sglang_trace_level: int
 
     # Extra served names beyond the primary, parsed from --served-model-name.
