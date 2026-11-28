@@ -3,7 +3,7 @@
 
 use crate::DistributedRuntime;
 use crate::config::HealthStatus;
-use crate::engine::AsyncEngine;
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
 use crate::pipeline::SingleIn;
 use crate::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Longest a canary waits for its response, however many forward passes the
@@ -45,14 +46,20 @@ pub struct HealthCheckManager {
     /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Breaks the manager/runtime ownership cycle when shutdown begins.
+    cancellation_token: CancellationToken,
 }
 
 impl HealthCheckManager {
+    /// Creates a manager whose tasks stop when runtime endpoint shutdown begins.
     pub fn new(drt: DistributedRuntime, config: HealthCheckConfig) -> Self {
+        // Stop health checks at the endpoint-shutdown phase.
+        let cancellation_token = drt.child_token();
         Self {
             drt,
             config,
             endpoint_tasks: Arc::new(Mutex::new(HashMap::new())),
+            cancellation_token,
         }
     }
 
@@ -86,6 +93,7 @@ impl HealthCheckManager {
         let manager = self.clone();
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
+        let token = self.cancellation_token.clone();
 
         // Get the endpoint-specific notifier
         let notifier = self
@@ -110,33 +118,12 @@ impl HealthCheckManager {
             let mut canary: Option<JoinHandle<()>> = None;
 
             loop {
-                // Wait for either timeout or activity notification
                 tokio::select! {
-                    _ = tokio::time::sleep(canary_wait) => {
-                        if canary.as_ref().is_some_and(|canary| !canary.is_finished()) {
-                            // Don't queue another canary behind the one still waiting.
-                            continue;
-                        }
+                    biased;
 
-                        // Timeout - send health check for this specific endpoint
-                        debug!("Canary timer expired for {}, sending health check", endpoint_subject);
-
-                        // Get the health check payload for this endpoint
-                        let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
-
-                        if let Some(target) = target {
-                            match manager.send_health_check_request(&endpoint_subject, &target.payload, progress.clone()) {
-                                Ok(sent) => canary = Some(sent),
-                                Err(e) => error!("Failed to send health check for {}: {}", endpoint_subject, e),
-                            }
-                        } else {
-                            // This should never happen - targets are registered at startup and never removed
-                            error!(
-                                "CRITICAL: Health check target for {} disappeared unexpectedly! This indicates a bug. Stopping health check task.",
-                                endpoint_subject
-                            );
-                            break;
-                        }
+                    _ = token.cancelled() => {
+                        debug!("Runtime shutdown started, stopping health check task for {}", endpoint_subject);
+                        break;
                     }
 
                     _ = notifier.notified() => {
@@ -150,13 +137,36 @@ impl HealthCheckManager {
                             crate::config::HealthStatus::Ready,
                         );
                     }
+
+                    _ = tokio::time::sleep(canary_wait) => {
+                        if canary.as_ref().is_some_and(|canary| !canary.is_finished()) {
+                            // Don't queue another canary behind the one still waiting.
+                            continue;
+                        }
+
+                        debug!("Canary timer expired for {}, sending health check", endpoint_subject);
+
+                        let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
+
+                        if let Some(target) = target {
+                            match manager.send_health_check_request(&endpoint_subject, &target.payload, progress.clone()) {
+                                Ok(sent) => canary = Some(sent),
+                                Err(e) => error!("Failed to send health check for {}: {}", endpoint_subject, e),
+                            }
+                        } else {
+                            error!(
+                                "CRITICAL: Health check target for {} disappeared unexpectedly! This indicates a bug. Stopping health check task.",
+                                endpoint_subject
+                            );
+                            break;
+                        }
+                    }
                 }
             }
 
             info!("Health check task for {} exiting", endpoint_subject);
         });
 
-        // Store the task handle
         self.endpoint_tasks
             .lock()
             .insert(endpoint_subject.clone(), task);
@@ -171,6 +181,7 @@ impl HealthCheckManager {
     /// Returns an error if duplicate endpoints are detected, indicating a bug in the system
     async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
         let manager = self.clone();
+        let token = self.cancellation_token.clone();
 
         // Get the receiver (can only be taken once)
         let mut rx = manager
@@ -185,7 +196,21 @@ impl HealthCheckManager {
         tokio::spawn(async move {
             info!("Starting dynamic endpoint discovery monitor with channel-based notifications");
 
-            while let Some(endpoint_subject) = rx.recv().await {
+            loop {
+                let endpoint_subject = tokio::select! {
+                    biased;
+
+                    _ = token.cancelled() => {
+                        debug!("Runtime shutdown started, stopping endpoint discovery monitor");
+                        break;
+                    }
+
+                    received = rx.recv() => match received {
+                        Some(endpoint_subject) => endpoint_subject,
+                        None => break,
+                    },
+                };
+
                 debug!(
                     "Received endpoint registration via channel: {}",
                     endpoint_subject
@@ -248,11 +273,13 @@ impl HealthCheckManager {
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
         let max_wait = CANARY_MAX_WAIT.max(timeout);
+        let token = self.cancellation_token.clone();
 
         // Spawn task to send health check and wait for response
         let canary = tokio::spawn(async move {
-            let result = timeout_unless_progress(timeout, max_wait, &progress, async {
-                let request = SingleIn::new(payload);
+            let request = SingleIn::new(payload);
+            let context = request.context();
+            let request_future = timeout_unless_progress(timeout, max_wait, &progress, async {
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
                         // Get the first response to verify endpoint is alive.
@@ -276,11 +303,6 @@ impl HealthCheckManager {
                             false
                         };
 
-                        tokio::spawn(async move {
-                            // We need to consume the rest of the stream to avoid warnings on the frontend.
-                            response_stream.for_each(|_| async {}).await;
-                        });
-
                         // Update health status based on response
                         system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
@@ -290,6 +312,9 @@ impl HealthCheckManager {
                                 HealthStatus::NotReady
                             },
                         );
+
+                        // Keep cleanup inside the deadline and the tracked canary task.
+                        response_stream.for_each(|_| async {}).await;
                     }
                     Err(e) => {
                         error!(
@@ -302,11 +327,27 @@ impl HealthCheckManager {
                         );
                     }
                 }
-            })
-            .await;
+            });
+
+            // Dropping this future cancels an in-flight `generate()`.
+            let result = tokio::select! {
+                biased;
+
+                _ = token.cancelled() => {
+                    context.stop_generating();
+                    debug!(
+                        "Runtime shutdown started, abandoning in-flight health check for {}",
+                        endpoint_subject_owned
+                    );
+                    return;
+                }
+
+                result = request_future => result,
+            };
 
             // Handle timeout
             if result.is_none() {
+                context.stop_generating();
                 warn!("Health check timeout for {}", endpoint_subject_owned);
                 system_health
                     .lock()
@@ -496,6 +537,7 @@ mod push_handler_notify_tests {
     use bytes::Bytes;
     use futures::stream;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     type TestRequest = serde_json::Value;
@@ -508,28 +550,40 @@ mod push_handler_notify_tests {
         num_chunks: usize,
         /// If set, chunks at these indices will be error responses.
         error_indices: Vec<usize>,
+        call_count: Arc<AtomicUsize>,
     }
 
     impl MockStreamingEngine {
+        /// Creates an engine that returns only successful response chunks.
         fn success(num_chunks: usize) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
                 error_indices: vec![],
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
         }
 
+        /// Creates an engine that returns an error for every response chunk.
         fn all_errors(num_chunks: usize) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
                 error_indices: (0..num_chunks).collect(),
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
         }
 
+        /// Creates an engine that returns errors at the specified chunk indices.
         fn with_error_at(num_chunks: usize, error_indices: Vec<usize>) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
                 error_indices,
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
+        }
+
+        /// Shares the request counter so a test can observe canary activity.
+        fn call_count(&self) -> Arc<AtomicUsize> {
+            self.call_count.clone()
         }
     }
 
@@ -537,10 +591,12 @@ mod push_handler_notify_tests {
     impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
         for MockStreamingEngine
     {
+        /// Counts the request and streams the configured success and error chunks.
         async fn generate(
             &self,
             input: SingleIn<TestRequest>,
         ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             let (_data, ctx) = input.into_parts();
             let chunks: Vec<TestResponse> = (0..self.num_chunks)
                 .map(|i| {
@@ -642,8 +698,10 @@ mod push_handler_notify_tests {
             connection_info,
             &serde_json::json!({"prompt": "test"}),
         );
-        let result = ingress.handle_payload(payload, Some(request_id)).await;
-        assert!(result.is_ok(), "handle_payload should succeed");
+        ingress
+            .handle_payload(payload, Some(request_id))
+            .await
+            .expect("handle_payload should succeed");
     }
 
     /// Helper: assert endpoint health status.
@@ -658,6 +716,264 @@ mod push_handler_notify_tests {
             .lock()
             .get_endpoint_health_status(endpoint_name);
         assert_eq!(status, Some(expected), "{msg}");
+    }
+
+    // A controllable engine stream exercises the real canary task without a GPU.
+    struct ControlledCanary {
+        response: Mutex<Option<tokio::sync::mpsc::Receiver<TestResponse>>>,
+        context: Mutex<Option<Arc<dyn crate::engine::AsyncEngineContext>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error> for ControlledCanary {
+        async fn generate(
+            &self,
+            input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let (_, ctx) = input.into_parts();
+            *self.context.lock() = Some(ctx.context());
+            let receiver = self.response.lock().take().expect("one canary per engine");
+            Ok(ResponseStream::new(
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver)),
+                ctx.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_canary_stalled_tail_demotes_and_releases_stream() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_stalled_tail";
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Annotated::from_data(serde_json::json!({"token": 1})))
+            .await
+            .unwrap();
+        let engine = Arc::new(ControlledCanary {
+            response: Mutex::new(Some(receiver)),
+            context: Mutex::new(None),
+        });
+        register_endpoint(&drt, endpoint, engine.clone());
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(60),
+                request_timeout: Duration::from_millis(100),
+            },
+        );
+        let progress = Arc::new(tokio::sync::Notify::new());
+        let task = manager
+            .send_health_check_request(endpoint, &serde_json::json!({}), progress.clone())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "a stalled tail must fail the canary",
+        );
+        tokio::time::timeout(Duration::from_secs(1), sender.closed())
+            .await
+            .expect("the timed-out stream must be released");
+        assert!(engine.context.lock().as_ref().unwrap().is_stopped());
+
+        drt.local_endpoint_registry()
+            .register(endpoint.to_owned(), MockStreamingEngine::success(1));
+        let task = manager
+            .send_health_check_request(endpoint, &serde_json::json!({}), progress)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "a completed canary must recover readiness",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_canary_shutdown_stops_and_releases_pending_tail() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_shutdown_tail";
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Annotated::from_data(serde_json::json!({"token": 1})))
+            .await
+            .unwrap();
+        let engine = Arc::new(ControlledCanary {
+            response: Mutex::new(Some(receiver)),
+            context: Mutex::new(None),
+        });
+        register_endpoint(&drt, endpoint, engine.clone());
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(60),
+                request_timeout: Duration::from_secs(30),
+            },
+        );
+        let task = manager
+            .send_health_check_request(
+                endpoint,
+                &serde_json::json!({}),
+                Arc::new(tokio::sync::Notify::new()),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drt
+                .system_health()
+                .lock()
+                .get_endpoint_health_status(endpoint)
+                != Some(HealthStatus::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the canary must reach its pending tail before shutdown");
+        assert!(!task.is_finished());
+
+        drt.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("shutdown must finish the canary before its thirty-second timeout")
+            .unwrap();
+        assert!(
+            sender.is_closed(),
+            "shutdown must release the response stream"
+        );
+        assert!(
+            engine.context.lock().as_ref().unwrap().is_stopped(),
+            "shutdown must signal the producer to stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_canary_first_error_is_not_delayed_by_tail_cleanup() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_first_error";
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Annotated::from_error("unhealthy".to_owned()))
+            .await
+            .unwrap();
+        register_endpoint(
+            &drt,
+            endpoint,
+            Arc::new(ControlledCanary {
+                response: Mutex::new(Some(receiver)),
+                context: Mutex::new(None),
+            }),
+        );
+        drt.system_health()
+            .lock()
+            .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(60),
+                request_timeout: Duration::from_secs(10),
+            },
+        );
+        let task = manager
+            .send_health_check_request(
+                endpoint,
+                &serde_json::json!({}),
+                Arc::new(tokio::sync::Notify::new()),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while drt
+                .system_health()
+                .lock()
+                .get_endpoint_health_status(endpoint)
+                != Some(HealthStatus::NotReady)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first-item failure must be published before the ten-second drain timeout");
+        assert!(
+            !task.is_finished(),
+            "the canary must track its pending tail"
+        );
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "cleanup must not recover a failed canary",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_canary_tail_completion_preserves_newer_health_status() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_completion_order";
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Annotated::from_data(serde_json::json!({"token": 1})))
+            .await
+            .unwrap();
+        register_endpoint(
+            &drt,
+            endpoint,
+            Arc::new(ControlledCanary {
+                response: Mutex::new(Some(receiver)),
+                context: Mutex::new(None),
+            }),
+        );
+        let manager = HealthCheckManager::new(
+            drt.clone(),
+            HealthCheckConfig {
+                canary_wait_time: Duration::from_secs(60),
+                request_timeout: Duration::from_secs(10),
+            },
+        );
+        let task = manager
+            .send_health_check_request(
+                endpoint,
+                &serde_json::json!({}),
+                Arc::new(tokio::sync::Notify::new()),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while drt
+                .system_health()
+                .lock()
+                .get_endpoint_health_status(endpoint)
+                != Some(HealthStatus::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drt.system_health()
+            .lock()
+            .set_endpoint_health_status(endpoint, HealthStatus::NotReady);
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "old tail completion must not overwrite a newer failure",
+        );
     }
 
     /// Helper: create ingress pipeline with given engine and notifier.
@@ -687,6 +1003,21 @@ mod push_handler_notify_tests {
         };
         let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
         manager.start().await.unwrap();
+    }
+
+    /// Starts a manager with the same ownership shape used in production.
+    async fn start_manager_weak(
+        drt: &crate::DistributedRuntime,
+        canary_wait_ms: u64,
+    ) -> std::sync::Weak<HealthCheckManager> {
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(canary_wait_ms),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        let weak = Arc::downgrade(&manager);
+        manager.start().await.unwrap();
+        weak
     }
 
     // =================================================================
@@ -821,6 +1152,119 @@ mod push_handler_notify_tests {
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
         );
+    }
+
+    /// Checks that shutdown releases the manager and stops further canary requests.
+    #[tokio::test]
+    async fn test_manager_tasks_exit_on_runtime_shutdown() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.shutdown_stops_tasks";
+
+        let engine = MockStreamingEngine::success(1);
+        let canary_calls = engine.call_count();
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+
+        let weak_manager = start_manager_weak(&drt, 50).await;
+
+        // Confirm the loop ran before checking that shutdown stops it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let calls_before_shutdown = canary_calls.load(Ordering::SeqCst);
+        assert!(
+            calls_before_shutdown > 0,
+            "canary should have fired at least once before shutdown"
+        );
+
+        drt.shutdown();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak_manager.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("health check manager tasks should exit once runtime shutdown begins");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let calls_after_shutdown = canary_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            canary_calls.load(Ordering::SeqCst),
+            calls_after_shutdown,
+            "no canary request should begin after runtime shutdown"
+        );
+    }
+
+    /// Engine whose `generate` never returns.
+    struct MockBlockingEngine {
+        in_flight: Arc<AtomicUsize>,
+    }
+
+    /// Records when cancellation drops the blocked future.
+    struct InFlightGuard(Arc<AtomicUsize>);
+
+    impl Drop for InFlightGuard {
+        /// Records that the request future has been dropped.
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for MockBlockingEngine
+    {
+        /// Keeps a request pending until cancellation drops its tracking guard.
+        async fn generate(
+            &self,
+            _input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.in_flight.fetch_add(1, Ordering::SeqCst);
+            let _guard = InFlightGuard(self.in_flight.clone());
+            std::future::pending::<()>().await;
+            unreachable!("blocking engine never completes");
+        }
+    }
+
+    /// Checks that shutdown drops a pending request before its timeout can expire.
+    #[tokio::test]
+    async fn test_in_flight_health_check_cancelled_on_runtime_shutdown() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.shutdown_cancels_in_flight";
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(MockBlockingEngine {
+            in_flight: in_flight.clone(),
+        });
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+
+        // The long request timeout distinguishes cancellation from timeout expiry.
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(50),
+            request_timeout: Duration::from_secs(30),
+        };
+        Arc::new(HealthCheckManager::new(drt.clone(), config))
+            .start()
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while in_flight.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a canary request should be in flight before shutdown");
+
+        drt.shutdown();
+
+        // The two-second bound is well inside the request timeout.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while in_flight.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("in-flight health check should be cancelled when runtime shutdown begins");
     }
 }
 

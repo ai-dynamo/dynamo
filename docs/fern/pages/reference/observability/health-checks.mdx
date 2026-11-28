@@ -168,7 +168,7 @@ The worker `/health` and `/live` status is decided in this order:
 | --- | --- | --- |
 | `DYN_HEALTH_CHECK_ENABLED` | `false` | Enables active checks for registered worker endpoints |
 | `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary |
-| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response; restarts on each completed engine forward pass, up to 10 minutes in total |
+| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response and stream cleanup; restarts on each completed engine forward pass, up to 10 minutes in total |
 | `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` canary payload override |
 
 LLM backends supply a minimal inference request that Dynamo sends through the registered worker
@@ -180,10 +180,17 @@ rationale, see
 A canary sent while the engine is busy waits behind the work already running. A long prefill streams
 nothing until it ends, so the canary can wait for minutes. On workers that publish forward-pass
 metrics (`DYN_FORWARDPASS_METRIC_PORT`, which the operator sets), each completed forward pass
-restarts the canary's timeout: the canary fails once `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` passes with
-neither a response nor a completed forward pass, or after 10 minutes in total. A forward pass only
-extends that wait. It does not reset the idle timer or mark the endpoint ready, and no second canary
-is sent while one is waiting.
+restarts the canary's timeout: the canary fails once `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` passes
+without either stream completion or a completed forward pass, or after 10 minutes in total.
+A forward pass only extends that wait. It does not reset the idle timer or mark the endpoint ready,
+and no second canary is sent while one is waiting.
+
+The first response sets the canary's health result immediately. Dynamo then consumes the remaining
+stream within the same timeout, keeping that canary in flight until cleanup finishes. If the stream
+stalls past the timeout, Dynamo marks the endpoint not ready, asks the engine to stop the request,
+and releases the stream. Completing cleanup does not overwrite a newer health result.
+Runtime shutdown also cancels pending checks and stream cleanup, signalling the producer to stop
+without waiting for the request timeout.
 
 The timeout stays fixed in these cases:
 
