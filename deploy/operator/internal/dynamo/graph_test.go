@@ -7280,6 +7280,90 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		env         []corev1.EnvVar
+		generalEnv  []corev1.EnvVar
+		wantFPMPort string // "" means the variable must be absent
+	}{
+		{name: "ordinary worker", args: []string{"-m", "dynamo.vllm", "--model", "m"}, wantFPMPort: "20380"},
+		{name: "CLI opt-in", args: []string{"-m", "dynamo.vllm", "--model", "m", "--systemone-serial"}},
+		{
+			name: "env opt-in",
+			args: []string{"-m", "dynamo.vllm", "--model", "m"},
+			env:  []corev1.EnvVar{{Name: "DYN_VLLM_SYSTEMONE_SERIAL", Value: "true"}},
+		},
+		{
+			name:        "CLI opt-in with a user-set port",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m", "--systemone-serial"},
+			env:         []corev1.EnvVar{{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "30000"}},
+			wantFPMPort: "30000",
+		},
+		{
+			name:       "graph env opt-in",
+			args:       []string{"-m", "dynamo.vllm", "--model", "m"},
+			generalEnv: []corev1.EnvVar{{Name: "DYN_VLLM_SYSTEMONE_SERIAL", Value: "true"}},
+		},
+		{
+			name:        "CLI opt-in with a graph-level port",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m", "--systemone-serial"},
+			generalEnv:  []corev1.EnvVar{{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "30000"}},
+			wantFPMPort: "30000",
+		},
+	}
+
+	for _, origin := range []string{"1.7.0", "1.8.0"} {
+		for _, tt := range tests {
+			t.Run(origin+"/"+tt.name, func(t *testing.T) {
+				t.Log("Configure a worker with the selected operator origin and authored environment")
+				component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType:   commonconsts.ComponentTypeWorker,
+					DynamoNamespace: new("default-test-deployment"),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image:   "test-image:1.5.0",
+							Command: []string{"python3"},
+							Args:    tt.args,
+							Env:     tt.env,
+						},
+					},
+				})
+
+				component.PodTemplate.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+
+				t.Log("Render the complete pod with graph and container environment sources")
+				podSpec, err := GenerateBasePodSpec(
+					component,
+					BackendFrameworkVLLM,
+					&mockSecretsRetriever{},
+					"test-deployment",
+					"default",
+					RoleMain,
+					1,
+					&configv1alpha1.OperatorConfiguration{},
+					commonconsts.MultinodeDeploymentTypeGrove,
+					"test-service",
+					nil,
+					staticContainerGPUCount(0),
+					GenerateBasePodSpecOptions{GeneralEnvironment: tt.generalEnv},
+				)
+				require.NoError(t, err)
+
+				t.Log("Check that only an operator default is omitted for an opted-in worker")
+				got := findEnvVar(podSpec.Containers[0].Env, "DYN_FORWARDPASS_METRIC_PORT")
+				if tt.wantFPMPort == "" {
+					assert.Nil(t, got, "DYN_FORWARDPASS_METRIC_PORT must be absent")
+					return
+				}
+				require.NotNil(t, got, "DYN_FORWARDPASS_METRIC_PORT must be present")
+				assert.Equal(t, tt.wantFPMPort, got.Value)
+			})
+		}
+	}
+}
+
 func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
 	tests := []struct {
 		name           string

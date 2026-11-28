@@ -188,8 +188,8 @@ is sent while one is waiting.
 The timeout stays fixed in these cases:
 
 - The worker does not publish forward-pass metrics: it runs outside the operator without
-  `DYN_FORWARDPASS_METRIC_PORT`, a vLLM worker sets its own `--scheduler-cls`, or an SGLang worker
-  runs in snapshot mode.
+  `DYN_FORWARDPASS_METRIC_PORT`, a vLLM worker sets its own `--scheduler-cls` or opts in with
+  `--systemone-serial`, or an SGLang worker runs in snapshot mode.
 - A single forward pass runs longer than the timeout, such as a first-request compile.
 
 For vLLM-Omni workers, see [vLLM-Omni Health Checks](#vllm-omni-health-checks).

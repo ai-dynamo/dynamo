@@ -1564,3 +1564,305 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 		}
 	}
 }
+
+func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
+	operatorDefault := corev1.EnvVar{Name: forwardPassMetricPortEnvVar, Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)}
+	optInEnv := func(value string) corev1.EnvVar { return corev1.EnvVar{Name: systemOneSerialEnvVar, Value: value} }
+
+	tests := []struct {
+		name        string
+		args        []string
+		command     []string
+		env         []corev1.EnvVar
+		wantFPMPort string // "" means the variable must be absent
+	}{
+		{
+			name:        "ordinary worker keeps the default",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name: "CLI opt-in drops the default",
+			args: []string{"-m", "dynamo.vllm", "--model", "m", systemOneSerialFlag},
+			env:  []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name: "env opt-in drops the default",
+			args: []string{"-m", "dynamo.vllm", "--model", "m"},
+			env:  []corev1.EnvVar{operatorDefault, optInEnv(" TRUE ")},
+		},
+		{
+			name:        "falsy env value keeps the default",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m"},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("0")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "--no-systemone-serial overrides the env opt-in",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m", noSystemOneSerialFlag},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name: "last CLI flag wins",
+			args: []string{"-m", "dynamo.vllm", noSystemOneSerialFlag, "--model", "m", systemOneSerialFlag},
+			env:  []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell command opt-in drops the default",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell command opt-in with an attached terminator drops the default",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m --systemone-serial; echo done"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "shell command --no-systemone-serial with an attached terminator wins",
+			command:     []string{"/bin/bash", "-c"},
+			args:        []string{"python3 -m dynamo.vllm --systemone-serial --model m --no-systemone-serial&& echo done"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "shell comment cannot override the real opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m --max-num-seqs=1 --logprobs-mode=raw_logprobs --systemone-serial # --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "shell comment cannot override the real opt-out",
+			command:     []string{"sh", "-c"},
+			args:        []string{"python3 -m dynamo.vllm --no-systemone-serial # --systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "shell comments end at newlines",
+			command: []string{"/bin/bash", "-c"},
+			args:    []string{"# --no-systemone-serial\npython3 -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "quoted hashes do not start shell comments",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model '#m' --systemone-serial # --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "escaped hashes do not start shell comments",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model \\#m --systemone-serial # --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "hashes inside words do not start shell comments",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m#x --systemone-serial # --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "direct launch keeps arguments after a literal hash",
+			args:        []string{"-m", "dynamo.vllm", "--model", "#m", "--systemone-serial", "--no-systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "double-quoted shell opt-in drops the default",
+			command: []string{"sh", "-c"},
+			args:    []string{`python3 -m dynamo.vllm --model m --max-num-seqs=1 --logprobs-mode=raw_logprobs "--systemone-serial"`},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "single-quoted shell opt-in drops the default",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m '--systemone-serial'"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "quoted shell opt-out wins over CLI and env opt-in",
+			command:     []string{"/bin/bash", "-c"},
+			args:        []string{`python3 -m dynamo.vllm --systemone-serial "--no-systemone-serial"`},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "quoted text containing a serial flag stays one argument",
+			command:     []string{"sh", "-c"},
+			args:        []string{`python3 -m dynamo.vllm --model "m --systemone-serial text"`},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "escaped shell flag characters form the opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{`python3 -m dynamo.vllm --systemone\-serial`},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "quoted shell terminator remains part of the argument",
+			command:     []string{"sh", "-c"},
+			args:        []string{`python3 -m dynamo.vllm "--systemone-serial;"`},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "direct launch keeps spaces within an argument",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m --systemone-serial text"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "terminator outside a shell is part of the token",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m", systemOneSerialFlag + ";"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "echo opt-in does not change an ordinary worker",
+			command:     []string{"sh", "-c"},
+			args:        []string{"echo --systemone-serial; exec python3 -m dynamo.vllm --model m"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "echo opt-out does not change an opted-in worker",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --systemone-serial; echo --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "echoing a Python command does not make it a worker launch",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --systemone-serial; echo python3 -m dynamo.vllm --no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "combined Python options preserve the module opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -um dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "attached Python module preserves the opt-out",
+			command:     []string{"sh", "-c"},
+			args:        []string{"python3 -mdynamo.vllm --no-systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "Python option values precede the worker module",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -uWignore -X dev -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "env prefix preserves the worker opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"env FOO=bar python3 -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "uv run prefix preserves the worker opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"uv run --no-sync python3 -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell then prefix preserves the worker opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"if true; then exec python3 -m dynamo.vllm --systemone-serial; fi"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "quoted command separators remain inside the model argument",
+			command: []string{"sh", "-c"},
+			args:    []string{`python3 -m dynamo.vllm --model "m; echo --no-systemone-serial" --systemone-serial`},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "redirection targets do not count as worker flags",
+			command:     []string{"sh", "-c"},
+			args:        []string{"python3 -m dynamo.vllm --model m > --systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "descriptor duplication preserves following opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm 2>&1 --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "descriptor duplication preserves following opt-out",
+			command:     []string{"sh", "-c"},
+			args:        []string{"python3 -m dynamo.vllm --systemone-serial 2>&1 --no-systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:    "combined output redirection preserves following opt-in",
+			command: []string{"bash", "-c"},
+			args:    []string{"python3 -m dynamo.vllm &>worker.log --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "noclobber override preserves following opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm >|worker.log --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell option value precedes the worker script",
+			command: []string{"bash", "-O", "extglob", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "leading descriptor redirection preserves the worker launch",
+			command: []string{"sh", "-c"},
+			args:    []string{"2>/dev/null exec /usr/bin/python3.11 -m dynamo.vllm --systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell positional flags do not override the worker opt-in",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --systemone-serial", "worker-name", "--no-systemone-serial"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "shell file arguments are not a c script",
+			command:     []string{"sh"},
+			args:        []string{"worker.sh", "-c", "python3 -m dynamo.vllm --systemone-serial"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command := tt.command
+			if command == nil {
+				command = []string{"python3"}
+			}
+			container := &corev1.Container{Command: command, Args: tt.args, Env: append([]corev1.EnvVar(nil), tt.env...)}
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+			})
+
+			require.NoError(t, (&VLLMBackend{}).UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+
+			got := findEnvVar(container.Env, forwardPassMetricPortEnvVar)
+			if tt.wantFPMPort == "" {
+				require.Nil(t, got, "DYN_FORWARDPASS_METRIC_PORT must be absent")
+				return
+			}
+			require.NotNil(t, got, "DYN_FORWARDPASS_METRIC_PORT must be present")
+			require.Equal(t, tt.wantFPMPort, got.Value)
+		})
+	}
+}

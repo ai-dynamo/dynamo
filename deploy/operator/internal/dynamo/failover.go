@@ -558,10 +558,11 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int, e
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
-		// Per-engine FPM port. data_parallel_index is 0 for both failover
-		// engines (orthogonal axis), so without this override both bind to
-		// the same base port and engine-1 fails with EADDRINUSE.
-		{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort + engineID)},
+	}
+	// Per-engine FPM port: both engines have data_parallel_index 0, so a shared port
+	// fails engine-1 with EADDRINUSE. A base without the port keeps FPM off.
+	if findEnvVar(base.Env, "DYN_FORWARDPASS_METRIC_PORT") != nil {
+		failoverEnvs = append(failoverEnvs, corev1.EnvVar{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort + engineID)})
 	}
 	environment.bind(&engine, "operator.failover", failoverEnvs)
 
