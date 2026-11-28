@@ -5,7 +5,7 @@
 #[cfg(feature = "ais-forward-pass")]
 use aisim_core::{
     ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfModelConfig, ForwardPassPerfReadiness,
-    ScheduledRequestMetrics,
+    ForwardPassSpeculationConfig, ScheduledRequestMetrics,
 };
 use dynamo_mocker::common::perf_model::AisCallback;
 use dynamo_scheduler::host::PrefillLoadEstimator;
@@ -136,30 +136,37 @@ impl PrefillLoadEstimator for RustAisCallback {
     }
 }
 
+/// Map AIS speculation to the legacy nextn width used by decode queries.
+///
+/// AISim `ForwardPassSpeculationConfig::replay_depth` returns 0 for
+/// `kind: "none"` (no speculation). Other non-ngram kinds stay rejected so
+/// Router/Mocker does not dispatch them through AISim's Python registry.
+#[cfg(feature = "ais-forward-pass")]
+fn resolve_nextn(
+    speculation: Option<&ForwardPassSpeculationConfig>,
+    nextn: u32,
+) -> Result<u32, String> {
+    match speculation {
+        None => Ok(nextn),
+        Some(spec) if spec.kind == "none" => Ok(0),
+        Some(spec) if spec.kind == "ngram" => spec
+            .params
+            .get("num_speculative_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|depth| u32::try_from(depth).ok())
+            .ok_or_else(|| "ngram num_speculative_tokens must be a nonnegative u32".to_string()),
+        Some(_) => Err("Router/Mocker supports only ngram speculation or legacy nextn".to_string()),
+    }
+}
+
 #[cfg(feature = "ais-forward-pass")]
 fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
     let config: ForwardPassPerfModelConfig =
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = match config.speculation.as_ref() {
-        None => config.nextn,
-        Some(spec) if spec.kind == "ngram" => spec
-            .params
-            .get("num_speculative_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|depth| u32::try_from(depth).ok())
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "ngram num_speculative_tokens must be a nonnegative u32",
-                )
-            })?,
-        Some(_) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Router/Mocker supports only ngram speculation or legacy nextn",
-            ));
-        }
-    };
+    let nextn = resolve_nextn(config.speculation.as_ref(), config.nextn)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
@@ -215,7 +222,57 @@ pub(super) fn create_ais_prefill_load_estimator(
 
 #[cfg(all(test, feature = "ais-forward-pass"))]
 mod tests {
-    use super::{decode_metrics, prefill_metrics};
+    use super::{decode_metrics, prefill_metrics, resolve_nextn};
+    use aisim_core::ForwardPassSpeculationConfig;
+
+    fn spec(value: serde_json::Value) -> ForwardPassSpeculationConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn resolve_nextn_absent_uses_legacy_nextn() {
+        assert_eq!(resolve_nextn(None, 0).unwrap(), 0);
+        assert_eq!(resolve_nextn(None, 3).unwrap(), 3);
+    }
+
+    #[test]
+    fn resolve_nextn_kind_none_is_no_speculation() {
+        let none = spec(serde_json::json!({"kind": "none"}));
+        assert_eq!(resolve_nextn(Some(&none), 0).unwrap(), 0);
+        // AISim replay_depth() is 0 for kind none; a nonzero legacy nextn is
+        // rejected later by AISim validate() ("cannot be combined with nextn").
+        assert_eq!(resolve_nextn(Some(&none), 2).unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_nextn_ngram_uses_depth() {
+        let ngram = spec(serde_json::json!({
+            "kind": "ngram",
+            "params": {"num_speculative_tokens": 2}
+        }));
+        assert_eq!(resolve_nextn(Some(&ngram), 0).unwrap(), 2);
+    }
+
+    #[test]
+    fn resolve_nextn_ngram_missing_depth_is_error() {
+        let ngram = spec(serde_json::json!({"kind": "ngram"}));
+        assert_eq!(
+            resolve_nextn(Some(&ngram), 0).unwrap_err(),
+            "ngram num_speculative_tokens must be a nonnegative u32"
+        );
+    }
+
+    #[test]
+    fn resolve_nextn_unsupported_kind_is_error() {
+        let mtp = spec(serde_json::json!({
+            "kind": "mtp",
+            "params": {"depth": 2}
+        }));
+        assert_eq!(
+            resolve_nextn(Some(&mtp), 0).unwrap_err(),
+            "Router/Mocker supports only ngram speculation or legacy nextn"
+        );
+    }
 
     #[test]
     fn scheduler_queries_preserve_prefix_and_local_attention_dp_batch() {
