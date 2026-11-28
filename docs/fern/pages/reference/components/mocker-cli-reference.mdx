@@ -191,6 +191,10 @@ file that changes only the scheduling of a default Mocker is:
   Number of DP replicas.
 </ParamField>
 
+<ParamField path="--dp-load-balance-method" type="string" default="auto">
+  How a worker with more than one DP replica places requests that carry no explicit DP rank, mirroring SGLang's `--load-balance-method`. One of `auto`, `round_robin`, `follow_bootstrap_room`, `total_requests`, or `total_tokens`. `auto` uses `follow_bootstrap_room` on SGLang prefill workers and `round_robin` elsewhere. `follow_bootstrap_room` rejects requests without a bootstrap room, as SGLang does. The router only adds a room when the prefill worker has a `--bootstrap-ports` entry, so a prefill worker without one serves only requests with an explicit DP rank, such as those from the KV router, and logs a warning at startup. Use `round_robin` to send requests directly to a prefill worker.
+</ParamField>
+
 <ParamField path="--num-workers" type="integer" default="1">
   Workers per process. Prefer this over launching many separate mocker processes: all workers share
   one tokio runtime and thread pool.

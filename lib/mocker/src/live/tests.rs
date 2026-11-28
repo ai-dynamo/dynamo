@@ -522,6 +522,35 @@ async fn dropping_prepared_registration_closes_route_and_allows_id_reuse() {
 }
 
 #[tokio::test]
+async fn admission_resolves_once_the_scheduler_accepts_the_request() {
+    let engine = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
+    let (registration, prepared) = engine
+        .prepare_request(DirectRequest {
+            tokens: vec![1, 2, 3],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(31)),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut admission = Box::pin(prepared.admission());
+    assert!((&mut admission).now_or_never().is_none());
+    drop(registration);
+    assert!(!admission.await);
+
+    let submitted = engine
+        .submit(DirectRequest {
+            tokens: vec![4, 5, 6],
+            max_output_tokens: 100,
+            uuid: Some(Uuid::from_u128(32)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(submitted.admission().await);
+    submitted.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let source = LiveEngine::start(handoff_args(engine_type, WorkerType::Prefill), 0).unwrap();
