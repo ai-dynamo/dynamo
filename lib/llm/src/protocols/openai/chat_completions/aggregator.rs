@@ -4296,6 +4296,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_glm47_quoted_marker_prose_is_preserved_on_length_finish() {
+        if super::super::unified_parser::selected_batch_family(Some("glm47"), None).is_some()
+            && crate::test_utils::run_isolated(
+                concat!(
+                    module_path!(),
+                    "::test_glm47_quoted_marker_prose_is_preserved_on_length_finish"
+                ),
+                &[
+                    ("DYN_PARSER_VERSION", "2"),
+                    ("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0"),
+                ],
+            )
+        {
+            return;
+        }
         let text = r#"The literal "<tool_call>" marker is part of the explanation."#;
         let delta = create_test_delta(
             0,

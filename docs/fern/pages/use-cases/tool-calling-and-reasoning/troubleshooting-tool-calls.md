@@ -187,11 +187,19 @@ For MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `gui
 
 Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 
+### Quote Policy
+
+Shared prose scanners in the pinned V2 release treat reasoning and tool-call markers as structural by default, including markers inside single quotes, double quotes, or backticks. A quoted complete tool call can therefore emit a tool call; the surrounding quote characters remain text. Tool argument contents still follow the selected family's grammar.
+
+To retain the previous quote-aware behavior, set `DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING=0` before starting each process that runs V2 parsing. This process-wide setting is cached on first use and cannot vary per request or family. Unset, `1`, `true`, `on`, and `yes` select the structural-marker default; explicitly set nontruthy values select compatibility behavior. Native control-token framing, such as Beam and Harmony, and V1 parsing are unchanged. See the [V2 quote handling contract](https://github.com/ai-dynamo/frontend-crates/blob/main/parsers/v2/README.md#quote-handling-compatibility).
+
+For unframed Muse Glimmer `response_format` output, the adapter streams a leading JSON object or array as content, including literal channel markers within its strings. Actual protocol markers after the container still use native parsing. Scalar roots retain their existing route.
+
 ## Known limitations and follow-up
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
 
-Two cases remain unqualified: literal native tool-call openers inside quoted content, and V1 prompt prefill when `</think>` splits after its first `<`. Existing reasoning-marker tests do not cover them; see [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577).
+Complete quoted native GLM calls have batch coverage in both V2 quote-policy profiles. Hermes guided-required batch parsing also covers a complete quoted example: the default policy extracts it, while the quote-aware profile preserves the original prose. Isolated quoted GLM openers have length-finish aggregation coverage in the quote-aware compatibility profile. Other families, streaming combinations, and quoted truncated openers remain unqualified. V1 prompt prefill when `</think>` splits after its first `<` also remains unqualified; see [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577).
 
 For configurations supported by V1, select `DYN_PARSER_VERSION=1` to use the legacy parser.
 

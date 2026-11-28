@@ -11755,21 +11755,59 @@ mod tests {
                 false,
             )?;
             eprintln!("replay installed tool constraint: {constraint:?}");
-            let raw = match &request.inner.tool_choice {
-                Some(ChatCompletionToolChoiceOption::Required)
-                    if constraint.installs_guided_json() =>
-                {
-                    format!(
-                        "[{{\"name\":\"write_file\",\"arguments\":{}}}]",
-                        self.arguments
-                    )
+            let raw = if let [
+                ..,
+                ChatCompletionRequestMessage::Assistant(assistant),
+                ChatCompletionRequestMessage::Tool(tool),
+            ] = request.inner.messages.as_slice()
+            {
+                let calls = assistant
+                    .tool_calls
+                    .as_ref()
+                    .context("missing assistant tool call")?;
+                anyhow::ensure!(
+                    calls.len() == 1 && calls[0].id == tool.tool_call_id,
+                    "tool result must bind to the returned assistant call"
+                );
+                anyhow::ensure!(
+                    calls[0].function.name == "write_file"
+                        && calls[0].function.arguments == self.arguments,
+                    "tool result must preserve the original function and arguments"
+                );
+                let ChatCompletionRequestToolMessageContent::Text(text) = &tool.content else {
+                    anyhow::bail!("expected synthetic text tool result");
+                };
+                let prompt = self
+                    .preprocessor
+                    .apply_template(&request)?
+                    .context("missing continuation prompt")?;
+                let at = prompt
+                    .as_str()
+                    .find(text)
+                    .context("tool result lost by prompt rendering")?;
+                let result: serde_json::Value =
+                    serde_json::from_str(&prompt.as_str()[at..at + text.len()])?;
+                let marker = result["marker"]
+                    .as_str()
+                    .context("missing tool-result marker")?;
+                format!("Tool output: {marker}")
+            } else {
+                match &request.inner.tool_choice {
+                    Some(ChatCompletionToolChoiceOption::Required)
+                        if constraint.installs_guided_json() =>
+                    {
+                        format!(
+                            "[{{\"name\":\"write_file\",\"arguments\":{}}}]",
+                            self.arguments
+                        )
+                    }
+                    Some(ChatCompletionToolChoiceOption::Named(_))
+                        if constraint.installs_guided_json() =>
+                    {
+                        self.arguments.clone()
+                    }
+                    _ => self.native.clone(),
                 }
-                Some(ChatCompletionToolChoiceOption::Named(_))
-                    if constraint.installs_guided_json() =>
-                {
-                    self.arguments.clone()
-                }
-                _ => self.native.clone(),
             };
             let mut chunks = Vec::new();
             for (index, character) in raw.chars().enumerate() {
@@ -11795,6 +11833,14 @@ mod tests {
             let route = self
                 .preprocessor
                 .tool_processing_route(&request, &constraint)?;
+            if self.preprocessor.tool_call_parser.as_deref() == Some("glm47")
+                && crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
+            {
+                assert!(
+                    matches!(&route, ToolProcessingRoute::Unified("glm47")),
+                    "GLM replay must exercise the V2 unified route"
+                );
+            }
             let parsed = self
                 .preprocessor
                 .postprocessor_parsing_stream_with_constraint(
@@ -11870,23 +11916,39 @@ mod tests {
 
     // The backend cannot emit either continuation until the client releases it.
     // This catches transport buffering even when the final aggregate is correct.
-    async fn paused_http_tool_progress(guided: bool) {
+    async fn paused_http_tool_progress(guided: bool, family_filter: Option<&str>) {
         use crate::protocols::openai::chat_completions::unified_parser;
         assert!(
             unified_parser::parsers_v2_selected(),
             "run with DYN_PARSER_VERSION=2"
         );
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap();
         let mut failures = Vec::new();
+        let mut scenarios = 0;
         for (shape, fields) in unified_parser::tests::write_file_progress_cases() {
             let expected_arguments: serde_json::Value =
                 serde_json::from_str(&unified_parser::tests::ordered_arguments(&fields)).unwrap();
             for (family, native) in unified_parser::tests::native_write_file_calls(&fields) {
+                if family_filter.is_some_and(|selected| selected != family) {
+                    continue;
+                }
+                if family == "glm47" && !guided {
+                    for marker in [" STAGE_TWO ", " END"] {
+                        let prefix = &native[..native.find(marker).unwrap()];
+                        assert!(prefix.rfind("<arg_value>") > prefix.rfind("</arg_value>"));
+                        assert!(!prefix.contains("</tool_call>"));
+                    }
+                }
                 for named in if guided {
                     vec![false, true]
                 } else {
                     vec![false]
                 } {
+                    scenarios += 1;
                     let release = Arc::new(tokio::sync::Semaphore::new(0));
                     let (port, cancel, join) = start_unified_replay(
                         family,
@@ -11918,6 +11980,7 @@ mod tests {
                     let mut ids = Vec::new();
                     let mut finishes = Vec::new();
                     let mut progress = Vec::new();
+                    let mut nonempty_updates = 0;
                     for expected in ["first content", "second content"] {
                         let reached =
                             tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -11930,6 +11993,7 @@ mod tests {
                                             String::from_utf8(pending.drain(..=end).collect())
                                                 .unwrap();
                                         body.push_str(&line);
+                                        let before = arguments.len();
                                         read_replay_delta(
                                             &line,
                                             &mut names,
@@ -11937,6 +12001,7 @@ mod tests {
                                             &mut ids,
                                             &mut finishes,
                                         );
+                                        nonempty_updates += usize::from(arguments.len() > before);
                                     }
                                     if names == "write_file" && arguments.contains(expected) {
                                         return true;
@@ -11947,6 +12012,12 @@ mod tests {
                             .await
                             .unwrap_or(false);
                         progress.push(reached);
+                        if family == "glm47" && !guided && reached {
+                            assert!(nonempty_updates >= 2, "{shape}: repeated argument deltas");
+                            assert_eq!(ids.len(), 1, "{shape}: stable tool-call ID");
+                            assert!(finishes.is_empty(), "{shape}: completed before closure");
+                            assert!(serde_json::from_str::<serde_json::Value>(&arguments).is_err());
+                        }
                         release.add_permits(1);
                     }
                     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -11968,21 +12039,80 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                    cancel.cancel();
-                    tokio::time::timeout(std::time::Duration::from_secs(5), join)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .unwrap();
                     assert!(body.contains("[DONE]"));
                     assert_eq!(names, "write_file", "{family}/{choice}");
                     assert_eq!(ids.len(), 1, "{family}/{choice}");
+                    assert!(
+                        !ids[0].is_empty(),
+                        "{family}/{choice}: nonempty tool-call ID"
+                    );
                     assert_eq!(finishes, ["tool_calls"], "{family}/{choice}");
                     assert_eq!(
                         serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
                         expected_arguments,
                         "{family}/{choice}"
                     );
+                    if family == "glm47" && !guided {
+                        // Synthetic result: use the HTTP call ID without running a real tool.
+                        let marker = format!("result-{}", uuid::Uuid::new_v4());
+                        assert!(!request.to_string().contains(&marker));
+                        let mut followup = request.clone();
+                        let messages = followup["messages"].as_array_mut().unwrap();
+                        messages.push(serde_json::json!({"role":"assistant","tool_calls":[{
+                            "id":ids[0],"type":"function",
+                            "function":{"name":names,"arguments":arguments}
+                        }]}));
+                        messages.push(serde_json::json!({"role":"tool","tool_call_id":ids[0],
+                            "content":serde_json::json!({"marker":marker}).to_string()
+                        }));
+                        let response = client
+                            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+                            .json(&followup)
+                            .send()
+                            .await
+                            .unwrap();
+                        assert!(response.status().is_success(), "{shape}");
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            response.text(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        let mut content = String::new();
+                        let mut final_reasons = Vec::new();
+                        for line in result.lines() {
+                            let Some(data) = line.strip_prefix("data: ") else {
+                                continue;
+                            };
+                            if data == "[DONE]" {
+                                continue;
+                            }
+                            let event: serde_json::Value = serde_json::from_str(data).unwrap();
+                            assert!(event.get("error").is_none(), "{event}");
+                            for choice in event["choices"].as_array().unwrap() {
+                                assert!(choice["delta"]["tool_calls"].is_null());
+                                if let Some(text) = choice["delta"]["content"].as_str() {
+                                    content.push_str(text);
+                                }
+                                if let Some(reason) = choice["finish_reason"].as_str() {
+                                    final_reasons.push(reason.to_owned());
+                                }
+                            }
+                        }
+                        assert!(result.contains("[DONE]"), "{shape}");
+                        assert_eq!(content, format!("Tool output: {marker}"), "{shape}");
+                        assert_eq!(final_reasons, ["stop"], "{shape}");
+                        eprintln!(
+                            "GLM native HTTP {shape}: {nonempty_updates} pre-close argument updates; tool-result continuation passed"
+                        );
+                    }
+                    cancel.cancel();
+                    tokio::time::timeout(std::time::Duration::from_secs(5), join)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
                     eprintln!(
                         "paused HTTP {family}/{shape}/{choice}: first={} continued={} final=true",
                         progress[0], progress[1]
@@ -11993,6 +12123,7 @@ mod tests {
                 }
             }
         }
+        assert!(scenarios > 0, "no native HTTP replay fixtures selected");
         assert!(
             failures.is_empty(),
             "paused HTTP progress failed: {failures:?}"
@@ -12035,15 +12166,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn glm47_native_http_progress_and_tool_result_continuation() {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm47_native_http_progress_and_tool_result_continuation"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+        assert_eq!(
+            unified_parser::selected_family(Some("glm47"), Some("glm45")),
+            Some(unified_parser::GLM47_UNIFIED_FAMILY)
+        );
+        paused_http_tool_progress(false, Some("glm47")).await;
+    }
+
+    #[tokio::test]
     #[ignore = "Run explicitly with DYN_PARSER_VERSION=2; measures upstream native buffering"]
     async fn eight_family_paused_native_http_progress() {
-        paused_http_tool_progress(false).await;
+        paused_http_tool_progress(false, None).await;
     }
 
     #[tokio::test]
     #[ignore = "Run explicitly with DYN_PARSER_VERSION=2; measures installed forced-tool modes"]
     async fn eight_family_paused_forced_http_progress() {
-        paused_http_tool_progress(true).await;
+        paused_http_tool_progress(true, None).await;
     }
 
     #[tokio::test]

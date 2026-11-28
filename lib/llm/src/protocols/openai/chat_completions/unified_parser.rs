@@ -56,6 +56,7 @@ use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
 use crate::protocols::openai::GuidedToolConstraint;
+use crate::protocols::openai::json_container::JsonContainerBoundary;
 use crate::tokenizers::traits::Tokenizer;
 
 use super::NvCreateChatCompletionStreamResponse;
@@ -426,6 +427,14 @@ impl UnifiedRequestPolicy {
 
     fn inspects_json_prefill(self, constraint: &GuidedToolConstraint) -> bool {
         self.structured_response || constraint.installs_guided_json()
+    }
+
+    // Muse scans channel headers even in Response state. A declared, unframed JSON
+    // answer owns its leading container; a real native suffix still belongs to Muse.
+    fn protects_response_container(self, family: &str, constraint: &GuidedToolConstraint) -> bool {
+        self.structured_response
+            && family == MUSE_UNIFIED_FAMILY
+            && !constraint.installs_guided_json()
     }
 
     fn batch_starting_state(
@@ -3078,6 +3087,19 @@ fn parse_complete_in_mode(
     .transpose()?
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
+    let starting_state = policy.batch_starting_state(family, content)?;
+    let (response_container, content) = if policy
+        .protects_response_container(family, guided_tool_constraint)
+        && starting_state != UnifiedParserStartingState::Reasoning
+        && starts_bare_json(content)
+    {
+        let end = JsonContainerBoundary::default()
+            .end_before_markup(content)
+            .unwrap_or(content.len());
+        content.split_at(end)
+    } else {
+        ("", content)
+    };
     parser.initialize_request(UnifiedParserInit {
         prompt_token_ids: if family == "gpt_oss"
             && matches!(&effective_mode, UnifiedToolOutputMode::Native)
@@ -3087,7 +3109,7 @@ fn parse_complete_in_mode(
         } else {
             Vec::new()
         },
-        starting_state: policy.batch_starting_state(family, content)?,
+        starting_state,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
@@ -3101,6 +3123,7 @@ fn parse_complete_in_mode(
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut output = UnifiedParserOutput::default();
+    output.push_text(response_container);
     parser.parse_into(content, &mut output)?;
     output.events.extend(
         if confirmed_eos {
@@ -3204,6 +3227,8 @@ fn parse_complete_in_mode(
 /// `apply_stream_with_constraint` for why this can't just live inside `ChoiceState`.
 #[derive(Default)]
 struct ChoiceRecord {
+    // A pre-parsed chunk can replace ChoiceState while this visible JSON value stays open.
+    response_container: ResponseContainer,
     incomplete_native_call: bool,
     opened_calls: HashSet<usize>,
     tool_ids_emitted: HashSet<usize>,
@@ -3455,6 +3480,58 @@ fn stream_chunks_for_choices(
             }
         })
         .collect()
+}
+
+#[derive(Default)]
+enum ResponseContainer {
+    #[default]
+    Undecided,
+    Open(JsonContainerBoundary),
+    Done,
+}
+
+impl ResponseContainer {
+    /// Only the first visible object/array can claim bytes. A completed root
+    /// never re-arms when a later native channel or second object arrives.
+    fn split<'a>(&mut self, text: &'a str) -> (&'a str, &'a str) {
+        if matches!(self, Self::Undecided) {
+            if text.trim_start().is_empty() {
+                return ("", text);
+            }
+            *self = if starts_bare_json(text) {
+                Self::Open(JsonContainerBoundary::default())
+            } else {
+                Self::Done
+            };
+        }
+        let Self::Open(container) = self else {
+            return ("", text);
+        };
+        let Some(end) = container.end_before_markup(text) else {
+            return (text, "");
+        };
+        *self = Self::Done;
+        text.split_at(end)
+    }
+
+    // Typed deltas are forwarded as received. Only their visible text advances the boundary.
+    fn observe(&mut self, content: Option<&ChatCompletionMessageContent>) {
+        match content {
+            Some(ChatCompletionMessageContent::Text(text)) => {
+                self.split(text);
+            }
+            Some(ChatCompletionMessageContent::Parts(parts)) => {
+                for part in parts {
+                    if let dynamo_protocols::types::ChatCompletionResponseContentPart::Text(part) =
+                        part
+                    {
+                        self.split(&part.text);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
 }
 
 impl ChoiceRecord {
@@ -3877,6 +3954,7 @@ where
     let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
+        let protects_container = policy.protects_response_container(family, &guided_tool_constraint);
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
         let mut states: HashMap<u32, ChoiceState> = HashMap::new();
         // Per-choice bookkeeping that must outlive a single `ChoiceState`: a
@@ -3979,6 +4057,9 @@ where
                     // built for it (e.g. its first-ever chunk is already-parsed),
                     // so it is not invisible to `finish_unterminated_choices`.
                     let record = records.entry(original.index).or_default();
+                    if protects_container {
+                        record.response_container.observe(original.delta.content.as_ref());
+                    }
                     let pending_whitespace =
                         std::mem::take(&mut record.pending_guided_prefill_whitespace);
                     if !pending_whitespace.is_empty() {
@@ -4276,7 +4357,8 @@ where
                 let mut detected_prefill = prefill;
                 if !states.contains_key(&original.index)
                     && (prefill == UnifiedParserStartingState::Reasoning
-                        || policy.structured_response && prefill == UnifiedParserStartingState::None)
+                        || policy.structured_response && prefill == UnifiedParserStartingState::None
+                        || protects_container && prefill == UnifiedParserStartingState::Response)
                     && policy.inspects_json_prefill(&guided_tool_constraint)
                     && !has_consumed_harmony_prefix
                     && !records.get(&original.index).is_some_and(|record| record.detoured)
@@ -4287,7 +4369,7 @@ where
                     };
                     let mut probe = undecided_guided_prefix.remove(&original.index).unwrap_or_default();
                     probe.push(text);
-                    let probe_decision = if prefill == UnifiedParserStartingState::None {
+                    let probe_decision = if prefill != UnifiedParserStartingState::Reasoning {
                         // Without a prompt-opened channel, non-JSON may contain an explicit
                         // reasoning opener. Let the native parser recognize it.
                         probe.unopened_channel_decision(family, original.finish_reason.is_some())
@@ -4399,6 +4481,9 @@ where
                         }
                         let uses_request_prefill = choice_prefill == prefill
                             && !records.get(&original.index).is_some_and(|record| record.detoured);
+                        if protects_container && choice_prefill == UnifiedParserStartingState::Reasoning {
+                            records.entry(original.index).or_default().response_container = ResponseContainer::Done;
+                        }
                         let choice_prefill = StreamPrefill {
                             starting_state: choice_prefill,
                             prefix: uses_request_prefill.then(|| prefill_prefix.clone()).flatten(),
@@ -4467,10 +4552,18 @@ where
                 };
 
                 let mut deltas = Vec::new();
-                if let Some(ChatCompletionMessageContent::Text(text)) =
-                    original.delta.content.as_ref()
-                {
-                    deltas.extend(state.push(text));
+                if let Some(ChatCompletionMessageContent::Text(text)) = original.delta.content.as_ref() {
+                    let (root, suffix) = if protects_container {
+                        records.entry(original.index).or_default().response_container.split(text)
+                    } else {
+                        ("", text.as_str())
+                    };
+                    if !root.is_empty() {
+                        deltas.push(UnifiedParserEvent::Text(root.to_owned()));
+                    }
+                    if !suffix.is_empty() || root.is_empty() {
+                        deltas.extend(state.push(suffix));
+                    }
                 }
                 let terminal = original.finish_reason;
                 let already_finished = records
@@ -11331,6 +11424,15 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text separately from reasoning controls.
     #[tokio::test]
     async fn quoted_control_markers_stay_visible_in_batch_and_streaming() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quoted_control_markers_stay_visible_in_batch_and_streaming"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
         assert_quoted_control_markers(true, true).await;
     }
 
@@ -11342,7 +11444,72 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text in native-channel batch responses.
     #[tokio::test]
     async fn native_channel_quoted_control_markers_stay_visible_in_batch() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::native_channel_quoted_control_markers_stay_visible_in_batch"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
         assert_quoted_control_markers(false, true).await;
+    }
+
+    #[test]
+    fn glm_default_quote_policy_parses_a_complete_quoted_native_call() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_default_quote_policy_parses_a_complete_quoted_native_call"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let input = r#"Before "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>" after"#;
+        let output = parse_complete(
+            GLM47_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(output.text, "Before \"\" after");
+        assert!(output.reasoning.is_empty());
+        assert!(!output.incomplete_native_call);
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(output.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output.tool_calls[0].function.arguments)
+                .unwrap(),
+            serde_json::json!({"city":"Paris"}),
+        );
+    }
+
+    #[test]
+    fn glm_quote_aware_policy_keeps_a_complete_quoted_native_call_literal() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_quote_aware_policy_keeps_a_complete_quoted_native_call_literal"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
+        let input = r#"Before "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>" after"#;
+        let output = parse_complete(
+            GLM47_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(output.text, input);
+        assert!(output.reasoning.is_empty());
+        assert!(!output.incomplete_native_call);
+        assert!(output.tool_calls.is_empty());
     }
 
     async fn assert_quoted_control_markers(check_streaming: bool, include_deferred: bool) {
@@ -13459,10 +13626,20 @@ pub(crate) mod tests {
 
     #[test]
     fn muse_prefilled_reasoning_does_not_treat_prose_as_a_header() {
-        for reasoning in [
-            "map x to=y before answering",
-            "literal \"<|message|>\" in a thought",
+        let quoted_case_in_child = crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_prefilled_reasoning_does_not_treat_prose_as_a_header"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        );
+        for (reasoning, requires_quote_aware) in [
+            ("map x to=y before answering", false),
+            ("literal \"<|message|>\" in a thought", true),
         ] {
+            if quoted_case_in_child && requires_quote_aware {
+                continue;
+            }
             let input =
                 format!("{reasoning}<|eom|><|start|>assistant to=user<|message|>answer<|eot|>");
             let result = parse_complete(
@@ -15041,43 +15218,317 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let tools = weather_tools();
-        let literal_marker_json = r#"{"note":"<think>literal</think>"}"#;
-        let batch = parse_complete_with_policy(
-            "qwen3",
-            literal_marker_json,
-            &GuidedToolConstraint::None,
-            &tools,
-            policy,
-        )
-        .unwrap();
-        assert_eq!(batch.text, literal_marker_json);
-        assert!(batch.reasoning.is_empty());
+        for (family, root, suffix, expected_reasoning) in [
+            ("qwen3", r#"{"note":"<think>literal</think>"}"#, "", ""),
+            (
+                "muse_glimmer",
+                r#"{"note":"<|start|>assistant to=self<|message|>literal<|eom|>"}"#,
+                "",
+                "",
+            ),
+            (
+                "muse_glimmer",
+                r#" [{"note":"雪\"]}<|start|>assistant to=self<|message|>literal<|eom|>"}]"#,
+                "<|start|>assistant to=self<|message|>real<|eom|>",
+                "real",
+            ),
+            (
+                "muse_glimmer",
+                "{broken",
+                "<|start|>assistant to=self<|message|>real<|eom|>",
+                "real",
+            ),
+        ] {
+            let raw = format!("{root}{suffix}");
+            let batch = parse_complete_with_policy(
+                family,
+                &raw,
+                &GuidedToolConstraint::None,
+                &tools,
+                policy,
+            )
+            .unwrap();
+            assert_eq!(batch.text, root, "{family} batch");
+            assert_eq!(batch.reasoning, expected_reasoning);
+            assert!(batch.tool_calls.is_empty());
 
-        let streamed = apply_stream_with_policy(
-            futures::stream::iter(vec![chunk(literal_marker_json, true)]),
-            Some(tools.clone()),
+            for split in raw.char_indices().map(|(at, _)| at).chain([raw.len()]) {
+                let streamed = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    GuidedToolConstraint::None,
+                    stream_prefill(family, false),
+                    family,
+                    false,
+                    policy,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                let choices = collect_choices(&streamed);
+                let text: String = choices
+                    .iter()
+                    .filter_map(|choice| match &choice.delta.content {
+                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let reasoning: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                    .collect();
+                assert_eq!(text, root, "{family} stream at {split}");
+                assert_eq!(reasoning, expected_reasoning);
+                assert!(
+                    choices
+                        .iter()
+                        .all(|choice| choice.delta.tool_calls.is_none())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_streams_unclosed_structured_content_per_choice() {
+        let first = r#"{"note":"雪"#;
+        let second = "<|start|>assistant to=self<|message|>literal<|eom|>";
+        let mut other = chunk("<|start|>assistant to=self<|message|>real<|eom|>", true);
+        other.data.as_mut().unwrap().inner.choices[0].index = 1;
+        // No closer or EOF is available for choice zero; both fragments must already be visible.
+        let source = stream::iter([chunk(first, false), other, chunk(second, false)])
+            .chain(stream::pending());
+        let output = apply_stream_with_policy(
+            source,
+            None,
             GuidedToolConstraint::None,
-            stream_prefill("qwen3", false),
-            "qwen3",
+            UnifiedParserStartingState::None,
+            MUSE_UNIFIED_FAMILY,
             false,
-            policy,
+            UnifiedRequestPolicy {
+                structured_response: true,
+                ..Default::default()
+            },
+        );
+        tokio::pin!(output);
+        let mut texts = Vec::new();
+        let mut reasoning = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while texts.len() < 2 {
+                let response = output.next().await.expect("open source");
+                for choice in response.data.unwrap().inner.choices {
+                    assert!(choice.delta.tool_calls.is_none());
+                    if choice.index == 0 {
+                        assert!(
+                            choice.finish_reason.is_none()
+                                && choice.delta.reasoning_content.is_none()
+                        );
+                        if let Some(ChatCompletionMessageContent::Text(text)) = choice.delta.content
+                        {
+                            texts.push(text);
+                        }
+                    } else if let Some(delta) = choice.delta.reasoning_content {
+                        reasoning.push_str(&delta);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("structured JSON must progress while the source is open");
+        assert_eq!(texts, [first, second]);
+        assert_eq!(reasoning, "real");
+    }
+
+    #[tokio::test]
+    async fn muse_structured_container_survives_preparsed_content_parts() {
+        let prefix = r#"{"note":""#;
+        let marker = "<|start|>assistant to=self<|message|>body<|eom|>";
+        let part = |text: &str| serde_json::json!({"content":[{"type":"text","text":text}]});
+        let mut observations = Vec::new();
+        let mut oracle = Vec::new();
+        for (raw_prefix, delta, prefill, suffix, expected_text, expected_reasoning) in [
+            (
+                Some(prefix),
+                part("middle"),
+                UnifiedParserStartingState::None,
+                format!("{marker}\"}}"),
+                format!("{prefix}middle{marker}\"}}"),
+                String::new(),
+            ),
+            (
+                Some(prefix),
+                part("\"}"),
+                UnifiedParserStartingState::None,
+                marker.to_owned(),
+                format!("{prefix}\"}}"),
+                "body".to_owned(),
+            ),
+            (
+                None,
+                part(prefix),
+                UnifiedParserStartingState::None,
+                format!("{marker}\"}}"),
+                format!("{prefix}{marker}\"}}"),
+                String::new(),
+            ),
+            // An upstream content part selects visible output even if the prompt opened reasoning.
+            (
+                None,
+                part(prefix),
+                UnifiedParserStartingState::Reasoning,
+                format!("{marker}\"}}"),
+                format!("{prefix}{marker}\"}}"),
+                String::new(),
+            ),
+            // The same bytes in a reasoning field cannot start a visible response container.
+            (
+                None,
+                serde_json::json!({"reasoning_content":prefix}),
+                UnifiedParserStartingState::Reasoning,
+                marker.to_owned(),
+                String::new(),
+                format!("{prefix}body"),
+            ),
+        ] {
+            let mut parts = chunk("", false);
+            parts.data.as_mut().unwrap().inner.choices[0].delta =
+                serde_json::from_value(delta).unwrap();
+            let out = apply_stream_with_policy(
+                stream::iter(
+                    raw_prefix
+                        .map(|text| chunk(text, false))
+                        .into_iter()
+                        .chain([parts, chunk(&suffix, true)]),
+                ),
+                None,
+                GuidedToolConstraint::None,
+                prefill,
+                MUSE_UNIFIED_FAMILY,
+                false,
+                UnifiedRequestPolicy {
+                    structured_response: true,
+                    ..Default::default()
+                },
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let mut text = String::new();
+            let mut reasoning = String::new();
+            for choice in collect_choices(&out) {
+                match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(t)) => text.push_str(t),
+                    Some(ChatCompletionMessageContent::Parts(parts)) => {
+                        let [
+                            dynamo_protocols::types::ChatCompletionResponseContentPart::Text(part),
+                        ] = parts.as_slice()
+                        else {
+                            panic!("expected one text part");
+                        };
+                        text.push_str(&part.text);
+                    }
+                    None => {}
+                }
+                if let Some(delta) = &choice.delta.reasoning_content {
+                    reasoning.push_str(delta);
+                }
+            }
+            observations.push((text, reasoning));
+            oracle.push((expected_text, expected_reasoning));
+        }
+        assert_eq!(observations, oracle);
+    }
+
+    #[tokio::test]
+    async fn muse_structured_text_tracks_typed_fragments_and_metadata_per_choice() {
+        // The second object is outside the protected root and exercises default native parsing.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_structured_text_tracks_typed_fragments_and_metadata_per_choice"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let marker = "<|start|>assistant to=self<|message|>body<|eom|>";
+        let image = serde_json::json!({"type":"image_url","image_url":{"url":"https://example.test/image"}});
+        let call = serde_json::json!({"id":"call_meta", "index":0, "type":"function","function":{"name":"lookup","arguments":"{}"}});
+        let part = |text: &str| serde_json::json!({"content":[{"type":"text","text":text}]});
+        let raw = |text: &str| serde_json::json!({"content":text});
+        let wire = [
+            (0, raw(" \n")),
+            (0, serde_json::json!({"content":[image.clone()]})),
+            (0, serde_json::json!({"tool_calls":[call]})),
+            (1, part(" \t")),
+            (1, part(r#"{"x":""#)),
+            (0, raw(r#"{"x":""#)),
+            (0, part("\\")),
+            (1, part("\"}")),
+            // Choice one has already closed its single bare root. The second container
+            // is input to the native parser, including its genuine channel spelling.
+            (1, raw(&format!(r#"{{"second":"{marker}"}}"#))),
+            // The quote is escaped by the backslash from the earlier text part.
+            (0, raw(&format!("\"{marker}\"}}"))),
+        ];
+        let source = wire.into_iter().map(|(index, delta)| {
+            let mut item = chunk("", false);
+            let choice = &mut item.data.as_mut().unwrap().inner.choices[0];
+            choice.index = index;
+            choice.delta = serde_json::from_value(delta).unwrap();
+            item
+        });
+        let out = apply_stream_with_policy(
+            stream::iter(source),
+            None,
+            GuidedToolConstraint::None,
+            UnifiedParserStartingState::None,
+            MUSE_UNIFIED_FAMILY,
+            false,
+            UnifiedRequestPolicy {
+                structured_response: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await;
-        let streamed_choices = collect_choices(&streamed);
-        let streamed_text: String = streamed_choices
-            .iter()
-            .filter_map(|choice| match &choice.delta.content {
-                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let streamed_reasoning: String = streamed_choices
-            .iter()
-            .filter_map(|choice| choice.delta.reasoning_content.as_deref())
-            .collect();
-        assert_eq!(streamed_text, literal_marker_json);
-        assert!(streamed_reasoning.is_empty());
+        let mut text = [String::new(), String::new()];
+        let mut reasoning = [String::new(), String::new()];
+        let mut metadata = Vec::new();
+        for choice in collect_choices(&out) {
+            let index = choice.index as usize;
+            match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(t)) => text[index].push_str(t),
+                Some(ChatCompletionMessageContent::Parts(parts)) => {
+                    for part in parts {
+                        if let dynamo_protocols::types::ChatCompletionResponseContentPart::Text(
+                            part,
+                        ) = part
+                        {
+                            text[index].push_str(&part.text);
+                        } else {
+                            assert_eq!(index, 0);
+                            assert_eq!(serde_json::to_value(part).unwrap(), image);
+                            metadata.push("image");
+                        }
+                    }
+                }
+                None => {}
+            }
+            if let Some(calls) = &choice.delta.tool_calls {
+                assert_eq!(index, 0);
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id.as_deref(), Some("call_meta"));
+                metadata.push("tool");
+            }
+            if let Some(t) = &choice.delta.reasoning_content {
+                reasoning[index].push_str(t);
+            }
+        }
+        assert_eq!(metadata, ["image", "tool"]);
+        assert_eq!(text[0], format!(" \n{{\"x\":\"\\\"{marker}\"}}"));
+        assert_eq!(text[1], " \t{\"x\":\"\"}{\"second\":\"\"}");
+        assert_eq!(reasoning, ["", "body"]);
     }
 
     #[tokio::test]
@@ -15132,6 +15583,13 @@ pub(crate) mod tests {
 
     #[test]
     fn malformed_guided_zero_call_native_channels_recover_for_every_family() {
+        let quoted_cases_in_child = crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::malformed_guided_zero_call_native_channels_recover_for_every_family"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        );
         for (family, raw) in [
             ("deepseek_v4", "<think>private</think>answer"),
             ("deepseek_v41", "<think>private</think>answer"),
@@ -15165,6 +15623,9 @@ pub(crate) mod tests {
                 assert_eq!(batch.reasoning, "private", "{family} {constraint:?}");
                 assert_eq!(batch.text, "answer", "{family} {constraint:?}");
                 assert!(batch.tool_calls.is_empty());
+                if quoted_cases_in_child {
+                    continue;
+                }
                 let quoted = serde_json::to_string(raw).unwrap();
                 assert!(
                     !contains_native_envelope(&quoted, family),

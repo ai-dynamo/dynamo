@@ -75,6 +75,7 @@ use crate::protocols::openai::chat_completions::{
     allowed_tools::{AllowedToolsRequest, ToolAllowlist},
     tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
 };
+use crate::protocols::openai::json_container::JsonContainerBoundary;
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -3770,89 +3771,45 @@ enum ScanOutcome {
 /// scalar is never an early-dispatch candidate: `1` may still legally receive
 /// a further `2`. Such a value waits for the terminal `finish_reason` pass.
 #[derive(Debug, Default)]
-struct JsonStructureScanner {
-    /// Open `{`/`[` containers not yet closed.
-    depth: u32,
-    in_string: bool,
-    pending_escape: bool,
-    /// The first non-whitespace byte has been seen.
-    root_started: bool,
-    /// The root value is a top-level scalar (or leading junk), so no early
-    /// dispatch is possible and scanning stops.
-    scalar_root: bool,
-    /// The root container opened and closed.
-    root_closed: bool,
-    /// Sticky: the accumulated string is structurally impossible.
-    malformed: bool,
+enum JsonStructureScanner {
+    #[default]
+    Pending,
+    Container(JsonContainerBoundary),
+    Scalar,
+    Closed,
+    Malformed,
 }
 
 impl JsonStructureScanner {
-    /// Consume one fragment in full and report the state of the accumulated
-    /// argument string. The *entire* fragment is consumed before a candidate
-    /// is declared, so `{}junk` cannot be reported complete at the first `}`.
     fn consume(&mut self, fragment: &str) -> ScanOutcome {
-        for byte in fragment.bytes() {
-            if self.malformed {
-                break;
-            }
-            if self.scalar_root {
-                // Nothing a scalar root can do makes it an early candidate.
-                break;
-            }
-            if self.in_string {
-                if self.pending_escape {
-                    self.pending_escape = false;
-                } else if byte == b'\\' {
-                    self.pending_escape = true;
-                } else if byte == b'"' {
-                    self.in_string = false;
-                }
-                continue;
-            }
-            if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
-                continue;
-            }
-            if self.root_closed {
-                // Trailing junk after a closed root: `{}junk`, `{}{}`.
-                self.malformed = true;
-                break;
-            }
-            if !self.root_started {
-                self.root_started = true;
-                if byte == b'}' || byte == b']' {
-                    // A closing token with nothing open: `}{"x":1}` is a
-                    // permanent non-dispatch, not a depth-clamped completion.
-                    self.malformed = true;
-                    break;
-                }
-                if byte != b'{' && byte != b'[' {
-                    // Top-level scalar, or leading junk. Either way the
-                    // terminal pass — not the scanner — decides.
-                    self.scalar_root = true;
-                    break;
-                }
-            }
-            match byte {
-                b'"' => self.in_string = true,
-                b'{' | b'[' => self.depth += 1,
-                b'}' | b']' => {
-                    if self.depth == 0 {
-                        self.malformed = true;
-                        break;
-                    }
-                    self.depth -= 1;
-                    if self.depth == 0 {
-                        self.root_closed = true;
-                    }
-                }
-                _ => {}
+        let mut remaining = fragment;
+        if matches!(self, Self::Pending) {
+            match fragment
+                .trim_start_matches([' ', '\t', '\r', '\n'])
+                .as_bytes()
+                .first()
+            {
+                None => return ScanOutcome::Incomplete,
+                Some(b'{' | b'[') => *self = Self::Container(JsonContainerBoundary::default()),
+                Some(b'}' | b']') => *self = Self::Malformed,
+                _ => *self = Self::Scalar,
             }
         }
-
-        if self.malformed {
+        if let Self::Container(boundary) = self {
+            let Some(end) = boundary.end_in(fragment) else {
+                return ScanOutcome::Incomplete;
+            };
+            remaining = &fragment[end..];
+            *self = Self::Closed;
+        }
+        if matches!(self, Self::Closed) {
+            if remaining.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+                return ScanOutcome::RootClosed;
+            }
+            *self = Self::Malformed;
+        }
+        if matches!(self, Self::Malformed) {
             ScanOutcome::Malformed
-        } else if self.root_closed && self.depth == 0 && !self.in_string {
-            ScanOutcome::RootClosed
         } else {
             ScanOutcome::Incomplete
         }

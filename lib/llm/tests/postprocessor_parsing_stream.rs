@@ -3677,7 +3677,10 @@ async fn postprocessor_parsing_stream_keeps_quoted_think_markers_as_content() {
             module_path!(),
             "::postprocessor_parsing_stream_keeps_quoted_think_markers_as_content"
         ),
-        &[(env_llm::DYN_PARSER_VERSION, "2")],
+        &[
+            (env_llm::DYN_PARSER_VERSION, "2"),
+            ("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0"),
+        ],
     ) {
         return;
     }

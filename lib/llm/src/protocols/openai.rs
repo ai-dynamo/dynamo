@@ -23,6 +23,7 @@ pub mod completions;
 pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod images;
+pub(crate) mod json_container;
 #[cfg(test)]
 mod media_fixtures;
 #[cfg(test)]
