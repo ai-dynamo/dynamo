@@ -23,6 +23,7 @@ pub use config::{LoraAllocationConfig, McfConfig};
 pub use controller::LoraController;
 pub use downloader::LoRADownloader;
 pub use filter::LoraFilter;
+pub use huggingface::{validate_hf_commit_sha, validate_hf_relative_path, validate_hf_repo_file};
 pub use load_estimator::{LoadEstimator, LoadEstimatorConfig};
 pub use routing::{
     AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable,

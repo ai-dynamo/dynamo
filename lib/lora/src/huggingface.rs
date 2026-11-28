@@ -63,7 +63,9 @@ impl HfRepoSpec {
     }
 }
 
-fn validate_hf_relative_path(value: &str, kind: &str) -> anyhow::Result<()> {
+/// Reject a Hub path that is empty, absolute, uses backslashes, or has an empty, `.` or
+/// `..` component, so it cannot leave the directory it is joined onto.
+pub fn validate_hf_relative_path(value: &str, kind: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.starts_with('/')
         || value.starts_with('\\')
@@ -79,7 +81,7 @@ fn validate_hf_relative_path(value: &str, kind: &str) -> anyhow::Result<()> {
 
 /// Validate a path received from the Hub before passing it to hf-hub, whose cache
 /// writer joins sibling names directly beneath the snapshot directory.
-fn validate_hf_repo_file(filename: &str) -> anyhow::Result<()> {
+pub fn validate_hf_repo_file(filename: &str) -> anyhow::Result<()> {
     validate_hf_relative_path(filename, "repository filename")?;
     if filename.eq_ignore_ascii_case(LORA_COMPLETE_MARKER) {
         anyhow::bail!("reserved Hugging Face repository filename: {filename:?}");
@@ -87,7 +89,8 @@ fn validate_hf_repo_file(filename: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_hf_commit_sha(sha: &str) -> anyhow::Result<()> {
+/// Accept only a full 40-character hexadecimal commit SHA, the name of a snapshot directory.
+pub fn validate_hf_commit_sha(sha: &str) -> anyhow::Result<()> {
     if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         anyhow::bail!("invalid Hugging Face commit SHA: {sha:?}");
     }

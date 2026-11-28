@@ -2320,7 +2320,7 @@ pub(crate) async fn build_local_model(
             PathBuf::from(&source)
         } else {
             // Skip weights: the engine loaded them in start(); the card needs only metadata.
-            LocalModel::fetch(&source, true).await.map_err(|e| {
+            LocalModel::fetch(&source, None, true).await.map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::CannotConnect),
                     format!("fetch '{source}': {e}"),

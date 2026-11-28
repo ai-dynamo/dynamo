@@ -351,6 +351,7 @@ async def init_omni_stage_router(
         # Aggregated with no peer dependencies.
         worker_type=WorkerType.Aggregated,
         needs=[],
+        revision=config.engine_args.revision,
         # Stage 0 does not load input_reference into the image prompt.
         user_data={"image_edits": {"schema_version": 1, "max_input_images": 0}},
     )
