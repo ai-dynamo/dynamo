@@ -9,10 +9,13 @@ functions, no runtime needed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Optional
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.thunderagent_router import __main__ as main_module
 from dynamo.thunderagent_router.__main__ import ThunderAgentRouterHandler
 from dynamo.thunderagent_router.program_state import ReplicaKey
 from dynamo.thunderagent_router.router import PauseDecision
@@ -23,6 +26,53 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 def make_handler() -> ThunderAgentRouterHandler:
     """A handler with only the state the tested methods touch."""
     return ThunderAgentRouterHandler(runtime=None, config=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("phase", ["capacity", "scheduler", "registration", "serving"])
+async def test_serve_router_cleans_up_partial_startup(monkeypatch, phase):
+    failure = RuntimeError("startup failed")
+    endpoint = SimpleNamespace(
+        serve_endpoint=AsyncMock(side_effect=failure if phase == "serving" else None)
+    )
+    runtime = SimpleNamespace(endpoint=Mock(return_value=endpoint))
+    config = SimpleNamespace(
+        endpoint="test.vllm.generate",
+        namespace="test",
+        model_name="test-model",
+        model_path=None,
+        tool_call_parser=None,
+        reasoning_parser=None,
+        publish_sglang_generate=False,
+    )
+    handler = ThunderAgentRouterHandler(runtime, config)
+    capacity = SimpleNamespace(stop=Mock())
+    scheduler = SimpleNamespace(stop=AsyncMock())
+
+    async def initialize():
+        handler._capacity = capacity
+        if phase == "capacity":
+            raise failure
+        handler._scheduler = scheduler
+        if phase == "scheduler":
+            raise failure
+
+    monkeypatch.setattr(handler, "initialize", initialize)
+    registration = AsyncMock(side_effect=failure if phase == "registration" else None)
+    monkeypatch.setattr(main_module, "register_model", registration)
+    with pytest.raises(RuntimeError) as caught:
+        await main_module.serve_router(runtime, config, handler)
+    assert caught.value is failure
+    capacity.stop.assert_called_once_with()
+    if phase == "capacity":
+        scheduler.stop.assert_not_awaited()
+    else:
+        scheduler.stop.assert_awaited_once_with()
+    if phase in ("capacity", "scheduler"):
+        registration.assert_not_awaited()
+    if phase != "serving":
+        endpoint.serve_endpoint.assert_not_awaited()
 
 
 def chunk_with(worker_info: Any) -> dict[str, Any]:
@@ -106,8 +156,12 @@ class FakeScheduler:
         )
         self.back_fills: list[tuple[Optional[ReplicaKey], int]] = []
         self.completed_requests: list[tuple[str, int, int]] = []
+        self.request_ids: list[Optional[str]] = []
 
-    async def before_request(self, program_id, estimated_prompt_tokens=0):
+    async def before_request(
+        self, program_id, estimated_prompt_tokens=0, *, request_id=None
+    ):
+        self.request_ids.append(request_id)
         return self._decision
 
     async def assign_worker(self, program_id, replica, *, admission_epoch):
@@ -164,9 +218,10 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
     handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
     handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
 
-    context = object()
+    context = SimpleNamespace(id=lambda: "routed-request")
     await drive(handler, context=context)
     assert handler._kv_router.context is context
+    assert handler._scheduler.request_ids == ["routed-request"]
 
     sent = handler._kv_router.sent
     assert sent is not None
