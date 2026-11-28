@@ -176,8 +176,8 @@ def cumem_import_from_shareable_handle_close_fd(fd: int) -> int:
         os.close(fd)
 
 
-def cumem_address_reserve(size: int, granularity: int) -> int:
-    result, va = cuda.cuMemAddressReserve(size, granularity, 0, 0)
+def cumem_address_reserve(size: int, granularity: int, addr: int = 0) -> int:
+    result, va = cuda.cuMemAddressReserve(size, granularity, addr, 0)
     cuda_check_result(result, "cuMemAddressReserve")
     return int(va)
 
@@ -375,8 +375,8 @@ class CudaVMM(VMMDevice):
 
     # ----- virtual address space + mapping ----------------------------------
 
-    def address_reserve(self, size: int, granularity: int) -> int:
-        return cumem_address_reserve(size, granularity)
+    def address_reserve(self, size: int, granularity: int, addr: int = 0) -> int:
+        return cumem_address_reserve(size, granularity, addr)
 
     def address_free(self, va: int, size: int) -> None:
         cumem_address_free(va, size)
