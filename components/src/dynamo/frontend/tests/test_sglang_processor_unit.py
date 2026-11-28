@@ -430,183 +430,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             "json": {"type": "object"}
         }
 
-    @pytest.mark.router
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "backend_instance_id",
-            "decode_worker_id",
-            "prefill_worker_id",
-            "dp_rank",
-            "prefill_dp_rank",
-        ],
-    )
-    def test_worker_routing_hints_are_projected(self, field):
-        result = _build_dynamo_preproc({"nvext": {field: 7}}, [1], "test", None)
-        assert result["routing"] == {field: 7}
-
-    @pytest.mark.router
-    def test_worker_routing_preserves_rank_zero(self):
-        """Rank zero is an explicit value, not an omitted rank."""
-        result = _build_dynamo_preproc({"nvext": {"dp_rank": 0}}, [1], "test", None)
-        assert result["routing"] == {"dp_rank": 0}
-
-    @pytest.mark.router
-    def test_worker_routing_omits_null(self):
-        result = _build_dynamo_preproc(
-            {"nvext": {"backend_instance_id": None}}, [1], "test", None
-        )
-        assert result["routing"] is None
-
-    @pytest.mark.router
-    def test_worker_routing_preserves_priority_and_explicit_overrides(self):
-        request = {
-            "nvext": {
-                "backend_instance_id": 2**64 - 1,
-                "decode_worker_id": 7,
-                "dp_rank": 0,
-                "agent_hints": {"priority": 10},
-            },
-            "routing": {"decode_worker_id": 9, "priority": 3},
-        }
-        original = copy.deepcopy(request)
-        result = _build_dynamo_preproc(request, [1], "test", None)
-        assert result["routing"] == {
-            "backend_instance_id": 2**64 - 1,
-            "decode_worker_id": 9,
-            "dp_rank": 0,
-            "priority": 3,
-            "priority_jump": 10.0,
-        }
-        assert request == original
-
-    def test_agent_hints_are_projected_to_routing(self):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {
-                    "agent_hints": {
-                        "priority": 10,
-                        "strict_priority": 3,
-                        "osl": 128,
-                    }
-                },
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] == {
-            "priority": 10,
-            "priority_jump": 10.0,
-            "strict_priority": 3,
-            "expected_output_tokens": 128,
-        }
-
-    def test_negative_priority_hint_preserves_backend_priority(self):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {"agent_hints": {"priority": -5}},
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] == {"priority": -5, "priority_jump": 0.0}
-
-    def test_existing_routing_overrides_agent_hint_projection(self):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "routing": {"priority_jump": 1.0, "strict_priority": 2},
-                "nvext": {
-                    "agent_hints": {
-                        "priority": 10,
-                        "strict_priority": 3,
-                        "osl": 128,
-                    }
-                },
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] == {
-            "priority": 10,
-            "priority_jump": 1.0,
-            "strict_priority": 2,
-            "expected_output_tokens": 128,
-        }
-
-    def test_latency_sensitivity_projects_to_priority_jump_without_priority(self):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}},
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] == {"priority_jump": 2.5}
-
-    @pytest.mark.parametrize(
-        "latency_sensitivity", [10**400, float("inf"), float("nan")]
-    )
-    def test_invalid_latency_sensitivity_hint_is_ignored(self, latency_sensitivity):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {"agent_hints": {"latency_sensitivity": latency_sensitivity}},
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] is None
-
-    @pytest.mark.parametrize("priority", [2**40, 10**400])
-    def test_out_of_range_priority_hint_is_ignored(self, priority):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {"agent_hints": {"priority": priority}},
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] is None
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("strict_priority", -1),
-            ("strict_priority", 2**32),
-            ("osl", -1),
-            ("osl", 2**32),
-        ],
-    )
-    def test_out_of_range_u32_agent_hints_are_ignored(self, field, value):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {"agent_hints": {"priority": 1, field: value}},
-            },
-            prompt_token_ids=[1],
-            model_name="test",
-            eos_token_ids=None,
-        )
-
-        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
-
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
         """The Python chat processor preserves SGLang's reasoning gate."""
@@ -792,25 +615,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] is None
         assert build_sglang_logprob_kwargs(result["output_options"]) == {}
-
-    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
-        result = _build_dynamo_preproc(
-            {
-                "model": "test",
-                "nvext": {
-                    "metadata_upload": {
-                        "url": "s3://bucket/root/rollouts",
-                    },
-                },
-            },
-            [1],
-            "test",
-            None,
-        )
-
-        assert result["extra_args"]["nvext"]["metadata_upload"] == {
-            "url": "s3://bucket/root/rollouts",
-        }
 
     def test_model_name_and_token_ids(self):
         """Model name and token_ids are set correctly."""
@@ -5561,18 +5365,15 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    ("requested", "pin_workers"),
+    "requested",
     [
-        pytest.param(None, False, id="omitted"),
-        pytest.param(True, False, id="true"),
-        pytest.param(False, False, id="false"),
-        pytest.param(None, True, id="pinned"),
+        pytest.param(None, id="omitted"),
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
     ],
 )
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-def test_generator_preserves_decode_and_routing_options(
-    requested, use_pool, pin_workers, monkeypatch
-):
+def test_generator_preserves_decode_options(requested, use_pool, monkeypatch):
     class SpecialTokenTokenizer:
         chat_template = ""
 
@@ -5592,15 +5393,8 @@ def test_generator_preserves_decode_and_routing_options(
     if requested is not None:
         request["skip_special_tokens"] = requested
 
-    worker_routing = {
-        "backend_instance_id": 7,
-        "decode_worker_id": 8,
-        "prefill_worker_id": 9,
-        "dp_rank": 0,
-        "prefill_dp_rank": 1,
-    }
-    if pin_workers:
-        request["nvext"] = worker_routing.copy()
+    # RoutedEngine.generate reads routing hints from the client's request.
+    request["nvext"] = {"backend_instance_id": 7}
 
     if use_pool:
         # Run the real worker through the pool branch without loading a model
@@ -5641,7 +5435,7 @@ def test_generator_preserves_decode_and_routing_options(
     assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
         requested is not False
     )
-    assert engine.requests[0]["routing"] == (worker_routing if pin_workers else None)
+    assert "routing" not in engine.requests[0]
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text

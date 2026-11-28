@@ -112,6 +112,16 @@ pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
     crate::to_pyerr(err)
 }
 
+/// Raise a request the frontend rejected itself as a [`RoutedEngineError`], so the details
+/// in its `DynamoError` (a context-length limit and counts) reach the client. An
+/// `InvalidArgument` keeps only a message.
+pub fn rejected_request_to_pyerr(err: anyhow::Error) -> PyErr {
+    match find_dynamo_error(err.as_ref()) {
+        Some(error) => routed_engine_error(error, err.to_string()),
+        None => crate::to_pyerr(err),
+    }
+}
+
 fn is_worker_draining(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(cause) = current {

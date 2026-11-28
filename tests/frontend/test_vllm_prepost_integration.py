@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 TEST_MODEL = QWEN
 CAPTURE_PATH_ENV = "DYN_VLLM_PREPOST_CAPTURE_PATH"
+# The stub worker's published token budget; ordinary test prompts are far below it.
+TOKEN_BUDGET_LIMIT = 2048
 
 SEARCH_TOOL = {
     "type": "function",
@@ -235,6 +237,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
         "tool_choice": "auto",
         "stream": True,
         "max_tokens": 128,
+        "nvext": {"agent_hints": {"osl": 64}},
     }
 
     response = requests.post(
@@ -249,7 +252,11 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
 
     assert captured["model"] == TEST_MODEL
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
+    # The processor sets none of these: Dynamo fills them from the client's
+    # request and its session header.
     assert captured["agent_context"]["session_id"] == "session-123"
+    assert captured["image_cache_scope"] == "session-123"
+    assert captured["routing"]["expected_output_tokens"] == 64
 
     guided_decoding = captured["sampling_options"].get("guided_decoding")
     assert isinstance(guided_decoding, dict)
@@ -451,6 +458,29 @@ def test_vllm_responses_processor_forwards_max_thinking_tokens(
     captured = _read_captured_request(capture_path)
 
     assert captured["stop_conditions"]["max_thinking_tokens"] == 16
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_rejects_prompt_over_token_budget(
+    start_services: tuple[int, Path],
+) -> None:
+    """A prompt over the worker's token budget is a context-length error that
+    names the limit, as on Dynamo's own preprocessing path."""
+    frontend_port, _ = start_services
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "word " * (TOKEN_BUDGET_LIMIT + 100)}],
+        "max_tokens": 8,
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+
+    assert response.status_code == 400
+    assert f"maximum context length is {TOKEN_BUDGET_LIMIT} tokens" in response.text
 
 
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)

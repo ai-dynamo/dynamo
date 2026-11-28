@@ -20,6 +20,7 @@ pub mod mm_routing;
 #[cfg(all(test, feature = "mm-routing"))]
 mod glm5_next_tests;
 pub mod prompt;
+pub mod request_envelope;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub use structural_tag::structural_tag_parser_names;
@@ -68,9 +69,7 @@ use crate::local_model::runtime_config::{
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
-};
+use crate::local_model::runtime_config::{SGLANG_GENERATE_CAPABILITY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -79,7 +78,7 @@ use crate::preprocessor::media::MediaFetcher;
 use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
-    PreprocessedRequestBuilder, RoutingHints,
+    PreprocessedRequestBuilder,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -99,10 +98,7 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{
-            AgentHints, NvExtProvider, merge_response_nvext, request_cache_salt,
-            routing_constraints_to_kv,
-        },
+        extensions::{NvExtProvider, merge_response_nvext},
     },
     openai::{
         DeltaGeneratorExt, ParsingOptions,
@@ -118,6 +114,9 @@ use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
     MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+};
+use crate::preprocessor::request_envelope::{
+    RequestEnvelope, RequestScope, nvext_passthrough_args, routing_hints, sampling_passthrough_args,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -138,17 +137,6 @@ fn into_token_ids(encoding: Encoding) -> Vec<TokenIdType> {
         Encoding::Sp(token_ids) => token_ids,
         encoding => encoding.token_ids().to_vec(),
     }
-}
-
-fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
-    let priority_jump = hints.and_then(|h| {
-        h.priority
-            .map(|priority| priority.max(0) as f64)
-            .or(h.latency_sensitivity)
-    });
-    let strict_priority = hints.and_then(|h| h.strict_priority);
-    let priority = hints.and_then(|h| h.priority);
-    (priority_jump, strict_priority, priority)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1817,49 +1805,6 @@ fn embedding_prompt_formatter(mdc: &ModelDeploymentCard) -> Result<PromptFormatt
     }
 }
 
-fn attach_agent_context_from_context(
-    request: &mut PreprocessedRequest,
-    context: &PipelineContext<()>,
-) {
-    if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
-        crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
-    ) {
-        request.agent_context = Some(agent_context.as_ref().clone());
-    }
-}
-
-fn attach_image_cache_scope_from_context(
-    request: &mut PreprocessedRequest,
-    context: &PipelineContext<()>,
-) {
-    use crate::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
-
-    if let Ok(session_affinity) = context.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
-        request.image_cache_scope = Some(session_affinity.as_str().to_owned());
-    }
-}
-
-/// Start the tracker's arrival age from the time a gateway reports it held the request, so a
-/// backend that orders admission by arrival counts the wait in front of this process too.
-fn apply_upstream_elapsed(context: &PipelineContext<()>, tracker: Option<&RequestTracker>) {
-    use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
-
-    if let Some(tracker) = tracker
-        && let Ok(upstream_elapsed) =
-            context.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
-    {
-        tracker.set_upstream_elapsed(*upstream_elapsed);
-    }
-}
-
-fn attach_request_context_metadata(
-    request: &mut PreprocessedRequest,
-    context: &PipelineContext<()>,
-) {
-    attach_agent_context_from_context(request, context);
-    attach_image_cache_scope_from_context(request, context);
-}
-
 fn validate_custom_kind(kind: &str) -> Result<()> {
     if matches!(
         kind,
@@ -2125,7 +2070,7 @@ impl EmbeddingTokenizerState {
 }
 
 pub struct OpenAIPreprocessor {
-    mdcsum: String,
+    envelope: RequestEnvelope,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
@@ -2135,7 +2080,6 @@ pub struct OpenAIPreprocessor {
     /// Exclusive bound for client token ids (`nvext.token_data`, token
     /// prompts, and embedding token input), from `token_id_bound`.
     token_id_bound: Option<usize>,
-    lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     /// Resolve grammar timing against the selected worker during mixed-version serving.
@@ -2158,8 +2102,6 @@ pub struct OpenAIPreprocessor {
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
-    /// Engine-published request-token admission policy.
-    token_budget: Option<TokenBudget>,
     /// Model context limit used by the embedding truncation contract.
     context_length: u32,
     /// Tracks warmups and cancels them when this preprocessor is retired.
@@ -2399,63 +2341,6 @@ impl OpenAIPreprocessor {
         Ok(exact_prompt_len)
     }
 
-    fn nvext_passthrough_args<R: NvExtProvider>(
-        request: &R,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let mut nvext_passthrough = serde_json::Map::new();
-
-        if let Some(nvext) = request.nvext() {
-            if let Some(ref fields) = nvext.extra_fields {
-                nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
-            }
-            if let Some(ref metadata_upload) = nvext.metadata_upload {
-                nvext_passthrough.insert(
-                    "metadata_upload".to_string(),
-                    serde_json::json!(metadata_upload),
-                );
-            }
-            if nvext.token_data.is_some() {
-                nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
-            }
-        }
-
-        if let Some(salt) = request_cache_salt(request) {
-            nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
-        }
-
-        if nvext_passthrough.is_empty() {
-            None
-        } else {
-            Some(nvext_passthrough)
-        }
-    }
-
-    fn sampling_passthrough_args<R: NvExtProvider>(
-        request: &R,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let mut sampling_passthrough = serde_json::Map::new();
-
-        if let Some(fields) = request.unsupported_fields() {
-            for key in [
-                "detokenize",
-                "allowed_token_ids",
-                "bad_words_token_ids",
-                "logprob_token_ids",
-                "vllm_xargs",
-            ] {
-                if let Some(value) = fields.get(key) {
-                    sampling_passthrough.insert(key.to_string(), value.clone());
-                }
-            }
-        }
-
-        if sampling_passthrough.is_empty() {
-            None
-        } else {
-            Some(sampling_passthrough)
-        }
-    }
-
     fn backend_extra_args<R: OAIChatLikeRequest + NvExtProvider>(
         request: &R,
         reasoning_parser_configured: bool,
@@ -2463,14 +2348,14 @@ impl OpenAIPreprocessor {
     ) -> Option<serde_json::Value> {
         let mut extra_args = serde_json::Map::new();
 
-        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+        if let Some(nvext_passthrough) = nvext_passthrough_args(request) {
             extra_args.insert(
                 "nvext".to_string(),
                 serde_json::Value::Object(nvext_passthrough),
             );
         }
 
-        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
+        if let Some(sampling_passthrough) = sampling_passthrough_args(request) {
             extra_args.insert(
                 "sampling_options".to_string(),
                 serde_json::Value::Object(sampling_passthrough),
@@ -3118,9 +3003,8 @@ impl OpenAIPreprocessor {
         let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
         use crate::protocols::openai::chat_completions::unified_parser;
 
-        let mdcsum = mdc.mdcsum().to_string();
+        let envelope = RequestEnvelope::from_card(&mdc);
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
-        let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(model_info) = mdc.resolved_model_info()? else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
@@ -3213,27 +3097,14 @@ impl OpenAIPreprocessor {
                 crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
             );
 
-        if let Some(ref lora_name) = lora_name {
-            tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
+        if let Some(lora) = mdc.lora.as_ref() {
+            tracing::info!(model = %mdc.display_name, lora_name = lora.name, "LoRA adapter detected in MDC");
         }
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
         let structural_tag_reasoning_boundary =
             structural_tag::validate_runtime_config(&runtime_config)?;
-        let token_budget = match runtime_config
-            .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
-        {
-            Ok(token_budget) => token_budget,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    key = TOKEN_BUDGET_RUNTIME_KEY,
-                    "Ignoring invalid runtime metadata; token overflow handling will be delegated to the backend"
-                );
-                None
-            }
-        };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
         let context_length = mdc.effective_context_length();
 
@@ -3525,13 +3396,12 @@ impl OpenAIPreprocessor {
         };
 
         Ok(Arc::new(Self {
+            envelope,
             formatter,
             tokenizer,
             embedding_tokenizers,
             model_info,
             token_id_bound,
-            mdcsum,
-            lora_name,
             runtime_config,
             runtime_configs,
             structural_tag_reasoning_boundary,
@@ -3542,7 +3412,6 @@ impl OpenAIPreprocessor {
             mistral_tool_call_grammar,
             normalize_tool_call_args,
             media_loader,
-            token_budget,
             context_length,
             speculative_prefill_tasks: speculative_prefill::PrefillTasks::new(
                 speculative_prefill_cancel.as_ref(),
@@ -3823,20 +3692,23 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let exact_prompt_len =
-            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
+        let exact_prompt_len = Self::validate_preprocessed_token_budget(
+            &preprocessed,
+            self.envelope.token_budget.as_ref(),
+        )?;
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = exact_prompt_len
             // Preserve omission when the prompt itself is backend-owned. In
             // particular, setting a saturating zero here would interfere with
             // SGLang's auto-truncation before the backend sees the request.
-            && !self.token_budget.is_some_and(|token_budget| {
+            && !self.envelope.token_budget.is_some_and(|token_budget| {
                 prompt_len >= token_budget.combined_limit as usize
                     && !token_budget.reject_prompt_overflow
             })
             && let Some(max_tokens) = Self::omitted_max_tokens_default(
                 prompt_len,
-                self.token_budget
+                self.envelope
+                    .token_budget
                     .map(|token_budget| token_budget.combined_limit),
                 options,
             )
@@ -3845,7 +3717,10 @@ impl OpenAIPreprocessor {
             // A strict limit may be smaller than the raw context window because
             // the engine reserves tokens. Revalidate the derived budget so an
             // already-over-limit prompt fails before streaming begins.
-            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
+            Self::validate_preprocessed_token_budget(
+                &preprocessed,
+                self.envelope.token_budget.as_ref(),
+            )?;
         }
 
         Ok((
@@ -4005,47 +3880,10 @@ impl OpenAIPreprocessor {
         }
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone().or(lora_name_override);
-        let cache_namespace = request_cache_salt(request).map(str::to_owned);
-
-        // Extract routing hints from nvext if present
-        if let Some(nvext) = request.nvext() {
-            // Build routing hints from nvext fields
-            let hints = nvext.agent_hints.as_ref();
-            let (priority_jump, strict_priority, priority) = routing_priorities(hints);
-            builder.request_timestamp_ms(nvext.request_timestamp_ms);
-            let routing = RoutingHints {
-                backend_instance_id: nvext.backend_instance_id,
-                prefill_worker_id: nvext.prefill_worker_id,
-                decode_worker_id: nvext.decode_worker_id,
-                dp_rank: nvext.dp_rank,
-                prefill_dp_rank: nvext.prefill_dp_rank,
-                expected_output_tokens: hints.and_then(|h| h.osl),
-                priority_jump,
-                strict_priority,
-                priority,
-                lora_name,
-                base_model_name: None,
-                lora_source_uri: None,
-                lora_resolution_version: None,
-                cache_namespace: cache_namespace.clone(),
-                allowed_worker_ids: None,
-                routing_constraints: nvext
-                    .routing_constraints
-                    .clone()
-                    .map(routing_constraints_to_kv),
-            };
-            builder.routing(Some(routing));
-        } else if lora_name.is_some() || cache_namespace.is_some() {
-            // Ensure routing hints exist when we have LoRA or a legacy
-            // top-level cache_salt, even when nvext is absent.
-            builder.routing(Some(RoutingHints {
-                lora_name,
-                cache_namespace,
-                ..Default::default()
-            }));
-        }
+        builder.mdc_sum(Some(self.envelope.mdcsum.clone()));
+        let lora_name = self.envelope.lora_name.clone().or(lora_name_override);
+        builder.routing(routing_hints(request, lora_name));
+        builder.request_timestamp_ms(request.nvext().and_then(|nvext| nvext.request_timestamp_ms));
 
         if let Some(extra_args) = Self::backend_extra_args(
             request,
@@ -5939,7 +5777,7 @@ impl OpenAIPreprocessor {
         builder.dimensions(request.inner.dimensions);
 
         builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.mdcsum.clone()));
+        builder.mdc_sum(Some(self.envelope.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))
     }
@@ -9047,8 +8885,9 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
+        let scope = RequestScope::from_context(&context);
         let tracker = Some(response_generator.tracker());
-        apply_upstream_elapsed(&context, tracker.as_deref());
+        scope.apply_upstream_elapsed(tracker.as_deref());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -9062,18 +8901,14 @@ impl
                 &request,
                 tracker.as_deref(),
                 preprocess_options,
-                context
-                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
-                    .ok()
-                    .flatten()
-                    .map(|name| name.as_ref().clone()),
+                scope.lora_name(),
             )
             .instrument(preprocessing.clone())
             .await?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
-        attach_request_context_metadata(&mut common_request, &context);
+        scope.complete_request(&mut common_request);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
@@ -9283,17 +9118,11 @@ impl
         // create a response generator
         let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
+        let scope = RequestScope::from_context(&context);
         let tracker = Some(response_generator.tracker());
-        apply_upstream_elapsed(&context, tracker.as_deref());
+        scope.apply_upstream_elapsed(tracker.as_deref());
         // convert the chat completion request to a common completion request
-        let mut builder = self.builder_with_lora(
-            &request,
-            context
-                .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
-                .ok()
-                .flatten()
-                .map(|name| name.as_ref().clone()),
-        )?;
+        let mut builder = self.builder_with_lora(&request, scope.lora_name())?;
 
         // Check if embeddings are provided - skip tokenization path
         let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
@@ -9328,11 +9157,14 @@ impl
             .as_object_mut()
             .context("preprocessed extra_args must be an object")?;
         extra_args.insert("request_type".to_string(), "completions".into());
-        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        Self::validate_preprocessed_token_budget(
+            &common_request,
+            self.envelope.token_budget.as_ref(),
+        )?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
-        attach_request_context_metadata(&mut common_request, &context);
+        scope.complete_request(&mut common_request);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -9736,12 +9568,12 @@ mod token_data_tests {
             let preprocessor =
                 OpenAIPreprocessor::new_for_completions(completion_card, tokenizer.clone())
                     .unwrap();
-            assert_eq!(preprocessor.mdcsum, checksum);
+            assert_eq!(preprocessor.envelope.mdcsum, checksum);
         }
         let checksum = card.mdcsum().to_string();
         let preprocessor =
             OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone()).unwrap();
-        assert_eq!(preprocessor.mdcsum, checksum);
+        assert_eq!(preprocessor.envelope.mdcsum, checksum);
         assert_eq!(
             preprocessor.runtime_config.tool_call_parser,
             card.runtime_config.tool_call_parser
@@ -10297,6 +10129,7 @@ mod extra_args_media_copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
     use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -15137,21 +14970,6 @@ mod tests {
         assert!(error.to_string().contains("image_url[3]"));
     }
 
-    #[test]
-    fn routing_priorities_keep_strict_tier_independent() {
-        let hints = crate::protocols::common::extensions::AgentHints {
-            priority: Some(-3),
-            strict_priority: Some(7),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            routing_priorities(Some(&hints)),
-            (Some(0.0), Some(7), Some(-3))
-        );
-        assert_eq!(routing_priorities(None), (None, None, None));
-    }
-
     fn test_llm_metrics_annotation() -> LLMMetricAnnotation {
         LLMMetricAnnotation {
             input_tokens: 10,
@@ -16806,14 +16624,14 @@ mod tests {
 
         let mut context = PipelineContext::new(());
         let untouched = RequestTracker::new();
-        apply_upstream_elapsed(&context, Some(&untouched));
+        RequestScope::from_context(&context).apply_upstream_elapsed(Some(&untouched));
         assert!(untouched.elapsed_since_arrival() < Duration::from_secs(1));
 
         context.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, Duration::from_secs(40));
         let tracker = RequestTracker::new();
-        apply_upstream_elapsed(&context, Some(&tracker));
+        RequestScope::from_context(&context).apply_upstream_elapsed(Some(&tracker));
         assert!(tracker.elapsed_since_arrival() >= Duration::from_secs(40));
-        apply_upstream_elapsed(&context, None);
+        RequestScope::from_context(&context).apply_upstream_elapsed(None);
     }
 
     #[test]
@@ -16833,7 +16651,7 @@ mod tests {
         context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
         let mut request = preprocessed_budget_request(None);
 
-        attach_agent_context_from_context(&mut request, &context);
+        RequestScope::from_context(&context).complete_request(&mut request);
 
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
@@ -16850,7 +16668,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_request_context_metadata_keeps_affinity_separate_from_agent_context() {
+    fn request_scope_keeps_affinity_separate_from_agent_context() {
         use crate::protocols::common::extensions::{
             SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
         };
@@ -16870,7 +16688,7 @@ mod tests {
         );
         let mut request = preprocessed_budget_request(None);
 
-        attach_request_context_metadata(&mut request, &context);
+        RequestScope::from_context(&context).complete_request(&mut request);
 
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         assert_eq!(
@@ -16887,7 +16705,8 @@ mod tests {
             SessionAffinityId::new("routing-only"),
         );
         let mut affinity_only_request = preprocessed_budget_request(None);
-        attach_request_context_metadata(&mut affinity_only_request, &affinity_only_context);
+        RequestScope::from_context(&affinity_only_context)
+            .complete_request(&mut affinity_only_request);
         assert!(affinity_only_request.agent_context.is_none());
         assert_eq!(
             affinity_only_request.image_cache_scope.as_deref(),

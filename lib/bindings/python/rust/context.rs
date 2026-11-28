@@ -12,9 +12,8 @@
 
 use dynamo_backend_common::FirstTokenNotifier;
 use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
-use dynamo_llm::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
-};
+use dynamo_llm::preprocessor::request_envelope::RequestScope;
+use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;
@@ -69,7 +68,9 @@ pub struct Context {
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     session_affinity: Option<SessionAffinityId>,
-    agent_context: Option<Arc<AgentContext>>,
+    /// What a chat request and its HTTP context say about the request to route. `None`
+    /// outside a frontend chat engine.
+    request_scope: Option<RequestScope>,
     /// Where a frontend chat engine sets HTTP response headers. `None` when
     /// the request's response cannot carry them.
     response_headers: Option<ResponseHeaders>,
@@ -193,7 +194,7 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             session_affinity: None,
-            agent_context: None,
+            request_scope: None,
             response_headers: None,
             span: None,
         }
@@ -209,13 +210,10 @@ impl Context {
         Ok(self)
     }
 
-    /// Keep the request's [`AgentContext`], for a request routed from Python to inherit.
-    pub fn with_agent_context_from<T: Send + Sync + 'static>(
-        mut self,
-        context: &PipelineContext<T>,
-    ) -> Result<Self, String> {
-        self.agent_context = context.get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)?;
-        Ok(self)
+    /// Keep a chat request's [`RequestScope`], to complete the request routed from Python.
+    pub fn with_request_scope(mut self, request_scope: Option<RequestScope>) -> Self {
+        self.request_scope = request_scope;
+        self
     }
 
     /// Share the [`ResponseHeaders`] the chat completions handler put on the
@@ -275,8 +273,8 @@ impl Context {
         self.session_affinity.as_ref()
     }
 
-    pub fn agent_context(&self) -> Option<&AgentContext> {
-        self.agent_context.as_deref()
+    pub fn request_scope(&self) -> Option<&RequestScope> {
+        self.request_scope.as_ref()
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
@@ -327,7 +325,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             session_affinity: None,
-            agent_context: None,
+            request_scope: None,
             response_headers: None,
             span: None,
         }
@@ -347,7 +345,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             session_affinity: self.session_affinity.clone(),
-            agent_context: self.agent_context.clone(),
+            request_scope: self.request_scope.clone(),
             response_headers: None,
             span: self.span.clone(),
         }
