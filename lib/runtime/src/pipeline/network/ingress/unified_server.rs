@@ -4,8 +4,7 @@
 //! Unified Request Plane Server Interface
 //!
 //! This module defines a transport-agnostic interface for request plane servers.
-//! All transport implementations (TCP, NATS) implement this trait to provide
-//! a consistent interface for endpoint registration and management.
+//! Request transports use this trait for endpoint registration and management.
 
 use super::*;
 use crate::{SystemHealth, protocols::EndpointId};
@@ -16,7 +15,7 @@ use std::sync::Arc;
 
 /// Unified interface for request plane servers
 ///
-/// This trait abstracts over different transport mechanisms (TCP, NATS)
+/// This trait abstracts over different transport mechanisms
 /// providing a consistent interface for registering endpoints and managing server lifecycle.
 ///
 /// # Design Principles
@@ -79,6 +78,13 @@ pub trait RequestPlaneServer: Send + Sync {
     /// An endpoint that is not registered is a no-op.
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
 
+    /// Stop admitting new requests for an endpoint before withdrawing it.
+    ///
+    /// The default preserves discovery-first withdrawal.
+    async fn close_endpoint_instance(&self, _: &EndpointId, _: u64) -> Result<()> {
+        Ok(())
+    }
+
     /// Unregister the handler with the namespace, component, name, and instance ID
     /// used at registration. An endpoint that is not registered is a no-op.
     ///
@@ -98,6 +104,7 @@ pub trait RequestPlaneServer: Send + Sync {
     /// Returns a transport-specific address string:
     /// - TCP: `"tcp://0.0.0.0:9999"`
     /// - NATS: `"nats://localhost:4222"`
+    /// - Velo: `"velo://<instance>/<worker-address>"`
     ///
     /// Used for logging, debugging, and service discovery.
     fn address(&self) -> String;

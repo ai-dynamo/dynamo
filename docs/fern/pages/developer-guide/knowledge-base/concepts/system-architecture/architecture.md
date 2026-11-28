@@ -68,13 +68,112 @@ The request plane carries RPC traffic between Dynamo components. `DYN_REQUEST_PL
 
 - `tcp` is the default and uses direct pooled connections.
 - `nats` uses brokered request transport.
+- `velo` sends requests over the Velo response listeners. It requires `DYN_RESPONSE_PLANE=velo`.
 
 When the runtime reads this setting from its environment, an absent value selects
-`tcp`. Every present value, including an empty value, must be `tcp` or `nats`
-(case-insensitive); any other value stops startup instead of silently selecting
-`tcp`.
+`tcp`. Every present value, including an empty value, must be `tcp`, `nats`, or
+`velo` (case-insensitive); any other value stops startup instead of silently
+selecting `tcp`.
 
 `DYN_REQUEST_PLANE_CODEC` selects `msgpack` or `json`. The destination endpoint advertises its codec, so one client can communicate with endpoints that use different codecs.
+
+#### Velo Request Plane
+
+Set both planes to `velo` on every frontend and worker in the pool:
+
+```bash
+DYN_REQUEST_PLANE=velo DYN_RESPONSE_PLANE=velo python3 -m dynamo.frontend
+```
+
+- A `velo` request plane requires a `velo` response plane. Any other effective
+  response plane is a local configuration error and stops startup.
+- Velo has no TLS. Dynamo uses the `tcp` response plane instead while any of
+  `DYN_TCP_TLS_CERT_PATH`, `DYN_TCP_TLS_KEY_PATH`, `DYN_TCP_TLS_CA_CERT_PATH`,
+  `DYN_TCP_TLS_CLIENT_CERT_PATH`, `DYN_TCP_TLS_CLIENT_KEY_PATH`, or
+  `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` is set, or while `DYN_TCP_TLS_INSECURE` is
+  truthy. A `velo` request plane then stops startup because its response plane
+  is no longer `velo`. `DYN_TCP_TLS_SERVER_NAME`,
+  `DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS`, and `DYN_TCP_TLS_INSECURE=false` do not
+  trigger the fallback.
+- The Velo request plane supports only Velo's TCP transport. Setting
+  `DYN_VELO_RESPONSE_TRANSPORT=ucx` with `DYN_REQUEST_PLANE=velo` stops startup.
+- Both planes share the Velo listener. `DYN_VELO_RESPONSE_PORT` sets its port.
+- Bidirectional endpoints, whose requests stream input, still use the TCP
+  request-callback stream.
+- An older runtime skips Velo metadata it cannot read. In Kubernetes pod mode
+  that covers the whole pod; in container mode, compatible sibling containers
+  can still be discovered.
+
+##### Shared Settings and Limits
+
+The Velo request plane reads the `DYN_TCP_*` request settings instead of adding
+its own:
+
+| Setting | Effect on the Velo request plane |
+|---|---|
+| `DYN_TCP_REQUEST_TIMEOUT` | Bounds the send and the worker's acknowledgment, including first contact with a worker. |
+| `DYN_TCP_WORKER_POOL_SIZE` | Maximum requests a worker runs at once. |
+| `DYN_TCP_WORK_QUEUE_SIZE` | Maximum requests a worker queues beyond the pool. A request beyond both is refused as overloaded. |
+| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size. Also limits each large response item. |
+| `DYN_TCP_RESPONSE_STREAM_HOST` | Host the Velo listener binds and advertises for both planes. `DYN_TCP_RPC_HOST` and `DYN_TCP_RPC_PORT` are not used. |
+
+- Set the same `DYN_TCP_MAX_MESSAGE_SIZE` on every frontend and worker in the
+  pool. When a worker's limit is lower than the frontend's, the worker refuses
+  the larger requests, and the frontend treats each refusal as a connection
+  failure and marks the worker down.
+- A response item is checked against the limit when the item and its 40-byte
+  frame header together exceed 256 KiB. The header counts toward the limit,
+  and an item that exceeds it ends its own stream. Smaller response items are
+  not checked.
+- Each request header value is limited to 1024 bytes, and the encoded header
+  map to 15,872 bytes. A request over either limit fails at the frontend and is
+  not sent. The `tcp` request plane has no such limit, so a long `x-request-id`
+  or `tracestate` that works on `tcp` fails on `velo`.
+- A frontend keeps at most four requests larger than 256 KiB unacknowledged at
+  one worker. Further large requests to that worker wait their turn within
+  `DYN_TCP_REQUEST_TIMEOUT`. A request that waits the whole timeout fails, and
+  the worker stays eligible. Smaller requests are not limited this way.
+
+##### Pools and Rollout
+
+A pool must not mix Velo and non-Velo workers. A foreign transport in a pool is
+a local configuration error: the router fails each request it routes to that
+worker and does not inhibit the worker or migrate the request.
+
+- Do not change `DYN_REQUEST_PLANE` in place on a running pool. During the
+  rollout the frontends and workers disagree, and requests routed across the
+  two planes fail until every process has restarted.
+- A separate Dynamo namespace isolates routing only when the frontend selects
+  that exact namespace or disjoint prefixes. A `--namespace-prefix` that
+  matches both pools still selects both, and Dynamo namespaces do not filter
+  raw Kubernetes watches.
+
+To move a pool from `tcp` to `velo`:
+
+1. Upgrade every frontend in the discovery domain to a release that supports
+   the `velo` request plane, and leave it on `tcp`. An earlier release skips
+   Velo workers instead of reporting them.
+2. Deploy a second pool, frontend and workers, with both planes set to `velo`.
+   Choose Dynamo namespaces so that neither pool's namespace is a prefix of
+   the other's, for example `prod-llm-tcp` and `prod-llm-velo`.
+3. On each frontend, list the instances in discovery:
+
+   ```bash
+   curl -s "http://<frontend-host>:<port>/health?instances=true"
+   ```
+
+   The key of each instance's `transport` field names its transport: `tcp`,
+   `nats_tcp`, `velo`, or `direct`. Every instance in a namespace that the
+   frontend selects must advertise the frontend's request plane or `direct`.
+   A `direct` instance is reached through the frontend's registered direct
+   dispatch, on any request plane.
+
+4. Shift traffic from the `tcp` frontend to the `velo` frontend.
+5. Keep the `tcp` pool running until the `velo` pool has proven itself, then
+   remove it.
+
+To roll back, shift traffic to the `tcp` pool again. The two pools share no
+workers, so nothing else changes.
 
 ### Event Plane
 

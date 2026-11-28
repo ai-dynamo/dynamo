@@ -29,6 +29,7 @@ _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
     "discovery_backend",
     "request_plane",
+    "response_plane",
     "event_plane",
 )
 
@@ -85,6 +86,7 @@ async def refresh_snapshot_restore_config(
                 target_runtime_config, "discovery_backend", None
             ),
             "request_plane": getattr(target_runtime_config, "request_plane", None),
+            "response_plane": getattr(target_runtime_config, "response_plane", None),
             "event_plane": getattr(target_runtime_config, "event_plane", None),
         },
     )

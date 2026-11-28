@@ -830,8 +830,8 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
-    /// Request-plane transport selection: `"tcp"` (default) or `"nats"`. Read by the
-    /// runtime in `distributed.rs` and by the Python launch layer.
+    /// Request-plane transport: `"tcp"` (default), `"nats"`, or `"velo"`.
+    /// Velo requires `DYN_RESPONSE_PLANE=velo` over Velo TCP.
     pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
 
     /// Preferred payload codec advertised by every request-plane endpoint in this process.
@@ -844,7 +844,7 @@ pub mod request_plane {
     /// whose readers accept the packed form.
     pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
 
-    /// Maximum TCP request-plane message size, in bytes.
+    /// Maximum TCP or Velo request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
     /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.

@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
+from dynamo.common.configuration.utils import normalize_plane, validate_request_plane
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -237,15 +238,32 @@ class Worker:
                 stacklevel=2,
             )
 
-        if self.config.response_plane is not None:
-            if self.config.response_plane not in {"tcp", "quic", "velo"}:
-                raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
-            os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
+        # Keep an empty value as it is: the runtime refuses it, where "tcp"
+        # would start a worker on a plane the caller did not ask for.
+        request_plane = normalize_plane(self.config.request_plane)
+        if request_plane is None:
+            request_plane = "tcp"
+        response_plane = (
+            normalize_plane(self.config.response_plane)
+            or normalize_plane(os.environ.get("DYN_RESPONSE_PLANE"))
+            or None
+        )
+        # Refuse an invalid pair before exporting anything: a direct Worker
+        # caller must not change the process environment on a configuration
+        # error.
+        validate_request_plane(request_plane, response_plane)
+        if response_plane is not None and response_plane not in {
+            "tcp",
+            "quic",
+            "velo",
+        }:
+            raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,
-            request_plane=self.config.request_plane,
+            request_plane=request_plane,
             event_plane=self.config.event_plane,
+            response_plane=response_plane,
         )
         worker_cfg = _backend.WorkerConfig(
             namespace=self.config.namespace,
@@ -283,5 +301,24 @@ class Worker:
         # (JSON request adapter); everything else is a token-pipeline
         # LLMEngine. The Rust Worker validates model_input against the kind.
         is_raw = isinstance(self.engine, RawEngine)
-        worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
-        await worker.run()
+        # The runtime reads the response plane from the environment. Export it
+        # only now, after every check Python can make, and take it back if the
+        # worker fails: the runtime can still refuse the pair, for example
+        # when a TLS setting rules velo out.
+        previous_response_plane = os.environ.get("DYN_RESPONSE_PLANE")
+        if response_plane is not None:
+            os.environ["DYN_RESPONSE_PLANE"] = response_plane
+        try:
+            worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
+            await worker.run()
+        except BaseException:
+            # Undo only our own write, and only if nobody changed it since.
+            if (
+                response_plane is not None
+                and os.environ.get("DYN_RESPONSE_PLANE") == response_plane
+            ):
+                if previous_response_plane is None:
+                    os.environ.pop("DYN_RESPONSE_PLANE", None)
+                else:
+                    os.environ["DYN_RESPONSE_PLANE"] = previous_response_plane
+            raise

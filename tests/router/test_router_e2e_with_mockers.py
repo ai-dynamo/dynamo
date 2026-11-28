@@ -14,11 +14,13 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
 import pytest
+import requests
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
@@ -62,8 +64,9 @@ from tests.router.mocker_process import (
     wait_for_disagg_workers,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
-from tests.utils.constants import ROUTER_MODEL_NAME
+from tests.utils.constants import ROUTER_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.router_nvext import parse_sse_json_chunks
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,7 @@ pytestmark = [
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
+VELO_REQUESTS = 8
 BLOCK_SIZE = 16
 ROUTER_OVERLOAD_DEBUG_DYN_LOG = (
     "info,"
@@ -1883,3 +1887,147 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             min_initial_workers=workers.num_workers,
         ):
             asyncio.run(run_test(workers))
+
+
+def _velo_worker_metrics(system_port: int) -> tuple[float, float]:
+    """Return the worker's request-handler and response-frame counters."""
+    response = requests.get(f"http://127.0.0.1:{system_port}/metrics", timeout=10)
+    response.raise_for_status()
+    handler_requests = 0.0
+    response_records = 0.0
+    for line in response.text.splitlines():
+        if line.startswith("velo_messenger_handler_requests_total{"):
+            labels, _, value = line.rpartition(" ")
+            if 'handler="dynamo_request"' in labels:
+                handler_requests += float(value)
+        elif line.startswith("velo_streaming_mux_records_sent_total{"):
+            labels, _, value = line.rpartition(" ")
+            if 'record_type="data"' in labels:
+                response_records += float(value)
+    return handler_requests, response_records
+
+
+VELO_QUIET_WINDOW_S = 0.5
+VELO_COUNTER_POLL_S = 0.05
+VELO_COUNTER_DEADLINE_S = 10.0
+
+
+def _wait_for_frontend_models(frontend_url: str, timeout: float = 120.0) -> None:
+    """Wait for /v1/models to list a model without dispatching a model request."""
+    url = f"{frontend_url}/v1/models"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200 and response.json().get("data"):
+                return
+        except (requests.RequestException, ValueError):
+            pass
+        time.sleep(0.1)
+    raise TimeoutError(f"{url} did not list a model within {timeout}s")
+
+
+def _stable_worker_metrics(system_port: int) -> tuple[float, float]:
+    """Wait until both worker counters have been unchanged for the quiet window."""
+    deadline = time.monotonic() + VELO_COUNTER_DEADLINE_S
+    current = _velo_worker_metrics(system_port)
+    quiet_since = time.monotonic()
+    while True:
+        time.sleep(VELO_COUNTER_POLL_S)
+        latest = _velo_worker_metrics(system_port)
+        now = time.monotonic()
+        if latest != current:
+            current = latest
+            quiet_since = now
+        elif now - quiet_since >= VELO_QUIET_WINDOW_S:
+            return current
+        if now >= deadline:
+            raise AssertionError(
+                "worker counters did not settle within " f"{VELO_COUNTER_DEADLINE_S}s"
+            )
+
+
+async def _send_velo_plane_requests(frontend_url: str, count: int) -> None:
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "request plane"}],
+        "stream": False,
+        "max_tokens": 4,
+    }
+    async with aiohttp.ClientSession() as session:
+        for index in range(count):
+            async with session.post(
+                f"{frontend_url}/v1/chat/completions",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                body = await response.json()
+                assert response.status == 200, body
+                assert body.get("choices"), f"request {index} has no choices: {body}"
+                content = body["choices"][0].get("message", {}).get("content")
+                assert content, f"request {index} returned no decoded tokens: {body}"
+                completion_tokens = (body.get("usage") or {}).get(
+                    "completion_tokens", 0
+                )
+                assert (
+                    completion_tokens > 0
+                ), f"request {index} generated no tokens: {body}"
+
+
+@pytest.mark.timeout(180)
+def test_mocker_velo_request_plane(
+    request,
+    predownload_tokenizers,
+    file_storage_backend,
+):
+    """Both planes Velo: every request decodes tokens and reaches the worker handler.
+
+    Readiness polls GET /v1/models only, so it cannot dispatch a model request
+    and add to the worker's dynamo_request counter.
+    """
+    system_port = allocate_ports(1, DynamoPortRange.SERVE.value)[0]
+    request.addfinalizer(lambda: deallocate_ports([system_port]))
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+
+    with MockerProcess(
+        request,
+        mocker_args={
+            "speedup_ratio": SPEEDUP_RATIO,
+            "block_size": BLOCK_SIZE,
+        },
+        num_mockers=1,
+        store_backend="file",
+        request_plane="velo",
+        env_overrides={
+            "DYN_RESPONSE_PLANE": "velo",
+            "DYN_SYSTEM_PORT": str(system_port),
+        },
+    ) as mockers:
+        with FrontendRouterProcess(
+            request,
+            block_size=BLOCK_SIZE,
+            frontend_port=frontend_port,
+            namespace=mockers.namespace,
+            store_backend="file",
+            request_plane="velo",
+            router_mode="kv",
+            extra_env={"DYN_RESPONSE_PLANE": "velo"},
+        ):
+            frontend_url = f"http://localhost:{frontend_port}"
+            _wait_for_frontend_models(frontend_url)
+
+            before_requests, before_frames = _stable_worker_metrics(system_port)
+            asyncio.run(_send_velo_plane_requests(frontend_url, VELO_REQUESTS))
+            after_requests, after_frames = _stable_worker_metrics(system_port)
+
+            assert after_requests - before_requests == VELO_REQUESTS, (
+                "worker dynamo_request handler count grew by "
+                f"{after_requests - before_requests}, expected exactly "
+                f"{VELO_REQUESTS}; a readiness or retry increment landed in the "
+                "measured window"
+            )
+            assert after_frames - before_frames >= VELO_REQUESTS, (
+                'worker velo_streaming_mux_records_sent_total{record_type="data"} '
+                f"grew by {after_frames - before_frames}, expected at least "
+                f"{VELO_REQUESTS}; the responses did not travel over Velo"
+            )

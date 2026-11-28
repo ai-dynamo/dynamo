@@ -82,6 +82,7 @@ class MockerProcess:
         num_mockers: int = 1,
         store_backend: str = "etcd",
         request_plane: str = "nats",
+        env_overrides: Optional[Dict[str, str]] = None,
         raw_kv_events: bool = False,
         standalone_indexer: bool = False,
         standalone_selector: bool = False,
@@ -113,6 +114,7 @@ class MockerProcess:
         self._request = request
         self._store_backend = store_backend
         self._request_plane = request_plane
+        self._env_overrides = dict(env_overrides or {})
         self._mocker_config = MockerConfig.from_value(mocker_args)
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
         request.addfinalizer(self._release_ports)
@@ -177,6 +179,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            env.update(self._env_overrides)
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -309,6 +312,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            env.update(self._env_overrides)
             proc = ManagedProcess(
                 command=command,
                 env=env,

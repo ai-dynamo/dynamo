@@ -172,6 +172,7 @@ def test_legacy_standby_context_is_used_for_non_proxy_parent(
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
     monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "tcp")
     monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
     monkeypatch.setenv("DYN_TCP_RPC_HOST", "192.0.2.15")
     monkeypatch.setenv("DYN_TCP_RPC_PORT", "25000")
@@ -184,6 +185,7 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
         {
             "DYN_DISCOVERY_BACKEND": "etcd",
             "DYN_REQUEST_PLANE": None,
+            "DYN_RESPONSE_PLANE": "velo",
             "DYN_EVENT_PLANE_HOST": None,
             "DYN_TCP_RPC_HOST": "198.51.100.15",
             "DYN_TCP_RPC_PORT": "25001",
@@ -199,6 +201,7 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert restored == {
         "DYN_DISCOVERY_BACKEND": "etcd",
         "DYN_REQUEST_PLANE": None,
+        "DYN_RESPONSE_PLANE": "velo",
         "DYN_EVENT_PLANE_HOST": None,
         "DYN_TCP_RPC_HOST": "198.51.100.15",
         "DYN_TCP_RPC_PORT": "25001",
@@ -208,6 +211,7 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     }
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
+    assert os.environ["DYN_RESPONSE_PLANE"] == "velo"
     assert "DYN_EVENT_PLANE_HOST" not in os.environ
     assert os.environ["DYN_TCP_RPC_HOST"] == "198.51.100.15"
     assert os.environ["DYN_TCP_RPC_PORT"] == "25001"
@@ -224,6 +228,7 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
         namespace="snapshot-ns",
         discovery_backend="file",
         request_plane="nats",
+        response_plane="tcp",
         event_plane="zmq",
         engine_args=SimpleNamespace(enable_sleep_mode=True),
     )
@@ -234,6 +239,7 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
             "DYN_NAMESPACE": "restore-ns",
             "DYN_DISCOVERY_BACKEND": "etcd",
             "DYN_REQUEST_PLANE": "tcp",
+            "DYN_RESPONSE_PLANE": "velo",
             "DYN_EVENT_PLANE": "nats",
         },
     )
@@ -245,6 +251,7 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
             namespace=os.environ["DYN_NAMESPACE"],
             discovery_backend=os.environ["DYN_DISCOVERY_BACKEND"],
             request_plane=os.environ["DYN_REQUEST_PLANE"],
+            response_plane=os.environ["DYN_RESPONSE_PLANE"],
             event_plane=os.environ["DYN_EVENT_PLANE"],
         )
 
@@ -254,6 +261,7 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
     assert config.namespace == "restore-ns"
     assert config.discovery_backend == "etcd"
     assert config.request_plane == "tcp"
+    assert config.response_plane == "velo"
     assert config.event_plane == "nats"
     # Preserve the existing backend/engine config object; only runtime fields
     # are refreshed from the parser.

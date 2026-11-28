@@ -83,7 +83,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp" or "nats")
+            request_plane: Request plane transport ("tcp", "nats", or "velo")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
             response_plane: Response plane transport ("tcp", "quic", or "velo")
@@ -299,7 +299,7 @@ class PyAsyncRequestStream:
 class TransportType:
     """
     A read-only view of an instance's transport, wrapping the runtime
-    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct")
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct" / "velo")
     and ``address`` is its (transport-specific) address. The address format is
     not a stable parse target.
     """

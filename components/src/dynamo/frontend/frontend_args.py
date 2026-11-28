@@ -29,7 +29,9 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    normalize_plane,
     parse_bool,
+    validate_request_plane,
 )
 
 from . import __version__
@@ -263,6 +265,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
 
     def validate(self) -> None:
+        self.request_plane = normalize_plane(self.request_plane) or ""
+        self.response_plane = normalize_plane(self.response_plane)
+        validate_request_plane(self.request_plane, self.response_plane)
         if (
             self.chat_processor_config is not None
             and self.chat_processor in BUILTIN_CHAT_PROCESSORS
@@ -779,9 +784,9 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|tcp]"
+                "'tcp' is the default [nats|tcp|velo]. velo requires --response-plane velo."
             ),
-            choices=["nats", "tcp"],
+            choices=["nats", "tcp", "velo"],
             env=self.env,
         )
         add_argument(

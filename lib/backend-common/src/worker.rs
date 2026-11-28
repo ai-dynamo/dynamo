@@ -76,8 +76,8 @@ pub struct RuntimeConfig {
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
     #[arg(long, env = "DYN_DISCOVERY_BACKEND", value_parser = ["kubernetes", "etcd", "file", "mem"])]
     pub discovery_backend: Option<String>,
-    /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
-    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
+    /// Request-plane transport — e.g. `"tcp"`, `"nats"`, `"velo"`. Maps to `DYN_REQUEST_PLANE`.
+    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats", "velo"], ignore_case = true)]
     pub request_plane: Option<String>,
     /// Response transport. Frontend and workers must use the same value.
     /// Maps to `DYN_RESPONSE_PLANE`.
@@ -104,6 +104,7 @@ impl RuntimeConfig {
     pub fn to_distributed_config(
         &self,
     ) -> anyhow::Result<dynamo_runtime::distributed::DistributedConfig> {
+        use dynamo_runtime::distributed::RequestPlaneMode;
         use dynamo_runtime::pipeline::network::ResponsePlaneMode;
 
         let mut config =
@@ -121,6 +122,29 @@ impl RuntimeConfig {
             }
             None => None,
         };
+        // Velo has no TLS, so the runtime serves a velo response selection over
+        // tcp whenever a DYN_TCP_TLS_* setting is present. Reflect that here so
+        // this config matches the plane the runtime will use.
+        config.response_plane = config.response_plane.map(ResponsePlaneMode::tcp_under_tls);
+        if config.request_plane == RequestPlaneMode::Velo {
+            // An omitted response plane is resolved from DYN_RESPONSE_PLANE and
+            // the tcp default, exactly as the runtime will resolve it, so both
+            // paths report the same local configuration error.
+            let effective = match config.response_plane {
+                Some(response_plane) => response_plane,
+                None => ResponsePlaneMode::configured()?,
+            };
+            if effective != ResponsePlaneMode::Velo {
+                anyhow::bail!(
+                    "--request-plane velo requires --response-plane velo; \
+                     the effective response plane is '{}'",
+                    effective.name()
+                );
+            }
+        }
+        // The runtime's remaining pair rules, such as the Velo transport, are
+        // configuration errors too, not connection failures.
+        config.check_request_plane_pair()?;
         Ok(config)
     }
 
@@ -3737,6 +3761,336 @@ mod tests {
         assert_eq!(
             applied,
             vec![("DYN_DISCOVERY_BACKEND".to_string(), "etcd".to_string())]
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // RuntimeConfig request/response plane resolution
+    // -------------------------------------------------------------------
+
+    fn clean_plane_env() -> Vec<(&'static str, Option<&'static str>)> {
+        use dynamo_runtime::config::environment_names::{
+            request_plane, response_plane, tcp_response_stream::tls,
+        };
+
+        vec![
+            (request_plane::DYN_REQUEST_PLANE, None),
+            (response_plane::DYN_RESPONSE_PLANE, None),
+            ("DYN_DISCOVERY_BACKEND", None),
+            ("DYN_EVENT_PLANE", None),
+            (tls::DYN_TCP_TLS_CERT_PATH, None),
+            (tls::DYN_TCP_TLS_KEY_PATH, None),
+            (tls::DYN_TCP_TLS_CA_CERT_PATH, None),
+            (tls::DYN_TCP_TLS_CLIENT_CERT_PATH, None),
+            (tls::DYN_TCP_TLS_CLIENT_KEY_PATH, None),
+            (tls::DYN_TCP_TLS_CLIENT_CA_CERT_PATH, None),
+            (tls::DYN_TCP_TLS_INSECURE, None),
+        ]
+    }
+
+    fn with_clean_plane_env<R>(
+        extra: &[(&'static str, Option<&'static str>)],
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let mut vars = clean_plane_env();
+        vars.extend_from_slice(extra);
+        temp_env::with_vars(vars, f)
+    }
+
+    fn lose_config(
+        result: anyhow::Result<dynamo_runtime::distributed::DistributedConfig>,
+    ) -> anyhow::Error {
+        match result {
+            Ok(_) => panic!("expected the runtime config to be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    const ISOLATED_PLANE_ENV: &str = "DYNAMO_RUNTIME_CONFIG_PLANE_CHILD";
+
+    /// Run one environment-sensitive test in a fresh process. The response
+    /// plane resolver caches its first environment read process-wide, so a
+    /// sibling test must not observe this test's environment.
+    fn run_isolated_plane_child(name: &str) -> bool {
+        if std::env::var_os(ISOLATED_PLANE_ENV).is_some() {
+            return true;
+        }
+        let module = module_path!();
+        let test_name = format!(
+            "{}::{name}",
+            module
+                .strip_prefix("dynamo_backend_common::")
+                .unwrap_or(module)
+        );
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command.args(["--exact", &test_name, "--nocapture"]);
+        command.env_clear();
+        for key in [
+            "PATH",
+            "LD_LIBRARY_PATH",
+            "HOME",
+            "TMPDIR",
+            "RUST_BACKTRACE",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        command.env(ISOLATED_PLANE_ENV, "1");
+        let output = command.output().expect("isolated plane test child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated plane test '{test_name}' failed:\n{stdout}\n{stderr}"
+        );
+        false
+    }
+
+    #[derive(clap::Parser)]
+    struct RuntimeConfigArgs {
+        #[command(flatten)]
+        runtime: RuntimeConfig,
+    }
+
+    #[tokio::test]
+    async fn worker_classifies_velo_requests_over_ucx_as_invalid_configuration() {
+        if std::env::var_os(ISOLATED_PLANE_ENV).is_none() {
+            let test =
+                "worker::tests::worker_classifies_velo_requests_over_ucx_as_invalid_configuration";
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            for (key, _) in clean_plane_env() {
+                child.env_remove(key);
+            }
+            let status = child
+                .env(ISOLATED_PLANE_ENV, "1")
+                .env("DYN_VELO_RESPONSE_TRANSPORT", "ucx")
+                .args(["--exact", test, "--include-ignored", "--nocapture"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated worker failed: {status}");
+            return;
+        }
+        let (engine, _) = StateMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.config.runtime = RuntimeConfig {
+            discovery_backend: Some("mem".into()),
+            request_plane: Some("velo".into()),
+            response_plane: Some("velo".into()),
+            ..RuntimeConfig::default()
+        };
+        let runtime = Runtime::from_current().unwrap();
+        let error = worker
+            .run_with_shutdown(runtime.clone(), None, CancellationToken::new())
+            .await
+            .unwrap_err();
+        runtime.shutdown();
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_VELO_RESPONSE_TRANSPORT=ucx"),
+            "{error}"
+        );
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_plane_parser_accepts_velo_with_velo_response() {
+        if !run_isolated_plane_child("request_plane_parser_accepts_velo_with_velo_response") {
+            return;
+        }
+        use clap::Parser as _;
+
+        with_clean_plane_env(&[], || {
+            let args = RuntimeConfigArgs::try_parse_from([
+                "test",
+                "--request-plane",
+                "velo",
+                "--response-plane",
+                "velo",
+            ])
+            .expect("velo must be an accepted request plane");
+
+            let config = args.runtime.to_distributed_config().unwrap();
+            assert_eq!(
+                config.request_plane,
+                dynamo_runtime::distributed::RequestPlaneMode::Velo
+            );
+            assert_eq!(
+                config.response_plane,
+                Some(dynamo_runtime::pipeline::network::ResponsePlaneMode::Velo)
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_rejects_a_tcp_response_plane() {
+        if !run_isolated_plane_child("velo_request_plane_rejects_a_tcp_response_plane") {
+            return;
+        }
+        with_clean_plane_env(&[], || {
+            let cfg = RuntimeConfig {
+                request_plane: Some("velo".to_string()),
+                response_plane: Some("tcp".to_string()),
+                ..RuntimeConfig::default()
+            };
+
+            let error = lose_config(cfg.to_distributed_config());
+            let message = error.to_string();
+            assert!(message.contains("requires"), "{message}");
+            assert!(message.contains("tcp"), "{message}");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_response_plane_reflects_the_tls_fallback() {
+        if !run_isolated_plane_child("velo_response_plane_reflects_the_tls_fallback") {
+            return;
+        }
+        with_clean_plane_env(
+            &[(
+                dynamo_runtime::config::environment_names::tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+                Some("/run/secrets/tls.crt"),
+            )],
+            || {
+                let cfg = RuntimeConfig {
+                    request_plane: Some("tcp".to_string()),
+                    response_plane: Some("velo".to_string()),
+                    ..RuntimeConfig::default()
+                };
+
+                assert_eq!(
+                    cfg.to_distributed_config().unwrap().response_plane,
+                    Some(dynamo_runtime::pipeline::network::ResponsePlaneMode::Tcp)
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_is_refused_when_tls_forces_tcp() {
+        if !run_isolated_plane_child("velo_request_plane_is_refused_when_tls_forces_tcp") {
+            return;
+        }
+        with_clean_plane_env(
+            &[(
+                dynamo_runtime::config::environment_names::tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+                Some("/run/secrets/tls.crt"),
+            )],
+            || {
+                let cfg = RuntimeConfig {
+                    request_plane: Some("velo".to_string()),
+                    response_plane: Some("velo".to_string()),
+                    ..RuntimeConfig::default()
+                };
+
+                let error = lose_config(cfg.to_distributed_config());
+                assert!(error.to_string().contains("tcp"), "{error}");
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_from_environment_requires_a_velo_response() {
+        if !run_isolated_plane_child("velo_request_plane_from_environment_requires_a_velo_response")
+        {
+            return;
+        }
+        with_clean_plane_env(&[("DYN_REQUEST_PLANE", Some("velo"))], || {
+            let cfg = RuntimeConfig {
+                request_plane: None,
+                response_plane: Some("tcp".to_string()),
+                ..RuntimeConfig::default()
+            };
+
+            let error = lose_config(cfg.to_distributed_config());
+            assert!(error.to_string().contains("requires"), "{error}");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_without_a_response_plane_uses_the_default() {
+        if !run_isolated_plane_child("velo_request_plane_without_a_response_plane_uses_the_default")
+        {
+            return;
+        }
+
+        with_clean_plane_env(&[], || {
+            let cfg = RuntimeConfig {
+                request_plane: Some("velo".to_string()),
+                response_plane: None,
+                ..RuntimeConfig::default()
+            };
+
+            let error = lose_config(cfg.to_distributed_config());
+            let message = error.to_string();
+            assert!(message.contains("requires"), "{message}");
+            assert!(message.contains("tcp"), "{message}");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_accepts_velo_response_from_the_environment() {
+        if !run_isolated_plane_child(
+            "velo_request_plane_accepts_velo_response_from_the_environment",
+        ) {
+            return;
+        }
+
+        with_clean_plane_env(&[("DYN_RESPONSE_PLANE", Some("velo"))], || {
+            let cfg = RuntimeConfig {
+                request_plane: Some("velo".to_string()),
+                response_plane: None,
+                ..RuntimeConfig::default()
+            };
+
+            let config = cfg.to_distributed_config().unwrap();
+            assert_eq!(
+                config.request_plane,
+                dynamo_runtime::distributed::RequestPlaneMode::Velo
+            );
+            assert_eq!(config.response_plane, None);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn velo_request_plane_without_a_response_plane_is_refused_under_tls() {
+        if !run_isolated_plane_child(
+            "velo_request_plane_without_a_response_plane_is_refused_under_tls",
+        ) {
+            return;
+        }
+
+        with_clean_plane_env(
+            &[
+                ("DYN_RESPONSE_PLANE", Some("velo")),
+                (
+                    dynamo_runtime::config::environment_names::tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+                    Some("/run/secrets/tls.crt"),
+                ),
+            ],
+            || {
+                let cfg = RuntimeConfig {
+                    request_plane: Some("velo".to_string()),
+                    response_plane: None,
+                    ..RuntimeConfig::default()
+                };
+
+                let error = lose_config(cfg.to_distributed_config());
+                assert!(error.to_string().contains("tcp"), "{error}");
+            },
         );
     }
 }

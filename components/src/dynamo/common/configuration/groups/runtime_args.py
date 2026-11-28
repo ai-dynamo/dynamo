@@ -19,6 +19,8 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    normalize_plane,
+    validate_request_plane,
 )
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
@@ -118,6 +120,9 @@ class DynamoRuntimeConfig(ConfigBase):
     nats_tls_client_key_path: Optional[str] = None
 
     def validate(self) -> None:
+        self.request_plane = normalize_plane(self.request_plane) or ""
+        self.response_plane = normalize_plane(self.response_plane)
+        validate_request_plane(self.request_plane, self.response_plane)
         self.namespace = get_worker_namespace(self.namespace)
         self.structural_tag = resolve_structural_tag_config(self)
         for flag, value in (
@@ -284,8 +289,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--request-plane",
             env_var="DYN_REQUEST_PLANE",
             default="tcp",
-            help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
-            choices=["tcp", "nats"],
+            help="Determines how requests are distributed from routers to workers. 'tcp' is the default. velo requires --response-plane velo.",
+            choices=["tcp", "nats", "velo"],
         )
         add_argument(
             g,

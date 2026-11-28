@@ -18,7 +18,13 @@ from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )
-from dynamo.common.configuration.utils import ArgEnv, Deprecated, join_names
+from dynamo.common.configuration.utils import (
+    ArgEnv,
+    Deprecated,
+    join_names,
+    normalize_plane,
+    validate_request_plane,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.mocker.config import normalize_mocker_config, old_ais_perf_inputs
 
@@ -788,9 +794,9 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
     parser.add_argument(
         "--request-plane",
         type=str,
-        choices=["nats", "tcp"],
+        choices=["nats", "tcp", "velo"],
         default=environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
+        help="Determines how requests are distributed from routers to workers. 'tcp' is the default [nats|tcp|velo]. velo requires --response-plane velo.",
     )
     parser.add_argument(
         "--response-plane",
@@ -862,6 +868,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
+    # argparse applies no choices check to an environment default, so an empty
+    # or unknown DYN_REQUEST_PLANE is refused here and not served over tcp.
+    args.request_plane = normalize_plane(args.request_plane)
+    if args.request_plane not in ("nats", "tcp", "velo"):
+        parser.error(
+            "--request-plane (DYN_REQUEST_PLANE) must be 'nats', 'tcp', or 'velo', "
+            f"not {args.request_plane!r}"
+        )
+    args.response_plane = normalize_plane(args.response_plane)
+    try:
+        validate_request_plane(args.request_plane, args.response_plane)
+    except ValueError as e:
+        parser.error(str(e))
     set_ais_perf_model_attributes(parser, args, env_value(AIS_PERF_MODEL_ENV))
     old_ais_perf = old_ais_perf_inputs(args)
     if args.ais_perf_model_value is not None and old_ais_perf:
