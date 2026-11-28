@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from _deps import HAS_GMS, HAS_TORCH
@@ -19,6 +20,8 @@ if not HAS_GMS:
 if not HAS_TORCH:
     pytest.skip("torch is required", allow_module_level=True)
 
+from gpu_memory_service.client.torch import allocator as torch_allocator
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.vllm import model_loader
 
@@ -60,6 +63,15 @@ def gms_write(monkeypatch):
     """A prepared (registered + pruned, uncommitted) fake GMS write."""
     events = []
     allocator = _FakeAllocator(events)
+    monkeypatch.setattr(
+        torch_allocator,
+        "_tag_states",
+        {
+            "weights": SimpleNamespace(
+                manager=allocator, mem_pool=None, callback_failure=None
+            )
+        },
+    )
 
     def register(_allocator, _model):
         events.append("register")
@@ -89,6 +101,7 @@ def clear_pending_write(monkeypatch):
     monkeypatch.setattr(model_loader, "_pending_retained_gms_tensors", [])
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
+    monkeypatch.setattr(model_loader, "_published_gms_tensor_owners", [])
 
 
 def test_prepare_registers_prunes_and_defers_commit(gms_write):
@@ -144,6 +157,32 @@ def test_publication_failure_releases_writer_and_preserves_error(gms_write):
     assert not model_loader.has_pending_gms_write()
 
 
+def test_free_failure_is_logged_and_prevents_publication(gms_write, monkeypatch):
+    """The native free callback cannot raise, so the failure is logged and
+    surfaces when the writer publishes."""
+    allocator, stats, events = gms_write
+    model_loader._store_pending_gms_write(allocator, stats, 12, [])
+    failure = RuntimeError("server release failed")
+
+    def destroy_mapping(va):
+        raise failure
+
+    allocator.granted_lock_type = GrantedLockType.RW
+    allocator.destroy_scratch_mapping = lambda va: False
+    allocator.destroy_mapping = destroy_mapping
+    logged = Mock()
+    monkeypatch.setattr(torch_allocator.logger, "exception", logged)
+
+    torch_allocator._gms_free(1, 60, 0, 0)
+
+    logged.assert_called_once()
+    with pytest.raises(RuntimeError, match="free callback failed") as error:
+        model_loader.publish_pending_gms_write()
+    assert error.value.__cause__ is failure
+    assert events == ["register", "prune", "close_best_effort"]
+    assert not model_loader.has_pending_gms_write()
+
+
 def test_eager_finalize_preserves_publish_then_rebind_order(gms_write):
     """SGLang/TRT-LLM keep the eager register->commit->reconnect->rebind flow."""
     allocator, _, events = gms_write
@@ -163,3 +202,29 @@ def test_eager_finalize_preserves_publish_then_rebind_order(gms_write):
         "remap",
         "rebind",
     ]
+
+
+def test_failed_write_preparation_releases_the_writer(monkeypatch):
+    events = []
+    allocator = _FakeAllocator(events)
+
+    def fail(*args):
+        raise RuntimeError("weight loading failed")
+
+    monkeypatch.setattr(model_loader, "_prepare_write", fail)
+    with pytest.raises(RuntimeError, match="weight loading failed"):
+        model_loader._load_write_mode(allocator, None, None, None, None)
+
+    assert events == ["close_best_effort"]
+
+
+def test_second_write_does_not_release_the_pending_write(gms_write):
+    allocator, stats, events = gms_write
+    model_loader._store_pending_gms_write(allocator, stats, 12, [])
+    config = SimpleNamespace(load_config=SimpleNamespace(model_loader_extra_config={}))
+
+    with pytest.raises(RuntimeError, match="already awaiting publication"):
+        model_loader._load_write_mode(allocator, config, None, None, None)
+
+    assert events == ["register", "prune"]
+    assert model_loader.has_pending_gms_write()

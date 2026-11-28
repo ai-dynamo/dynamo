@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import gc
 import logging
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ class _TagState:
     socket_path: str
     device: int
     is_scratch: bool = False
+    callback_failure: Exception | None = None
 
 
 _tag_states: dict[str, _TagState] = {}
@@ -72,8 +75,24 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     for tag, state in _tag_states.items():
         if va not in state.manager.mappings:
             continue
+        if (
+            state.mem_pool is None
+            and state.manager.granted_lock_type != GrantedLockType.RW
+        ):
+            # A block of a released weight pool, freed after publication. The
+            # allocation belongs to the committed layout: keep the mapping so
+            # remap_all_vas still matches it. close() releases it.
+            logger.debug("[GMS] free(tag=%s): keeping published va=0x%x", tag, va)
+            return
         logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
-        state.manager.destroy_mapping(va)
+        try:
+            state.manager.destroy_mapping(va)
+        except Exception as exc:
+            # The native shim cannot propagate free callback exceptions.
+            # Preserve the first failure for the publication barrier.
+            logger.exception("[GMS] free(tag=%s): failed to release va=0x%x", tag, va)
+            if state.callback_failure is None:
+                state.callback_failure = exc
         return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
@@ -365,3 +384,58 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
                 yield
     finally:
         _active_tag.reset(token)
+
+
+def release_gms_mem_pool(
+    manager: "GMSClientMemoryManager", *, collect_garbage: bool = True
+) -> None:
+    """Release cached blocks through Torch's allocator, preserving live storage.
+
+    Called outside the pool region after synchronizing. Dropping the pool
+    frees the blocks it has cached; blocks that live StorageImpls own keep
+    their backing. Module traversal cannot establish allocation liveness.
+
+    ``collect_garbage=False`` skips the full garbage collection for a caller
+    that has just run one.
+    """
+    state = _tag_states.get(manager.tag)
+    if state is None or state.manager is not manager or state.mem_pool is None:
+        raise RuntimeError("GMS memory pool is missing or already released")
+    if _active_tag.get() == manager.tag:
+        raise RuntimeError("Cannot release an active GMS memory pool")
+    if collect_garbage:
+        # Tensors that only reference cycles keep alive must die while the
+        # pool still exists, so that dropping the pool releases their blocks.
+        gc.collect()
+    pool = state.mem_pool
+    state.mem_pool = None
+    try:
+        pool_ref = weakref.ref(pool)
+    except TypeError:
+        pool_ref = None
+    del pool
+    if pool_ref is None or pool_ref() is not None:
+        # A reference cycle may hold the pool itself.
+        gc.collect()
+        if pool_ref is not None and pool_ref() is not None:
+            logger.warning(
+                "[GMS] The %s memory pool is still referenced; its cached "
+                "blocks were not released",
+                manager.tag,
+            )
+    raise_if_gms_allocator_failed(manager)
+
+
+def raise_if_gms_allocator_failed(manager: "GMSClientMemoryManager") -> None:
+    """Surface native free-callback errors at synchronous ownership barriers.
+
+    Frees are only routed to managers registered here; an unregistered (or
+    closed and evicted) manager has no callback failures to report.
+    """
+    state = next(
+        (state for state in _tag_states.values() if state.manager is manager), None
+    )
+    if state is not None and state.callback_failure is not None:
+        raise RuntimeError(
+            "GMS allocator free callback failed"
+        ) from state.callback_failure
