@@ -70,6 +70,9 @@ This is the ideal way for agents to develop. You can provide the path to both re
 
 Two paths are supported. Pick the one that matches how you plan to develop.
 
+> [!NOTE]
+> The CUDA `runtime` build target excludes `easydict`. If a model's remote Python code imports it, add `easydict` to a custom image before loading that model with `--trust-remote-code`.
+
 #### Pre-built Dynamo SGLang container (recommended)
 
 Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../../../../reference/general/release-artifacts.mdx) for the current tag and CUDA variants.

@@ -449,6 +449,12 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# The renderer bundles AAC; removing it disables Inkling, including text-only
+# requests. EasyDict supports optional remote model code.
+RUN uv pip uninstall tml-renderers easydict
+{% endif %}
+
 {%- if device != "xpu" %}
 # Precompile Python bytecode into the image while still root. CI runs tests as
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
