@@ -35,6 +35,16 @@ struct EndpointTask {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
+impl EndpointTask {
+    async fn ready(self) -> Self {
+        // Cancellation before the registry takes ownership must stop the listener too.
+        let cancel_on_drop = self.cancel_token.clone().drop_guard();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        cancel_on_drop.disarm();
+        self
+    }
+}
+
 /// Subject suffix within a NATS service group; the group supplies the namespace and component.
 fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
@@ -180,16 +190,15 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         // Give the endpoint a moment to start listening
         // This prevents a race condition where discovery registers the endpoint
         // before NATS is actually ready to receive requests
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let task = EndpointTask {
+            cancel_token: endpoint_cancel,
+            join_handle,
+        }
+        .ready()
+        .await;
 
-        // Store task info for later cleanup
-        self.handlers.insert(
-            (endpoint_id, instance_id),
-            EndpointTask {
-                cancel_token: endpoint_cancel,
-                join_handle,
-            },
-        );
+        // Store task info for later cleanup, without another cancellation point.
+        self.handlers.insert((endpoint_id, instance_id), task);
 
         Ok(())
     }
@@ -269,6 +278,28 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_readiness_stops_listener_before_registry_handoff() {
+        let cancellation = CancellationToken::new();
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+        let listener_cancellation = cancellation.clone();
+        let task = EndpointTask {
+            cancel_token: cancellation.clone(),
+            join_handle: tokio::spawn(async move {
+                listener_cancellation.cancelled().await;
+                let _ = stopped_tx.send(());
+            }),
+        };
+        let mut readiness = Box::pin(task.ready());
+        assert!(futures::poll!(readiness.as_mut()).is_pending());
+        drop(readiness);
+        assert!(cancellation.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), stopped_rx)
+            .await
+            .expect("cancelled listener must exit")
+            .unwrap();
+    }
 
     #[test]
     fn instance_subject_is_the_client_subject_and_unique_per_instance() {
