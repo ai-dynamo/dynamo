@@ -200,6 +200,7 @@ json-five = { version = "0.3" }
 # media loading in the preprocessor
 reqwest = { workspace = true }
 base64 = { version = "0.22" }
+base64-simd = "0.8"
 image = { version = "0.25", features = ["serde"] }
 libloading = "0.8"
 # Track the in-tree FFmpeg major (container/context.yaml ffmpeg_version): these

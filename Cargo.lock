@@ -2951,6 +2951,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "base64 0.22.1",
+ "base64-simd",
  "bitflags 2.13.2",
  "blake3",
  "bytemuck",

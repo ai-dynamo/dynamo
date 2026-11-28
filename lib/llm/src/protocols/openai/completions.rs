@@ -914,6 +914,28 @@ mod tests {
     }
 
     #[test]
+    fn prompt_embeds_require_canonical_standard_base64() {
+        let prefix = "AAAA".repeat(34);
+        for (tail, valid) in [
+            ("AA==", true),
+            ("AAA=", true),
+            ("AAAA", true),
+            ("AB==", false),
+            ("AAB=", false),
+            ("AA", false),
+            ("AA=_", false),
+            ("AA==AAAA", false),
+        ] {
+            let encoded = format!("{prefix}{tail}");
+            assert_eq!(
+                validate::validate_prompt_embeds(Some(&encoded)).is_ok(),
+                valid,
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
     fn test_embeds_too_large() {
         // Create embeddings with DECODED size larger than 10MB
         // Base64 encoding adds ~33% overhead, so we need 11MB decoded = ~14.7MB encoded
