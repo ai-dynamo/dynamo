@@ -238,6 +238,8 @@ def normalize_unary(payload: Any) -> dict[str, Any]:
 def _stable_ir(request: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(request)
     result.pop("mdc_sum", None)
+    # Router dispatch timing; it differs on every execution.
+    result.pop("elapsed_since_arrival_ms", None)
     result["annotations"] = [
         item
         for item in result.get("annotations", [])

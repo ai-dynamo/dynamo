@@ -45,6 +45,7 @@ from tests.frontend.trace_replay.runner import (
     _environment,
     _execution_configuration,
     _sse_lines,
+    _stable_ir,
     _write_junit,
     assemble_sse,
     compare_baseline,
@@ -193,6 +194,23 @@ def test_semantic_fingerprints_ignore_number_spelling_without_rounding() -> None
     assert digest(1) != digest("1")
     assert digest(loads("9007199254740993.0")) != digest(9007199254740992)
     assert dumps(loads("1.0")) == "1.0"
+
+
+def test_stable_ir_ignores_dispatch_timing_but_not_request_meaning() -> None:
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {"temperature": 0.6},
+        "elapsed_since_arrival_ms": 0.64,
+    }
+    later = {**request, "elapsed_since_arrival_ms": 0.77}
+    assert digest(_stable_ir(request)) == digest(_stable_ir(later))
+    # The raw observation keeps the timing value.
+    assert request["elapsed_since_arrival_ms"] == 0.64
+    for changed in (
+        {**request, "token_ids": [1, 2, 4]},
+        {**request, "sampling_options": {"temperature": 0.7}},
+    ):
+        assert digest(_stable_ir(request)) != digest(_stable_ir(changed))
 
 
 @pytest.mark.parametrize("text", ['{"x":1,"x":2}', "NaN", "Infinity", "-Infinity"])
