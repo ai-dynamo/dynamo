@@ -25,7 +25,7 @@ mod dedup_tests;
 mod deserialize;
 mod extra_keys;
 mod filter;
-mod mm_exclusion;
+mod mm_labels;
 #[cfg(test)]
 mod tests;
 mod trtllm;
@@ -42,8 +42,8 @@ pub use extra_keys::{
 pub use filter::KvCacheSpecKind;
 pub use trtllm::IMAGE_ROUTING_UUID_PREFIX;
 pub use types::{
-    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
-    WIDE_TOKEN_SENTINEL,
+    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality,
+    MmRoutingSpanWire, RawKvEvent, WIDE_TOKEN_SENTINEL,
 };
 
 use filter::KvCacheEventMetadata;
@@ -88,8 +88,8 @@ pub struct ZmqEventNormalizer {
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
     /// Exclusion of multimodal values the request side cannot reproduce. See
-    /// `mm_exclusion` and [`Self::with_engine_owned_mm_identity`].
-    engine_mm: mm_exclusion::EngineMmState,
+    /// `mm_labels` and [`Self::with_engine_owned_mm_identity`].
+    engine_mm: mm_labels::EngineMmState,
     /// Workers that have published at least one full-size block. Once a worker
     /// has proven its block size matches, a smaller `BlockStored` event is a
     /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
@@ -151,7 +151,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: mm_exclusion::EngineMmState::new(false),
+            engine_mm: mm_labels::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
         }
     }
@@ -164,27 +164,32 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: mm_exclusion::EngineMmState::new(false),
+            engine_mm: mm_labels::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
         }
     }
 
     /// Mark this source as deriving multimodal pad values from engine
-    /// identities (sgl-project/sglang#43043): every event token at or above
-    /// `MM_PAD_SHIFT_VALUE` is excluded with the blocks chained after it.
-    /// Unflagged sources exclude only values that did not fit in `u32`.
+    /// identities (sgl-project/sglang#43043): labeled spans map to Dynamo routing
+    /// pads and all indexed chains get Dynamo-owned ids. Other multimodal values
+    /// and their following blocks are excluded. Unflagged sources exclude only
+    /// values that did not fit in `u32`.
     pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
-        self.engine_mm = mm_exclusion::EngineMmState::new(enabled);
+        self.engine_mm = mm_labels::EngineMmState::new(enabled);
         self
     }
 
     /// Bound the per-rank exclusion state. Past it a rank falls back to root stores until
     /// its cache is cleared; tests shrink it to exercise that path.
     pub fn with_engine_mm_excluded_capacity(mut self, excluded_capacity: usize) -> Self {
-        self.engine_mm = mm_exclusion::EngineMmState::with_excluded_capacity(
-            self.engine_mm.engine_owned(),
-            excluded_capacity,
-        );
+        self.engine_mm.excluded_capacity = excluded_capacity;
+        self
+    }
+
+    /// Bound mapped engine block residencies across tiers. A live mapping is
+    /// never evicted to admit another; new chains fall back to exclusion.
+    pub fn with_engine_mm_id_capacity(mut self, id_capacity: usize) -> Self {
+        self.engine_mm.id_capacity = id_capacity;
         self
     }
 
@@ -346,11 +351,15 @@ impl ZmqEventNormalizer {
                 if !self.engine_mm.prepare_store(&mut raw, worker, tier) {
                     return Some(empty_removal(event_id, worker, tier));
                 }
-                convert(raw)
+                let mut event = convert(raw)?;
+                if !self.engine_mm.translate_store(&mut event, worker, tier) {
+                    return Some(empty_removal(event_id, worker, tier));
+                }
+                Some(event)
             }
             RawKvEvent::BlockRemoved { .. } => {
                 let mut event = convert(raw)?;
-                self.engine_mm.filter_remove(&mut event, worker, tier);
+                self.engine_mm.translate_remove(&mut event, worker, tier);
                 Some(event)
             }
             RawKvEvent::AllBlocksCleared { .. } => {
@@ -441,8 +450,11 @@ impl ZmqEventNormalizer {
                 block_hashes,
                 parent_block_hash,
                 cache_namespace,
+                request_cache_salt,
                 ..
             } => {
+                let explicit_namespace = request_cache_salt.is_some();
+                let cache_namespace = request_cache_salt.as_mut().unwrap_or(cache_namespace);
                 if cache_namespace.as_deref() == Some("") {
                     *cache_namespace = None;
                 }
@@ -461,7 +473,9 @@ impl ZmqEventNormalizer {
                             _ => None,
                         })
                         .or_else(|| Some(Arc::from(namespace)))
-                } else if let Some(parent) = parent_block_hash.as_ref() {
+                } else if let Some(parent) =
+                    parent_block_hash.as_ref().filter(|_| !explicit_namespace)
+                {
                     match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
                         Some(CacheNamespaceState::Namespaced(namespace)) => {
                             *cache_namespace = Some(namespace.to_string());

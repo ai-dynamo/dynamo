@@ -43,6 +43,7 @@ from dynamo.llm import (
 )
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
+    sglang_has_wide_mm_pad_values,
     sglang_uses_mla_backend,
     supports_disagg_prefill_cancel_anytime,
 )
@@ -339,12 +340,29 @@ async def _register_model_with_runtime_config(
         getattr(dynamo_args, "router_advertisement", None)
     )
     try:
+        model_path = dynamo_args.model_source_uri or _register_model_source_path(
+            engine, server_args
+        )
+        indexer_identity = None
+        if (
+            engine is not None
+            and dynamo_args.use_kv_events
+            and sglang_has_wide_mm_pad_values()
+        ):
+            # Keep the model identity when replacing the default semantics.
+            # Metadata downloads can give identical models different temp paths.
+            indexer_identity = {
+                "semantics": {
+                    "model_source": dynamo_args.model_source_uri
+                    or server_args.model_path,
+                    "kv_event_block_id_scheme": "dynamo-canonical-v1",
+                }
+            }
         await register_model(
             input_type,
             output_type,
             endpoint,
-            dynamo_args.model_source_uri
-            or _register_model_source_path(engine, server_args),
+            model_path,
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -361,6 +379,7 @@ async def _register_model_with_runtime_config(
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,
+            indexer_identity=indexer_identity,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True

@@ -63,6 +63,11 @@ pub enum KvTokenIds {
 /// and fails closed.
 pub const WIDE_TOKEN_SENTINEL: u32 = u32::MAX;
 
+/// One `[start, length, label]` entry of SGLang's `mm_routing_spans`: a run of
+/// multimodal positions inside one block, labeled with the caller's routing
+/// label (16 hex digits of Dynamo's per-item hash).
+pub type MmRoutingSpanWire = (u32, u32, String);
+
 /// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
 /// legacy events; vLLM never infers it. `Unknown` captures any future value so
 /// deserialization stays forward-compatible and unrecognized values fail closed
@@ -120,6 +125,10 @@ pub enum RawKvEvent {
             skip_serializing_if = "Option::is_none"
         )]
         cache_namespace: Option<String>,
+        /// Supplied request namespace on SGLang events. Some(None) explicitly
+        /// selects unsalted routing; None retains legacy namespace inference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_cache_salt: Option<Option<String>>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,

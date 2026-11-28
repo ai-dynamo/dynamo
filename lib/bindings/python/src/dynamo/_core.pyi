@@ -2234,6 +2234,7 @@ async def register_model(
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
     skip_model_assets: bool = False,
+    indexer_identity: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2252,6 +2253,15 @@ async def register_model(
     to register a minimal card without fetching or loading weights, configuration,
     or tokenizer files. Audio models retain their metadata by default; external
     audio adapters must explicitly opt in. Audio aliases are preserved in both paths.
+
+    `indexer_identity` optionally supplies `semantics` and/or `routing_scope`
+    dictionaries of non-empty strings. Each present dictionary replaces that
+    identity dimension's derived defaults; absent dimensions keep their defaults.
+    In particular, custom semantics must retain a model identity, and custom
+    routing scope must retain any required deployment isolation. KV block size
+    and query-hash format always remain part of cache semantics. Invalid maps
+    raise ValueError before registration. The default None preserves existing
+    cohort and indexer identities.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and

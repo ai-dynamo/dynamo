@@ -81,3 +81,27 @@ parsed by name, with `lora_name` on `BlockStored`. Other SGLang shapes are
 legacy and parsed only for compatibility: the default format, and the
 positional `BlockStored` of releases before 0.5.20, which ends at `lora_id` and
 parses because the tuple terminates early.
+
+SGLang builds with routing-label support add the optional named field
+`mm_routing_spans` to `BlockStored` in the `dynamo` format. It is a list aligned
+with `block_hashes`; each block contains `[start, length, label]` spans with
+block-relative token offsets and lengths. The label echoes Dynamo's hexadecimal
+`u64` media hash. For example, `[[], [[0, 4, "0123456789abcdef"]]]` labels the
+first four tokens of the second block. The field adds no positional slot.
+For sources flagged with `engine_owned_mm_identity`, events without usable
+labels retain multimodal exclusion.
+
+SGLang's `dynamo` format can also report `request_cache_salt`, the request
+namespace supplied to the engine, including one set by a proxy. Selection is by field
+presence: a string selects that namespace, explicit `null` selects unsalted
+routing, and only an omitted field falls back to `cache_salt` and the legacy
+namespace rules. Empty strings are unsalted. LoRA identity remains independent.
+For example, `{"cache_salt": "sglang-mm-v1:...", "request_cache_salt": null}`
+must hash routing tokens without the internal media salt. This adds no
+positional slot. SGLang omits the field when it equals `cache_salt`.
+
+For `engine_owned_mm_identity` sources, all indexed blocks receive canonical
+routing IDs, including text-only requests and text before media. The internal
+media salt gives identical text prefixes different engine IDs; translating only
+media blocks would leave those prefixes aliased during eviction. A continuation
+whose parent mapping is unknown is excluded until its chain can be reconstructed.

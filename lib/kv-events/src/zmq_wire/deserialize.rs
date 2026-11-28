@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{
@@ -15,7 +15,8 @@ use super::filter::{
 };
 use super::trtllm::{self, MapTokenIds};
 use super::types::{
-    BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent, WIDE_TOKEN_SENTINEL,
+    BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, MmRoutingSpanWire, RawKvEvent,
+    WIDE_TOKEN_SENTINEL,
 };
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
@@ -65,8 +66,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
         let mut cache_namespace: Option<Option<String>> = None;
+        let mut request_cache_salt: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut mm_routing_spans: Option<Option<Vec<Option<Vec<MmRoutingSpanWire>>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
         let mut session_id: Option<Option<String>> = None;
@@ -104,11 +107,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "cache_salt" => {
                     cache_namespace = Some(map.next_value()?);
                 }
+                "request_cache_salt" => {
+                    request_cache_salt = Some(map.next_value()?);
+                }
                 "extra_keys" => {
                     extra_keys = Some(map.next_value()?);
                 }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
+                }
+                "mm_routing_spans" => {
+                    mm_routing_spans = Some(map.next_value()?);
                 }
                 "group_idx" => {
                     metadata.group_idx = map.next_value()?;
@@ -164,9 +173,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
-                let block_mm_infos = block_mm_infos
-                    .unwrap_or(None)
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                // SGLang routing-label spans take precedence; SGLang never sends
+                // vLLM-style extra_keys multimodal hashes.
+                let block_mm_infos = match mm_routing_spans.unwrap_or(None) {
+                    Some(spans) => Some(mm_routing_spans_to_block_mm_infos(spans)),
+                    None => block_mm_infos
+                        .unwrap_or(None)
+                        .or_else(|| extra_keys_to_block_mm_infos(extra_keys)),
+                };
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -175,6 +189,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium,
                     lora_name,
                     cache_namespace,
+                    request_cache_salt,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: metadata.group_idx,
@@ -279,6 +294,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium,
                     lora_name,
                     cache_namespace,
+                    request_cache_salt: None,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: parsed.metadata.group_idx,
@@ -532,7 +548,7 @@ fn narrow_token_id(token_id: u64) -> u32 {
 
 /// A raw binary key, such as vLLM's prompt-embeds digest, is an identity that the
 /// block's tokens do not carry and a request cannot reproduce. Marking the first such
-/// block makes `mm_exclusion` keep it and the blocks chained after it out of the index.
+/// block makes the normalizer keep it and the blocks chained after it out of the index.
 fn mark_first_raw_key_block(
     token_ids: &mut [u32],
     block_size: usize,
@@ -567,4 +583,34 @@ fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
             (new_tids, true)
         }
     }
+}
+
+/// Convert SGLang's per-block `[start, length, label]` spans into the existing
+/// per-block multimodal shape (`mm_hash` plus block-relative offsets). Labels
+/// contain Dynamo's already-computed hexadecimal `u64` hashes. Invalid or
+/// overflowing hashes leave their spans unmapped so the normalizer fails closed.
+fn mm_routing_spans_to_block_mm_infos(
+    spans: Vec<Option<Vec<MmRoutingSpanWire>>>,
+) -> Vec<Option<BlockExtraInfo>> {
+    spans
+        .into_iter()
+        .map(|block_spans| {
+            let mut mm_objects: Vec<BlockMmObjectInfo> = Vec::new();
+            for (start, length, label) in block_spans.unwrap_or_default() {
+                let Ok(mm_hash) = u64::from_str_radix(&label, 16) else {
+                    tracing::debug!(%label, "Dropping multimodal routing span with invalid label");
+                    continue;
+                };
+                let range = (start as usize, start as usize + length as usize);
+                match mm_objects.iter_mut().find(|obj| obj.mm_hash == mm_hash) {
+                    Some(obj) => obj.offsets.push(range),
+                    None => mm_objects.push(BlockMmObjectInfo {
+                        mm_hash,
+                        offsets: vec![range],
+                    }),
+                }
+            }
+            (!mm_objects.is_empty()).then_some(BlockExtraInfo { mm_objects })
+        })
+        .collect()
 }

@@ -466,6 +466,17 @@ def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
     )
 
 
+def supports_mm_routing_labels(engine: Any) -> bool:
+    """Whether async_generate accepts per-item routing labels.
+
+    Labels are routing metadata only: SGLang reports them as spans on its KV
+    events and never uses them for cache identity.
+    """
+    return "mm_routing_labels" in filter_supported_async_generate_kwargs(
+        engine, {"mm_routing_labels": None}
+    )
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -713,6 +724,7 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "supports_mm_routing_labels",
     "sglang_uses_engine_owned_mm_identity",
     "sglang_has_wide_mm_pad_values",
 ]

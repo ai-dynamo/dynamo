@@ -2122,6 +2122,7 @@ mod tests {
             medium: medium.map(str::to_owned),
             lora_name: None,
             cache_namespace: None,
+            request_cache_salt: None,
             block_mm_infos: None,
             is_eagle: Some(false),
             group_idx: None,

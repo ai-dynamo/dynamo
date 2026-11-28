@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use dynamo_kv_indexer::host::IndexerIdentitySpec;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
@@ -62,6 +63,7 @@ pub struct LocalModelBuilder {
     endpoint_id: Option<EndpointId>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
+    indexer_identity: Option<IndexerIdentitySpec>,
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
@@ -107,6 +109,7 @@ impl Default for LocalModelBuilder {
             endpoint_id: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
+            indexer_identity: None,
             migration_limit: Default::default(),
             migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
@@ -304,6 +307,12 @@ impl LocalModelBuilder {
         self
     }
 
+    /// Set authoritative indexer compatibility material; omitted dimensions keep their defaults.
+    pub fn indexer_identity(&mut self, identity: Option<IndexerIdentitySpec>) -> &mut Self {
+        self.indexer_identity = identity;
+        self
+    }
+
     pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
         self.runtime_config = runtime_config;
         self
@@ -384,6 +393,7 @@ impl LocalModelBuilder {
             card.media_fetcher = self.media_fetcher.clone();
             card.tensor_model_config = self.tensor_model_config.clone();
             card.router_config = self.router_config.clone();
+            card.indexer_identity = self.indexer_identity.clone();
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
             }
@@ -449,6 +459,7 @@ impl LocalModelBuilder {
         card.media_fetcher = self.media_fetcher.clone();
         card.tensor_model_config = self.tensor_model_config.clone();
         card.router_config = self.router_config.clone();
+        card.indexer_identity = self.indexer_identity.clone();
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
         }
@@ -996,6 +1007,46 @@ mod local_source_tests {
 
     fn model_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    #[tokio::test]
+    async fn indexer_identity_reaches_minimal_and_loaded_cards() {
+        let identity: IndexerIdentitySpec = serde_json::from_value(serde_json::json!({
+            "semantics": {"model_source": "org/model", "block_id_scheme": "canonical-v1"}
+        }))
+        .unwrap();
+        for load_assets in [false, true] {
+            let builder = || {
+                let mut builder = LocalModelBuilder::default();
+                builder.model_name(Some("model".to_string()));
+                if load_assets {
+                    builder
+                        .model_path(model_dir())
+                        .source_path("org/model".into());
+                }
+                builder
+            };
+            let default = builder().build().await.unwrap();
+            let absent = builder().indexer_identity(None).build().await.unwrap();
+            assert!(absent.card().indexer_identity.is_none());
+            assert_eq!(default.card().mdcsum(), absent.card().mdcsum());
+            let explicit = builder()
+                .indexer_identity(Some(identity.clone()))
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(explicit.card().indexer_identity.as_ref(), Some(&identity));
+            assert_eq!(explicit.card().source_path(), default.card().source_path());
+            assert_eq!(
+                explicit.card().kv_cache_block_size,
+                default.card().kv_cache_block_size
+            );
+            assert_ne!(explicit.card().mdcsum(), default.card().mdcsum());
+            let serialized = serde_json::to_value(explicit.card()).unwrap();
+            let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored.indexer_identity, Some(identity.clone()));
+            assert_eq!(restored.mdcsum(), explicit.card().mdcsum());
+        }
     }
 
     #[tokio::test]
