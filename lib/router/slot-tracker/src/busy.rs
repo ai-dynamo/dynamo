@@ -9,7 +9,7 @@
 use std::collections::hash_map::Entry;
 use std::ops::Range;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use dynamo_router_protocol::worker::{WorkerCapacity, WorkerId, WorkerWithDpRank};
 
@@ -170,6 +170,8 @@ impl BusyRanksExt for BusyThresholds {
 pub struct FullRankCounts {
     limits: BusyThresholds,
     full_ranks: FxHashMap<WorkerId, u32>,
+    /// The ranks counted in `full_ranks`, so a check can name one rank.
+    full_rank_ids: FxHashSet<WorkerWithDpRank>,
 }
 
 impl FullRankCounts {
@@ -177,11 +179,13 @@ impl FullRankCounts {
     pub fn reset(&mut self, limits: BusyThresholds) {
         self.limits = limits;
         self.full_ranks.clear();
+        self.full_rank_ids.clear();
     }
 
     /// Forget what the current pass recorded; it starts over from the first rank.
     pub fn clear(&mut self) {
         self.full_ranks.clear();
+        self.full_rank_ids.clear();
     }
 
     /// Judge one rank's projected load against the limits and count it when it has no room.
@@ -194,6 +198,7 @@ impl FullRankCounts {
     ) {
         if !self.limits.has_room(projection, capacity) {
             *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+            self.full_rank_ids.insert(worker);
         }
     }
 
@@ -231,6 +236,12 @@ impl FullRankCounts {
         self.full_ranks
             .get(&worker_id)
             .is_some_and(|&full| full >= dp_size)
+    }
+
+    /// Whether `worker`'s rank was counted full in this pass.
+    #[inline]
+    pub fn rank_counted_full(&self, worker: WorkerWithDpRank) -> bool {
+        self.full_rank_ids.contains(&worker)
     }
 }
 
