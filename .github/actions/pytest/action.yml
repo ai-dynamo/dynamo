@@ -121,6 +121,12 @@ runs:
         NUM_CPUS: ${{ inputs.cpu_limit }}
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
+        # ddtrace reads this for ci.job.id / ci.job.url. It has to be set
+        # at STEP level: the `job` context is not available in a job-level
+        # `env:`, and GitHub rejects the whole workflow file if it is used
+        # there. Its only fallback is the runner's _diag directory, which
+        # the test container cannot see.
+        JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         HF_HOME: /runner/_work/_temp
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
@@ -170,6 +176,40 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        # Datadog Test Optimization. ddtrace is already in the image
+        # (container/Dockerfile.test), so this is env plumbing only.
+        if [[ -n "${DD_API_KEY:-}" ]]; then
+          # Passed by NAME (--env VAR) so DD_API_KEY stays out of the command
+          # line. The GITHUB_* names are what ddtrace's github_actions provider
+          # reads: pytest runs in the container and inherits none of the
+          # runner's environment, so without them ddtrace emits no git or ci
+          # tags at all and skips the settings request.
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_API_KEY DD_SITE \
+                   DD_CIVISIBILITY_ENABLED DD_CIVISIBILITY_AGENTLESS_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED \
+                   DD_CIVISIBILITY_FLAKY_RETRY_ENABLED \
+                   DD_CIVISIBILITY_FLAKY_RETRY_COUNT \
+                   DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER \
+                   JOB_CHECK_RUN_ID \
+                   GITHUB_SERVER_URL GITHUB_REPOSITORY GITHUB_SHA \
+                   GITHUB_RUN_ID GITHUB_RUN_NUMBER GITHUB_RUN_ATTEMPT \
+                   GITHUB_WORKFLOW GITHUB_JOB GITHUB_REF GITHUB_HEAD_REF \
+                   GITHUB_BASE_REF; do
+            [[ -n "${!v:-}" ]] && DOCKER_ENV_FLAGS+=(--env "${v}")
+          done
+          # ci.workspace_path must name the path INSIDE the container. The repo
+          # is baked into the image at /workspace and only test-results is
+          # mounted, so forwarding the runner's own GITHUB_WORKSPACE would
+          # mislabel every source path Datadog shows.
+          DOCKER_ENV_FLAGS+=(--env "GITHUB_WORKSPACE=/workspace")
+          # GITHUB_EVENT_PATH is deliberately NOT forwarded: it names a file on
+          # the runner the container cannot open, and ddtrace logs an error when
+          # it is set but unreadable. It supplies only PR head/base SHAs, which
+          # the post-merge and nightly callers do not have in any case.
+          PYTEST_CMD="${PYTEST_CMD} --ddtrace"
+          echo "📡 Datadog Test Optimization enabled for this run"
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
@@ -205,6 +245,12 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
+        # ddtrace reads this for ci.job.id / ci.job.url. It has to be set
+        # at STEP level: the `job` context is not available in a job-level
+        # `env:`, and GitHub rejects the whole workflow file if it is used
+        # there. Its only fallback is the runner's _diag directory, which
+        # the test container cannot see.
+        JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         HF_HOME: /models
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
@@ -301,6 +347,40 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        # Datadog Test Optimization. ddtrace is already in the image
+        # (container/Dockerfile.test), so this is env plumbing only.
+        if [[ -n "${DD_API_KEY:-}" ]]; then
+          # Passed by NAME (--env VAR) so DD_API_KEY stays out of the command
+          # line. The GITHUB_* names are what ddtrace's github_actions provider
+          # reads: pytest runs in the container and inherits none of the
+          # runner's environment, so without them ddtrace emits no git or ci
+          # tags at all and skips the settings request.
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_API_KEY DD_SITE \
+                   DD_CIVISIBILITY_ENABLED DD_CIVISIBILITY_AGENTLESS_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED \
+                   DD_CIVISIBILITY_FLAKY_RETRY_ENABLED \
+                   DD_CIVISIBILITY_FLAKY_RETRY_COUNT \
+                   DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER \
+                   JOB_CHECK_RUN_ID \
+                   GITHUB_SERVER_URL GITHUB_REPOSITORY GITHUB_SHA \
+                   GITHUB_RUN_ID GITHUB_RUN_NUMBER GITHUB_RUN_ATTEMPT \
+                   GITHUB_WORKFLOW GITHUB_JOB GITHUB_REF GITHUB_HEAD_REF \
+                   GITHUB_BASE_REF; do
+            [[ -n "${!v:-}" ]] && DOCKER_ENV_FLAGS+=(--env "${v}")
+          done
+          # ci.workspace_path must name the path INSIDE the container. The repo
+          # is baked into the image at /workspace and only test-results is
+          # mounted, so forwarding the runner's own GITHUB_WORKSPACE would
+          # mislabel every source path Datadog shows.
+          DOCKER_ENV_FLAGS+=(--env "GITHUB_WORKSPACE=/workspace")
+          # GITHUB_EVENT_PATH is deliberately NOT forwarded: it names a file on
+          # the runner the container cannot open, and ddtrace logs an error when
+          # it is set but unreadable. It supplies only PR head/base SHAs, which
+          # the post-merge and nightly callers do not have in any case.
+          PYTEST_CMD="${PYTEST_CMD} --ddtrace"
+          echo "📡 Datadog Test Optimization enabled for this run"
+        fi
         if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
           DOCKER_ENV_FLAGS+=(--env "COVERAGE_FILE=/workspace/test-results/.coverage")
           DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
