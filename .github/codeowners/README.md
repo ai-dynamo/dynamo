@@ -29,7 +29,9 @@ adding required approvals.
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
-| `emit_codeowners.py` | Generates root `CODEOWNERS` directly from declared policy globs, plus `CONTRIBUTORS.md`; it never reads the git tree. |
+| `emit_codeowners.py` | Generates root `CODEOWNERS`, `CODEOWNERS.<team>` and `CONTRIBUTORS.md` from the policy; it never reads the git tree. |
+| `CODEOWNERS.<team>` | Generated, readable entries for one team's native policy review. Commit these with the central policy. |
+| `team_codeowners.py` | Generates team entries and verifies that ownership changes preserve native review for the affected teams. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
 
@@ -47,7 +49,34 @@ adding required approvals.
      --areas .github/codeowners/areas.yaml --out CODEOWNERS
    ```
 
-3. Commit `areas.yaml` and `CODEOWNERS` together.
+3. Commit `areas.yaml`, `CODEOWNERS` and the changed `CODEOWNERS.<team>` files together.
+
+### Native review of policy changes
+
+The generator also writes `CODEOWNERS.ops`, `CODEOWNERS.docs`, etc. in this
+directory. Each file has its own team as its sole native owner and contains that
+team's complete CODEOWNERS entries, including alternative owners. A later override
+that removes the team appears as an ownerless entry, so losing a subdirectory also
+changes the old team's file. Process additionally sees generator settings and
+ownership contracts as readable comments in its file.
+
+Regenerate with the command above and commit the team files together with the
+central policy. The existing `codeowners` action checks all generated files for
+drift and verifies that every affected old/new owner has a changed team file.
+Unrepresentable wildcard changes fail rather than bypassing an affected owner;
+split the owning glob in that case.
+
+Register new owners first with an empty area or contributor-area list. The
+`CODEOWNERS.*` fallback requires Process review for a new team file: GitHub uses
+the base branch's routing, which does not yet contain that file's exact team rule.
+Existing team files keep their exact team owner. They cannot be deleted or
+reassigned through a routing change. GitHub enforces native reviews using the
+repository's existing approval-retention rules.
+
+Root `CODEOWNERS` and `areas.yaml` have no direct native owner; their reviews go
+through the affected team files. These are the only two exceptions. The existing
+required `codeowners` action checks the team files; no new required check or branch
+setting is needed.
 
 ### Add owners without dropping existing accountability
 
@@ -68,11 +97,9 @@ before it, which may have been decided by an ancestor several levels up or by
 an intermediate rule that already reassigned it. The catch-all never counts --
 every explicit row exists to replace it.
 
-That check covers `shared` rows only. An area `path_globs` entry nested inside
-another area's directory still replaces the outer owner silently. Whether an
-owner should inherit down a subtree at all is an open question about the
-ownership model; until it is settled, a reviewer reading the `areas.yaml` diff
-is the control there.
+That additivity check covers `shared` rows only. A nested area `path_globs` entry
+can replace the outer owner; the generated team files make that transfer
+reviewable by both affected teams.
 
 For an invariant that should not emit another CODEOWNERS row, use
 `required_owners`. The strict gate checks every matching tracked file against
@@ -92,7 +119,7 @@ deleted.
 
 Removing a `required_owners` entry lifts the requirement -- deliberately, or a
 contract could never be retired. The edit is itself a policy change: it is
-judged full-tree and reviewed by this directory's owners, so lifting a
+judged full-tree and reviewed through the generated Process file, so lifting a
 guarantee is always a visible, owned decision.
 
 ## External contributors

@@ -1,0 +1,23 @@
+/dev/docker-observability-xpu.yml @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/test_vllm_xpu.py @ai-dynamo/dynamo-xpu-codeowners
+/.github/workflows/pr-xpu.yaml @ai-dynamo/dynamo-xpu-codeowners
+/.github/workflows/xpu-ci.yaml @ai-dynamo/dynamo-xpu-codeowners
+/dev/observability/prometheus-xpu.yml @ai-dynamo/dynamo-xpu-codeowners
+/dev/observability/xpu-alert-rules.yml @ai-dynamo/dynamo-xpu-codeowners
+/dev/observability/xpu_smi_exporter.py @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/multimodal_profiles/vllm_xpu.py @ai-dynamo/dynamo-xpu-codeowners
+/tests/router/test_router_e2e_with_vllm_xpu.py @ai-dynamo/dynamo-xpu-codeowners
+/dev/observability/*xpu* @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-observability-codeowners
+/recipes/**/vllm/**/*xpu* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/test_vllm_xpu.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.github/workflows/pr-xpu.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.github/workflows/xpu-ci.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/dev/docker-observability-xpu.yml @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/examples/backends/vllm/**/xpu/** @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/multimodal_profiles/
+/recipes/**/sglang/**/*Dockerfile*
+/examples/global_planner/*vllm*xpu* @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/recipes/**/tokenspeed/**/*Dockerfile*
+/dev/observability/grafana_dashboards/*xpu* @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/multimodal_profiles/vllm_xpu.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/tests/router/test_router_e2e_with_vllm_xpu.py @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners

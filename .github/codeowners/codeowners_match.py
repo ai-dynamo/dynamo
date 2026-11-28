@@ -51,6 +51,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
+DELEGATED = frozenset({"CODEOWNERS", ".github/codeowners/areas.yaml"})
+
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
 # ----------------------------------------------------------------------
@@ -247,8 +249,7 @@ def parse_codeowners(text: str) -> list[tuple[str, list[str]]]:
         if not stripped:
             continue
         pattern, *owners = stripped.split()
-        if owners:
-            rules.append((pattern, owners))
+        rules.append((pattern, owners))
     return rules
 
 

@@ -1,0 +1,12 @@
+/tests/fault_tolerance/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/deploy/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/etcd_ha/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/hardware/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/migration/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/cancellation/ @ai-dynamo/dynamo-fault-tolerance-codeowners
+/tests/fault_tolerance/etcd_ha/utils.py @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/tests/fault_tolerance/migration/utils.py @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
+/tests/fault_tolerance/cancellation/utils.py @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
+/tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/tests/fault_tolerance/hardware/fault_injection_service/api_service/main.py @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners

@@ -1,0 +1,26 @@
+/lib/sidecar/AGENTS.md @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/CLAUDE.md @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/lpx/ @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/mocker/servers/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/common/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/sglang/ @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/triton/ @ai-dynamo/dynamo-backend-triton-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/testkit/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/README.md @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/docs/fern/**/*sidecar* @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/mocker/servers/sglang/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/mocker/servers/trtllm/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/dynamo-sidecar @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/tests/serve/test_sidecar.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/SUPPORT_NOTES.md @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/docs/fern/pages/use-cases/agents/
+/components/src/dynamo/vllm/sidecar.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/components/src/dynamo/sglang/sidecar.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/components/src/dynamo/trtllm/sidecar.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/testkit/tests/support/lpx.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/testkit/tests/support/vllm.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/testkit/tests/support/sglang.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/bindings/python/tests/test_sidecar_startup.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners

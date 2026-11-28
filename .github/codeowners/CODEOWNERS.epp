@@ -1,0 +1,23 @@
+/deploy/inference-gateway/ @ai-dynamo/dynamo-epp-codeowners
+/deploy/inference-gateway/scripts/ @ai-dynamo/dynamo-epp-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/deploy/**/*lpx*
+/lib/llm/src/entrypoint.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/kv_router/README.md @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/http/service/error.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-epp-codeowners
+/deploy/inference-gateway/ext-proc/ @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
+/lib/router/scheduler/src/config.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/router/scheduler/src/selection/* @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/kv_router/routing_load.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/router-plugins/builtin/src/lib.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/router/session-affinity/src/lib.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/discovery/worker_monitor.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-epp-codeowners
+/examples/router/custom-policy-example/epp/ @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/http/service/busy_threshold.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-epp-codeowners
+/deploy/inference-gateway/ext-proc/Dockerfile @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-ops-codeowners
+/lib/router/kv-router/src/plugins/registry.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/kv_router/prefill_router/query.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/router/kv-router/src/scheduling/config.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/router/kv-router/src/services/selection/* @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners

@@ -1134,13 +1134,13 @@ class TestIsPolicyChange:
     def test_codeowners_output_is_policy(self) -> None:
         assert is_policy_change(["CODEOWNERS"], self._AREAS, ".") is True
 
-    def test_codeowners_file_requests_only_process(self) -> None:
-        # GitHub requests every owner on the last matching line. A wide list
-        # on CODEOWNERS pages every codeowner group when the generated file
-        # changes, which is what happened on pull request 15170.
+    def test_codeowners_file_delegates_instead_of_requesting_every_team(self) -> None:
+        # The generated root delegates to changed team files instead of broadcasting.
         root = Path(__file__).resolve().parents[2]
         rules = parse_codeowners((root / "CODEOWNERS").read_text())
-        assert resolve_owners(rules, "CODEOWNERS") == [
+        assert resolve_owners(rules, "CODEOWNERS") == []
+        assert resolve_owners(rules, ".github/codeowners/areas.yaml") == []
+        assert resolve_owners(rules, ".github/codeowners/CODEOWNERS.process") == [
             "@ai-dynamo/dynamo-process-codeowners"
         ]
 

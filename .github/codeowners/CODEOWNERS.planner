@@ -1,0 +1,39 @@
+/gyms/planner-gym/ @ai-dynamo/dynamo-planner-codeowners
+/examples/global_planner/ @ai-dynamo/dynamo-planner-codeowners
+/examples/power-aware-budget/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/profiler/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/aisimulate/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/core/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/tests/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/global_planner/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/config/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/profiler/tests/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/profiler/utils/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/offline/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/connectors/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/monitoring/ @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/global_planner/tests/ @ai-dynamo/dynamo-planner-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/deploy/power-agent/ @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
+/deploy/power-agent/Dockerfile @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-ops-codeowners
+/examples/global_planner/*vllm*xpu* @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/container/templates/planner.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/container/deps/requirements.planner.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/aisimulate/tests/dgd/ @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/aisimulate/output/dgd/ @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/.github/actions/build-deploy-component/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/aisimulate/output/dgdr_run/ @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/profiler/utils/dgdr_validate.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/planner/connectors/kubernetes.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/profiler/utils/dgd_generation.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/planner/environment/metrics_provider/ @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/planner/monitoring/planner_metrics.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/planner/monitoring/traffic_metrics.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
+/deploy/observability/grafana-planner-dashboard-configmap.yaml @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/connectors/clients/kubernetes_api.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/mocker/utils/planner_profiler_perf_data_converter.py @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
+/components/src/dynamo/planner/tests/unit/test_prometheus_traffic_provider.py @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners

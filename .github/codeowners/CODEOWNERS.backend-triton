@@ -1,0 +1,8 @@
+/lib/sidecar/triton/ @ai-dynamo/dynamo-backend-triton-codeowners
+/components/src/dynamo/triton/** @ai-dynamo/dynamo-backend-triton-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/ @ai-dynamo/dynamo-backend-triton-codeowners
+/lib/sidecar/triton/ @ai-dynamo/dynamo-backend-triton-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/docs/fern/**/*sidecar*

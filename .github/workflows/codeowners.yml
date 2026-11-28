@@ -37,7 +37,7 @@ jobs:
       # fail, nothing else means anything.
       - name: Unit tests (matcher + tree-independence)
         run: |
-          python -m pytest .github/codeowners/test_codeowners.py -v \
+          python -m pytest .github/codeowners/ -v \
             -p no:cacheprovider \
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
@@ -76,7 +76,12 @@ jobs:
             --repo . \
             --strict
 
-      # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
+      - name: Validate team CODEOWNERS
+        if: github.event_name == 'pull_request'
+        # Checkout uses the PR merge commit; its first parent is the tested base.
+        run: python .github/codeowners/team_codeowners.py --base HEAD^1
+
+      # Regenerate, then fail if CODEOWNERS, its team files or CONTRIBUTORS.md
       # drifted from what the sources produce. emit_codeowners.py is a PURE
       # FUNCTION of areas.yaml + external_contributors.yaml (no tree walk),
       # so this diff only ever fires when a policy input or a committed output
@@ -89,5 +94,5 @@ jobs:
             --out CODEOWNERS \
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md
-          git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
-            || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
+          git diff --exit-code CODEOWNERS CONTRIBUTORS.md '.github/codeowners/CODEOWNERS.*' \
+            || { echo "::error::Generated ownership files are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
