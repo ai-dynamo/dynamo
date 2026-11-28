@@ -21,15 +21,15 @@ use super::{PublisherInput, ZmqRecoveryConfig};
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
-pub(super) struct DecodedZmqKvBatch {
-    pub(super) source_cursor: u64,
-    pub(super) batch: KvEventBatch,
+pub struct DecodedZmqKvBatch {
+    pub source_cursor: u64,
+    pub batch: KvEventBatch,
 }
 
 /// Decode the transport envelope shared by legacy and residency-aware inputs.
 ///
 /// Callers retain their own malformed-input and protocol-version policies.
-pub(super) fn decode_zmq_kv_batch(
+pub fn decode_zmq_kv_batch(
     frames: crate::utils::zmq::MultipartMessage,
 ) -> Result<DecodedZmqKvBatch> {
     let (source_cursor, payload) = split_zmq_kv_batch(frames)?;
@@ -115,6 +115,7 @@ pub(super) async fn start_zmq_listener(
         return;
     }
 
+    let next_id = || next_event_id.fetch_add(1, Ordering::SeqCst);
     let mut messages_processed = 0u64;
     let mut last_source_cursors = HashMap::<u32, u64>::new();
     let mut last_message = tokio::time::Instant::now();
@@ -215,7 +216,7 @@ pub(super) async fn start_zmq_listener(
                         .expect("synthetic clear event always normalizes");
                     events.push(event);
                 }
-                normalize_batch(batch, &mut normalizer, worker, &next_event_id, &mut events);
+                normalize_batch(batch, &mut normalizer, worker, next_id, &mut events);
                 if !events.is_empty() {
                     let event_count = events.len() as u64;
                     if tx.send(PublisherInput::Events(events)).is_err() {
@@ -240,12 +241,12 @@ pub(super) fn is_mismatched_rank(rank: Option<i32>, expected_rank: Option<u32>) 
     expected_rank.is_some_and(|expected_rank| rank.map(i32::cast_unsigned) != Some(expected_rank))
 }
 
-/// Shared by live and recovery ingestion so both use one normalizer and event ID allocator.
-pub(super) fn normalize_batch(
+/// Shared by live and recovery ingestion and by sidecars, so all use one normalizer and event ID allocator.
+pub fn normalize_batch(
     batch: KvEventBatch,
     normalizer: &mut ZmqEventNormalizer,
     worker: WorkerWithDpRank,
-    next_event_id: &AtomicU64,
+    mut next_event_id: impl FnMut() -> u64,
     events: &mut Vec<PlacementEvent>,
 ) {
     let metrics = kv_publisher_metrics();
@@ -267,7 +268,7 @@ pub(super) fn normalize_batch(
         if let Some(metrics) = &metrics {
             metrics.increment_zmq_event("accepted", event_type);
         }
-        let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+        let event_id = next_event_id();
         let Some(event) = normalizer.normalize_preprocessed(raw_event, event_id, worker) else {
             if let Some(metrics) = &metrics {
                 metrics.increment_zmq_conversion_issue(event_type, "conversion_none");

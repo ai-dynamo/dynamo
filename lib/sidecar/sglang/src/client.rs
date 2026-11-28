@@ -14,8 +14,10 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_sidecar_common::kv_events::{Subscribe, grpc_batches};
 use dynamo_sidecar_common::v14::GrpcChannelPool;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use sglang_kv_types::kv::v1::kv_events_client::KvEventsClient;
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
@@ -41,6 +43,8 @@ pub(crate) struct NodeMetadata {
     pub dp_size: u32,
     pub dist_init_addr: Option<String>,
     pub kv_event_sources: Vec<LocalKvEventSource>,
+    /// Each listener serves its rank's `sglang.kv.v1.KvEvents` stream.
+    pub grpc_kv_events: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +70,7 @@ impl NodeMetadata {
             dp_size,
             dist_init_addr,
             kv_event_sources,
+            grpc_kv_events: false,
         };
         metadata.validate()?;
         Ok(metadata)
@@ -386,6 +391,7 @@ pub(crate) fn client_from_channel(channel: Channel) -> Client {
 pub struct Pool {
     clients: Vec<Client>,
     next: AtomicUsize,
+    kv_events: Channel,
 }
 
 impl Pool {
@@ -404,6 +410,7 @@ impl Pool {
         Ok(Self {
             clients,
             next: AtomicUsize::new(0),
+            kv_events: pool.next_channel(),
         })
     }
 
@@ -427,11 +434,31 @@ impl Pool {
             .expect("a validated endpoint")
             .connect_lazy();
         Self {
-            clients: vec![client_from_channel(channel)],
+            clients: vec![client_from_channel(channel.clone())],
             next: AtomicUsize::new(0),
+            kv_events: channel,
         }
     }
+
+    /// Opens this listener's `SubscribeKvEvents` stream for `dp_rank` on each call.
+    pub(crate) fn kv_event_subscription(&self, dp_rank: u32) -> Subscribe {
+        let channel = self.kv_events.clone();
+        Box::new(move || {
+            let mut client = KvEventsClient::new(channel.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+            Box::pin(async move {
+                let request = sglang_kv_types::kv::v1::SubscribeKvEventsRequest {
+                    data_parallel_rank: dp_rank,
+                    resume: None,
+                };
+                let response = client.subscribe_kv_events(request).await?;
+                Ok(grpc_batches(response.into_inner(), kv_event_proto::batch))
+            })
+        })
+    }
 }
+
+mod kv_event_proto;
 
 /// GetServerInfo, GetModelInfo and ListModels, mapped to typed discovery.
 /// An engine that answers any of them UNIMPLEMENTED does not serve the

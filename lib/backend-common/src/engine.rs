@@ -536,6 +536,8 @@ pub enum KvEventSource {
     Push {
         on_ready: OnPublisherReady,
         dp_rank: u32,
+        /// See `idempotent_stores` on `Zmq`.
+        idempotent_stores: bool,
     },
 }
 

@@ -352,7 +352,7 @@ fn hicache_native_offloading_capacity(
 /// the registration at start. Its own DP rank is checked with the node's
 /// listener table.
 fn kv_events(deployment: &pb::DeploymentInfo) -> Result<NodeMetadata, DynamoError> {
-    let metadata = NodeMetadata::new(
+    let mut metadata = NodeMetadata::new(
         deployment.node_rank,
         deployment.nnodes,
         deployment.dp_size,
@@ -369,6 +369,11 @@ fn kv_events(deployment: &pb::DeploymentInfo) -> Result<NodeMetadata, DynamoErro
             .collect(),
     )
     .map_err(|error| client::protocol_error(error.to_string()))?;
+    let dp_rank = deployment.dp_rank.unwrap_or(0);
+    metadata.grpc_kv_events = deployment
+        .grpc_kv_event_sources
+        .iter()
+        .any(|source| source.dp_rank == dp_rank);
     Ok(metadata)
 }
 

@@ -76,13 +76,14 @@ pub use state_agent_host::{
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
+pub use zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch, normalize_batch};
 
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None;
 const DEFAULT_MAX_BATCH_BLOCKS: usize = 128;
 
-/// Configure the source of KV events.
-/// Currently, only ZMQ is supported.
+/// Configure the source of KV events. `Push` starts no source, like passing no
+/// config, and differs from that only in the dedup policy it can select.
 pub enum KvEventSourceConfig {
     Zmq {
         endpoint: String,
@@ -112,6 +113,11 @@ pub enum KvEventSourceConfig {
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
+    },
+    /// Events arrive through the `publish_*` methods only.
+    Push {
+        /// See `idempotent_stores` on `Zmq`.
+        idempotent_stores: bool,
     },
 }
 
@@ -163,7 +169,7 @@ impl KvEventSource {
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<PublisherInput>,
         next_event_id: Arc<AtomicU64>,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         match source_config {
             KvEventSourceConfig::Zmq {
                 endpoint,
@@ -213,11 +219,12 @@ impl KvEventSource {
                             cancellation_token,
                         ));
 
-                Ok(KvEventSource::Zmq {
+                Ok(Some(KvEventSource::Zmq {
                     listener_abort_handle,
                     supervisor_handle: parking_lot::Mutex::new(Some(supervisor_handle)),
-                })
+                }))
             }
+            KvEventSourceConfig::Push { .. } => Ok(None),
         }
     }
 
@@ -245,6 +252,21 @@ impl KvEventSource {
             }
         }
         Ok(())
+    }
+}
+
+fn worker_dedup_policy(source_config: Option<&KvEventSourceConfig>) -> EventDedupPolicy {
+    match source_config {
+        Some(
+            KvEventSourceConfig::Zmq {
+                idempotent_stores: true,
+                ..
+            }
+            | KvEventSourceConfig::Push {
+                idempotent_stores: true,
+            },
+        ) => EventDedupPolicy::SetLike,
+        _ => EventDedupPolicy::RefCounted,
     }
 }
 
@@ -432,20 +454,10 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
-        let worker_dedup_policy = if matches!(
-            source_config,
-            Some(KvEventSourceConfig::Zmq {
-                idempotent_stores: true,
-                ..
-            })
-        ) {
-            EventDedupPolicy::SetLike
-        } else {
-            EventDedupPolicy::RefCounted
-        };
+        let worker_dedup_policy = worker_dedup_policy(source_config.as_ref());
         let mut source = None;
         if let Some(config) = source_config {
-            source = Some(KvEventSource::start(
+            source = KvEventSource::start(
                 component.clone(),
                 worker_id,
                 kv_block_size,
@@ -453,7 +465,7 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 tx.clone(),
                 next_event_id.clone(),
-            )?);
+            )?;
         }
 
         let local_indexer = if enable_local_indexer {
@@ -748,6 +760,10 @@ impl KvEventPublisher {
 
     pub fn kv_block_size(&self) -> u32 {
         self.kv_block_size
+    }
+
+    pub fn worker_id(&self) -> WorkerId {
+        self.worker_id
     }
 
     pub fn shutdown(&mut self) {

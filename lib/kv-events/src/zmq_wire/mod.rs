@@ -36,6 +36,7 @@ pub use convert::{
     normalize_mm_placeholder_runs, normalize_mm_token_runs,
 };
 pub use dedup::{EventDedupFilter, EventDedupPolicy};
+pub use deserialize::{mark_first_raw_key_block, normalize_medium, normalize_token_ids};
 pub use extra_keys::{
     DYNAMO_CACHE_SALT_PREFIX, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
 };

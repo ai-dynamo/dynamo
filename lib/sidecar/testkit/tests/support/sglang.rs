@@ -26,6 +26,7 @@ use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
 use futures::stream::BoxStream;
+use sglang_kv_types::kv::v1::kv_events_server::KvEventsServer;
 use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
@@ -222,6 +223,7 @@ impl Fixture {
         let (health_tx, health_calls) = watch::channel(0);
         let (abort_tx, aborts) = watch::channel(Vec::new());
         let (received_tx, received) = watch::channel(Vec::new());
+        let kv_events_service = service.clone();
         let controlled = ControlledService {
             inner: service.clone(),
             control,
@@ -238,6 +240,7 @@ impl Fixture {
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(SglangServiceServer::new(controlled))
+                .add_service(KvEventsServer::new(kv_events_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown.await;
                 })

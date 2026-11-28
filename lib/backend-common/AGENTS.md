@@ -373,11 +373,12 @@ Pick based on how the engine's KV event API is shaped:
   publishes to a ZMQ PUB socket. `Worker` subscribes directly. Set
   `image_token_id` to the model's image placeholder token to enable exact
   multimodal KV routing; `None` keeps text-prefix routing for images.
-- `Push { on_ready, dp_rank }` — engine has a programmatic event
+- `Push { on_ready, dp_rank, idempotent_stores }` — engine has a programmatic event
   surface. `Worker` constructs the publisher, then calls
   `on_ready(publisher)` once during setup. The engine stashes the
   publisher and drives `publish_stored` / `publish_removed` from its
   own thread. The engine **must** stop that thread in `cleanup()`.
+  `idempotent_stores` picks the publisher's dedup policy, as on `Zmq`.
 
 ### `SnapshotPublisher` (mirrors `KvEventSource::Push`)
 

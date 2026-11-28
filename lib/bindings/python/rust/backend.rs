@@ -1663,7 +1663,11 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
                 })
                 .map_err(py_err_to_dynamo)
             });
-            Ok(RsKvEventSource::Push { on_ready, dp_rank })
+            Ok(RsKvEventSource::Push {
+                on_ready,
+                dp_rank,
+                idempotent_stores: false,
+            })
         }
         other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "kv_event_sources() returned unknown descriptor type {other:?}; \

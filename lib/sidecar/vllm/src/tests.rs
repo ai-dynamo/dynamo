@@ -20,6 +20,7 @@ use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_sidecar_common::kv_events::KvEventFeed;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
@@ -964,28 +965,18 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.data_parallel_size, Some(2));
     assert_eq!(registration.data_parallel_start_rank, Some(0));
 
-    let sources = engine.kv_event_sources().await.expect("KV event sources");
-    assert_eq!(sources.len(), 2);
+    let sources = engine.sidecar_kv_sources().await.expect("KV event sources");
     assert_eq!(
         sources
             .iter()
-            .map(|source| source.dp_rank())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([0, 1])
-    );
-    assert!(sources.iter().all(|source| matches!(
-        source,
-        dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
-    )));
-    assert_eq!(
-        sources
-            .iter()
-            .map(|source| match source {
-                dynamo_backend_common::KvEventSource::Zmq { endpoint, .. } => endpoint.as_str(),
-                dynamo_backend_common::KvEventSource::Push { .. } => unreachable!(),
+            .map(|source| match &source.feed {
+                KvEventFeed::Zmq { endpoint, topic } if topic.is_empty() => {
+                    (source.dp_rank, endpoint.as_str())
+                }
+                _ => panic!("expected a ZMQ feed"),
             })
             .collect::<Vec<_>>(),
-        ["tcp://127.0.0.1:20081", "tcp://127.0.0.1:20082"]
+        [(0, "tcp://127.0.0.1:20081"), (1, "tcp://127.0.0.1:20082")]
     );
 
     let mut routed_request = serde_json::to_value(request()).expect("serialize request");
@@ -2523,15 +2514,13 @@ async fn multimodal_kv_sources_carry_the_resolved_image_token() {
     let (engine, _) = engine_from_args(&server.endpoint).await;
     engine.start(0).await.expect("start");
 
-    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    let sources = engine.sidecar_kv_sources().await.expect("KV event sources");
     assert!(!sources.is_empty());
-    assert!(sources.iter().all(|source| matches!(
-        source,
-        dynamo_backend_common::KvEventSource::Zmq {
-            image_token_id: Some(151655),
-            ..
-        }
-    )));
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.image_token_id == Some(151655))
+    );
 }
 
 #[tokio::test]
@@ -2552,15 +2541,9 @@ async fn unresolved_multimodal_routing_token_falls_back_without_source_metadata(
     let (engine, _) = engine_from_args(&server.endpoint).await;
 
     engine.start(0).await.expect("start without routing token");
-    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    let sources = engine.sidecar_kv_sources().await.expect("KV event sources");
     assert!(!sources.is_empty());
-    assert!(sources.iter().all(|source| matches!(
-        source,
-        dynamo_backend_common::KvEventSource::Zmq {
-            image_token_id: None,
-            ..
-        }
-    )));
+    assert!(sources.iter().all(|source| source.image_token_id.is_none()));
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 
 use tonic_v14 as tonic;
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
+use dynamo_sidecar_common::kv_events::{KvEventFeed, SidecarKvSource, kv_event_feeds};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
 };
@@ -1134,6 +1135,7 @@ impl LLMEngine for VllmSidecarEngine {
                 grpc.sleep(crate::proto::SleepRequest {
                     level,
                     mode: mode as i32,
+                    reset_connector: None,
                 })
                 .await
                 .map_err(|status| client::status_to_dynamo("Sleep", status))?;
@@ -1248,65 +1250,109 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(self
+            .sidecar_kv_sources()
+            .await?
+            .into_iter()
+            .map(|source| source.into_push(self.cancel.child_token()))
+            .collect())
+    }
+}
+
+impl VllmSidecarEngine {
+    /// One feed per local rank: vLLM's gRPC stream when it lists one, else its
+    /// ZMQ publisher. Empty when KV events are off.
+    pub(crate) async fn sidecar_kv_sources(&self) -> Result<Vec<SidecarKvSource>, DynamoError> {
         let client = self
             .client
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
-        let expected_dp_range = self.model.data_parallel_range();
-        let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
-        let mut ranks = HashSet::new();
-        let mut sources = Vec::new();
-        let reported_sources = client.kv_event_sources().await?;
-        if reported_sources.is_empty() {
+        let reported = client.kv_event_sources().await?;
+        if reported.is_empty() {
             return Ok(Vec::new());
         }
-        let image_token_id = self.routing_image_token_id.get().copied().flatten();
-        for source in reported_sources {
-            if source.transport != "zmq" {
+        for source in &reported {
+            if !matches!(source.transport.as_str(), "zmq" | "grpc") {
                 tracing::warn!(
                     transport = %source.transport,
                     endpoint = %source.endpoint,
                     "Skipping unsupported vLLM KV-event transport"
                 );
-                continue;
             }
-            let dp_rank = source.data_parallel_rank.ok_or_else(|| {
-                client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without data_parallel_rank",
-                )
-            })?;
-            if !expected_dp_range.contains(&dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned rank {dp_rank}, outside the expected local range {expected_dp_range:?}",
-                )));
-            }
-            if !ranks.insert(dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned duplicate rank {dp_rank}",
-                )));
-            }
-            if source.endpoint.trim().is_empty() {
-                return Err(client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without an endpoint",
-                ));
-            }
-            sources.push(KvEventSource::Zmq {
-                heartbeat_timeout: None,
-                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
-                topic: source.topic,
+        }
+        let local_ranks = self.model.data_parallel_range();
+        let grpc = if reported.iter().any(|source| source.transport == "grpc") {
+            sources_by_rank(&reported, "grpc", local_ranks)?
+        } else {
+            BTreeMap::new()
+        };
+        let zmq = || {
+            sources_by_rank(&reported, "zmq", local_ranks)?
+                .into_iter()
+                .map(|(rank, source)| {
+                    if source.endpoint.trim().is_empty() {
+                        return Err(client::protocol_error(
+                            "GetKvEventSources returned a ZMQ source without an endpoint",
+                        ));
+                    }
+                    let endpoint = zmq_connect_endpoint(&source.endpoint, &self.endpoint);
+                    let topic = source.topic.clone();
+                    Ok((rank, KvEventFeed::Zmq { endpoint, topic }))
+                })
+                .collect()
+        };
+        let grpc = grpc
+            .into_keys()
+            .map(|rank| (rank, client.kv_event_subscription(rank)));
+        let image_token_id = self.routing_image_token_id.get().copied().flatten();
+        Ok(kv_event_feeds(grpc, zmq)
+            .await?
+            .into_iter()
+            .map(|(dp_rank, feed)| SidecarKvSource {
                 dp_rank,
                 image_token_id,
                 idempotent_stores: false,
-            });
-        }
-        if ranks.len() != expected_dp_size as usize {
+                feed,
+            })
+            .collect())
+    }
+}
+
+/// `transport`'s sources by local rank: each rank in range, listed once, none missing.
+fn sources_by_rank<'a>(
+    sources: &'a [pb::KvEventSource],
+    transport: &str,
+    local_ranks: &std::ops::Range<u32>,
+) -> Result<BTreeMap<u32, &'a pb::KvEventSource>, DynamoError> {
+    let mut by_rank = BTreeMap::new();
+    for source in sources
+        .iter()
+        .filter(|source| source.transport == transport)
+    {
+        let dp_rank = source.data_parallel_rank.ok_or_else(|| {
+            client::protocol_error(format!(
+                "GetKvEventSources returned a {transport} source without data_parallel_rank"
+            ))
+        })?;
+        if !local_ranks.contains(&dp_rank) {
             return Err(client::protocol_error(format!(
-                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} local data-parallel ranks; KV routing requires one source for every local rank",
-                ranks.len()
+                "GetKvEventSources returned rank {dp_rank}, outside the expected local range {local_ranks:?}",
             )));
         }
-        Ok(sources)
+        if by_rank.insert(dp_rank, source).is_some() {
+            return Err(client::protocol_error(format!(
+                "GetKvEventSources returned duplicate {transport} rank {dp_rank}",
+            )));
+        }
     }
+    if by_rank.len() != local_ranks.len() {
+        return Err(client::protocol_error(format!(
+            "GetKvEventSources returned {transport} sources for {} of {} local data-parallel ranks; KV routing requires one source for every local rank",
+            by_rank.len(),
+            local_ranks.len()
+        )));
+    }
+    Ok(by_rank)
 }
 
 #[cfg(feature = "mm-routing")]

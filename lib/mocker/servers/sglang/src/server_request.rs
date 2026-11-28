@@ -259,6 +259,7 @@ impl PreparedRequest {
                 }),
                 None => Kind::Length(pb::FinishLength {
                     length: Some(self.max_output_tokens as u64),
+                    ignored_stop: None,
                 }),
             }),
         }

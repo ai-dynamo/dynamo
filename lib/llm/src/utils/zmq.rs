@@ -54,7 +54,7 @@ where
     configure_common_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-pub(crate) async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> Result<SubSocket> {
+pub async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> Result<SubSocket> {
     let ctx = Context::new();
     let socket = configure_receive_builder(subscribe(&ctx))
         .set_ipv6(ipv6_option_for(endpoint)?)

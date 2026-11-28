@@ -180,6 +180,7 @@ fn min_present(infos: &[&EngineInfo], value: impl Fn(&EngineInfo) -> Option<u64>
 fn kv_union(infos: &[&EngineInfo]) -> Result<NodeMetadata, DynamoError> {
     let mut sources: Vec<LocalKvEventSource> = Vec::new();
     let mut publishing = Vec::new();
+    let mut grpc_kv_events = true;
     for info in infos {
         let metadata = info.kv_events.as_ref().map_err(Clone::clone)?;
         for source in &metadata.kv_event_sources {
@@ -193,6 +194,7 @@ fn kv_union(infos: &[&EngineInfo]) -> Result<NodeMetadata, DynamoError> {
         if !metadata.kv_event_sources.is_empty() {
             publishing.push(info.dp_rank);
         }
+        grpc_kv_events &= metadata.grpc_kv_events;
         sources.extend(metadata.kv_event_sources.iter().cloned());
     }
     if !publishing.is_empty() && publishing.len() != infos.len() {
@@ -202,14 +204,19 @@ fn kv_union(infos: &[&EngineInfo]) -> Result<NodeMetadata, DynamoError> {
         )));
     }
     let start = infos[0].kv_events.as_ref().map_err(Clone::clone)?;
-    NodeMetadata::new(
+    let metadata = NodeMetadata::new(
         start.node_rank,
         start.nnodes,
         start.dp_size,
         start.dist_init_addr.clone(),
         sources,
     )
-    .map_err(|error| client::protocol_error(error.to_string()))
+    .map_err(|error| client::protocol_error(error.to_string()))?;
+    // A stream on every listener, or the ZMQ sources for all of them.
+    Ok(NodeMetadata {
+        grpc_kv_events,
+        ..metadata
+    })
 }
 
 /// The gRPC endpoint of table entry `index`: the host of `--grpc-endpoint`

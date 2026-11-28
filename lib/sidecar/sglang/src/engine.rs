@@ -16,6 +16,7 @@ use dynamo_backend_common::{
 use dynamo_llm::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
+use dynamo_sidecar_common::kv_events::{KvEventFeed, SidecarKvSource, kv_event_feeds};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
 };
@@ -53,6 +54,7 @@ pub struct SglangSidecarEngine {
 struct StartedState {
     listeners: NodeListeners,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    grpc_kv_events: bool,
     combined_token_limit: Option<u32>,
 }
 
@@ -406,6 +408,7 @@ impl LLMEngine for SglangSidecarEngine {
             .set(StartedState {
                 listeners,
                 kv_event_sources,
+                grpc_kv_events: node.kv_events.grpc_kv_events,
                 combined_token_limit,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
@@ -624,20 +627,47 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(self
+            .sidecar_kv_sources()
+            .await?
+            .into_iter()
+            .map(|source| source.into_push(self.cancel.child_token()))
+            .collect())
+    }
+}
+
+impl SglangSidecarEngine {
+    /// One feed per rank of the node: each listener's gRPC stream when every
+    /// listener serves one, else the ZMQ publishers. Empty when KV events are off.
+    pub(crate) async fn sidecar_kv_sources(&self) -> Result<Vec<SidecarKvSource>, DynamoError> {
         let state = self
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
-        Ok(state
-            .kv_event_sources
-            .iter()
-            .map(|source| KvEventSource::Zmq {
-                heartbeat_timeout: None,
-                endpoint: source.endpoint.clone(),
-                topic: source.topic.clone(),
-                dp_rank: source.dp_rank,
+        let listeners = state.listeners.listeners.iter();
+        let grpc: Vec<_> = listeners
+            .filter(|_| state.grpc_kv_events)
+            .map(|listener| {
+                let subscription = listener.pool.kv_event_subscription(listener.dp_rank);
+                (listener.dp_rank, subscription)
+            })
+            .collect();
+        let zmq = || {
+            let feed = |zmq: &DiscoveredKvEventSource| KvEventFeed::Zmq {
+                endpoint: zmq.endpoint.clone(),
+                topic: zmq.topic.clone(),
+            };
+            let sources = state.kv_event_sources.iter();
+            Ok(sources.map(|zmq| (zmq.dp_rank, feed(zmq))).collect())
+        };
+        Ok(kv_event_feeds(grpc, zmq)
+            .await?
+            .into_iter()
+            .map(|(dp_rank, feed)| SidecarKvSource {
+                dp_rank,
                 image_token_id: None,
                 idempotent_stores: true,
+                feed,
             })
             .collect())
     }

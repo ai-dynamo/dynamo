@@ -76,6 +76,16 @@ pub enum Locality {
     Unknown,
 }
 
+impl Locality {
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "LOCAL" => Self::Local,
+            "REMOTE" => Self::Remote,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Ownership domain of one vLLM-enriched placement event.
 ///
 /// Missing on the wire is deliberately interpreted as `Framework`; an

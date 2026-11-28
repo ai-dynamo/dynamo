@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent, WorkerType,
 };
 use dynamo_mocker::live::{
     LiveEngine, LiveEngineConfig, RequestOutputBuffering, stable_request_uuid,
 };
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::grpc_kv_events::KvCacheEventData;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use futures::Stream;
 use sglang_api_types::api::v1 as pb;
@@ -28,6 +29,45 @@ use tonic::{Request, Response, Status};
 #[path = "server_request.rs"]
 mod request;
 
+mod kv_events {
+    dynamo_mocker::grpc_kv_events!(sglang_kv_types::kv::v1, attn_dp_rank, super::kv_event);
+}
+
+/// The fields the Mocker's ZMQ sink publishes for the same event.
+fn kv_event(raw: &RawKvEvent, block_size: u32) -> sglang_kv_types::kv::v1::KvCacheEvent {
+    use sglang_kv_types::kv::v1 as kv;
+    use sglang_kv_types::kv::v1::kv_cache_event::Event;
+    let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
+    let event = match &raw.event.data {
+        KvCacheEventData::Stored(data) => Event::BlockStored(kv::BlockStored {
+            block_hashes: (data.blocks.iter())
+                .map(|block| block.block_hash.0.cast_signed())
+                .collect(),
+            parent_block_hash: data.parent_hash.map(|parent| parent.0.cast_signed()),
+            token_ids: Some(kv::block_stored::TokenIds::Single(kv::TokenIdList {
+                token_ids: (raw.block_token_ids.iter().flatten().flatten())
+                    .map(|&token| u64::from(token))
+                    .collect(),
+            })),
+            block_size,
+            medium,
+            session_id: raw.session_id.clone(),
+            ..Default::default()
+        }),
+        KvCacheEventData::Removed(data) => Event::BlockRemoved(kv::BlockRemoved {
+            block_hashes: data
+                .block_hashes
+                .iter()
+                .map(|block| block.0.cast_signed())
+                .collect(),
+            medium,
+        }),
+        KvCacheEventData::Cleared => Event::AllBlocksCleared(kv::AllBlocksCleared {}),
+    };
+    kv::KvCacheEvent { event: Some(event) }
+}
+
+use kv_events::{KvEventResponses, KvEventStream};
 use request::PreparedRequest;
 
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
@@ -120,6 +160,7 @@ pub struct SglangMockerService {
     config: Arc<MockerServerConfig>,
     discovery: Arc<DiscoveryMetadata>,
     engine: LiveEngine,
+    kv_events: Option<Arc<KvEventStream>>,
     request_permits: Arc<Semaphore>,
 }
 
@@ -208,6 +249,8 @@ impl SglangMockerService {
                 engine_args.max_num_batched_tokens
             },
         };
+        let kv_events =
+            sink.map(|zmq| Arc::new(KvEventStream::new(zmq, config.dp_rank, page_size)));
         // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
         let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
@@ -215,7 +258,7 @@ impl SglangMockerService {
             LiveEngineConfig {
                 kv_event_publishers: KvEventPublishers::new(
                     None,
-                    sink.map(|sink| Arc::new(sink) as _),
+                    kv_events.clone().map(|sink| sink as _),
                 ),
                 ..Default::default()
             },
@@ -226,6 +269,7 @@ impl SglangMockerService {
             config: Arc::new(config),
             discovery: Arc::new(discovery),
             engine,
+            kv_events,
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
         })
     }
@@ -270,6 +314,15 @@ impl SglangMockerService {
 
     pub fn active_request_count(&self) -> usize {
         self.engine.active_request_count()
+    }
+
+    /// Tell KV event subscribers that every block was cleared, as a cache
+    /// flush does. The Mocker's own cache is left as it is.
+    #[doc(hidden)]
+    pub fn publish_all_blocks_cleared(&self) {
+        if let Some(kv_events) = &self.kv_events {
+            kv_events.publish_all_blocks_cleared();
+        }
     }
 
     pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
@@ -344,11 +397,35 @@ impl SglangMockerService {
                 )),
                 max_prefill_tokens: to_u64(discovery.max_prefill_tokens),
                 enable_dp_attention: config.enable_dp_attention,
+                grpc_kv_event_sources: self
+                    .kv_events
+                    .iter()
+                    .map(|_| pb::KvEventSource {
+                        dp_rank: config.dp_rank,
+                        block_size: discovery.page_size,
+                        ..Default::default()
+                    })
+                    .collect(),
                 kv_event_sources,
                 ..Default::default()
             }),
             ..Default::default()
         }
+    }
+}
+
+#[tonic::async_trait]
+impl sglang_kv_types::kv::v1::kv_events_server::KvEvents for SglangMockerService {
+    type SubscribeKvEventsStream = KvEventResponses;
+
+    async fn subscribe_kv_events(
+        &self,
+        request: Request<sglang_kv_types::kv::v1::SubscribeKvEventsRequest>,
+    ) -> Result<Response<Self::SubscribeKvEventsStream>, Status> {
+        let kv_events = self.kv_events.as_ref().ok_or_else(|| {
+            Status::failed_precondition("the Mocker does not publish KV cache events")
+        })?;
+        kv_events.subscribe(request.into_inner()).map(Response::new)
     }
 }
 

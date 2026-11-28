@@ -102,7 +102,9 @@ Aggregated serving uses loopback between the engine and sidecar. Disaggregated
 serving binds SGLang to the pod network so decode workers can reach prefill's
 bootstrap server, which the Rust server serves on its HTTP port; the prefill
 sidecar auto-detects and advertises its pod IP. For KV routing, the sidecar
-subscribes to the ZMQ endpoints SGLang reports in its discovery metadata.
+reads each listener's `sglang.kv.v1.KvEvents` gRPC stream when SGLang serves
+one, and otherwise subscribes to the ZMQ endpoints SGLang reports in its
+discovery metadata.
 Restrict pod-network gRPC, HTTP, and ZMQ ports with NetworkPolicy.
 
 Disaggregated serving requires an SGLang image with NIXL/UCX support, RDMA

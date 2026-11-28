@@ -38,7 +38,7 @@ pub enum KvCacheSpecKind {
 }
 
 impl KvCacheSpecKind {
-    pub(crate) fn from_wire(value: &str) -> Self {
+    pub fn from_wire(value: &str) -> Self {
         match value {
             "full_attention" => Self::FullAttention,
             "mla_attention" => Self::MlaAttention,

@@ -21,6 +21,7 @@ use dynamo_vllm_sidecar::proto::{
     self as pb,
     control_server::{Control, ControlServer},
     inference_server::{Inference, InferenceServer},
+    kv_events_server::KvEventsServer,
 };
 use futures::stream::BoxStream;
 use tokio::sync::watch;
@@ -109,6 +110,7 @@ impl SidecarFixture for Fixture {
             reasoning_parser: reasoning_parser.clone(),
         };
         let control_service = controlled.clone();
+        let kv_events_service = service.clone();
         let health = tonic_health::server::HealthReporter::new();
         health
             .set_serving::<ControlServer<ControlledService>>()
@@ -131,6 +133,7 @@ impl SidecarFixture for Fixture {
                         .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
                 )
                 .add_service(ControlServer::new(control_service))
+                .add_service(KvEventsServer::new(kv_events_service))
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown.await;

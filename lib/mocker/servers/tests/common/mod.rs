@@ -44,22 +44,26 @@ async fn generate(engine: &impl LLMEngine, tokens: Vec<u32>) {
     }
 }
 
-pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
-    let sources = engine.kv_event_sources().await.unwrap();
+/// The engine's KV events reach a router index through the sidecar's push
+/// source: stores, evictions, then the cache clear `clear_cache` triggers, if any.
+pub async fn check_kv_events(
+    engine: &impl LLMEngine,
+    block_size: u32,
+    idempotent_stores: bool,
+    clear_cache: Option<&dyn Fn()>,
+) {
+    let mut sources = engine.kv_event_sources().await.unwrap();
     assert_eq!(sources.len(), 1);
-    let KvEventSource::Zmq {
-        endpoint: source_endpoint,
-        topic,
+    let KvEventSource::Push {
+        on_ready,
         dp_rank,
-        ..
-    } = &sources[0]
+        idempotent_stores: source_idempotent_stores,
+    } = sources.remove(0)
     else {
-        panic!("expected a native ZMQ source");
+        panic!("expected the sidecar's push source");
     };
-    assert_eq!(*dp_rank, 0);
-    assert!(topic.is_empty());
-    assert!(source_endpoint.starts_with("tcp://127.0.0.1:"));
-    assert_ne!(source_endpoint.rsplit(':').next(), Some("0"));
+    assert_eq!(dp_rank, 0);
+    assert_eq!(source_idempotent_stores, idempotent_stores);
 
     let drt = DistributedRuntime::new(
         Runtime::from_current().unwrap(),
@@ -77,28 +81,21 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
         .await
         .unwrap()
         .typed::<Vec<RouterEvent>>();
-    let mut relay = KvEventPublisher::new_with_local_indexer(
-        endpoint,
-        block_size,
-        Some(KvEventSourceConfig::Zmq {
-            endpoint: source_endpoint.clone(),
-            topic: topic.clone(),
-            image_token_id: None,
-            video_token_id: None,
-            liveness: None,
-            expected_rank: None,
-            engine_owned_mm_identity: false,
-            idempotent_stores: false,
-            recovery: None,
-        }),
-        false,
-        *dp_rank,
-        None,
-    )
-    .unwrap();
+    let relay = Arc::new(
+        KvEventPublisher::new_with_local_indexer(
+            endpoint,
+            block_size,
+            Some(KvEventSourceConfig::Push { idempotent_stores }),
+            false,
+            dp_rank,
+            None,
+        )
+        .unwrap(),
+    );
+    on_ready(relay.clone()).unwrap();
 
-    // Exercise both real ZMQ subscription handshakes. Distinct warmup prompts
-    // produce fresh stores even if an earlier event was dropped before connect.
+    // Distinct warmup prompts produce fresh stores even if an earlier event
+    // was published before the subscriptions connected.
     tokio::time::timeout(Duration::from_secs(10), async {
         for n in 100.. {
             generate(engine, vec![n; block_size as usize]).await;
@@ -191,7 +188,23 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
     })
     .await
     .expect("eviction did not remove the prompt from the router index");
-    relay.shutdown();
-    cancel.cancel();
+
+    // Only the gRPC stream carries a clear, so this also shows which feed ran.
+    if let Some(clear_cache) = clear_cache {
+        clear_cache();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (_, events) = subscriber.next().await.unwrap().unwrap();
+                let mut events = events.iter();
+                if events.any(|event| matches!(event.event.data, KvCacheEventData::Cleared)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the cache clear did not reach the router");
+    }
     engine.cleanup().await.unwrap();
+    relay.stop_and_wait().await.unwrap();
+    cancel.cancel();
 }

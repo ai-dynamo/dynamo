@@ -576,6 +576,7 @@ impl LLMEngine for MockerBackend {
         Ok(vec![KvEventSource::Push {
             on_ready: Box::new(|_publisher| Ok(())),
             dp_rank: DP_RANK,
+            idempotent_stores: false,
         }])
     }
 

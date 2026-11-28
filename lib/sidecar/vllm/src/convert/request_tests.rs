@@ -410,8 +410,8 @@ fn vllm_extensions_preserve_native_fields() {
     assert_eq!(sampling.seed, Some(123));
     let decoding = sent.decoding.as_ref().unwrap();
     assert!(matches!(
-        decoding.structured_output,
-        Some(pb::decoding_parameters::StructuredOutput::Json(_))
+        decoding.legacy_structured_output,
+        Some(pb::decoding_parameters::LegacyStructuredOutput::Json(_))
     ));
     let kv = sent.kv.as_ref().unwrap();
     assert!(kv.bypass_prefix_cache);
@@ -590,7 +590,7 @@ fn sampling_passthrough_reaches_decoding_parameters() {
 
 #[test]
 fn guide_variants_preserve_type_and_payload() {
-    use pb::decoding_parameters::StructuredOutput;
+    use pb::decoding_parameters::LegacyStructuredOutput as StructuredOutput;
     for (guide, expected) in [
         (
             GuidedDecodingOptions {
@@ -623,7 +623,7 @@ fn guide_variants_preserve_type_and_payload() {
                 choice: Some(vec!["yes".into(), "no".into()]),
                 ..Default::default()
             },
-            StructuredOutput::Choice(pb::decoding_parameters::StringChoices {
+            StructuredOutput::Choice(pb::structured_output::StringChoices {
                 choices: vec!["yes".into(), "no".into()],
             }),
         ),
@@ -646,7 +646,10 @@ fn guide_variants_preserve_type_and_payload() {
         request.sampling_options.guided_decoding = Some(guide);
         let wire = build_generate_request(request, "guide".into(), DisaggregationMode::Aggregated)
             .unwrap();
-        assert_eq!(wire.decoding.unwrap().structured_output, Some(expected));
+        assert_eq!(
+            wire.decoding.unwrap().legacy_structured_output,
+            Some(expected)
+        );
     }
 }
 

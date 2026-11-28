@@ -44,8 +44,10 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 sglang-api-types = { workspace = true }
+sglang-kv-types = { workspace = true }
 tonic-v14 = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
+rmp-serde = { workspace = true }

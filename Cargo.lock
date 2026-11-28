@@ -3563,6 +3563,7 @@ dependencies = [
  "futures",
  "serde_json",
  "sglang-api-types",
+ "sglang-kv-types",
  "tokio",
  "tokio-stream",
  "tonic 0.14.6",
@@ -3588,8 +3589,10 @@ dependencies = [
  "futures",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde_json",
  "sglang-api-types",
+ "sglang-kv-types",
  "tokio",
  "tokio-util",
  "tonic 0.14.6",
@@ -3605,6 +3608,9 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-events",
+ "dynamo-llm",
+ "dynamo-router-protocol",
  "dynamo-runtime",
  "futures",
  "hyper-util",
@@ -3648,6 +3654,7 @@ dependencies = [
  "prost-types 0.14.3",
  "reqwest 0.12.28",
  "serde_json",
+ "sglang-kv-types",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -3896,7 +3903,9 @@ dependencies = [
  "pep440_rs",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "tokio",
@@ -9613,13 +9622,22 @@ dependencies = [
 [[package]]
 name = "sglang-api-types"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "445ae1031a16227c066c3e9dfb338407bed4d62994d0637c8b2fae05fa993344"
+source = "git+https://github.com/JulienDarve/sglang?rev=d1612cc4fc7086689b9137a059c3138fb2442379#d1612cc4fc7086689b9137a059c3138fb2442379"
 dependencies = [
  "bytes",
  "prost 0.14.3",
  "serde",
  "serde_json",
+ "tonic 0.14.6",
+ "tonic-prost",
+]
+
+[[package]]
+name = "sglang-kv-types"
+version = "0.1.0"
+source = "git+https://github.com/JulienDarve/sglang?rev=d1612cc4fc7086689b9137a059c3138fb2442379#d1612cc4fc7086689b9137a059c3138fb2442379"
+dependencies = [
+ "prost 0.14.3",
  "tonic 0.14.6",
  "tonic-prost",
 ]
@@ -11618,9 +11636,8 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556c39cab83e7b52b85503df323ea8bcc8a65a217be9bd4219d8d831ae20d31b"
+version = "0.7.0"
+source = "git+https://github.com/JulienDarve/vllm?rev=fb5a79e8fdb429ca1de8c8a3837e11c456a635ff#fb5a79e8fdb429ca1de8c8a3837e11c456a635ff"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",
