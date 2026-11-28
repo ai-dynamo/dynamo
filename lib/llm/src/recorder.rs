@@ -534,22 +534,29 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Send the events
+        let sent_at = Instant::now();
         for event in &events {
             event_tx.send(event.clone()).await.unwrap();
         }
 
-        // Allow some time for processing
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while recorder.event_count().await != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both events must be recorded");
+        let recorded_by = Instant::now();
+
         tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Check that both events were recorded
-        assert_eq!(recorder.event_count().await, 2);
-
-        // Check that the elapsed time is between 5 and 15 milliseconds
+        // The first event arrived between sending and observing the recorded count.
+        let minimum_elapsed_ms = recorded_by.elapsed().as_millis();
         let elapsed_ms = recorder.elapsed_time().await.unwrap().as_millis();
-        if !(5..=15).contains(&elapsed_ms) {
-            println!("Actual elapsed time: {} ms", elapsed_ms);
-            assert!((5..=15).contains(&elapsed_ms));
-        }
+        let maximum_elapsed_ms = sent_at.elapsed().as_millis();
+        assert!(
+            (minimum_elapsed_ms..=maximum_elapsed_ms).contains(&elapsed_ms),
+            "elapsed time {elapsed_ms} ms must be between {minimum_elapsed_ms} and {maximum_elapsed_ms} ms"
+        );
 
         // Force shutdown to flush file
         recorder.shutdown();
