@@ -22,6 +22,8 @@ pub use crate::replication::{
     ReplicaSyncConfig, SchedulerLoadSink,
 };
 pub use crate::selection::SelectionError;
+/// The role's booking-time hint stage, for a host that books outside the selection core.
+pub use crate::selection::core::RoleHintStage;
 pub use crate::selection::core::{
     HostCache, HostEligibility, HostHints, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
     Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,

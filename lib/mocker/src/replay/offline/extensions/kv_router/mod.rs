@@ -29,9 +29,11 @@ use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RoleHintStage;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_policies::kv_fetch::KV_FETCH_ACTION_TYPE;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
@@ -649,6 +651,8 @@ pub(crate) struct OfflineReplayRouter {
     kv_transfer_chain_supported: bool,
     /// The role computes KV copy sources, as resolved for the live router.
     sends_kv_fetch_hints: bool,
+    /// The role's hint policies, run for each admission whose selection found a copy source.
+    hint_stage: RoleHintStage,
     kv_transfer_gate_warned: bool,
 }
 
@@ -1042,6 +1046,7 @@ impl OfflineReplayRouter {
             needs_drain: false,
             kv_transfer_chain_supported,
             sends_kv_fetch_hints,
+            hint_stage: role.hint_stage,
             kv_transfer_gate_warned: false,
         };
         router.refresh_kv_transfer_chain();
@@ -1679,11 +1684,18 @@ impl OfflineReplayRouter {
                 self.block_size,
             ))?;
         let worker_idx = self.scheduler_id(selection.worker)?;
-        let kv_fetch_source = self.kv_fetch_source(
+        let request_id = request.request_id();
+        let fetched_source = self.fetched_source(
+            &scheduling_request,
+            &request_id,
+            selection.worker,
+            request.isl_tokens,
             selection.kv_transfer_source,
+        )?;
+        let kv_fetch_source = self.kv_fetch_source(
+            fetched_source,
             scheduling_request.kv_transfer_candidates.as_ref(),
         )?;
-        let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
             selection.cached_tokens,
@@ -1748,6 +1760,39 @@ impl OfflineReplayRouter {
             .and_then(|worker_id| worker_id.checked_mul(self.dp_size as usize))
             .and_then(|base| base.checked_add(worker.dp_rank as usize))
             .ok_or_else(|| anyhow!("scheduler id of {worker:?} does not fit into usize"))
+    }
+
+    /// The selected copy source when the role's hint policies send a `kv.fetch` for it, as the
+    /// live router's booking decides: a copy the selection committed to is always sent, and
+    /// `kv_fetch` sends a best-effort one only when it adds `min_additional_blocks`. Replay
+    /// simulates only the fetch; a policy's other actions, and the block range a fetch names,
+    /// are not modelled.
+    fn fetched_source(
+        &self,
+        scheduling_request: &SchedulingRequest,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        isl_tokens: usize,
+        source: Option<KvTransferSourceChoice>,
+    ) -> Result<Option<KvTransferSourceChoice>> {
+        if source.is_none() {
+            return Ok(None);
+        }
+        let hint = self.hint_stage.compose(
+            &self.workers_with_configs,
+            scheduling_request,
+            request_id,
+            worker,
+            isl_tokens,
+            self.block_size,
+            source,
+        )?;
+        let fetches = hint.is_some_and(|hint| {
+            hint.actions
+                .iter()
+                .any(|action| action.action_type == KV_FETCH_ACTION_TYPE)
+        });
+        Ok(source.filter(|_| fetches))
     }
 
     /// The engine pulls from a rank: the source rank itself, or the rank a cache-owner
@@ -4197,6 +4242,17 @@ policy_classes:
 
     pub(super) fn target_prefix_in_g2(worker_id: WorkerId, dp_rank: u32) -> RouterEvent {
         target_prefix(worker_id, dp_rank, StorageTier::HostPinned)
+    }
+
+    /// Worker `worker_id` holds the target prompt's first `blocks` blocks in G1, so a copy of
+    /// the whole prompt adds `8 - blocks` blocks to it.
+    pub(super) fn target_prefix_in_g1(worker_id: WorkerId, blocks: usize) -> RouterEvent {
+        prompt_store_event(
+            worker_id,
+            3,
+            &kv_fetch_target_hashes()[..blocks],
+            StorageTier::Device,
+        )
     }
 
     /// Places a request of `input_tokens` on worker `worker_id`, rank `dp_rank`,

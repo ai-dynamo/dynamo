@@ -538,9 +538,12 @@ hardware offload recipe.
 
   Without a policy file, the environment variable `DYN_ROUTER_WORKER_SELECTION_POLICY=kvcr` selects
   `kvcr` for every role, as it does for the frontend.
-  Replay models the built-in `kv_fetch` policy only: it sends a hint for every copy source the
-  router selects, does not apply the `min_additional_blocks` parameter, and does not run a custom
-  hint policy. Decode workers of a disaggregated deployment get no hints, because replay feeds the
+  Replay runs the role's hint policies for each placement, as the production router does when it
+  books a worker: `kv_fetch` sends a best-effort copy only when it adds at least
+  `min_additional_blocks` blocks, and always sends a copy that the `kvcr` selection committed to.
+  A `kv.fetch` action from any hint policy becomes a fetch from the copy source the router
+  selected. Replay does not simulate other action types or the block range a fetch names.
+  Decode workers of a disaggregated deployment get no hints, because replay feeds the
   router no KV events from the decode pool.
   `round_robin` sends no hints. Replay checks the role as the production router does at startup
   and fails with the same error: a role that lists `kv_fetch` needs an index that keeps the
