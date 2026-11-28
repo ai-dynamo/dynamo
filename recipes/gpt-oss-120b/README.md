@@ -113,4 +113,5 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 
 1. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
    JSON while speculative decoding is enabled; use tool calling or validate client-side.
+2. When using `--dyn-tool-call-parser harmony` or `--dyn-tool-call-parser gpt_oss`, GPT-OSS returns at most one tool call per response when `tool_choice: "auto"` is set, even if `parallel_tool_calls: true` is specified. To enable multiple tool calls in a single response, use the V2 parser route with structural tags enabled and set `tool_choice: "required"` and `parallel_tool_calls: true`. See [Known limitations and follow-up](../../docs/fern/pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#known-limitations-and-follow-up) for more details.
 

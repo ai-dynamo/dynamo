@@ -189,6 +189,10 @@ Forced choices can install guided JSON or family-native structural tags. A mode 
 
 ## Known limitations and follow-up
 
+When GPT-OSS uses its Harmony tool-call format with `--dyn-tool-call-parser gpt_oss` or `--dyn-tool-call-parser harmony` on the worker, the Chat Completions and Responses APIs return at most one tool call per response on the vLLM and SGLang backends if `tool_choice: "auto"` is set. This limit applies even when `parallel_tool_calls: true` is set.
+
+To allow multiple tool calls in a single response, set `tool_choice: "required"` and `parallel_tool_calls: true`, and use the [V2 parser route](#parser-generation-routing) with [structural tags enabled](structural-tag.md). This mode requires at least one tool call but does not guarantee multiple calls.
+
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
 
 Two cases remain unqualified: literal native tool-call openers inside quoted content, and V1 prompt prefill when `</think>` splits after its first `<`. Existing reasoning-marker tests do not cover them; see [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577).
