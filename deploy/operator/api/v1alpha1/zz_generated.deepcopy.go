@@ -2100,6 +2100,11 @@ func (in *ServiceReplicaStatus) DeepCopyInto(out *ServiceReplicaStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.RuntimeNamespaces != nil {
+		in, out := &in.RuntimeNamespaces, &out.RuntimeNamespaces
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.GPUPowerLimitWatts != nil {
 		in, out := &in.GPUPowerLimitWatts, &out.GPUPowerLimitWatts
 		*out = new(int64)

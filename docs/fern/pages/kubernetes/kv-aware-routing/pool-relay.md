@@ -82,6 +82,12 @@ reconciliation. If `Ready` is False, inspect the condition reason with
 `kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
 serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
 
+The operator writes the Relay's source file from the DGD's status: the Dynamo runtime namespace
+of each worker component. During a rolling update by the operator or by Grove, the old and new
+workers run in different runtime namespaces, and the file lists both until the old workers are
+gone, so the Relay keeps reporting the workers of both revisions. The Relay reloads the file
+without restarting once the kubelet refreshes it in the Pod, which can take about a minute.
+
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The
 operator supplies the main command, listener ports and probes, source volume, service account,

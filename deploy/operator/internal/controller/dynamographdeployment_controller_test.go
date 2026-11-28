@@ -1204,6 +1204,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				componentStatus, exists := result.ComponentStatus[component.ComponentName]
 				g.Expect(exists).To(gomega.BeTrue())
 				g.Expect(componentStatus.RuntimeNamespace).To(gomega.BeEmpty())
+				g.Expect(componentStatus.RuntimeNamespaces).To(gomega.BeEmpty())
 			}
 
 			pcs := &grovev1alpha1.PodCliqueSet{}
@@ -1231,7 +1232,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			t.Log("Expect accepted, completed workers to publish the rendered hash-suffixed namespace")
+			t.Log("Expect accepted, completed workers to publish the rendered hash-suffixed namespace, and unfinished ones to list it")
 			wantFinal := tt.wantReconcileResult
 			wantFinal.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
 			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
@@ -1247,14 +1248,18 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 					continue
 				}
 				componentStatus := wantFinal.ComponentStatus[component.ComponentName]
-				if componentStatus.RuntimeNamespace == "" {
-					continue
-				}
-				componentStatus.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+				acceptedNamespace := dynamo.ComponentRuntimeNamespace(
 					dgd.GetDynamoNamespaceForComponent(component),
 					string(component.ComponentType),
 					workerHash,
 				)
+				if componentStatus.RuntimeNamespace == "" {
+					// Unfinished workers keep no active namespace, but their accepted
+					// revision's replicas already run in its namespace.
+					componentStatus.RuntimeNamespaces = []string{acceptedNamespace}
+				} else {
+					componentStatus.RuntimeNamespace = acceptedNamespace
+				}
 				wantFinal.ComponentStatus[component.ComponentName] = componentStatus
 			}
 			g.Expect(result.ReconcileResult).To(gomega.Equal(wantFinal))
