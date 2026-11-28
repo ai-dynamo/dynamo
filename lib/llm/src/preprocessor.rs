@@ -1904,6 +1904,8 @@ pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
+    /// Shorten tool-call IDs to the 9 characters Mistral chat templates accept.
+    truncate_tool_call_ids: bool,
     continue_final_message: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
@@ -1927,6 +1929,9 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
                 "tool_call arguments normalization failed; template rendering may fail \
                  if it calls .items() on a string"
             );
+        }
+        if self.truncate_tool_call_ids {
+            crate::preprocessor::prompt::truncate_mistral_tool_call_ids(&mut json);
         }
         if self.continue_final_message
             && let Err(e) = crate::preprocessor::prompt::append_continue_final_message_tag(
@@ -2157,6 +2162,9 @@ pub struct OpenAIPreprocessor {
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
+    /// The card renders with the native tekken formatter, which never prints
+    /// tool-call IDs and needs no 9-character truncation.
+    tekken_formatter: bool,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -3541,6 +3549,12 @@ impl OpenAIPreprocessor {
             beam_route,
             mistral_tool_call_grammar,
             normalize_tool_call_args,
+            // Same check that selects the formatter in `prompt_formatter_from_mdc`.
+            tekken_formatter: mdc
+                .tokenizer
+                .as_ref()
+                .and_then(crate::model_card::TokenizerKind::tekken_file)
+                .is_some(),
             media_loader,
             token_budget,
             context_length,
@@ -4256,7 +4270,10 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
+        let truncate_tool_call_ids =
+            self.tool_call_parser.as_deref() == Some("mistral") && !self.tekken_formatter;
         let formatted_prompt = if self.normalize_tool_call_args
+            || truncate_tool_call_ids
             || emulate_continuation
             || rendering.is_some()
             || named_tool.is_some()
@@ -4264,6 +4281,7 @@ impl OpenAIPreprocessor {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
+                truncate_tool_call_ids,
                 continue_final_message: emulate_continuation,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
@@ -9582,6 +9600,39 @@ mod token_data_tests {
             prompt.as_str()
         );
         assert!(prompt.segments().is_some());
+    }
+
+    #[test]
+    fn mistral_tekken_card_keeps_parallel_tool_call_ids_distinct() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-mistral-tekken",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("mistral".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let call = |id: &str, city: &str| {
+            serde_json::json!({
+                "id": id, "type": "function",
+                "function": {"name": "get_weather", "arguments": format!("{{\"city\": \"{city}\"}}")}
+            })
+        };
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "mistral",
+            "messages": [
+                {"role": "user", "content": "Weather in Paris and Rome?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    call("first_123456789", "Paris"),
+                    call("second_123456789", "Rome")
+                ]},
+                {"role": "tool", "tool_call_id": "first_123456789", "content": "18C"},
+                {"role": "tool", "tool_call_id": "second_123456789", "content": "21C"}
+            ]
+        }))
+        .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert!(prompt.as_str().contains("18C"), "{}", prompt.as_str());
+        assert!(prompt.as_str().contains("21C"), "{}", prompt.as_str());
     }
 
     #[tokio::test]
@@ -17847,6 +17898,7 @@ mod tests {
             named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
+            truncate_tool_call_ids: false,
             continue_final_message: true,
             final_message_start_tag: None,
             rendering: None,
@@ -17892,6 +17944,7 @@ mod tests {
                     named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
+                    truncate_tool_call_ids: false,
                     continue_final_message: true,
                     final_message_start_tag: None,
                     rendering: None,
@@ -22766,6 +22819,63 @@ mod custom_content_template_tests {
             let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
             assert_eq!(rendered.as_str(), "patch=change x;<chemistry>");
         }
+    }
+
+    // The ID checks of the Mistral-7B-Instruct-v0.3 chat template.
+    const MISTRAL_TOOL_CALL_ID_TEMPLATE: &str = concat!(
+        "{% for message in messages %}",
+        "{% for call in message.tool_calls or [] %}",
+        "{% if call.id is not defined or call.id|length != 9 %}",
+        "{{ raise_exception('Tool call IDs should be alphanumeric strings with length 9!') }}",
+        "{% endif %}[CALL {{ call.id }}]{% endfor %}",
+        "{% if message.role == 'tool' %}",
+        "{% if message.tool_call_id is not defined or message.tool_call_id|length != 9 %}",
+        "{{ raise_exception('Tool call IDs should be alphanumeric strings with length 9!') }}",
+        "{% endif %}[RESULT {{ message.tool_call_id }}]{% endif %}{% endfor %}",
+    );
+
+    fn tool_result_turn(id: &str) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": id, "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}
+                }]},
+                {"role": "tool", "tool_call_id": id, "content": "18C and sunny"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn mistral_parser_shortens_tool_call_ids_for_the_chat_template() {
+        let mut preprocessor = custom_preprocessor(MISTRAL_TOOL_CALL_ID_TEMPLATE);
+        preprocessor.tool_call_parser = Some("mistral".to_string());
+
+        // The ID shape Dynamo itself returns on the first turn.
+        let request = tool_result_turn("call-b9d3d3b7-bd16-4158-a3e8-98885787c6db");
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(rendered.as_str(), "[CALL 85787c6db][RESULT 85787c6db]");
+
+        let request = tool_result_turn("VwLkM9Fp1");
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(rendered.as_str(), "[CALL VwLkM9Fp1][RESULT VwLkM9Fp1]");
+    }
+
+    #[test]
+    fn other_parsers_keep_tool_call_ids() {
+        let template = "{% for m in messages %}{% for call in m.tool_calls or [] %}{{ call.id }};{% endfor %}{{ m.tool_call_id or '' }}{% endfor %}";
+        let mut preprocessor = custom_preprocessor(template);
+        preprocessor.tool_call_parser = Some("hermes".to_string());
+
+        let request = tool_result_turn("call-b9d3d3b7-bd16-4158-a3e8-98885787c6db");
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            rendered.as_str(),
+            "call-b9d3d3b7-bd16-4158-a3e8-98885787c6db;call-b9d3d3b7-bd16-4158-a3e8-98885787c6db"
+        );
     }
 
     #[test]

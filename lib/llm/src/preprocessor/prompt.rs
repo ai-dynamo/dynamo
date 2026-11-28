@@ -235,6 +235,40 @@ pub(crate) fn normalize_tool_call_arguments(
     Ok(())
 }
 
+/// Mistral chat templates reject tool-call IDs that are not exactly 9 characters.
+const MISTRAL_TOOL_CALL_ID_LEN: usize = 9;
+
+/// Shorten each `tool_calls[].id` and `tool_call_id` longer than 9 characters to
+/// its last 9, as vLLM's `truncate_tool_call_ids` does. Mistral chat templates
+/// raise on any other length, so the IDs Dynamo and OpenAI clients generate
+/// (`call-<uuid>`, `call_<24 chars>`) would fail the turn that sends them back.
+/// The same rule on both fields keeps a call and its result paired.
+pub(crate) fn truncate_mistral_tool_call_ids(messages: &mut serde_json::Value) {
+    fn truncate(id: &mut serde_json::Value) {
+        if let serde_json::Value::String(id) = id
+            && let Some((start, _)) = id.char_indices().rev().nth(MISTRAL_TOOL_CALL_ID_LEN - 1)
+        {
+            // `start` is the byte offset of the 9th character from the end.
+            id.drain(..start);
+        }
+    }
+    for message in messages.as_array_mut().into_iter().flatten() {
+        if let Some(id) = message.get_mut("tool_call_id") {
+            truncate(id);
+        }
+        for call in message
+            .get_mut("tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = call.get_mut("id") {
+                truncate(id);
+            }
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
@@ -897,6 +931,29 @@ mod tests {
     /// without being silently corrupted to an f64 approximation.
     /// parse_args_object detects precision loss and falls back to Value::String,
     /// so the original spelling is preserved for the MiniJinja template.
+    #[test]
+    fn truncate_mistral_tool_call_ids_keeps_the_last_nine_characters() {
+        let mut messages = serde_json::json!([
+            {"role": "assistant", "tool_calls": [
+                {"id": "call-b9d3d3b7-bd16-4158-a3e8-98885787c6db"},
+                {"id": "VwLkM9Fp1"},
+                {"id": "short"},
+                {"id": "ünïcödé-ïdéntïfïér"}
+            ]},
+            {"role": "tool", "tool_call_id": "call-b9d3d3b7-bd16-4158-a3e8-98885787c6db"},
+            {"role": "user", "content": "no ids here"}
+        ]);
+        super::truncate_mistral_tool_call_ids(&mut messages);
+        let ids: Vec<_> = messages[0]["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["85787c6db", "VwLkM9Fp1", "short", "déntïfïér"]);
+        assert_eq!(messages[1]["tool_call_id"], "85787c6db");
+    }
+
     #[test]
     fn normalize_preserves_large_integer() {
         let big_int = "123456789012345678901234567890";
