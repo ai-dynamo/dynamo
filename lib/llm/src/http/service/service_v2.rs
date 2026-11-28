@@ -1809,6 +1809,11 @@ impl HttpServiceConfigBuilder {
                             Ok(next.run(req).await)
                         } else {
                             tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                            record_disabled_endpoint_rejection(
+                                &state,
+                                endpoint_type,
+                                req.headers(),
+                            );
                             Err(axum::http::StatusCode::NOT_FOUND)
                         }
                     }
@@ -1818,6 +1823,47 @@ impl HttpServiceConfigBuilder {
         }
         Ok(routes)
     }
+}
+
+fn metrics_endpoint_for(
+    endpoint_type: EndpointType,
+) -> Option<dynamo_http_server::metrics::Endpoint> {
+    use dynamo_http_server::metrics::Endpoint as MetricsEndpoint;
+    Some(match endpoint_type {
+        EndpointType::Chat => MetricsEndpoint::ChatCompletions,
+        EndpointType::Completion => MetricsEndpoint::Completions,
+        EndpointType::Embedding => MetricsEndpoint::Embeddings,
+        EndpointType::Images => MetricsEndpoint::Images,
+        EndpointType::Audios => MetricsEndpoint::Audios,
+        EndpointType::Transcriptions => MetricsEndpoint::Transcriptions,
+        EndpointType::Videos => MetricsEndpoint::Videos,
+        EndpointType::Classify => MetricsEndpoint::Classify,
+        EndpointType::Pooling => MetricsEndpoint::Pooling,
+        EndpointType::Rerank => MetricsEndpoint::Rerank,
+        EndpointType::Responses => MetricsEndpoint::Responses,
+        EndpointType::AnthropicMessages => MetricsEndpoint::AnthropicMessages,
+        EndpointType::Generate => MetricsEndpoint::Generate,
+        EndpointType::SystemOne => MetricsEndpoint::SystemOne,
+        EndpointType::Realtime | EndpointType::Batch => return None,
+    })
+}
+
+fn record_disabled_endpoint_rejection(
+    state: &Arc<State>,
+    endpoint_type: EndpointType,
+    headers: &axum::http::HeaderMap,
+) {
+    let Some(endpoint) = metrics_endpoint_for(endpoint_type) else {
+        return;
+    };
+    let request_id = super::openai::get_or_create_request_id(headers);
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        crate::discovery::UNKNOWN_METRIC_MODEL,
+        endpoint,
+        false,
+        &request_id,
+    );
+    inflight_guard.mark_error(dynamo_http_server::metrics::ErrorType::NotFound);
 }
 
 #[cfg(test)]
@@ -2221,6 +2267,209 @@ mod tests {
             client.get(&ready_url).send().await.unwrap().status(),
             reqwest::StatusCode::NOT_FOUND
         );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn outage_rejections_are_counted_in_request_metrics() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let model_name = "outage-model";
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        let mut workers =
+            crate::discovery::WorkerSet::new("test-ns".to_string(), "worker".to_string(), card);
+        let (_members, receiver) = tokio::sync::watch::channel::<Vec<u64>>(vec![]);
+        workers.set_instance_watcher(receiver);
+        state
+            .manager()
+            .add_worker_set(model_name, "test-ns", workers);
+        control
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+
+        let chat_request = serde_json::json!({
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        let response = client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&chat_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        for (endpoint_type, path, body) in [
+            (
+                EndpointType::Completion,
+                "/v1/completions",
+                serde_json::json!({"model": model_name, "prompt": "hi"}),
+            ),
+            (
+                EndpointType::Embedding,
+                "/v1/embeddings",
+                serde_json::json!({"model": model_name, "input": "hi"}),
+            ),
+            (
+                EndpointType::Responses,
+                "/v1/responses",
+                serde_json::json!({"model": model_name, "input": "hi"}),
+            ),
+        ] {
+            control.enable_model_endpoint(endpoint_type, true).unwrap();
+            let response = client
+                .post(format!("{base}{path}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "{path}"
+            );
+        }
+
+        control
+            .enable_model_endpoint(EndpointType::Chat, false)
+            .unwrap();
+        let response = client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&chat_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let body = client
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let request_lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("dynamo_frontend_requests_total{"))
+            .collect();
+        assert!(
+            request_lines
+                .iter()
+                .any(|line| line.contains(&format!("model=\"{model_name}\""))
+                    && line.contains("endpoint=\"chat_completions\"")
+                    && line.contains("status=\"error\"")
+                    && line.contains("error_type=\"unavailable\"")),
+            "readiness-gate 503 missing from dynamo_frontend_requests_total: {request_lines:?}"
+        );
+        for label in ["completions", "embeddings", "responses"] {
+            assert!(
+                request_lines
+                    .iter()
+                    .any(|line| line.contains(&format!("model=\"{model_name}\""))
+                        && line.contains(&format!("endpoint=\"{label}\""))
+                        && line.contains("status=\"error\"")
+                        && line.contains("error_type=\"unavailable\"")),
+                "readiness-gate 503 missing under endpoint=\"{label}\": {request_lines:?}"
+            );
+        }
+        assert!(
+            request_lines
+                .iter()
+                .any(|line| line.contains("model=\"unknown_model\"")
+                    && line.contains("endpoint=\"chat_completions\"")
+                    && line.contains("status=\"error\"")
+                    && line.contains("error_type=\"not_found\"")),
+            "disabled-endpoint 404 missing from dynamo_frontend_requests_total: {request_lines:?}"
+        );
+        handle.abort();
+    }
+
+    /// Every inference endpoint rejected by the disabled-endpoint gate must be
+    /// counted under its own endpoint label.
+    #[tokio::test]
+    async fn disabled_endpoint_rejections_are_counted_for_all_endpoints() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let control = service.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let cases = [
+            (
+                EndpointType::Chat,
+                "/v1/chat/completions",
+                "chat_completions",
+            ),
+            (EndpointType::Completion, "/v1/completions", "completions"),
+            (EndpointType::Embedding, "/v1/embeddings", "embeddings"),
+            (EndpointType::Classify, "/v1/classify", "classify"),
+            (EndpointType::Rerank, "/v1/rerank", "rerank"),
+            (EndpointType::Pooling, "/v1/pooling", "pooling"),
+            (EndpointType::Responses, "/v1/responses", "responses"),
+            (EndpointType::Images, "/v1/images/generations", "images"),
+            (EndpointType::Videos, "/v1/videos", "videos"),
+            (EndpointType::Audios, "/v1/audio/speech", "audios"),
+            (
+                EndpointType::Transcriptions,
+                "/v1/audio/transcriptions",
+                "transcriptions",
+            ),
+        ];
+        for (endpoint_type, path, _) in cases {
+            control.enable_model_endpoint(endpoint_type, false).unwrap();
+            let response = client
+                .post(format!("{base}{path}"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
+
+        let body = client
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let request_lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("dynamo_frontend_requests_total{"))
+            .collect();
+        for (_, path, label) in cases {
+            assert!(
+                request_lines.iter().any(|line| {
+                    line.contains(&format!("endpoint=\"{label}\""))
+                        && line.contains("model=\"unknown_model\"")
+                        && line.contains("status=\"error\"")
+                        && line.contains("error_type=\"not_found\"")
+                }),
+                "disabled-endpoint 404 for {path} missing under endpoint=\"{label}\": {request_lines:?}"
+            );
+        }
         handle.abort();
     }
 

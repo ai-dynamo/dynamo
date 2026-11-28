@@ -1358,7 +1358,14 @@ async fn handler_completions(
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.inner.model,
+        Endpoint::Completions,
+        request.inner.stream.unwrap_or(false),
+        &request_id,
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1374,7 +1381,6 @@ async fn handler_completions(
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     // Canonicalize alias → primary for the metric label.
     let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
@@ -2036,7 +2042,14 @@ async fn embeddings(
     let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.inner.model,
+        Endpoint::Embeddings,
+        false,
+        &request_id,
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2056,7 +2069,6 @@ async fn embeddings(
     if canonical != request.inner.model {
         request.inner.model = canonical;
     }
-    let request_id = get_or_create_request_id(&headers);
     let mut request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
@@ -2191,7 +2203,14 @@ async fn classify(
     let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.model,
+        Endpoint::Classify,
+        false,
+        &request_id,
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2211,7 +2230,6 @@ async fn classify(
     if canonical != request.model {
         request.model = canonical;
     }
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
@@ -2300,7 +2318,14 @@ async fn rerank(
     Json(mut request): Json<NvCreateRerankRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.model,
+        Endpoint::Rerank,
+        false,
+        &request_id,
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2317,7 +2342,6 @@ async fn rerank(
     if canonical != request.model {
         request.model = canonical;
     }
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
     let model = &request.model;
@@ -2547,7 +2571,14 @@ async fn pooling(
     let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.model,
+        Endpoint::Pooling,
+        false,
+        &request_id,
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -2570,7 +2601,6 @@ async fn pooling(
     if canonical != request.model {
         request.model = canonical;
     }
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
@@ -2756,7 +2786,13 @@ async fn handler_chat_completions(
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+        && let Err(error) = check_model_serving_ready_tracked(
+            &state,
+            resolved_model,
+            Endpoint::ChatCompletions,
+            request.inner.stream.unwrap_or(false),
+            &request_id,
+        )
     {
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
@@ -4966,12 +5002,20 @@ async fn handler_responses(
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
     check_ready(&state)?;
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(
         request.inner.model.as_deref().unwrap_or(""),
         template.as_ref(),
     );
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        check_model_serving_ready_tracked(
+            &state,
+            resolved_model,
+            Endpoint::Responses,
+            streaming,
+            &request_id,
+        )?;
     }
 
     if !state.nvext_enabled() {
@@ -4988,8 +5032,6 @@ async fn handler_responses(
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.inner.stream.unwrap_or(false);
     let raw_model = request.inner.model.as_deref().unwrap_or("");
     let resolved_model = resolve_request_model(raw_model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
@@ -5662,6 +5704,25 @@ pub(crate) fn check_model_serving_ready(
     ))
 }
 
+pub(crate) fn check_model_serving_ready_tracked(
+    state: &Arc<service_v2::State>,
+    model_name: &str,
+    endpoint: Endpoint,
+    streaming: bool,
+    request_id: &str,
+) -> Result<(), ErrorResponse> {
+    check_model_serving_ready(state, model_name).inspect_err(|_| {
+        let metric_model = state.manager().metric_model_for(model_name);
+        let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+            metric_model,
+            endpoint,
+            streaming,
+            request_id,
+        );
+        inflight_guard.mark_error(ErrorType::Unavailable);
+    })
+}
+
 /// openai compatible format
 /// Example:
 /// {
@@ -6129,7 +6190,7 @@ async fn images_with_request(
     // Get the model name from the request (diffusion model)
     let model = request.model.as_deref().unwrap_or("diffusion").to_string();
 
-    check_model_serving_ready(&state, &model)?;
+    check_model_serving_ready_tracked(&state, &model, Endpoint::Images, streaming, &request_id)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -6282,12 +6343,18 @@ async fn videos(
     let mut request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &request.model,
+        Endpoint::Videos,
+        request.stream.unwrap_or(false),
+        &request_id,
+    )?;
 
     validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
@@ -6419,12 +6486,13 @@ async fn video_stream(
     let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.model)?;
+    let request_id = get_or_create_request_id(&headers);
+
+    check_model_serving_ready_tracked(&state, &request.model, Endpoint::Videos, true, &request_id)?;
 
     validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
@@ -6645,7 +6713,7 @@ async fn handler_audio_speech(
             .frontend_accepts_audio_chunks = Some(true);
     }
     request.nest_passthrough();
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id.clone(), &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -6662,7 +6730,13 @@ async fn handler_audio_speech(
     // Per-model serving readiness gate (now that we have a resolved model
     // name string). Runs on the requested name so a 503 quotes back what the
     // caller asked for.
-    check_model_serving_ready(&state, &model)?;
+    check_model_serving_ready_tracked(
+        &state,
+        &model,
+        Endpoint::Audios,
+        streams_audio_chunks,
+        &request_id,
+    )?;
 
     // Audio registrations honor --served-model-name aliases, so resolve one to
     // its primary before it reaches routing, metrics, or the engine request.

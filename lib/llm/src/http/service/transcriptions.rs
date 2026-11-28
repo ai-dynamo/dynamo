@@ -27,9 +27,9 @@ use super::{
     RouteDoc,
     metrics::process_response_and_observe_metrics,
     openai::{
-        ErrorMessage, ErrorResponse, check_model_serving_ready, check_ready, context_from_headers,
-        error_is_invalid_argument, extract_error_type_from_response, get_or_create_request_id,
-        payload_too_large_error,
+        ErrorMessage, ErrorResponse, check_model_serving_ready_tracked, check_ready,
+        context_from_headers, error_is_invalid_argument, extract_error_type_from_response,
+        get_or_create_request_id, payload_too_large_error,
     },
     service_v2,
 };
@@ -231,12 +231,18 @@ async fn audio_transcription(
     // Gate readiness on the requested name so a 503 quotes back what the caller
     // asked for, then resolve a --served-model-name alias to its primary before
     // it reaches routing, metrics, or the engine request (as /v1/audio/speech does).
-    check_model_serving_ready(&state, &model)?;
+    let request_id = get_or_create_request_id(&headers);
+    check_model_serving_ready_tracked(
+        &state,
+        &model,
+        Endpoint::Transcriptions,
+        false,
+        &request_id,
+    )?;
     let model = state.manager().resolve_canonical_name(&model);
     request.model = Some(model.clone());
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
-    let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
     let cancellation_labels = CancellationLabels {
