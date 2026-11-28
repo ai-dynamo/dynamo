@@ -78,7 +78,13 @@ from dynamo.common.utils.input_params import (
     InputParamManager,
     resolve_thinking_token_budget,
 )
-from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.structural_tag import (
+    publish_vllm_structural_tag_backend,
+    publish_vllm_structural_tag_reasoning_policy,
+    serialize_structural_tag,
+    structural_tag_backend_compatible,
+    structural_tag_backend_error,
+)
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import (
@@ -1033,6 +1039,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
     _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
     _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
+
+    def _validate_structural_tag_backend(self, sampling_params: SamplingParams) -> None:
+        structured_outputs = sampling_params.structured_outputs
+        if structured_outputs is None or not structured_outputs.structural_tag:
+            return
+
+        # The selected worker knows the effective backend, even when workers
+        # serving the same model have different structured-output settings.
+        backend = self.engine_client.vllm_config.structured_outputs_config.backend
+        if not structural_tag_backend_compatible(
+            structured_outputs.structural_tag, backend
+        ):
+            raise InvalidArgument(structural_tag_backend_error(backend))
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -2417,6 +2436,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+        publish_vllm_structural_tag_backend(
+            runtime_config, self.engine_client.vllm_config
+        )
+        publish_vllm_structural_tag_reasoning_policy(
+            runtime_config, self.engine_client.vllm_config
+        )
 
         if lora_worker_type in (WorkerType.Aggregated, WorkerType.Decode):
             lora_config = self.engine_client.vllm_config.lora_config
@@ -3850,6 +3875,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 enable_rl=self.config.enable_rl,
             )
         )
+        self._validate_structural_tag_backend(sampling_params)
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
@@ -4306,6 +4332,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+        self._validate_structural_tag_backend(sampling_params)
 
         kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 

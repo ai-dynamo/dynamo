@@ -8,6 +8,13 @@ import functools
 import logging
 from typing import Any, Literal
 
+from dynamo.common.utils.structural_tag import (
+    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+    VLLM_STRUCTURAL_TAG_FORMAT_SUPPORTED,
+    VLLM_STRUCTURED_OUTPUT_BACKEND,
+    supports_structural_tag_format,
+)
+
 logger = logging.getLogger(__name__)
 
 ToolChoiceKind = Literal["none", "auto", "required", "named", "other"]
@@ -31,13 +38,6 @@ def runtime_structural_tag_options(
         runtime_config.get("structural_tag_scope", "auto"),
         runtime_config.get("structural_tag_schema", "auto"),
     )
-
-
-# Published by the vLLM worker (dynamo.vllm.main.publish_vllm_structural_tag_reasoning_policy)
-# and read by the Rust preprocessor (lib/llm/src/preprocessor/structural_tag.rs).
-TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
-    "tool_call_structural_tag_excludes_reasoning"
-)
 
 
 def runtime_backend_defers_grammar(runtime_config: Any) -> bool:
@@ -239,3 +239,19 @@ def guidance_tool_schema(
         construct,
     )
     return stripped, strict
+
+
+def runtime_structural_tag_backend(runtime_config: Any) -> str | None:
+    """Absent, inconsistent, or unknown support stays unknown during rollout."""
+    if not isinstance(runtime_config, dict):
+        return None
+    data = runtime_config.get("runtime_data")
+    if not isinstance(data, dict):
+        return None
+    backend = data.get(VLLM_STRUCTURED_OUTPUT_BACKEND)
+    if not isinstance(backend, str):
+        return None
+    support = supports_structural_tag_format(backend)
+    if support is None or data.get(VLLM_STRUCTURAL_TAG_FORMAT_SUPPORTED) is not support:
+        return None
+    return backend

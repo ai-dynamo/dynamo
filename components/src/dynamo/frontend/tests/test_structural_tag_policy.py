@@ -12,6 +12,7 @@ from dynamo.frontend.structural_tag_policy import (
     effective_tool_strict,
     guidance_tool_schema,
     runtime_backend_defers_grammar,
+    runtime_structural_tag_backend,
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
     should_attempt_structural_tag,
@@ -274,3 +275,33 @@ def test_reasoning_boundary_resolution(boundary, backend_excludes, expected):
     if backend_excludes:
         config.update(_EXCLUDES)
     assert runtime_structural_tag_excludes_reasoning(config) is expected
+
+
+@pytest.mark.parametrize(
+    "backend,support,expected",
+    [
+        ("auto", True, "auto"),
+        ("xgrammar", True, "xgrammar"),
+        ("guidance", False, "guidance"),
+        ("outlines", False, "outlines"),
+        ("lm-format-enforcer", False, "lm-format-enforcer"),
+        ("auto", False, None),
+        ("guidance", True, None),
+        ("future", True, None),
+        ("auto", "true", None),
+        (None, None, None),
+    ],
+)
+def test_runtime_structural_tag_backend(backend, support, expected):
+    assert (
+        runtime_structural_tag_backend(
+            {
+                "runtime_data": {
+                    "vllm_structured_output_backend": backend,
+                    "vllm_structural_tag_format_supported": support,
+                }
+            }
+        )
+        == expected
+    )
+    assert runtime_structural_tag_backend({}) is None

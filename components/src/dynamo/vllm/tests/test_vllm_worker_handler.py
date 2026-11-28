@@ -27,7 +27,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import HttpError
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -212,7 +212,10 @@ def test_lora_discovery_publishes_engine_generate_capability(
     handler.config.engine_args.max_loras = 2
     handler.engine_client = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True),
+            structured_outputs_config=SimpleNamespace(
+                backend="auto", reasoning_parser="qwen3", enable_in_reasoning=False
+            ),
         )
     )
     runtime_config = MagicMock()
@@ -233,6 +236,16 @@ def test_lora_discovery_publishes_engine_generate_capability(
         patch.object(mod, "register_model", new=AsyncMock()) as register_model,
     ):
         asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
+
+    runtime_config.set_engine_specific.assert_any_call(
+        "vllm_structured_output_backend", '"auto"'
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        "vllm_structural_tag_format_supported", "true"
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        "tool_call_structural_tag_excludes_reasoning", "true"
+    )
 
     if expected_worker_type == mod.WorkerType.Prefill:
         publish_generate.assert_not_called()
@@ -1834,6 +1847,127 @@ def prefill_probe_handler():
     return handler
 
 
+@pytest.fixture
+def json_after_reasoning_guidance():
+    return {
+        "structural_tag": {
+            "type": "structural_tag",
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    {
+                        "type": "tag",
+                        "begin": "",
+                        "end": {"type": "token", "token": 3},
+                        "content": {"type": "any_tokens", "exclude_tokens": [3]},
+                    },
+                    {"type": "json_schema", "json_schema": {"type": "object"}},
+                ],
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "guidance", "rejected"),
+    [
+        ("guidance", None, True),
+        ("outlines", None, True),
+        ("lm-format-enforcer", None, True),
+        ("auto", None, False),
+        ("xgrammar", None, False),
+        ("guidance", {"json": {"type": "object"}}, False),
+        (
+            "guidance",
+            {
+                "structural_tag": {
+                    "triggers": ["<tool>"],
+                    "structures": [
+                        {
+                            "begin": "<tool>",
+                            "end": "</tool>",
+                            "schema": {"type": "object"},
+                        }
+                    ],
+                }
+            },
+            False,
+        ),
+    ],
+)
+async def test_prefill_checks_structural_tags_against_local_backend(
+    prefill_probe_handler, json_after_reasoning_guidance, backend, guidance, rejected
+):
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(backend=backend)
+    )
+    if guidance is None:
+        guidance = json_after_reasoning_guidance
+    request = VllmPrefillHealthCheckPayload().to_dict()
+    request.setdefault("sampling_options", {})["guided_decoding"] = guidance
+    stream = handler.generate(request, MagicMock())
+    if rejected:
+        with pytest.raises(InvalidArgument, match=rf"{backend!r}.*structural tag"):
+            await anext(stream)
+        handler.engine_client.generate.assert_not_called()
+    else:
+        assert [chunk["token_ids"] async for chunk in stream] == [[2]]
+        structured_outputs = handler.engine_client.generate.call_args.args[
+            1
+        ].structured_outputs
+        for name, value in guidance.items():
+            actual = getattr(structured_outputs, name)
+            assert (json.loads(actual) if name == "structural_tag" else actual) == value
+
+
+@pytest.mark.asyncio
+async def test_decode_rejects_incompatible_tool_tag_before_generation():
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": [1]}
+    )
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+
+    async def generate_tokens(*args, **kwargs):
+        yield {"token_ids": [2]}
+
+    handler.generate_tokens = MagicMock(side_effect=generate_tokens)
+    handler.engine_client = SimpleNamespace(
+        generate=MagicMock(),
+        vllm_config=SimpleNamespace(
+            structured_outputs_config=SimpleNamespace(backend="guidance")
+        ),
+    )
+    request = {
+        "token_ids": [1],
+        "sampling_options": {
+            "guided_decoding": {
+                "structural_tag": {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "tag",
+                        "begin": "<tool>",
+                        "end": "</tool>",
+                        "content": {
+                            "type": "json_schema",
+                            "json_schema": {"type": "object"},
+                        },
+                    },
+                }
+            }
+        },
+        "stop_conditions": {"max_tokens": 2},
+    }
+    stream = handler._generate_token_mode(request, MagicMock(), "req-tool-tag")
+    with pytest.raises(InvalidArgument, match=r"'guidance'.*structural tag"):
+        await anext(stream)
+    handler.generate_tokens.assert_not_called()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("custom_payload", [False, True])
 async def test_prefill_probe_runs_locally_without_handoff(
@@ -2070,7 +2204,7 @@ async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens, n):
     protocol.decode_request_kv_transfer_params.return_value = None
     monkeypatch.setattr(mod, "make_kv_connector_protocol", lambda _: protocol)
     monkeypatch.setattr(
-        mod, "build_sampling_params", lambda *args, **kwargs: MagicMock(n=n)
+        mod, "build_sampling_params", lambda *args, **kwargs: mod.SamplingParams(n=n)
     )
 
     chunks = [
