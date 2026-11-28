@@ -286,6 +286,7 @@ impl RoutingHost {
         let (mut selection, affinity) = self
             .select_with_request_lifecycle(request, phase, select)
             .await?;
+        self.kv_router().hints().on_route(request, selection.worker);
         drop(route_guard);
         Ok(RoutePlan {
             phase,

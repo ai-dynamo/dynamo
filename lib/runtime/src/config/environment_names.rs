@@ -317,6 +317,10 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
+    /// The Mooncake master's admin HTTP address, such as `http://mooncake-master:9003`; when
+    /// set, a session's pages are soft-pinned there while it waits on a tool.
+    pub const DYN_KVM_PIN_ENDPOINT: &str = "DYN_KVM_PIN_ENDPOINT";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -1218,6 +1222,7 @@ mod tests {
             llm::DYN_LORA_MCF_CONFIG,
             llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+            llm::DYN_KVM_PIN_ENDPOINT,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::metrics::DYN_METRICS_REQUEST_DURATION,
             llm::metrics::DYN_METRICS_INPUT_SEQUENCE,

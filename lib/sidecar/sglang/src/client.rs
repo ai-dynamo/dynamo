@@ -469,6 +469,27 @@ pub(crate) async fn discover(
     discovery::parse_discovery(model, server_info, models)
 }
 
+/// The worker's Mooncake object layout (SGLang's `hicache_object_layout`), or `None` when it
+/// stores no pages in Mooncake or predates the RPC.
+pub(crate) async fn mooncake_object_layout(
+    pool: &Pool,
+    deadline: Instant,
+) -> Option<serde_json::Value> {
+    let mut client = pool.control_client();
+    let layout = rpc_with_deadline(
+        "GetHiCacheL3CacheLayout",
+        deadline,
+        client.get_hi_cache_l3_cache_layout(pb::GetHiCacheL3CacheLayoutRequest {}),
+    )
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no Mooncake object layout"))
+    .ok()?
+    .into_inner()
+    .layout?;
+    let mut envelope: serde_json::Value = serde_json::from_str(&layout).ok()?;
+    (envelope["enabled"] == true).then(|| envelope["hicache_object_layout"].take())
+}
+
 /// SGLang's Rust server answers UNAVAILABLE until its scheduler responds, and
 /// the engine's readiness loop retries that error.
 pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool, DynamoError> {

@@ -2,6 +2,8 @@
 
 `dynamo-kv-hints` is what the router hands an engine so the selected worker can fetch a KV prefix from another worker: the hint wire, the hashed worker identity, and the source choice. Engines and sidecars consume it; the scheduler kernel and hosts produce with it.
 
+It also owns the tool-call pin (`src/pin.rs`): the per-request slot, a prefix's Mooncake object keys from the layout a worker publishes, the TTL and priority rule, and the body of the Mooncake master's `/api/v1/soft_pin` request. `dynamo-llm` arms the pin, fires it, and sends the request.
+
 ## Rules
 
 - **Adding a new kind of hint.** Add it as an action with its own `action_type` and `action_version`, not as a field on `KvHint`. `KvHintAction::payload` stays an opaque map so an engine forwards an action it does not know (`deserializes_unknown_action_as_opaque_transport_data`). The `kv.fetch` payload is `KvSourceLocationsPayload` (#17359, #17360).

@@ -9146,7 +9146,20 @@ impl
         }
 
         // repack the common completion request
-        let common_request = context.map(|_| common_request);
+        let mut common_request = context.map(|_| common_request);
+        // The router arms this slot; the response's end pins its pages after a tool call.
+        let pin_slot = crate::kv_router::hints::pin_endpoint()
+            .is_some()
+            .then(|| Arc::new(dynamo_kv_hints::pin::ToolCallPinSlot::default()));
+        if let Some(slot) = &pin_slot {
+            common_request.insert_arc(crate::kv_router::hints::PIN_SLOT_CONTEXT_KEY, slot.clone());
+        }
+        let announced_tool_call = common_request
+            .get::<crate::kv_router::hints::SimToolCall>(
+                crate::kv_router::hints::SIM_TOOL_CALL_CONTEXT_KEY,
+            )
+            .ok()
+            .map(|call| call.0);
 
         // create a stream of annotations this will be prepend to the response stream
         let annotations: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = annotations
@@ -9160,6 +9173,8 @@ impl
         let response_stream = next.generate(common_request).await?;
         // Extract context once
         let context = response_stream.context();
+        let response_stream =
+            crate::kv_router::hints::record_output(response_stream, pin_slot.clone());
 
         // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream_with_image_tokens(
@@ -9237,6 +9252,8 @@ impl
             &self.speculative_prefill_tasks,
         );
 
+        let final_stream =
+            crate::kv_router::hints::pin_on_tool_call(final_stream, pin_slot, announced_tool_call);
         let final_stream =
             crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
 
