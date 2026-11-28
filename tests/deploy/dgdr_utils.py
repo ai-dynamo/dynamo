@@ -45,6 +45,8 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
+# Enough to recreate every Pod of a three-component DGD twice.
+_MAX_EVICTED_POD_REPLACEMENTS = 6
 _RetryParams = ParamSpec("_RetryParams")
 _RetryResult = TypeVar("_RetryResult")
 PHASE_ORDER = {
@@ -489,6 +491,7 @@ class ManagedDGDR:
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
+        replaced_pods: set[str] = set()
         while time.monotonic() < deadline:
             # Connection retries can outlast the phase timeout, so stop them at
             # the deadline and report the phase timeout instead.
@@ -525,11 +528,74 @@ class ManagedDGDR:
                 )
             ):
                 return result
+            if result and target == "Deployed" and phase == "Deploying":
+                await self._replace_evicted_dgd_pods(result, replaced_pods)
             await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"
         )
+
+    async def _replace_evicted_dgd_pods(
+        self, dgdr: dict[str, Any], replaced: set[str]
+    ) -> None:
+        """Delete evicted DGD Pods so Grove recreates them.
+
+        Grove (v0.1.0-alpha.15 and v0.2.0-beta1) counts Failed Pods against
+        PodClique replicas and never replaces them, so a Pod the kubelet rejects
+        under DiskPressure keeps the DGDR in Deploying until the deploy timeout.
+        Only Pods with reason Evicted are deleted; other failures still fail the
+        test. Pods are tracked by UID because a recreated Pod can reuse the same
+        name.
+        """
+        dgd_name = dgdr.get("status", {}).get("dgdName")
+        if not dgd_name:
+            return
+        self._require_clients()
+        core = self.core
+        assert core is not None
+        namespace = self.config.namespace
+        pods = await self._retry_vcluster_api(
+            f"listing pods for DGD {namespace}/{dgd_name} while deploying",
+            core.list_namespaced_pod,
+            namespace,
+            label_selector=f"{DGD_LABEL}={dgd_name}",
+        )
+        evicted = [
+            pod
+            for pod in pods.items
+            if pod.status.phase == "Failed"
+            and pod.status.reason == "Evicted"
+            and pod.metadata.uid not in replaced
+        ]
+        if not evicted:
+            return
+        if len(replaced) + len(evicted) > _MAX_EVICTED_POD_REPLACEMENTS:
+            details = "; ".join(
+                f"{pod.metadata.name} on {pod.spec.node_name}: {pod.status.message}"
+                for pod in evicted
+            )
+            raise AssertionError(
+                f"DGD {namespace}/{dgd_name} Pods were still being evicted after "
+                f"{len(replaced)} replacements (node DiskPressure or other node "
+                f"pressure): {details}"
+            )
+        for pod in evicted:
+            pod_name = pod.metadata.name
+            logger.warning(
+                "Deleting evicted DGD pod %s/%s on node %s so it is recreated: %s",
+                namespace,
+                pod_name,
+                pod.spec.node_name,
+                pod.status.message,
+            )
+            await self._delete_if_exists(
+                f"deleting evicted pod {namespace}/{pod_name}",
+                core.delete_namespaced_pod,
+                pod_name,
+                namespace,
+            )
+            replaced.add(pod.metadata.uid)
 
     async def get_output_dgd(self, name: str) -> dict[str, Any]:
         self._require_clients()
