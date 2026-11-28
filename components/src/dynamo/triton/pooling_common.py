@@ -64,6 +64,26 @@ def resolve_string_input_name(
     return string_inputs[0]
 
 
+def reject_required_extra_inputs(
+    config: TritonModelConfigPb.ModelConfig,
+    name: str,
+    model_name: str,
+    task_label: str,
+    endpoint: str,
+) -> None:
+    # Requests carry only the selected STRING input, so a required extra
+    # input would pass readiness and then fail every request.
+    required = [i.name for i in config.input if i.name != name and not i.optional]
+    if required:
+        raise ValueError(
+            f"Triton {task_label} model '{model_name}' declares required "
+            f"input(s) {required} besides STRING input '{name}'; the "
+            f"{endpoint} path sends only '{name}'. Mark those inputs "
+            "`optional: true` in the model's config.pbtxt, or serve the "
+            "model with --task tensor and address it over KServe gRPC."
+        )
+
+
 def validate_string_input_dims(
     config: TritonModelConfigPb.ModelConfig,
     name: str,
@@ -265,6 +285,13 @@ class PoolingWorkerHandlerBase(ABC):
             input_name,
             task_label=self.task_label,
             cli_flag=self.cli_input_flag,
+        )
+        reject_required_extra_inputs(
+            self._config,
+            self._input_name,
+            model.name,
+            task_label=self.task_label,
+            endpoint=self.endpoint,
         )
         validate_string_input_dims(
             self._config,

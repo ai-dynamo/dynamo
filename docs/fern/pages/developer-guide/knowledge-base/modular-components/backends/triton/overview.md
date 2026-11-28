@@ -191,6 +191,7 @@ The Dynamo Frontend then forwards it to the Dynamo Triton Runtime as a single `B
 The Dynamo Triton Runtime reads the input/output tensor names from `config.pbtxt`.
 Any model, leaf or ensemble, that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves classify unchanged.
 The `STRING` input must declare `dims: [ 1 ]` or `dims: [ -1 ]` (one string per request item); other layouts are rejected at startup.
+Every other input must set `optional: true`, because the worker sends only the `STRING` input; a model with another required input is rejected at startup.
 An ensemble that runs tokenization inside Triton (Python-backend tokenizer plus a TensorRT plan wired through `ensemble_scheduling`) is the intended shape:
 
 ```protobuf
@@ -257,6 +258,7 @@ The Dynamo Frontend translates the embeddings JSON into a Dynamo tensor request,
 The Dynamo Triton Runtime auto-detects the input/output tensor names from `config.pbtxt`.
 Any model (leaf plan or ensemble) that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves embeddings unchanged.
 The `STRING` input must declare `dims: [ 1 ]` or `dims: [ -1 ]` (one string per request item); other layouts are rejected at startup.
+Every other input must set `optional: true`, because the worker sends only the `STRING` input; a model with another required input is rejected at startup.
 An ensemble that runs tokenization inside Triton (Python-backend tokenizer plus a TensorRT plan wired through `ensemble_scheduling`) is the intended shape:
 
 ```protobuf

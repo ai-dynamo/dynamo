@@ -38,11 +38,17 @@ def _make_config_proto(
     outputs: list[tuple[str, int]],
     name: str = "mock-classifier",
     max_batch_size: int = 8,
+    optional_inputs: tuple[str, ...] = (),
 ) -> TritonModelConfigPb.ModelConfig:
     """Build a minimal ModelConfig with the given input/output (name, dtype) pairs."""
     config = TritonModelConfigPb.ModelConfig(name=name, max_batch_size=max_batch_size)
     for input_name, dtype in inputs:
-        config.input.add(name=input_name, data_type=dtype, dims=[-1])
+        config.input.add(
+            name=input_name,
+            data_type=dtype,
+            dims=[-1],
+            optional=input_name in optional_inputs,
+        )
     for output_name, dtype in outputs:
         config.output.add(name=output_name, data_type=dtype, dims=[-1])
     return config
@@ -141,11 +147,13 @@ def _make_handler(
     max_batch_size: int = 8,
     classify_input_name: str | None = None,
     classify_output_name: str | None = None,
+    optional_inputs: tuple[str, ...] = (),
 ) -> tuple[_MockModel, ClassifyWorkerHandler]:
     config = _make_config_proto(
         inputs=inputs or [("TEXT", TritonModelConfigPb.DataType.TYPE_STRING)],
         outputs=outputs or [("probs", TritonModelConfigPb.DataType.TYPE_FP32)],
         max_batch_size=max_batch_size,
+        optional_inputs=optional_inputs,
     )
     model = _MockModel(responses or [], max_batch_size=max_batch_size)
     handler = ClassifyWorkerHandler(
@@ -175,10 +183,36 @@ class TestInitAndResolve:
                 ("probs_b", TritonModelConfigPb.DataType.TYPE_FP32),
             ],
             classify_input_name="TEXT_B",
+            optional_inputs=("TEXT_A",),
             classify_output_name="probs_a",
         )
         assert handler._input_name == "TEXT_B"
         assert handler._output_name == "probs_a"
+
+    def test_override_rejects_required_unselected_string_input(self) -> None:
+        # The handler sends only the selected input, so a required
+        # TEXT_A would fail every request even under an override.
+        with pytest.raises(ValueError, match=r"required input\(s\) \['TEXT_A'\]"):
+            _make_handler(
+                inputs=[
+                    ("TEXT_A", TritonModelConfigPb.DataType.TYPE_STRING),
+                    ("TEXT_B", TritonModelConfigPb.DataType.TYPE_STRING),
+                ],
+                classify_input_name="TEXT_B",
+            )
+
+    def test_required_extra_input_rejected(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            _make_handler(
+                inputs=[
+                    ("TEXT", TritonModelConfigPb.DataType.TYPE_STRING),
+                    ("IDS", TritonModelConfigPb.DataType.TYPE_INT32),
+                ]
+            )
+        message = str(excinfo.value)
+        assert "['IDS']" in message
+        assert "STRING input 'TEXT'" in message
+        assert "/v1/classify path" in message
 
     def test_ambiguous_bytes_input_without_override_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_STRING input tensor"):
