@@ -78,6 +78,25 @@ The alias and health-publication scenarios use `DiscoveryFixture` controls for v
 
 CPU handoff checks opaque vLLM metadata, SGLang concurrent bootstrap coordination, and TensorRT-LLM OpenEngine KV session forwarding. CPU handoff cancellation holds the peers before Mocker admission; it proves transport cleanup and recovery, not native scheduler or transfer cleanup. A Mocker cannot prove that a real engine accepts the serialized request, executes a structured-output constraint, releases its real scheduler work, or transfers GPU KV cache.
 
+### SGLang unmatched KV-transfer cancellation
+
+The GPU `sglang_disaggregated` case in `tests/serve/test_sidecar.py` creates an
+unmatched KV-transfer wait by sending the decode worker's Dynamo request-plane
+endpoint a bootstrap room that no prefill request uses. The public frontend
+rejects caller-supplied bootstrap metadata, so it cannot create this state.
+The payload reads SGLang's `/v1/loads` to require the request in the decode
+prealloc or transfer queue with no tokens, cancels it through the sidecar, and
+requires both queues to drain well before SGLang's 300 s waiting timeout.
+The `/metrics` queue gauges are not republished while a request waits for KV
+and no batch runs. It then requires idle schedulers and a fresh completed
+transfer through the frontend.
+
+This covers the chat decode path, where the sidecar ends its native gRPC call
+and SGLang aborts the request on disconnect. The native `/generate` decode path
+is not exercised. CPU handoff cancellation does not prove that a real SGLang
+transfer-wait queue drains after cancellation. This GPU case runs in the
+existing post-merge and nightly sidecar E2E jobs.
+
 ### Adding an integration test
 
 1. Choose the suite. Direct native RPC behavior belongs in

@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import base64
 import json
 import logging
 import math
+import random
 import re
 import shutil
 import struct
@@ -35,8 +37,9 @@ import psutil
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from dynamo.runtime import Context, DistributedRuntime
 from tests.utils.constants import DefaultPort
-from tests.utils.engine_metrics import EngineMetrics
+from tests.utils.engine_metrics import EngineMetrics, SGLangMetricsChecker
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
@@ -661,6 +664,130 @@ class KvTransferPayload(DisaggregatedChatPayload):
         self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
         self.decode_metrics.wait_for_scheduler()
         self.prefill_metrics.wait_for_scheduler()
+
+
+@dataclass
+class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
+    """Cancel a real SGLang decode request whose KV transfer never arrives.
+
+    The public frontend rejects caller-supplied bootstrap metadata, so this
+    sends the decode worker's request-plane endpoint a bootstrap room that no
+    prefill request uses. Stopping that request ends the sidecar's native gRPC
+    call, and SGLang's gRPC servicer aborts the decode request on disconnect.
+    The decode queues must drain well before SGLang's 300 s waiting timeout.
+    The frontend request that follows must then complete a fresh KV transfer.
+    """
+
+    decode_metrics: SGLangMetricsChecker = field(kw_only=True)
+    # Well under SGLang's 300 s KV-transfer waiting timeout, so a drain inside
+    # this bound comes from the cancellation, not from SGLang's own timeout.
+    queue_timeout: float = field(default=45, kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        super().bind_environment(env)
+        self._env = env
+
+    def before_request(self) -> None:
+        decode_before = asyncio.run(self._cancel_unmatched_transfer())
+        self.decode_metrics.wait_for_scheduler()
+        self.prefill_metrics.wait_for_scheduler()
+        decode_after = self.decode_metrics.progress()
+        assert (
+            decode_after == decode_before
+        ), f"Cancelled decode request advanced decode: {decode_before=}, {decode_after=}"
+        super().before_request()
+
+    async def _wait_for_decode_queues(self, *, is_waiting: bool) -> tuple[int, int]:
+        deadline = time.monotonic() + self.queue_timeout
+        while True:
+            running, prealloc, transfer = await asyncio.to_thread(
+                self.decode_metrics.decode_queue_counts
+            )
+            if is_waiting:
+                is_ready = prealloc + transfer >= 1 and running == 0
+            else:
+                is_ready = prealloc == transfer == 0
+            if is_ready:
+                return prealloc, transfer
+            assert time.monotonic() < deadline, (
+                f"Decode queues is_waiting={is_waiting} after {self.queue_timeout} s: "
+                f"{prealloc=}, {transfer=}, {running=}; metrics={self.decode_metrics.url}"
+            )
+            await asyncio.sleep(0.25)
+
+    async def _cancel_unmatched_transfer(self) -> float:
+        self.prefill_metrics.wait_for_scheduler()
+        self.decode_metrics.wait_for_scheduler()
+        decode_before = self.decode_metrics.progress()
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(),
+            self._env["DYN_DISCOVERY_BACKEND"],
+            self._env["DYN_REQUEST_PLANE"],
+        )
+        context = Context()
+        reader: asyncio.Task | None = None
+        try:
+            # Decode sidecars register as `backend`; prefill registers as `prefill`.
+            endpoint = runtime.endpoint(
+                f"{self._env['DYN_NAMESPACE']}.backend.generate"
+            )
+            client = await endpoint.client()
+            instances = await asyncio.wait_for(client.wait_for_instances(), 30)
+            assert len(instances) == 1, f"Expected one decode worker: {instances}"
+            # Same shape the PrefillRouter sends to decode, but with a room that
+            # no prefill request uses. No extra_args keeps the chat gRPC path.
+            request = {
+                "model": self.body["model"],
+                "token_ids": list(range(1000, 1128)),
+                "stop_conditions": {"max_tokens": 16, "ignore_eos": True},
+                "sampling_options": {"temperature": 0},
+                "bootstrap_info": {
+                    "bootstrap_host": self._env.get(
+                        "SGLANG_BOOTSTRAP_HOST", "127.0.0.1"
+                    ),
+                    "bootstrap_port": int(self._env["DYN_ENGINE_HTTP_PORT1"]),
+                    "bootstrap_room": random.getrandbits(63),
+                },
+            }
+            stream = await client.direct(request, instances[0], context=context)
+            outputs: list[Any] = []
+
+            async def read() -> None:
+                async for item in stream:
+                    outputs.append(item.data())
+
+            reader = asyncio.create_task(read())
+            prealloc, transfer = await self._wait_for_decode_queues(is_waiting=True)
+            assert not reader.done(), f"Decode stream ended before cancel: {outputs}"
+            assert not any(
+                (output or {}).get("token_ids") for output in outputs
+            ), f"Decode generated tokens without a KV transfer: {outputs}"
+            logger.info(
+                "Unmatched decode request waiting: prealloc=%s transfer=%s",
+                prealloc,
+                transfer,
+            )
+
+            context.stop_generating()
+            started = time.monotonic()
+            await asyncio.wait_for(reader, 10)
+            assert not any(
+                (output or {}).get("token_ids") for output in outputs
+            ), f"Cancelled decode request generated tokens: {outputs}"
+            await self._wait_for_decode_queues(is_waiting=False)
+            logger.info(
+                "Decode queues drained %.1f s after cancellation; outputs=%s",
+                time.monotonic() - started,
+                outputs,
+            )
+        finally:
+            # Release the engine request even when an assertion failed first.
+            context.stop_generating()
+            if reader is not None and not reader.done():
+                reader.cancel()
+            runtime.shutdown()
+        return decode_before
 
 
 _KV_ROUTING_PROMPTS = (
