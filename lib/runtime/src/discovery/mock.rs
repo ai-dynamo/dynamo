@@ -355,6 +355,7 @@ mod tests {
             transport: TransportType::Tcp(transport.to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
         contract::expect_empty_snapshot(&mut stream).await;
@@ -389,6 +390,7 @@ mod tests {
                 transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .await
             .unwrap();
@@ -435,6 +437,7 @@ mod tests {
                 transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .await
             .unwrap();
@@ -631,6 +634,7 @@ mod tests {
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
 
         let query = DiscoveryQuery::Endpoint {

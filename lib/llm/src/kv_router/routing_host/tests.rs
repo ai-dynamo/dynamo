@@ -675,6 +675,7 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
             )),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         })
         .collect::<Vec<_>>();
     let (source_tx, source_rx) = watch::channel(instances.clone());
@@ -936,6 +937,7 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
                 )),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .collect();
         let (source_tx, source_rx) = watch::channel(instances.clone());
@@ -1054,6 +1056,7 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
                 )),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .collect();
         let (source_tx, source_rx) = watch::channel(instances.clone());
@@ -1100,6 +1103,140 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
             &[replacement; 3]
         );
         assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[None; 3]);
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_policies_reach_a_held_worker_only_through_an_explicit_target() {
+    const HELD: u64 = 101;
+    const READY: u64 = 202;
+
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-held-worker".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    let modes = [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::DeviceAwareWeighted,
+    ];
+    let affinity_modes = [
+        crate::session_affinity::SessionAffinityMode::Soft,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    ];
+    for (index, (mode, affinity_mode)) in modes
+        .into_iter()
+        .flat_map(|mode| {
+            affinity_modes
+                .into_iter()
+                .map(move |affinity| (mode, affinity))
+        })
+        .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [HELD, READY]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "held-worker.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+                held: instance_id == HELD,
+            })
+            .collect();
+        let (_source_tx, source_rx) = watch::channel(instances);
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances_with_held(vec![HELD, READY], vec![HELD]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let (host, affinity) = builtin_host_with_affinity(
+            client.clone(),
+            mode,
+            dispatch.clone(),
+            load_context,
+            affinity_mode,
+        )
+        .await;
+        let case = format!("{mode:?} with {affinity_mode:?} affinity");
+
+        // Automatic selection never lands on the held worker.
+        for request_index in 0..8 {
+            let mut stream = host
+                .generate(affinity_request(&format!("unbound-{request_index}"), None))
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[READY; 8],
+            "{case}"
+        );
+
+        // A session bound to the held worker is automatic selection too: the binding is
+        // dropped and the session moves to a routable worker.
+        let session_id = SessionAffinityId::new("bound-to-held");
+        bind_affinity_target(&host, &session_id, AffinityTarget::worker(HELD)).await;
+        let mut stream = host
+            .generate(affinity_request("bound-to-held", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().last(),
+            Some(&READY),
+            "{case}"
+        );
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget::worker(READY)),
+            "{case}"
+        );
+
+        // A request that names the held worker reaches it.
+        let mut stream = host
+            .generate(affinity_request("explicit-target", Some(HELD)))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().last(),
+            Some(&HELD),
+            "{case}"
+        );
+
+        // Releasing the worker makes it an ordinary candidate.
+        client.override_discovered_instances_with_held(vec![HELD, READY], vec![]);
+        let dispatched = dispatch.worker_ids.lock().unwrap().len();
+        for request_index in 0..32 {
+            let mut stream = host
+                .generate(affinity_request(&format!("released-{request_index}"), None))
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert!(
+            dispatch.worker_ids.lock().unwrap()[dispatched..].contains(&HELD),
+            "{case}: the released worker took no automatic request"
+        );
+        drop(host);
     }
     runtime.shutdown();
 }

@@ -4418,6 +4418,7 @@ mod handoff_and_lifecycle_tests {
             transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
         system_health.lock().register_health_check_target(
             endpoint.name(),

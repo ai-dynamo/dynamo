@@ -3328,6 +3328,7 @@ mod tests {
                 transport: TransportType::Tcp("127.0.0.1:1".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .await
             .unwrap();

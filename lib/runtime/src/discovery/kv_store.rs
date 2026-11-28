@@ -813,6 +813,7 @@ mod tests {
             transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         })
     }
 
@@ -1180,6 +1181,7 @@ mod tests {
             device_type: None,
             request_plane_codec: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            held: false,
         };
         client.register(spec1).await.unwrap();
 
@@ -1190,6 +1192,7 @@ mod tests {
             request_plane_codec: None,
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            held: false,
         };
         client.register(spec2).await.unwrap();
 
@@ -1200,6 +1203,7 @@ mod tests {
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            held: false,
         };
         client.register(spec3).await.unwrap();
 
@@ -1289,6 +1293,7 @@ mod tests {
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
+                held: false,
             };
             client_clone.register(spec).await.unwrap();
         });
@@ -1322,6 +1327,7 @@ mod tests {
                 device_type: None,
                 request_plane_codec: None,
                 transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+                held: false,
             })
             .await
             .unwrap();
@@ -1376,6 +1382,7 @@ mod tests {
                 device_type: None,
                 request_plane_codec: None,
                 transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+                held: false,
             })
             .await
             .unwrap();
@@ -1602,6 +1609,7 @@ mod etcd_tests {
             device_type: None,
             request_plane_codec: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            held: false,
         }
     }
 

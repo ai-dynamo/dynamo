@@ -531,6 +531,7 @@ impl DirectEngineHost {
             transport: TransportType::Direct(self.spec.url.clone()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         });
         let model = model_card_instance(
             config.namespace,
@@ -1390,6 +1391,7 @@ mod tests {
             transport: TransportType::Direct(A.to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
         (dispatch, AddressedRequest::for_instance(request, instance))
     }

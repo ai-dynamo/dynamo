@@ -2722,6 +2722,7 @@ mod tests {
                 ),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .await
             .unwrap();

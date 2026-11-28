@@ -354,6 +354,7 @@ mod tests {
                 transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             }))
             .unwrap();
         CachedCrMetadata {
@@ -528,6 +529,7 @@ mod tests {
                 transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             }))
             .unwrap();
         let updated_cr = CachedCrMetadata {
