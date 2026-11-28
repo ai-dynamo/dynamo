@@ -225,7 +225,8 @@ newer booking that reused the same request id and worker.
 - **Active**: run the prefill hop.
 - **Pending**: a target is set but its binding is still being built. Fail closed with a
   retryable error; a decode-only worker cannot run the request without the hop.
-- **Untargeted**: no prefill target. Pass through to the next stage.
+- **Untargeted**: no prefill target. Pass through to the next stage, which runs the
+  request as `Aggregated`.
 
 `ModelManager::reconcile_discovery_topology` sets the target only when the namespace has
 exactly one prefill worker set and one decode worker set. The encoder target follows the

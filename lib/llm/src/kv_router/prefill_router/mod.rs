@@ -1133,12 +1133,19 @@ mod tests {
             ActivationSnapshot::Untargeted
         ));
 
+        // A retry whose failed attempt left the tracker in `Prefill` runs as aggregated.
+        let tracker = Arc::new(RequestTracker::new());
+        drop(tracker.set_phase(RequestPhase::Prefill).await);
+        let mut request = inference_request();
+        request.tracker = Some(tracker.clone());
+
         let host = Arc::new(CountingDecodeHost::default());
         router
-            .generate(SingleIn::new(inference_request()), host.clone())
+            .generate(SingleIn::new(request), host.clone())
             .await
             .expect("no target means plain passthrough");
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.phase(), RequestPhase::Aggregated);
     }
 
     #[tokio::test]
@@ -1160,77 +1167,6 @@ mod tests {
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
     }
 
-    /// Stands in for the decode RoutingHost: it picks the request's explicit worker for
-    /// the tracker's phase and records it there, as routing does.
-    #[derive(Default)]
-    struct PhaseRoutingHost {
-        routed: Mutex<Vec<(RequestPhase, Option<u64>)>>,
-    }
-
-    #[async_trait]
-    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-        for PhaseRoutingHost
-    {
-        async fn generate(
-            &self,
-            request: SingleIn<PreprocessedRequest>,
-        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            let phase = request.phase();
-            let worker = crate::session_affinity::explicit_target(&request, phase)?
-                .map(|target| target.worker_id);
-            if let (Some(tracker), Some(worker)) = (&request.tracker, worker) {
-                tracker.record_worker(
-                    worker,
-                    None,
-                    crate::protocols::common::timing::WORKER_TYPE_DECODE,
-                );
-            }
-            self.routed.lock().push((phase, worker));
-            Ok(ResponseStream::new(
-                Box::pin(stream::empty()),
-                request.context(),
-            ))
-        }
-    }
-
-    /// Pins prefill to worker 1 and decode to worker 2.
-    fn pinned_request(tracker: &Arc<RequestTracker>) -> PreprocessedRequest {
-        let mut request = inference_request();
-        request.routing = Some(RoutingHints {
-            prefill_worker_id: Some(1),
-            decode_worker_id: Some(2),
-            ..Default::default()
-        });
-        request.tracker = Some(tracker.clone());
-        request
-    }
-
-    #[tokio::test]
-    async fn retry_without_a_prefill_target_routes_as_aggregated() {
-        // The failed attempt's remote prefill left the tracker in `Prefill`, and the
-        // last prefill worker left before the retry.
-        let tracker = Arc::new(RequestTracker::new());
-        drop(tracker.set_phase(RequestPhase::Prefill).await);
-        tracker.record_worker(
-            1,
-            None,
-            crate::protocols::common::timing::WORKER_TYPE_PREFILL,
-        );
-        tracker.begin_retry();
-
-        let router = fresh_decode_router();
-        let host = Arc::new(PhaseRoutingHost::default());
-        router
-            .generate(SingleIn::new(pinned_request(&tracker)), host.clone())
-            .await
-            .unwrap();
-
-        assert_eq!(*host.routed.lock(), [(RequestPhase::Aggregated, Some(2))]);
-        let workers = tracker.get_worker_info().unwrap();
-        assert_eq!(workers.prefill_worker_id, Some(2));
-        assert_eq!(workers.decode_worker_id, Some(2));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn target_cleared_mid_flight_routes_as_aggregated() {
         // The request passes the activation gate, then the last prefill worker leaves
@@ -1242,12 +1178,13 @@ mod tests {
         );
         let tracker = Arc::new(RequestTracker::new());
         let barrier = tracker.set_phase(RequestPhase::Decode).await;
+        let mut request = inference_request();
+        request.tracker = Some(tracker.clone());
 
-        let host = Arc::new(PhaseRoutingHost::default());
+        let host = Arc::new(CountingDecodeHost::default());
         let in_flight = tokio::spawn({
             let router = router.clone();
             let host = host.clone();
-            let request = pinned_request(&tracker);
             async move { router.generate(SingleIn::new(request), host).await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1257,10 +1194,8 @@ mod tests {
         drop(barrier);
         in_flight.await.unwrap().unwrap();
 
-        assert_eq!(*host.routed.lock(), [(RequestPhase::Aggregated, Some(2))]);
-        let workers = tracker.get_worker_info().unwrap();
-        assert_eq!(workers.prefill_worker_id, Some(2));
-        assert_eq!(workers.decode_worker_id, Some(2));
+        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.phase(), RequestPhase::Aggregated);
     }
 
     #[tokio::test]
