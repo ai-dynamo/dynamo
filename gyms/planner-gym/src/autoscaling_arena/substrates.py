@@ -23,9 +23,23 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 DEFAULT_COLD_START_DELAY_S = 60.0
+
+
+def resolve_nextn(
+    extra_args: Mapping[str, Any],
+    *,
+    field_name: str = "extra_args",
+    error_type: type[ValueError] = ValueError,
+) -> Optional[int]:
+    """Resolve the canonical nextn setting and reject conflicting aliases."""
+    canonical = extra_args.get("aic_nextn")
+    legacy = extra_args.get("ais_nextn")
+    if canonical is not None and legacy is not None and canonical != legacy:
+        raise error_type(f"{field_name}.aic_nextn conflicts with ais_nextn")
+    return canonical if canonical is not None else legacy
 
 
 @dataclass(frozen=True)
@@ -48,18 +62,6 @@ class Substrate:
     extra_engine_args: dict = field(default_factory=dict)
 
     def engine_args(self) -> str:
-        perf_config = {
-            "model": self.model,
-            "system": self.system,
-            "backend": self.backend,
-            "backend_version": self.backend_version,
-            "tp": self.tp_size,
-            "moe_tp_size": self.moe_tp_size,
-            "moe_ep_size": self.moe_ep_size,
-            "attention_dp": self.attention_dp_size,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
-        }
         rank = dict(self.extra_engine_args)
         timing = rank.get("timing_model")
         if timing is not None and (
@@ -69,6 +71,23 @@ class Substrate:
             raise ValueError(
                 "extra_engine_args.timing_model may override only fixed or polynomial timing; external model identity belongs in the substrate"
             )
+        nextn = resolve_nextn(rank, field_name="extra_engine_args")
+        rank.pop("ais_nextn", None)
+        if nextn is not None:
+            rank["aic_nextn"] = nextn
+        perf_config = {
+            "model": self.model,
+            "system": self.system,
+            "backend": self.backend,
+            "backend_version": self.backend_version,
+            "tp": self.tp_size,
+            "moe_tp_size": self.moe_tp_size,
+            "moe_ep_size": self.moe_ep_size,
+            "attention_dp": self.attention_dp_size,
+            "nextn": nextn,
+            "estimation_mode": "auto",
+            "fallback_policy": "deny",
+        }
         launch = {}
         for key in (
             "gpu_memory_utilization",

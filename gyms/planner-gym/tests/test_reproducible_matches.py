@@ -268,6 +268,31 @@ def test_nextn_identity_matches_native_and_planner(raw_match, tmp_path, aliases)
     assert metadata["aggregated"]["config"]["nextn"] == 1
     assert "ais_nextn" not in native
 
+    substrate = json.loads(
+        Substrate(
+            "probe",
+            "synthetic-model",
+            "synthetic-system",
+            "vllm",
+            extra_engine_args=dict(aliases),
+        ).engine_args()
+    )["engine"]
+    assert substrate["aic_nextn"] == substrate["timing_model"]["config"]["nextn"] == 1
+    assert "ais_nextn" not in substrate
+
+    fixed = {"type": "fixed", "prefill_ms": 5, "decode_ms": 1}
+    substrate = json.loads(
+        Substrate(
+            "probe",
+            "synthetic-model",
+            "synthetic-system",
+            "vllm",
+            extra_engine_args={**aliases, "timing_model": dict(fixed)},
+        ).engine_args()
+    )["engine"]
+    assert substrate["timing_model"] == fixed
+    assert substrate["aic_nextn"] == 1
+
 
 def test_conflicting_nextn_aliases_fail_before_replay(raw_match, tmp_path):
     raw_match["backend"]["engines"]["common"]["extra_args"].update(
@@ -275,6 +300,14 @@ def test_conflicting_nextn_aliases_fail_before_replay(raw_match, tmp_path):
     )
     with pytest.raises(MatchConfigError, match="aic_nextn conflicts with ais_nextn"):
         _parse(raw_match, tmp_path)
+    with pytest.raises(ValueError, match="aic_nextn conflicts with ais_nextn"):
+        Substrate(
+            "probe",
+            "synthetic-model",
+            "synthetic-system",
+            "vllm",
+            extra_engine_args={"aic_nextn": 1, "ais_nextn": 2},
+        ).engine_args()
 
 
 def test_warmup_references_are_case_specific(raw_match, tmp_path, monkeypatch):
