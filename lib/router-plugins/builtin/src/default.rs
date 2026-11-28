@@ -11,6 +11,7 @@ mod scorer;
 pub use parameters::KVCR_POLICY_TYPE;
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
+pub(crate) use picker::softmax_sample_index;
 
 use dynamo_kv_router::plugins::worker_selection::*;
 use parking_lot::Mutex;
