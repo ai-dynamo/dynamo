@@ -1,4 +1,15 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Structural validation
+
+## Scope
+
+These rules apply to operator validating admission and its tests across
+resources and API versions. Implementation filenames below are relative to
+`deploy/operator/internal/webhook/validation/`.
 
 Structural validation is the operator's convention for custom-resource webhook
 validation. It mirrors the Go API type tree and composes typed Kubernetes
@@ -205,3 +216,8 @@ Keep this table current whenever a resource validator is migrated.
   admission boundary rather than treating a unit-test assumption as proof.
 - Every newly added nested API type must be directly checked by its parent or
   delegated to its exact-type validator.
+
+## Decision source
+
+Existing operator convention, introduced in
+[PR #11771](https://github.com/ai-dynamo/dynamo/pull/11771).

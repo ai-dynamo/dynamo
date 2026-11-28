@@ -1,6 +1,10 @@
 meta:
   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
 areas:
+- label: architecture
+  github_team: '@ai-dynamo/dynamo-architecture-codeowners'
+  path_globs:
+  - designs/
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'
   path_globs:
@@ -367,6 +371,7 @@ areas:
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:
+  - designs/operator/
   - deploy/CONTRIBUTING.md
   - deploy/__init__.py
   - deploy/helm/

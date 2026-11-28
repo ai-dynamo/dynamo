@@ -18,9 +18,19 @@ SPDX-License-Identifier: Apache-2.0
 | `docs/fern/` | Fern docs site; pages are in `pages/` |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
+| `designs/` | Design invariants and review checks, with global rules at the root and area rules in subdirectories |
 | `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
+
+## Design invariants
+
+Before implementing or reviewing a change, read
+[`designs/README.md`](designs/README.md) and every rule set whose scope covers the
+change and its effects. Their requirements are mandatory. Global rules apply
+across components; consult area-specific rules even when the changed code lives
+outside the owning area's directory. Review existing base-branch rules for
+conformance and proposed rule changes as design decisions.
 
 ## Ecosystem
 
