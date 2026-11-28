@@ -43,7 +43,7 @@ impl StageGuard {
     /// Increment the stage gauge and return a guard that decrements on drop.
     ///
     /// * `stage` — pipeline stage name; use `frontend_perf::STAGE_{PREPROCESS,ROUTE,DISPATCH}`
-    ///   constants from [`crate::metrics::prometheus_names`].
+    ///   constants from [`crate::prometheus_names`].
     /// * `phase` — request phase; use `RequestPhase::to_string` output
     ///   (`"prefill"|"decode"|"aggregated"`), or `""` for stages without a phase.
     pub fn new(stage: &str, phase: &str) -> Self {

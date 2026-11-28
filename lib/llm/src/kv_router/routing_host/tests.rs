@@ -49,7 +49,7 @@ use crate::{
         timing::RequestTracker,
     },
 };
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 
 fn request() -> PreprocessedRequest {
     PreprocessedRequest::builder()

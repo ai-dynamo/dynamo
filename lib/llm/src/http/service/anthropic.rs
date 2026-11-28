@@ -56,10 +56,8 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
-use dynamo_http_server::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, ErrorType, InflightGuard},
-};
+use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
+use dynamo_metrics::request::{CancellationLabels, Endpoint, ErrorType, InflightGuard};
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
@@ -761,7 +759,7 @@ async fn anthropic_messages(
         );
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight_guard.request_metrics(), &mut request);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -770,20 +768,19 @@ async fn anthropic_messages(
         // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
         // (`rate_limit_error`) with a `Cancelled` metric label and no
         // rejection accounting.
-        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(e.as_ref()) {
-            dynamo_http_server::metrics::record_failure(error);
-            inflight_guard.mark_error(dynamo_http_server::metrics::ErrorType::Cancelled);
+        if let Some(error) = dynamo_metrics::request::queue_deadline_error(e.as_ref()) {
+            dynamo_metrics::request::record_failure(error);
+            inflight_guard.mark_error(dynamo_metrics::request::ErrorType::Cancelled);
             return anthropic_error_unrecorded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
-                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_metrics::request::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(
-                &model,
-                dynamo_http_server::metrics::Endpoint::AnthropicMessages,
-            );
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, dynamo_metrics::request::Endpoint::AnthropicMessages);
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),
@@ -791,7 +788,7 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard);
         }
-        if dynamo_http_server::metrics::request_was_cancelled(e.as_ref()) {
+        if dynamo_metrics::request::request_was_cancelled(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Cancelled,
                 format!("{e:#}"),
@@ -805,7 +802,7 @@ async fn anthropic_messages(
             inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
             return response;
         }
-        if dynamo_http_server::metrics::request_was_unavailable(e.as_ref()) {
+        if dynamo_metrics::request::request_was_unavailable(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Unavailable,
                 format!("{e:#}"),
@@ -1035,8 +1032,8 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
-                    let error_type = if dynamo_http_server::metrics::request_was_cancelled(&error) {
-                        dynamo_http_server::metrics::ErrorType::Cancelled
+                    let error_type = if dynamo_metrics::request::request_was_cancelled(&error) {
+                        dynamo_metrics::request::ErrorType::Cancelled
                     } else {
                         super::openai::metric_error_type_for_class(error.class())
                     };
@@ -1497,7 +1494,7 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
 }
 
 fn anthropic_non_streaming_aggregation_error(error: DynamoError) -> Response {
-    if dynamo_http_server::metrics::request_was_cancelled(&error) {
+    if dynamo_metrics::request::request_was_cancelled(&error) {
         return anthropic_sanitized_error_with_details(SanitizedError::Cancelled, error);
     }
     anthropic_semantic_error(&error)
@@ -1513,7 +1510,7 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
         return None;
     };
 
-    dynamo_http_server::metrics::record_failure(error);
+    dynamo_metrics::request::record_failure(error);
     if matches!(
         error.class(),
         dynamo_runtime::error::ErrorClass::Internal
@@ -1657,7 +1654,7 @@ mod tests {
             .class(ErrorClass::BackendProtocol)
             .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
             .build();
-        let counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
+        let counter = dynamo_metrics::request::DYNAM_FAILURES_TOTAL
             .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
         let before = counter.get();
         let event = Annotated::<NvCreateChatCompletionStreamResponse> {

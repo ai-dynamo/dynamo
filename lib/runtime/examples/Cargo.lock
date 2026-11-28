@@ -801,6 +801,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-metrics"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "dynamo-error",
+ "once_cell",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "regex",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-runtime"
 version = "1.8.0"
 dependencies = [
@@ -821,6 +836,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-error",
+ "dynamo-metrics",
  "dynamo-truthy",
  "educe",
  "either",

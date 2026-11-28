@@ -57,6 +57,7 @@ harness = false
 required-features = ["media-ffmpeg"]
 
 [dependencies]
+dynamo-metrics = { workspace = true }
 dynamo-router-policies = { workspace = true }
 # repo
 dynamo-http-server = { workspace = true }

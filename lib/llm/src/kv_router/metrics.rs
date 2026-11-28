@@ -64,7 +64,7 @@ use prometheus::{
 };
 
 use crate::protocols::common::timing::RequestPhase;
-use dynamo_http_server::metrics::generate_log_buckets;
+use dynamo_metrics::request::generate_log_buckets;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;

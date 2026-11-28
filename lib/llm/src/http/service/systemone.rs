@@ -42,10 +42,8 @@ use crate::{
         },
     },
 };
-use dynamo_http_server::{
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
-};
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_metrics::request::{CancellationLabels, Endpoint, Metrics, SystemOnePhase};
 
 #[path = "systemone/abort.rs"]
 mod abort;

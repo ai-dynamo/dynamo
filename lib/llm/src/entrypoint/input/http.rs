@@ -352,7 +352,7 @@ async fn run_watcher(
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
-    metrics: Arc<dynamo_http_server::metrics::Metrics>,
+    metrics: Arc<dynamo_metrics::request::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
@@ -457,7 +457,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
 /// Updates metrics for model type changes
 fn update_model_metrics(
     model_type: ModelUpdate,
-    metrics: Arc<dynamo_http_server::metrics::Metrics>,
+    metrics: Arc<dynamo_metrics::request::Metrics>,
     migration_limit: u32,
 ) {
     match model_type {

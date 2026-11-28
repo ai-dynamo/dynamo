@@ -33,8 +33,8 @@ use derive_builder::Builder;
 use dynamo_http_server::lifecycle::{
     InflightPermit, ServiceObserver, ServiceStage, echo_request_id_header, track_inflight_response,
 };
-use dynamo_http_server::metrics::Metrics;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig, listen_socket_addr};
+use dynamo_metrics::request::Metrics;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
@@ -1372,7 +1372,7 @@ impl HttpServiceConfigBuilder {
         state.flags.set(&EndpointType::SystemOne, systemone_enabled);
 
         // enable prometheus metrics
-        let registry = dynamo_http_server::metrics::Registry::new();
+        let registry = dynamo_metrics::request::Registry::new();
         register_frontend_metrics_start_time_metric(&registry)?;
         metrics::register_with_model_manager(
             &state.metrics_clone(),

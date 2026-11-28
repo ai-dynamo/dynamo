@@ -24,7 +24,7 @@ use crate::{
     },
     session_affinity::explicit_target,
 };
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 
 use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
@@ -1061,7 +1061,7 @@ mod tests {
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
-    use dynamo_http_server::metrics::Metrics;
+    use dynamo_metrics::request::Metrics;
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;

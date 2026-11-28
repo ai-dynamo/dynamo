@@ -17,7 +17,7 @@ rule violation is a contract defect, not a style preference.
 ## Find the telemetry
 
 1. Look for metric definitions and changes:
-   - Rust: new `pub const` names in `lib/runtime/src/metrics/prometheus_names.rs`;
+   - Rust: new `pub const` names in `lib/metrics/src/prometheus_names.rs`;
      `.metrics().create_*` and `create_metric_with_options` calls; `prometheus` crate
      constructors such as `IntCounterVec::new`; custom `Collector` implementations.
    - Python: `prometheus_client` `Counter`, `Gauge`, `Histogram`, `Info`, and `Enum`; registry
@@ -202,7 +202,7 @@ and list every location. Put findings about names, types, units, labels, stabili
 unbounded series first, because they are hardest to change after release. For example:
 
 ```text
-lib/http-server/src/metrics.rs:1412 (N2, N3)
+lib/metrics/src/request.rs:1412 (N2, N3)
 Problem: new IntCounterVec "prefill_wait_ms" exports dynamo_frontend_prefill_wait_ms{model}.
 Consequence: the unit is not base form and the counter has no _total, so rate() panels show
   milliseconds per second under a name that reads as a gauge; renaming after release breaks them.

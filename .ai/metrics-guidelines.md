@@ -183,7 +183,7 @@ not make it visible: pre-create its children as well (**L6**).
 
 **R2.** Do not add a metric that no production code updates.
 
-**R3.** When you add, rename, or remove a name in `lib/runtime/src/metrics/prometheus_names.rs`,
+**R3.** When you add, rename, or remove a name in `lib/metrics/src/prometheus_names.rs`,
 regenerate its Python mirror in the same pull request with
 `cargo run -p dynamo-codegen --bin gen-python-prometheus-names`. Never edit the mirror by hand.
 
@@ -256,7 +256,7 @@ stability level. If no section fits the metric's family, add one.
 
 **D2.** Update the `AGENTS.md` nearest to the code that owns the metric to say what the
 metric is and how it can be used. The "Frontend Serving-Load Metrics" section of
-`lib/http-server/AGENTS.md` is an example.
+`lib/metrics/AGENTS.md` is an example.
 
 ## Logs and traces
 

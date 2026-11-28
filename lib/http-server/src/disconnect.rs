@@ -24,7 +24,7 @@
 //! [`create_connection_monitor`] spawns; it kills the engine context when a handle reports
 //! [`ConnectionStatus::ClosedUnexpectedly`].
 
-use crate::metrics::{CancellationLabels, Metrics};
+use dynamo_metrics::request::{CancellationLabels, Metrics};
 use dynamo_runtime::engine::AsyncEngineContext;
 use std::sync::Arc;
 

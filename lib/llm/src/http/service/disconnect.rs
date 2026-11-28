@@ -31,8 +31,8 @@ use dynamo_http_server::disconnect::{
     ConnectionStatus, connection_monitor, create_connection_monitor,
 };
 #[cfg(test)]
-use dynamo_http_server::metrics::{CancellationLabels, Metrics};
-use dynamo_http_server::metrics::{ErrorType, InflightGuard};
+use dynamo_metrics::request::{CancellationLabels, Metrics};
+use dynamo_metrics::request::{ErrorType, InflightGuard};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -119,7 +119,7 @@ impl StreamErrorSignal {
         };
         if let Some(error) = &failure.semantic_error {
             if error.class() != ErrorClass::Cancelled {
-                dynamo_http_server::metrics::record_failure(error);
+                dynamo_metrics::request::record_failure(error);
             }
             return;
         }
@@ -135,7 +135,7 @@ impl StreamErrorSignal {
             ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
-        dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
+        dynamo_metrics::request::record_failure(&DynamoError::builder().class(class).build());
     }
 }
 
@@ -641,7 +641,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
+    use dynamo_metrics::request::{Endpoint, ErrorType, RequestType, Status};
     use dynamo_runtime::pipeline::context::Controller;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1055,7 +1055,7 @@ mod tests {
         connection_handle.disarm();
         drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
-        let semantic_counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
+        let semantic_counter = dynamo_metrics::request::DYNAM_FAILURES_TOTAL
             .with_label_values(&["Internal", "runtime.internal"]);
         let semantic_before = semantic_counter.get();
         let producer_error_signal = error_signal.clone();

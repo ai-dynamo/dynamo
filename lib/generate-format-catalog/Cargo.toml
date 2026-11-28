@@ -18,8 +18,8 @@ dynamo-sglang-generate = { workspace = true }
 dynamo-vllm-generate = { workspace = true }
 
 [dev-dependencies]
+dynamo-metrics = { workspace = true }
 dynamo-sglang-generate = { workspace = true, features = ["testkit"] }
-dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }

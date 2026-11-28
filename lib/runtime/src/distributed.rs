@@ -401,7 +401,7 @@ impl DistributedRuntime {
             );
         }
 
-        crate::metrics::register_merge_conflicts_counter(
+        dynamo_metrics::register_merge_conflicts_counter(
             distributed_runtime.get_metrics_registry(),
         );
 

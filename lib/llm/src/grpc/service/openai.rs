@@ -23,10 +23,8 @@ use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::metrics::process_response_and_observe_metrics;
-use dynamo_http_server::{
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint},
-};
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_metrics::request::{CancellationLabels, Endpoint};
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::{Status, metadata::MetadataMap};
@@ -108,7 +106,7 @@ pub async fn completion_response_stream(
     );
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight_guard.request_metrics(), &mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -119,16 +117,15 @@ pub async fn completion_response_stream(
         // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
         // surfaces' 429: the deadline elapsed waiting for capacity, so it is
         // backpressure rather than a gateway timeout. No rejection accounting.
-        if dynamo_http_server::metrics::request_deadline_exceeded(e.as_ref()) {
+        if dynamo_metrics::request::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
-                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_metrics::request::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(
-                &model_name,
-                dynamo_http_server::metrics::Endpoint::Completions,
-            );
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, dynamo_metrics::request::Endpoint::Completions);
             return Status::resource_exhausted(e.to_string());
         }
         dispatch_error_status(e.as_ref(), "Failed to generate completions")

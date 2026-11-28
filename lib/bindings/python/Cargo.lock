@@ -2265,14 +2265,13 @@ version = "1.8.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dynamo-metrics",
  "dynamo-runtime",
  "futures",
  "http-body 1.0.1",
  "hyper-util",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
- "serde",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2422,6 +2421,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-lora",
  "dynamo-memory",
+ "dynamo-metrics",
  "dynamo-mocker",
  "dynamo-multimodal",
  "dynamo-parsers",
@@ -2553,6 +2553,21 @@ dependencies = [
  "offset-allocator",
  "serde",
  "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-metrics"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "dynamo-error",
+ "once_cell",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "regex",
+ "serde",
  "tracing",
 ]
 
@@ -2835,6 +2850,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-error",
+ "dynamo-metrics",
  "dynamo-truthy",
  "educe",
  "either",
@@ -2953,8 +2969,8 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dynamo-error",
- "dynamo-http-server",
  "dynamo-llm",
+ "dynamo-metrics",
  "dynamo-protocols 10.0.1",
  "dynamo-runtime",
  "serde",
@@ -3125,10 +3141,10 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dynamo-error",
- "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
+ "dynamo-metrics",
  "dynamo-protocols 10.0.1",
  "dynamo-runtime",
  "serde",

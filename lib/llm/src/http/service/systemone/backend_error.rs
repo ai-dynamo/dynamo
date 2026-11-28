@@ -7,13 +7,13 @@ use dynamo_error::http::{
 use dynamo_runtime::error::ErrorClass;
 
 use super::DispatchError;
-use dynamo_http_server::metrics;
+use dynamo_metrics::request;
 
 pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchError {
-    if metrics::request_was_cancelled(cause) {
+    if request::request_was_cancelled(cause) {
         return DispatchError::cancelled();
     }
-    if metrics::request_was_rejected(cause) {
+    if request::request_was_rejected(cause) {
         return DispatchError {
             status: overload_status_code(),
             public_message: "SGLang scoring worker capacity is exhausted",

@@ -18,53 +18,24 @@ use prometheus::proto::{
 };
 use std::collections::BTreeMap;
 
-#[cfg(test)]
-use serde::Deserialize;
-
-/// Accept a float as either a JSON number or a string, parsing strings with
-/// `str::parse`, which is correctly rounded.
-#[cfg(test)]
-fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    use serde::Deserialize as _;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Repr {
-        Text(String),
-        Num(f64),
-    }
-    match Repr::deserialize(d)? {
-        Repr::Text(t) => t.parse().map_err(serde::de::Error::custom),
-        Repr::Num(v) => Ok(v),
-    }
-}
-
 #[derive(Debug)]
-#[cfg_attr(test, derive(Deserialize))]
 pub struct TypedSample {
     pub name: String,
     pub labels: BTreeMap<String, String>,
-    /// Fixtures carry this as a string: JSON float parsing can land a ULP off
-    /// the correctly-rounded value, and a fixture must not introduce error the
-    /// real path -- a native f64 across PyO3 -- never has.
-    #[cfg_attr(test, serde(deserialize_with = "de_f64"))]
     pub value: f64,
     /// Seconds since the epoch, when the source recorded one. Standard
     /// `prometheus_client` metrics leave this unset; custom collectors and
     /// federated sources can populate it.
-    #[cfg_attr(test, serde(default))]
     pub timestamp: Option<f64>,
 }
 
 #[derive(Debug)]
-#[cfg_attr(test, derive(Deserialize))]
 pub struct TypedFamily {
     pub name: String,
     pub help: String,
-    #[cfg_attr(test, serde(rename = "type"))]
     pub kind: String,
     /// Prometheus UNIT metadata, as the word the client reports (`seconds`).
     /// Empty when the source does not declare one.
-    #[cfg_attr(test, serde(default))]
     pub unit: String,
     pub samples: Vec<TypedSample>,
 }

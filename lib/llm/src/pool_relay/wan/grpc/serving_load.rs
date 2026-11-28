@@ -112,7 +112,7 @@ mod tests {
 
     use super::*;
     use crate::pool_relay::load::{PoolDeployment, PoolSchedulerLoad, SchedulerGauges};
-    use dynamo_http_server::load::{RequestGauges, RequestTotals};
+    use dynamo_metrics::load::{RequestGauges, RequestTotals};
 
     fn producer(seed: u8) -> ProducerIdentity {
         let format = DcCkfState::new(CkfConfig::new(32)).unwrap().format();

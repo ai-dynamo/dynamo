@@ -4,7 +4,7 @@
 use axum::http::StatusCode;
 
 use dynamo_error::http::SanitizedError;
-use dynamo_http_server::metrics::{
+use dynamo_metrics::request::{
     ErrorType, REQUEST_DEADLINE_EXCEEDED_MESSAGE, request_deadline_exceeded, request_was_cancelled,
     request_was_rejected, request_was_unavailable,
 };

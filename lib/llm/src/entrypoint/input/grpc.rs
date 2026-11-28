@@ -15,7 +15,7 @@ use crate::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 use dynamo_runtime::DistributedRuntime;
 
 /// Build and run an KServe gRPC service

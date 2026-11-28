@@ -17,7 +17,7 @@ use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
-use dynamo_http_server::metrics::{
+use dynamo_metrics::request::{
     UNSET_DP_RANK_LABEL, WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE,
     WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };

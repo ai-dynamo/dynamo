@@ -71,7 +71,7 @@ do not carry compatibility branches forward indefinitely.
 
 # Frontend Serving-Load Metrics
 
-The frontend's request metrics live in `dynamo-http-server`; their rules are in [`../http-server/AGENTS.md`](../http-server/AGENTS.md). This crate adapts model cards and discovery into those metrics (`http/service/metrics.rs`) and publishes the frame they build for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`).
+The frontend's request metrics live in `dynamo-metrics`; their rules are in [`../metrics/AGENTS.md`](../metrics/AGENTS.md). This crate adapts model cards and discovery into those metrics (`http/service/metrics.rs`) and publishes the frame they build for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`).
 
 ## Decision Cleanup Diagnostics
 

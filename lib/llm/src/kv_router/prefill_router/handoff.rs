@@ -20,7 +20,7 @@ use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
     response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
 };
-use dynamo_http_server::metrics::request_deadline_exceeded;
+use dynamo_metrics::request::request_deadline_exceeded;
 
 /// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;

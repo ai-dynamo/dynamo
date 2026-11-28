@@ -45,7 +45,7 @@ use super::pool_registry::PoolRegistry;
 use super::topology::TopologyPublisher;
 use crate::frontend_load::FRONTEND_LOAD_TOPIC;
 use crate::kv_router::SCHEDULER_LOAD_SUBJECT;
-use dynamo_http_server::load::{RequestGauges, RequestTotals};
+use dynamo_metrics::load::{RequestGauges, RequestTotals};
 
 /// A source's report counts for this many of its publish intervals, so one or
 /// two lost reports do not make an aggregate incomplete.
