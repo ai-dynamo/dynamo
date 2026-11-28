@@ -36,6 +36,10 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
    ```
    See [container/README.md](../../../../../container/README.md) for complete build instructions.
+   The operator reads the Dynamo version from the image tag, so the templates set no
+   `runtimeVersionOverride`. When you replace `my-tag`, use a tag that holds the Dynamo version
+   you built, such as `1.8.0`, or set `runtimeVersionOverride` on the component. If the tag has no
+   version, such as `my-tag` or `latest`, the admission webhook rejects a new deployment.
 5. **Hugging Face token secret**:
    ```bash
    export HF_TOKEN=your_hf_token

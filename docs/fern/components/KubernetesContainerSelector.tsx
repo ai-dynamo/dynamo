@@ -107,7 +107,8 @@ function commandFor(
     return [
       `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export IMAGE_REGISTRY=${shellQuote(imageRegistry)}`,
-      'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"',
+      "export XPU_RUNTIME_VERSION=\"$(sed -n 's/^version = \"\\([^\"]*\\)\"$/\\1/p' pyproject.toml)\"",
+      'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:${XPU_RUNTIME_VERSION}"',
       "",
       "python3 container/render.py \\",
       "  --framework=vllm \\",
