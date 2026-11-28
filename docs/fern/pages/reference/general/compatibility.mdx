@@ -60,7 +60,9 @@ In Kubernetes deployments, worker spec changes during a rolling update create ge
 
 The frontend excludes incomplete or unready namespaces from routing. When multiple ready WorkerSets are available, it selects a WorkerSet at random with weight proportional to its worker count, then applies the configured routing policy within that WorkerSet.
 
-Worker count is a capacity approximation, not a measurement of end-to-end serving capacity. Selection between WorkerSets also does not provide request stickiness.
+In a disaggregated deployment that count is the decode worker count alone, so a generation with few prefill workers can receive more traffic than its prefill workers can handle. Set `DYN_ENABLE_PAIRED_CAPACITY_WEIGHTING=true` on the frontend to weight by each generation's paired capacity instead; it is off by default. When enabled and every ready namespace also has live prefill workers, a generation with `P` prefill and `D` decode workers is weighted by `min(P / ΣP, D / ΣD)`, where the sums run over all ready generations, so neither role in a generation receives more than its share of traffic. For example, with generations at 4P:1D and 2P:3D, traffic splits about 43% / 57%, putting every prefill and decode worker at the same relative load, rather than the default 25% / 75% by decode count, which overloads the two prefill workers of the second generation. Aggregated deployments are weighted by worker count either way.
+
+Worker count is a capacity approximation, not a measurement of end-to-end serving capacity: it assumes workers of the same role have similar throughput in every generation. Selection between WorkerSets also does not provide request stickiness.
 
 ## Feature Support
 
