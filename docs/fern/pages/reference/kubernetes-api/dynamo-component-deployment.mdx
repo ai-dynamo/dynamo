@@ -134,7 +134,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
       Deadline handling runs after download checks, compiler-registry resolution, and desired-state validation. An outage or invalid desired configuration can delay failure reporting and cleanup indefinitely, even after the deadline has elapsed. The timer does not bound asynchronous cleanup or finalization.
 
-      Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
+      Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly, except for [Cyborg placement by fabric pod](#lpx-cyborg-placement-by-fabric-pod). A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
     </ParamField>
   </Indent>
 
@@ -368,6 +368,44 @@ For DGDs created with operator version 1.6.0 or later, `main` and each declared 
 Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md), the [vLLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md), and the [TensorRT-LLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md) for topology requirements and examples.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/trtllm/deploy) sidecar manifests for complete examples, including `multinode_tp.yaml` and `multinode_dp.yaml`.
+
+## LPX Cyborg Placement by Fabric Pod
+
+An LPU fabric pod is the set of Nodes with one value of the label `network.topology.nvidia.com/lpu-fabric-pod`. By default, Grove and the scheduler choose the Nodes of the conductor (Cyborg) Pods of a hybrid LPX component. To keep a fixed count of Cyborg Pods in each fabric pod that holds LPUs of the workload replica, set this annotation on the conductor role template:
+
+```yaml
+roles:
+  - name: conductor
+    replicas: 2 # Cyborg Pods in each fabric pod
+    podTemplate:
+      metadata:
+        annotations:
+          lpx.nvidia.com/cyborg-placement: per-fabric-pod
+      spec:
+        containers:
+          - name: main
+            env:
+              - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['lpx.nvidia.com/replica-index']
+```
+
+`per-fabric-pod` is the only accepted value. The annotation has no effect on a build that runs every partition on the GPU.
+
+- **Count:** `roles[name=conductor].replicas` is the count of Cyborg Pods in each fabric pod, not in the workload replica.
+- **Capacity:** the operator owns the replica count of each Cyborg PodClique. Until the LPX scheduler binds the LPUs of a workload replica, the PodClique has the count in each fabric pod that the node selector and required node affinity of the conductor template can select. After that, the operator deletes the Cyborg Pods in the fabric pods without LPUs of that replica and lowers the capacity. Do not attach a scaler to this PodClique.
+- **Labels:** before a Cyborg Pod can be scheduled, the operator sets the node selector of its fabric pod and these labels. Read them in the template with `fieldRef`, as in the example.
+
+  | Label | Value |
+  |-------|-------|
+  | `lpx.nvidia.com/fabric-pod` | The fabric pod of the Pod. |
+  | `lpx.nvidia.com/fabric-pod-rank` | `0` to count − 1, unique in the fabric pod. |
+  | `lpx.nvidia.com/replica-index` | Unique in the PodClique and congruent to the rank modulo the count. |
+
+  A Pod keeps its labels for its life. After a change of the count, the operator deletes each Pod whose labels do not fit the new count, and Grove creates a Pod in its place.
+- **Refusals:** reconciliation rejects the annotation, and the DGD reports `status.state: failed`, when the operator runs in namespace-restricted mode (the placement reads Node labels) or when the DGD selects the `Coherent` update strategy.
+- **Prerequisites:** a Grove version that keeps the scheduling gates of a Pod template on the Pods that it creates ([ai-dynamo/grove#1019](https://github.com/ai-dynamo/grove/pull/1019)), and a scheduler that places each Pod by itself, such as the default scheduler. The operator holds each Cyborg Pod with the scheduling gate `lpx.nvidia.com/fabric-pod-pending` until it sets the node selector. KAI schedules the PodClique as one gang and is not supported.
 
 ## Runtime Version Compatibility
 

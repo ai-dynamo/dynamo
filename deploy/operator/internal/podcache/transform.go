@@ -83,6 +83,8 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 	return corev1.PodSpec{
 		// Topology and snapshot controllers require the assigned node.
 		NodeName: in.NodeName,
+		// LPX Cyborg placement pins a Pod after Grove has removed its scheduling gate.
+		SchedulingGates: in.SchedulingGates,
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
