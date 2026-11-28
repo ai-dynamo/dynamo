@@ -35,7 +35,10 @@ KUBEBUILDER_ASSETS=/absolute/path/to/envtest/binaries \
 `TestClusterOperatorUpgrade/native-vllm-rs` seeds the snapshot through the shared
 permissive historical phase, runs production takeover, checks the independent
 safety assertion, and compares the complete owned graph with the reviewed
-`output.yaml`. Before and after takeover it also recomputes the worker hash with
+`output.yaml`. The golden differs from the released graph only in the worker
+status: the current operator does not predict `servedModelName` from the engine
+flags of a native-sidecar worker, so the field is absent. Before and after
+takeover it also recomputes the worker hash with
 the current operator and requires it to equal the persisted DGD annotation and the
 worker clique label. That check fails on an operator that resolves `vllm-rs` as
 vLLM, independent of the golden. This is a CPU admission/controller/API-server

@@ -75,7 +75,6 @@ var upgradeCompatibilityScenarioHooks = map[string]upgradeCompatibilityHooks{
 	},
 }
 
-// workerCliqueHash returns the worker hash label of the only worker clique.
 func workerCliqueHash(t *testing.T, objects []unstructured.Unstructured) string {
 	t.Helper()
 	var hashes []any

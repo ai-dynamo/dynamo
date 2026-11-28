@@ -301,7 +301,6 @@ status:
       gpusPerEngine: 1
       gpusPerReplica: 1
       replicas: 0
-      servedModelName: Qwen/Qwen3-0.6B
       updatedReplicas: 0
   conditions:
   - lastTransitionTime: $ignore
