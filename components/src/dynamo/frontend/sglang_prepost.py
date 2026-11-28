@@ -29,6 +29,7 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
 from .sglang_prompt_renderer import (
+    JinjaPromptRenderer,
     KimiK3PromptRenderer,
     PromptRenderer,
     build_prompt_renderer,
@@ -322,6 +323,19 @@ def _normalize_assistant_tool_call_arguments(messages: list[dict[str, Any]]) -> 
                 fn["arguments"] = json.loads(args)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
+
+
+def _truncate_mistral_tool_call_ids(messages: list[dict[str, Any]]) -> None:
+    """Keep matching assistant and tool IDs in Mistral's nine-character format."""
+    for message in messages:
+        if isinstance(tool_call_id := message.get("tool_call_id"), str):
+            message["tool_call_id"] = tool_call_id[-9:]
+        if isinstance(tool_calls := message.get("tool_calls"), list):
+            for call in tool_calls:
+                if isinstance(call, dict) and isinstance(
+                    call_id := call.get("id"), str
+                ):
+                    call["id"] = call_id[-9:]
 
 
 def create_parsers(
@@ -804,6 +818,10 @@ def preprocess_chat_request(
             reasoning_parser_name=reasoning_parser_name,
         )
     prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
+    if tool_call_parser_name == "mistral" and isinstance(
+        prompt_renderer, JinjaPromptRenderer
+    ):
+        _truncate_mistral_tool_call_ids(messages)
     kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
     if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
         # K3's encoder cannot express a named choice. Its Rust formatter disables

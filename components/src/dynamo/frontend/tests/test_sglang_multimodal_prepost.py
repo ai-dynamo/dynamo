@@ -9,6 +9,7 @@ sends ``image_url``, so placeholders never rendered.
 """
 
 import pytest
+from jinja2 import Environment, TemplateError
 
 from dynamo.frontend.sglang_prepost import preprocess_chat_request
 from dynamo.frontend.sglang_prompt_renderer import _normalize_messages_for_template
@@ -94,3 +95,59 @@ def test_preprocess_feeds_normalized_chunks_to_template():
 
     assert 42 in result.prompt_token_ids
     assert [c["type"] for c in tok.seen] == ["text", "image"]
+
+
+@pytest.mark.parametrize(
+    ("parser_name", "expected_id"),
+    [("mistral", "89abcdef0"), (None, "call_123456789abcdef0")],
+)
+def test_tool_history_ids_render_in_jinja(parser_name, expected_id):
+    class Tokenizer:
+        chat_template = (
+            "{% for message in messages %}"
+            "{% if message.role == 'assistant' %}"
+            "{% set id = message.tool_calls[0].id %}"
+            "{% elif message.role == 'tool' %}"
+            "{% set id = message.tool_call_id %}"
+            "{% endif %}"
+            "{% if require_mistral_id and id|length != 9 %}"
+            "{{ raise_exception('Tool call IDs must have length 9') }}"
+            "{% endif %}{{ id }}|"
+            "{% endfor %}"
+        )
+
+        def apply_chat_template(self, messages, **kwargs):
+            def raise_exception(message):
+                raise TemplateError(message)
+
+            rendered = (
+                Environment()
+                .from_string(self.chat_template)
+                .render(
+                    messages=messages,
+                    require_mistral_id=parser_name == "mistral",
+                    raise_exception=raise_exception,
+                )
+            )
+            return list(rendered.encode())
+
+    original_id = "call_123456789abcdef0"
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": original_id, "function": {"name": "weather", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": original_id, "content": "Sunny"},
+    ]
+    result = preprocess_chat_request(
+        {"messages": messages},
+        tokenizer=Tokenizer(),
+        tool_call_parser_name=parser_name,
+        reasoning_parser_name=None,
+    )
+
+    assert bytes(result.prompt_token_ids).decode() == f"{expected_id}|{expected_id}|"
+    assert messages[0]["tool_calls"][0]["id"] == original_id
+    assert messages[1]["tool_call_id"] == original_id
