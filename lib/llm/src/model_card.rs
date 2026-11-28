@@ -1062,10 +1062,28 @@ fn checked_file_uri(
             if source.starts_with("ngc://") {
                 return Ok(None);
             }
+            if !is_in_hf_cache_snapshot(&path, source) {
+                anyhow::bail!(
+                    "file {filename} not reachable on this host \
+                     (worker path {} missing, no --model-path overlay); \
+                     the worker registered the local path {source}, which is \
+                     not a Hugging Face repo ID. Mount the model directory at \
+                     the same path on this host, pass --model-path pointing at \
+                     a local copy, or let the worker serve its metadata \
+                     (DYN_SELF_HOST_METADATA, on by default, needs \
+                     DYN_SYSTEM_PORT set on the worker)",
+                    path.display()
+                );
+            }
             Ok(Some(format!("hf://{source}/{filename}")))
         }
         _ => Ok(Some(url.to_string())),
     }
+}
+
+fn is_in_hf_cache_snapshot(path: &Path, repo: &str) -> bool {
+    let snapshots = Path::new(&format!("models--{}", repo.replace('/', "--"))).join("snapshots");
+    path.ancestors().any(|dir| dir.ends_with(&snapshots))
 }
 
 fn file_uri_for(p: &Path) -> anyhow::Result<String> {
@@ -3685,15 +3703,12 @@ mod tests {
         );
     }
 
-    /// Rung 4: when worker path is missing and `--model-path` doesn't
-    /// supply the basename, synthesize hf://; if `is_custom`, error
-    /// with a clear operator-action message instead (HF doesn't host
-    /// custom slots).
     #[test]
-    fn checked_file_uri_rung_4_hf_fallback_or_custom_error() {
+    fn checked_file_uri_rung_4_hf_fallback_or_error() {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
+        let snap_cf = cf_for("/cache/models--Qwen--Qwen3-0.6B/snapshots/abc/template.jinja");
 
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
+        let got = super::checked_file_uri(&snap_cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
         assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
@@ -3713,6 +3728,24 @@ mod tests {
                 .is_none()
         );
         assert!(super::checked_file_uri(&cf, source, None, true).is_err());
+
+        let bare_cf = cf_for("/worker/cwd/models/qwen/template.jinja");
+        let symlink_target_cf = cf_for("/mnt/model/template.jinja");
+        for (cf, local_source) in [
+            (&cf, "/models/Qwen/Qwen3.6-35B-A3B/current"),
+            (&cf, "./models/qwen"),
+            (&bare_cf, "models/qwen"),
+            (&symlink_target_cf, "models/qwen"),
+            (&cf, "Qwen/Qwen3-0.6B"),
+        ] {
+            let err = super::checked_file_uri(cf, local_source, None, false)
+                .expect_err("local-path source must error instead of falling back to HF");
+            let msg = err.to_string();
+            assert!(msg.contains("template.jinja"), "wrong error: {msg}");
+            assert!(msg.contains(local_source), "wrong error: {msg}");
+            assert!(msg.contains("--model-path"), "wrong error: {msg}");
+            assert!(msg.contains("DYN_SELF_HOST_METADATA"), "wrong error: {msg}");
+        }
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
