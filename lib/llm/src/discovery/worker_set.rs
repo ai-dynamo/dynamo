@@ -256,6 +256,9 @@ pub struct WorkerSet {
     /// Shared configuration handle for this routing load context.
     pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
+    /// The prefill pool's own handle, when this decode set fronts one.
+    pub(crate) prefill_load_thresholds: Option<LoadThresholdHandle>,
+
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
@@ -309,6 +312,7 @@ impl WorkerSet {
             systemone_preprocessor: None,
             load_context: None,
             load_thresholds: None,
+            prefill_load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
@@ -346,6 +350,13 @@ impl WorkerSet {
     #[cfg(test)]
     pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
         self.load_context.as_ref()
+    }
+
+    /// Every threshold handle a `/busy_threshold` write must reach, serving pool first.
+    pub(crate) fn load_threshold_handles(&self) -> impl Iterator<Item = &LoadThresholdHandle> {
+        self.load_thresholds
+            .iter()
+            .chain(&self.prefill_load_thresholds)
     }
 
     pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
@@ -663,6 +674,7 @@ impl WorkerSet {
             systemone_preprocessor: None,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),
+            prefill_load_thresholds: self.prefill_load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),

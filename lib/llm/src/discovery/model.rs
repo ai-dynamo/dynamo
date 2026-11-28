@@ -958,8 +958,8 @@ impl Model {
     // -- Worker monitoring (aggregated across WorkerSets) --
 
     /// Get load threshold config from the first WorkerSet with a threshold handle,
-    /// preferring an enabled one. When `config` is Some, updates every handle.
-    /// WorkerSets may share a handle.
+    /// preferring an enabled one. When `config` is Some, updates every handle:
+    /// each WorkerSet's serving pool and, for a decode set, its prefill pool.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
@@ -967,7 +967,7 @@ impl Model {
         let worker_sets = self.worker_sets.load();
         let handles: Vec<_> = worker_sets
             .values()
-            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .flat_map(|worker_set| worker_set.load_threshold_handles())
             .collect();
         if let Some(cfg) = config {
             handles.iter().for_each(|handle| handle.update(cfg));
@@ -983,9 +983,8 @@ impl Model {
     pub(crate) fn accepts_load_thresholds(&self) -> bool {
         self.worker_sets.load().values().any(|worker_set| {
             worker_set
-                .load_thresholds
-                .as_ref()
-                .is_some_and(|thresholds| thresholds.is_enabled())
+                .load_threshold_handles()
+                .any(|thresholds| thresholds.is_enabled())
         })
     }
 
