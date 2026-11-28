@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: deepseek-v4-1-flash-1017
+title: DeepSeek-V4.1-Flash-1017
+page: pages/recipes/model-recipes/deepseek-v4-1-flash-1017.mdx
+provider: deepseek
+model:
+  name: DeepSeek-V4.1-Flash-1017
+  hf_id: deepseek-ai/DeepSeek-V4.1-Flash-1017
+  precision: Checkpoint precision (FP8 dense, FP4 MoE experts); FP8 KV cache on B200 and GB300
+status: experimental
+targets:
+- id: agg-h200-agentx
+  recommended: true
+  badge: optimized
+  hardware:
+    gpu: H200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: aggregated
+  techniques:
+  - tp4
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - prefix-caching
+  - host-kv-cache
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/agg-h200-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=111: 502.5 system tok/s/GPU @ decode p50 50.1 tok/s/user, TTFT p50 609 ms (synthetic DSpark acceptance 3.19).'
+- id: disagg-h200-agentx
+  recommended: false
+  badge: optimized
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - conditional-disaggregation
+  - 1p3d
+  - pd-kv-transfer
+  - mooncake
+  - expert-parallel
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window; conditional 1P3D with a shared Mooncake KV pool'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/disagg-h200-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=600: 518.1 system tok/s/GPU @ decode p50 50.4 tok/s/user, TTFT p50 827 ms (synthetic DSpark acceptance 3.19).'
+- id: agg-b200-agentx
+  recommended: true
+  badge: optimized
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: aggregated
+  techniques:
+  - dep4
+  - expert-parallel
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - fp8-kv-cache
+  - prefix-caching
+  - host-kv-cache
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/agg-b200-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=800: 2,865.1 system tok/s/GPU @ decode p50 50.9 tok/s/user, TTFT p50 569 ms (synthetic DSpark acceptance 3.4).'
+- id: disagg-b200-agentx
+  recommended: false
+  badge: optimized
+  hardware:
+    gpu: B200
+    count: 28
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - conditional-disaggregation
+  - 1p6d
+  - pd-kv-transfer
+  - expert-parallel
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - fp8-kv-cache
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window; conditional 1P6D'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/disagg-b200-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=6150: 3,055.7 system tok/s/GPU @ decode p50 50.2 tok/s/user, TTFT p50 861 ms (synthetic DSpark acceptance 3.4).'
+- id: agg-gb300-agentx
+  recommended: false
+  badge: optimized
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: aggregated
+  techniques:
+  - dep2
+  - expert-parallel
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - fp8-kv-cache
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window; two DEP2 workers on one node'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/agg-gb300-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=1180 (590 per worker): 4,137.3 system tok/s/GPU @ decode p50 51.4 tok/s/user, TTFT p50 379 ms (synthetic DSpark acceptance 3.4).'
+- id: disagg-gb300-agentx
+  recommended: true
+  badge: optimized
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - 1p1d
+  - pd-kv-transfer
+  - mnnvl
+  - expert-parallel
+  - dspark-speculative-decoding
+  - kv-aware-routing
+  - session-affinity
+  - kv-events
+  - fp8-kv-cache
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'AgentX multi-turn coding-agent trace (semianalysis_cc_traces_weka_062126), 3600 s window; 1P1D'
+    sla: decode p50 >= 50 tok/s/user, TTFT p50 < 2 s, errors < 5%
+  deploy:
+    asset: recipes/deepseek-v4.1-flash-1017/vllm/disagg-gb300-agentx/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash-1017/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'C=1250: 4,778.3 system tok/s/GPU @ decode p50 69.9 tok/s/user, TTFT p50 1,916 ms (synthetic DSpark acceptance 3.4).'
+related_benchmarks: []
+maintainer: null

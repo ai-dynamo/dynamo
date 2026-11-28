@@ -1,0 +1,438 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# DeepSeek-V4.1-Flash-1017 on H200: conditional disaggregation, 1 prefill worker (TP4) + 3 decode workers (DEP4), 16 GPUs,
+# plus one shared Mooncake KV pool. Decode workers save their KV blocks to the pool, so the prefill worker can load a
+# returning session's prefix instead of recomputing it. That lets the router send nearly every turn (uncached prompt
+# above 256 tokens) to the prefill worker, which relieves the decode workers; they still prefill locally when the prefill
+# worker is busy (48 requests), and admit that local prefill every 8th step. DSpark (5 draft tokens, same config on
+# both roles), AgentX trace replay.
+#
+# The pool is 8 GiB per GPU rank (16 ranks, 128 GiB) over TCP. The Mooncake master below must run in the same
+# namespace as the workers; apply this file as a whole.
+#
+# The master is a bare Pod, as in the measured deployment. A restarted master starts with an empty pool, so a
+# Deployment would not keep the pool alive across a node loss; if you prefer one, wrap this spec in a Deployment with
+# `strategy: Recreate` so two masters never run at once. If the master is gone, requests are still served: pool
+# lookups fail over to recomputing the prefix.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dsv41-flash-h200-mooncake-master
+  labels:
+    app: dsv41-flash-h200-mooncake-master
+spec:
+  restartPolicy: Always
+  containers:
+  - name: master
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+    imagePullPolicy: IfNotPresent
+    command:
+    - /usr/local/bin/mooncake_master
+    args:
+    - -rpc_address=$(POD_IP)
+    - -rpc_port=50051
+    - -rpc_thread_num=8
+    - -default_kv_lease_ttl=60000
+    - -eviction_high_watermark_ratio=0.95
+    - -eviction_ratio=0.10
+    - -enable_metric_reporting=true
+    - -metrics_port=9003
+    - -logtostderr
+    env:
+    - name: POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+    ports:
+    - containerPort: 50051
+      name: rpc
+      protocol: TCP
+    - containerPort: 9003
+      name: metrics
+      protocol: TCP
+    readinessProbe:
+      tcpSocket:
+        port: 50051
+      periodSeconds: 5
+      failureThreshold: 3
+    resources:
+      requests:
+        cpu: '4'
+        memory: 8Gi
+      limits:
+        cpu: '8'
+        memory: 16Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsv41-flash-h200-mooncake-master
+spec:
+  selector:
+    app: dsv41-flash-h200-mooncake-master
+  ports:
+  - name: rpc
+    port: 50051
+    targetPort: 50051
+    protocol: TCP
+  - name: metrics
+    port: 9003
+    targetPort: 9003
+    protocol: TCP
+---
+# Mooncake client config for the workers (mounted at /etc/mooncake). Each GPU rank contributes an 8 GiB segment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv41-flash-h200-mooncake-client
+data:
+  prefill.json: |
+    {"mode": "embedded", "metadata_server": "P2PHANDSHAKE",
+     "master_server_address": "dsv41-flash-h200-mooncake-master:50051",
+     "protocol": "tcp", "device_name": "",
+     "global_segment_size": "8GB", "local_buffer_size": "2GB", "enable_offload": false}
+  decode.json: |
+    {"mode": "embedded", "metadata_server": "P2PHANDSHAKE",
+     "master_server_address": "dsv41-flash-h200-mooncake-master:50051",
+     "protocol": "tcp", "device_name": "",
+     "global_segment_size": "8GB", "local_buffer_size": "2GB", "enable_offload": false}
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-h200-disagg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --http-host
+          - 0.0.0.0
+          - --http-port
+          - '8000'
+          - --router-mode
+          - kv
+          - --router-session-affinity-ttl-secs
+          - '14400'
+          - --router-session-affinity-mode
+          - soft
+          - --active-decode-blocks-threshold
+          - None
+          - --active-prefill-tokens-threshold
+          - None
+          - --active-prefill-tokens-threshold-frac
+          - None
+          - --router-kv-events
+          - --router-conditional-disagg
+          - --router-conditional-disagg-config
+          - '{"policy":"isl_or_load","eff_isl_threshold":256,"eff_isl_ratio_threshold":0.7,"prefill_busy_threshold":48}'
+          env:
+          - name: PYTHONUNBUFFERED
+            value: '1'
+          - name: DYN_ROUTER_TEMPERATURE
+            value: '0'
+          - name: DYN_ROUTER_QUEUE_THRESHOLD
+            value: None
+          - name: DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS
+            value: '3600'
+          - name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT
+            value: '10000000'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 240
+          resources:
+            requests:
+              cpu: '4'
+              memory: 8Gi
+            limits:
+              cpu: '16'
+              memory: 32Gi
+  - name: PrefillWorker
+    type: prefill
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    sharedMemorySize: 64Gi
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        terminationGracePeriodSeconds: 60
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --disaggregation-mode
+          - prefill
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true}}]}}'
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --tokenizer-revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - '4'
+          - --max-model-len
+          - '1048576'
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --distributed-executor-backend
+          - mp
+          - --max-num-seqs
+          - '96'
+          - --enable-multimodal
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true,"revision":"1bae0e1088993b9b82de08f59de5be5a34e42170"}'
+          env:
+          - name: MOONCAKE_CONFIG_PATH
+            value: /etc/mooncake/prefill.json
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_MOONCAKE_LOAD_RECV_THREADS
+            value: '4'
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '3600'
+          - name: VLLM_WORKER_MULTIPROC_METHOD
+            value: spawn
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: PYTHONUNBUFFERED
+            value: '1'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          resources:
+            requests:
+              cpu: '6'
+              memory: 240Gi
+              nvidia.com/gpu: '4'
+            limits:
+              cpu: '64'
+              memory: 640Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          - name: model-cache
+            mountPath: /root/.cache/vllm
+            subPath: vllmcache-disagg-prefill
+          - name: pip-cache
+            mountPath: /root/.cache/pip
+          - name: mooncake-client
+            mountPath: /etc/mooncake
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: pip-cache
+          emptyDir: {}
+        - name: mooncake-client
+          configMap:
+            name: dsv41-flash-h200-mooncake-client
+  - name: DecodeWorker
+    type: decode
+    runtimeVersionOverride: 1.7.0
+    replicas: 3
+    sharedMemorySize: 200Gi
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        terminationGracePeriodSeconds: 60
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --disaggregation-mode
+          - decode
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"save_decode_cache":true,"enable_lookup":false}}]}}'
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --tokenizer-revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '4'
+          - --data-parallel-size-local
+          - '4'
+          - --data-parallel-rpc-port
+          - '13345'
+          - --data-parallel-address
+          - $(POD_IP)
+          - --enable-expert-parallel
+          - --prefill-schedule-interval
+          - '8'
+          - --max-model-len
+          - '1048576'
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --distributed-executor-backend
+          - mp
+          - --max-num-seqs
+          - '96'
+          - --enable-multimodal
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true,"revision":"1bae0e1088993b9b82de08f59de5be5a34e42170"}'
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024}'
+          env:
+          - name: MOONCAKE_CONFIG_PATH
+            value: /etc/mooncake/decode.json
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_MOONCAKE_LOAD_RECV_THREADS
+            value: '4'
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '3600'
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: VLLM_WORKER_MULTIPROC_METHOD
+            value: spawn
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: PYTHONUNBUFFERED
+            value: '1'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          resources:
+            requests:
+              cpu: '6'
+              memory: 240Gi
+              nvidia.com/gpu: '4'
+            limits:
+              cpu: '64'
+              memory: 640Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          - name: model-cache
+            mountPath: /root/.cache/vllm
+            subPath: vllmcache-disagg-decode
+          - name: pip-cache
+            mountPath: /root/.cache/pip
+          - name: mooncake-client
+            mountPath: /etc/mooncake
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: pip-cache
+          emptyDir: {}
+        - name: mooncake-client
+          configMap:
+            name: dsv41-flash-h200-mooncake-client
