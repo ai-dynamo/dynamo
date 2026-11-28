@@ -1,0 +1,80 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install KubeRay
+subtitle: Install the KubeRay operator to run reinforcement learning trainers on Ray next to Dynamo
+---
+
+<Note>
+Install KubeRay only to run trainers on Ray, such as the one in the [Slime](../../use-cases/reinforcement-learning/slime/overview.mdx) reinforcement learning (RL) tutorial. Dynamo doesn't need KubeRay to serve models.
+</Note>
+
+[KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) runs Ray clusters and Ray jobs on Kubernetes. The RL tutorials submit their trainers as KubeRay `RayJob` resources. For each `RayJob`, KubeRay creates a Ray cluster, runs the job on it, and deletes the cluster when the job ends.
+
+## Prerequisites
+
+- A [Kubernetes](https://kubernetes.io/docs/setup/) cluster
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/docs/intro/install/)
+
+## Install the Operator
+
+<Steps toc={true}>
+  <Step title="Check for an existing installation" id="check-for-an-existing-installation">
+
+Run one KubeRay operator per cluster, because two operators that watch the same namespace both act on each `RayJob`. Check whether the cluster already has the `RayJob` CRD:
+
+```bash
+kubectl get crd rayjobs.ray.io
+```
+
+If the command lists the CRD, KubeRay is already installed. Skip to [Verify the installation](#verify-the-installation), and check that its operator watches the namespaces where you create `RayJob` resources.
+
+  </Step>
+  <Step title="Install the KubeRay operator" id="install-the-kuberay-operator">
+
+Install the operator and its CRDs with Helm. The RL tutorials were validated with KubeRay 1.7.1:
+
+```bash
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm repo update
+helm install kuberay-operator kuberay/kuberay-operator \
+  --version 1.7.1 \
+  --namespace kuberay \
+  --create-namespace
+```
+
+By default, the operator watches every namespace.
+
+  </Step>
+  <Step title="Verify the installation" id="verify-the-installation">
+
+Confirm that the operator is running:
+
+```bash
+kubectl get pods -n kuberay
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+kuberay-operator-6b9c8d7f5d-x2q7z   1/1     Running   0          1m
+```
+
+Confirm that the `RayJob` and `RayCluster` CRDs exist:
+
+```bash
+kubectl get crd rayjobs.ray.io rayclusters.ray.io
+```
+
+```text
+NAME                 CREATED AT
+rayjobs.ray.io       2026-07-09T18:47:36Z
+rayclusters.ray.io   2026-07-09T18:47:32Z
+```
+
+  </Step>
+</Steps>
+
+## Next Steps
+
+[Install and set up Slime with Dynamo](../../use-cases/reinforcement-learning/slime/installation.mdx) to train Qwen3-0.6B with Slime on KubeRay while Dynamo serves its rollouts.
