@@ -24,7 +24,7 @@ use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
+    discovery::{ModelManager, RouterTargetState, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
@@ -323,6 +323,10 @@ struct PrefillBuildContext {
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+    fn inspect_target(&self, inspect: &dyn Fn(RouterTargetState<'_>) -> bool) -> bool {
+        inspect(RouterTargetState::Pending)
+    }
+
     /// Returns `None` when this router does not target the group, and an empty
     /// set when it targets the endpoint but its binding is not yet available.
     fn available_worker_ids_for(
@@ -335,6 +339,21 @@ pub(crate) trait PrefillRouterLifecycle: Send + Sync {
 impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
+    }
+
+    fn inspect_target(&self, inspect: &dyn Fn(RouterTargetState<'_>) -> bool) -> bool {
+        let current_target = self.target.lock();
+        if current_target.is_none() {
+            return inspect(RouterTargetState::Absent);
+        }
+        // Activation and target changes publish under the same lock.
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return inspect(RouterTargetState::Pending);
+        }
+        match &self.target_tx {
+            Some(target_tx) => inspect(RouterTargetState::Active(target_tx.borrow().as_ref())),
+            None => inspect(RouterTargetState::Active(None)),
+        }
     }
 
     fn available_worker_ids_for(

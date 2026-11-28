@@ -486,6 +486,7 @@ impl ModelWatcher {
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card));
+        worker_set.set_excludes_images(spec.excludes_images);
         let mut tokenizer = None;
         check_unified_family_tokens(card, &mut tokenizer)?;
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
@@ -501,6 +502,7 @@ impl ModelWatcher {
             generation: spec.generation,
             card: Arc::new(card.clone()),
             admitted_ids,
+            excludes_images: spec.excludes_images,
         });
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -1269,6 +1271,7 @@ impl ControllerHost for ModelWatcher {
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         let video_contract = qwen_video_contract_digest(&card);
+        let excludes_images = super::worker_set::card_excludes_images(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1278,6 +1281,7 @@ impl ControllerHost for ModelWatcher {
             mdc_checksum,
             projection_fingerprint,
             video_contract,
+            excludes_images,
         }))
     }
 
@@ -1897,6 +1901,7 @@ mod tests {
             fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
             video_contract: desired.video_contract.clone(),
+            excludes_images: false,
             representative: desired,
         };
         let (admission_tx, admitted) = tokio::sync::watch::channel(vec![worker_id]);
@@ -3120,6 +3125,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                excludes_images: desired.excludes_images,
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -3266,6 +3272,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            excludes_images: super::super::worker_set::card_excludes_images(&card),
             card,
             group_key: key.clone(),
         };
@@ -3276,6 +3283,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            excludes_images: desired.excludes_images,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -3361,6 +3369,7 @@ request_classifier:
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
                 video_contract: qwen_video_contract_digest(&card),
+                excludes_images: super::super::worker_set::card_excludes_images(&card),
                 card,
                 group_key: key.clone(),
             };
@@ -3371,6 +3380,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                excludes_images: desired.excludes_images,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -3586,6 +3596,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            excludes_images: super::super::worker_set::card_excludes_images(&card),
             card,
             group_key: key.clone(),
         };
@@ -3596,6 +3607,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            excludes_images: false,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -4325,6 +4337,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                excludes_images: desired.excludes_images,
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

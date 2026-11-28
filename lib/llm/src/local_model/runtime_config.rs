@@ -31,6 +31,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Complete input-modality list advertised by a worker; absence means unknown.
+pub const SUPPORTED_INPUT_MODALITIES: &str = "supported_input_modalities";
+
 /// Runtime-data key for the largest number of per-token log-probability
 /// alternatives the engine returns, as a non-negative integer (vLLM's
 /// `max_logprobs`). The frontend applies it to chat and responses

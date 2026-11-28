@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
-    SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
+    ChatEngineSelection, GenerateEngineSelection, KvSourceMembershipWatch, Model,
+    RuntimeConfigWatch, SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -1653,23 +1653,41 @@ impl ModelManager {
             .get_chat_engine_with_parsing_for_capability(capability)
     }
 
-    pub(crate) fn get_chat_completions_engine_with_input_policy(
+    pub(crate) fn get_chat_completions_selection(
         &self,
         model: &str,
-    ) -> Result<
-        (
-            OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-            crate::chat_input::ChatInputPolicy,
-        ),
-        ModelManagerError,
-    > {
-        self.catalog
-            .load()
-            .models
+    ) -> Result<(String, ChatEngineSelection), ModelManagerError> {
+        let catalog = self.catalog.load();
+        let canonical = catalog
+            .aliases
             .get(model)
+            .map(String::as_str)
+            .unwrap_or(model);
+        let selection = catalog
+            .models
+            .get(canonical)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_input_policy()
+            .get_chat_engine_with_image_policy()?;
+        Ok((canonical.to_owned(), selection))
+    }
+
+    pub(crate) fn get_chat_completions_selection_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<Option<(String, ChatEngineSelection)>, ModelManagerError> {
+        let catalog = self.catalog.load();
+        let canonical = catalog
+            .aliases
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or(model);
+        let selection = catalog
+            .models
+            .get(canonical)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_image_policy_for_capability(Some(capability))?;
+        Ok(selection.map(|selection| (canonical.to_owned(), selection)))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -4591,6 +4609,7 @@ mod tests {
             generation: 1,
             card: Arc::new(card),
             admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+            excludes_images: false,
         });
         if role != WorkerType::Decode {
             return (worker_set, None, None);

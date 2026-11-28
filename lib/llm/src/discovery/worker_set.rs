@@ -44,6 +44,38 @@ use crate::{
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
 
+/// Whether a card advertises a complete input-modality list without images.
+/// A missing or malformed list is unknown and keeps images.
+pub(super) fn card_excludes_images(card: &ModelDeploymentCard) -> bool {
+    card.runtime_config
+        .runtime_data
+        .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|modalities| {
+            !modalities.is_empty()
+                && modalities
+                    .iter()
+                    .all(|modality| matches!(modality.as_str(), Some("text" | "video" | "audio")))
+        })
+}
+
+/// Snapshot inspected while the router holds its target publication lock.
+pub(crate) enum RouterTargetState<'a> {
+    Absent,
+    Pending,
+    Active(Option<&'a WorkerSetTarget>),
+}
+
+fn target_allows_image_omission(state: RouterTargetState<'_>) -> bool {
+    match state {
+        RouterTargetState::Absent => true,
+        RouterTargetState::Active(Some(WorkerSetTarget::Committed(target))) => {
+            target.excludes_images
+        }
+        RouterTargetState::Pending | RouterTargetState::Active(_) => false,
+    }
+}
+
 /// A topology hop must retain the provider's admission and configuration, even
 /// when other cards share its endpoint or the endpoint is reused by a successor.
 #[derive(Clone)]
@@ -53,6 +85,8 @@ pub(crate) struct CommittedWorkerSetTarget {
     pub(crate) generation: u64,
     pub(crate) card: Arc<ModelDeploymentCard>,
     pub(crate) admitted_ids: watch::Receiver<Vec<u64>>,
+    /// Every admitted worker advertised a text-only input contract.
+    pub(crate) excludes_images: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +265,9 @@ pub struct WorkerSet {
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
 
+    /// Image support belongs to the serving pool, including for adapter views.
+    excludes_images: bool,
+
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
@@ -285,6 +322,7 @@ pub struct WorkerSet {
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        let excludes_images = card_excludes_images(&card);
         let max_logprobs = Arc::new(AtomicU8::new(published_max_logprobs(&card)));
         Self {
             namespace,
@@ -292,6 +330,7 @@ impl WorkerSet {
             topology_target: None,
             mdcsum,
             card,
+            excludes_images,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -350,6 +389,18 @@ impl WorkerSet {
 
     pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
         self.topology_target.as_ref()
+    }
+
+    pub(super) fn allows_image_omission(&self) -> bool {
+        self.excludes_images
+            && self
+                .prefill_router
+                .as_ref()
+                .is_none_or(|router| router.inspect_target(&target_allows_image_omission))
+            && self
+                .encoder_router
+                .as_ref()
+                .is_none_or(|router| router.inspect_target(&target_allows_image_omission))
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -486,6 +537,11 @@ impl WorkerSet {
     /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
         !self.is_encode_set() && !self.has_any_serving_engine()
+    }
+
+    /// The cohort's policy replaces the representative card's own list.
+    pub(crate) fn set_excludes_images(&mut self, excludes: bool) {
+        self.excludes_images = excludes;
     }
 
     pub(crate) fn set_input_policy(&mut self, policy: ChatInputPolicy) {
@@ -644,6 +700,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
+            excludes_images: self.excludes_images,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
@@ -816,6 +873,34 @@ mod tests {
         assert!(adapter.card.tokenizer.is_none());
         assert_eq!(base.input_policy(), adapter.input_policy());
         assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
+
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        for (modalities, expected) in [
+            (None, false),
+            (Some(serde_json::json!(["text"])), true),
+            (Some(serde_json::json!(["text", "image"])), false),
+        ] {
+            let mut base_card = base.card().clone();
+            base_card
+                .runtime_config
+                .runtime_data
+                .remove(SUPPORTED_INPUT_MODALITIES);
+            if let Some(modalities) = modalities {
+                base_card
+                    .runtime_config
+                    .runtime_data
+                    .insert(SUPPORTED_INPUT_MODALITIES.into(), modalities);
+            }
+            let base = WorkerSet::new("ns1".into(), "abc123".into(), base_card);
+            let mut adapter_card = adapter.card().clone();
+            adapter_card.runtime_config.runtime_data.insert(
+                SUPPORTED_INPUT_MODALITIES.into(),
+                serde_json::json!(["text"]),
+            );
+            let adapter = base.adapter_view(adapter_card);
+            assert_eq!(base.allows_image_omission(), expected);
+            assert_eq!(adapter.allows_image_omission(), expected);
+        }
     }
 
     #[tokio::test]

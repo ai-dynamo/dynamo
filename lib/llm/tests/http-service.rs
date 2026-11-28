@@ -61,6 +61,7 @@ struct CounterEngine {}
 #[derive(Default)]
 struct NvExtCaptureEngine {
     nvext: std::sync::Mutex<Option<Option<NvExt>>>,
+    messages: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 impl NvExtCaptureEngine {
@@ -392,6 +393,10 @@ impl
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         self.nvext.lock().unwrap().replace(request.nvext.clone());
+        self.messages
+            .lock()
+            .unwrap()
+            .replace(serde_json::to_value(&request.inner.messages)?);
         CounterEngine {}.generate(request).await
     }
 }
@@ -4055,11 +4060,18 @@ async fn check_reject_media_openai(status: StatusCode) {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
-    let card = ModelDeploymentCard::with_name_only("text-only");
+    let mut card = ModelDeploymentCard::with_name_only("text-only");
+    card.runtime_config
+        .set_engine_specific(
+            dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            vec!["text"],
+        )
+        .unwrap();
+    let checksum = card.mdcsum().to_string();
     let engine = Arc::new(NvExtCaptureEngine::default());
     state
         .manager()
-        .add_chat_completions_model("text-only", card.mdcsum(), engine.clone())
+        .add_chat_completions_model_with_card("text-only", &checksum, card, engine.clone())
         .unwrap();
 
     let url = format!("http://localhost:{port}/v1/chat/completions");
@@ -4315,12 +4327,24 @@ async fn check_reject_media_anthropic(status: StatusCode) {
     let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
     wait_for_service_ready(port).await;
 
-    let metric_model = state.manager().metric_model_for("unregistered").to_string();
+    let mut card = ModelDeploymentCard::with_name_only("text-only");
+    card.runtime_config
+        .set_engine_specific(
+            dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            vec!["text"],
+        )
+        .unwrap();
+    let checksum = card.mdcsum().to_string();
+    let engine = Arc::new(NvExtCaptureEngine::default());
+    state
+        .manager()
+        .add_chat_completions_model_with_card("text-only", &checksum, card, engine.clone())
+        .unwrap();
+    let metric_model = state.manager().metric_model_for("text-only").to_string();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
-    // No model is registered: conversion or lookup first would answer 400/404.
     let image_sources = [
         serde_json::json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
         serde_json::json!({"type": "url", "url": "https://example.com/a.png"}),
@@ -4329,7 +4353,7 @@ async fn check_reject_media_anthropic(status: StatusCode) {
         for in_tool_result in [false, true] {
             let image = serde_json::json!({"type": "image", "source": source});
             let content = if in_tool_result {
-                serde_json::json!([{"type": "tool_result", "tool_use_id": "call_1", "content": [{"text": "caption"}, image]}])
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "caption"}, image]}])
             } else {
                 serde_json::json!([image])
             };
@@ -4343,7 +4367,7 @@ async fn check_reject_media_anthropic(status: StatusCode) {
             let response = client
                 .post(format!("http://localhost:{port}/v1/messages"))
                 .json(&serde_json::json!({
-                    "model": "unregistered", "max_tokens": 16,
+                    "model": "text-only", "max_tokens": 16,
                     "messages": [{"role": "user", "content": content}]
                 }))
                 .send()
@@ -4366,6 +4390,7 @@ async fn check_reject_media_anthropic(status: StatusCode) {
                 body["error"]["message"],
                 "Model does not accept image input; received unsupported content type 'image_url'."
             );
+            assert!(engine.messages.lock().unwrap().is_none());
             compare_counter(
                 &state.metrics_clone(),
                 &metric_model,
@@ -4436,7 +4461,7 @@ async fn test_reject_media_preserves_openai_422() {
 }
 
 #[tokio::test]
-async fn test_reject_media_anthropic_refuses_before_model_lookup() {
+async fn test_reject_media_refuses_text_only_images_anthropic() {
     check_reject_media_anthropic(StatusCode::TOO_MANY_REQUESTS).await;
 }
 
@@ -4498,4 +4523,372 @@ async fn test_reject_media_disabled_preserves_backend_422_through_http_middlewar
     assert_eq!(body["code"], 422);
     assert_eq!(svc.engine.take_requests().await.len(), 1);
     svc.shutdown().await;
+}
+
+/// HTTP service with text-only, image-capable, and unknown-modality deployments
+/// sharing one capture engine.
+struct ImageOmissionService {
+    port: u16,
+    engine: Arc<NvExtCaptureEngine>,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl ImageOmissionService {
+    async fn start() -> Self {
+        use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .host("127.0.0.1")
+            .enable_chat_endpoints(true)
+            .enable_responses_endpoints(true)
+            .enable_anthropic_endpoints(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let engine = Arc::new(NvExtCaptureEngine::default());
+        for (name, modalities) in [
+            ("text-only", Some(vec!["text"])),
+            ("vision", Some(vec!["text", "image"])),
+            ("unknown", None),
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only(name);
+            if let Some(modalities) = modalities {
+                card.runtime_config
+                    .set_engine_specific(SUPPORTED_INPUT_MODALITIES, modalities)
+                    .unwrap();
+            }
+            let checksum = card.mdcsum().to_string();
+            state
+                .manager()
+                .add_chat_completions_model_with_card(name, &checksum, card, engine.clone())
+                .unwrap();
+        }
+        let cancel = CancellationToken::new();
+        let join = service.spawn_with_listener(cancel.clone(), listener).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        Self {
+            port,
+            engine,
+            client,
+            cancel,
+            join,
+        }
+    }
+}
+
+#[test]
+fn test_chat_engine_tuple_apis_stay_public() {
+    let manager = dynamo_llm::discovery::ModelManager::new();
+    let card = ModelDeploymentCard::with_name_only("model");
+    let checksum = card.mdcsum().to_string();
+    manager
+        .add_chat_completions_model_with_card(
+            "model",
+            &checksum,
+            card,
+            Arc::new(NvExtCaptureEngine::default()),
+        )
+        .unwrap();
+    let (_, _): (
+        OpenAIChatCompletionsStreamingEngine,
+        dynamo_llm::protocols::openai::ParsingOptions,
+    ) = manager
+        .get_chat_completions_engine_with_parsing("model")
+        .unwrap();
+    let unsupported: Option<(
+        OpenAIChatCompletionsStreamingEngine,
+        dynamo_llm::protocols::openai::ParsingOptions,
+    )> = manager
+        .get_chat_completions_engine_with_parsing_for_capability("model", "unsupported")
+        .unwrap();
+    assert!(unsupported.is_none());
+}
+
+#[tokio::test]
+async fn test_image_omission_replaces_images_only_for_text_only_models() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    for name in ["text-only", "vision", "unknown"] {
+        for (path, mut body) in [
+            (
+                "/v1/chat/completions",
+                serde_json::json!({"messages":[{"role":"user","content":[
+                {"type":"text","text":"before"}, {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+                {"type":"text","text":"after"}]}]}),
+            ),
+            (
+                "/v1/responses",
+                serde_json::json!({"input":[{"role":"user","content":[
+                {"type":"input_text","text":"before"}, {"type":"input_image","image_url":"data:image/png;base64,AAAA"},
+                {"type":"input_text","text":"after"}]}]}),
+            ),
+            (
+                "/v1/messages",
+                serde_json::json!({"max_tokens":1,"messages":[{"role":"user","content":[
+                {"type":"text","text":"before"}, {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+                {"type":"text","text":"after"}]}]}),
+            ),
+            (
+                "/v1/responses",
+                serde_json::json!({"input":[
+                    {"type":"function_call", "call_id":"call_1", "name":"inspect", "arguments":"{}"},
+                    {"type":"function_call_output", "call_id":"call_1", "output":[
+                        {"type":"input_text", "text":"before"},
+                        {"type":"input_image", "image_url":"data:image/png;base64,AAAA"},
+                        {"type":"input_text", "text":"after"}
+                    ]}
+                ]}),
+            ),
+        ] {
+            body["model"] = serde_json::json!(name);
+            let input_kind = body
+                .pointer("/input/0/type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("message")
+                .to_owned();
+            let response = client
+                .post(format!("http://127.0.0.1:{port}{path}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{name} {path} {input_kind}: {body}");
+            let captured = engine.messages.lock().unwrap().take().unwrap();
+            let captured = captured.to_string();
+            assert_eq!(
+                captured.contains("[image omitted]"),
+                name == "text-only",
+                "{name} {path}: {captured}"
+            );
+            assert_eq!(
+                captured.contains("image_url"),
+                name != "text-only",
+                "{name} {path}: {captured}"
+            );
+            assert!(captured.contains("before") && captured.contains("after"));
+            if name == "text-only" {
+                assert!(
+                    captured.find("before").unwrap() < captured.find("[image omitted]").unwrap()
+                );
+                assert!(
+                    captured.find("[image omitted]").unwrap() < captured.find("after").unwrap()
+                );
+            }
+        }
+    }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_replaces_file_id_and_url_sources() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({"model":"text-only", "input":[
+            {"type":"function_call_output", "call_id":"call_1", "output":[
+                {"type":"input_image", "file_id":"file-image"}
+            ]}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "function call output: {body}");
+    let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
+    assert!(captured.contains("[image omitted]"));
+    assert!(!captured.contains("image_url") && !captured.contains("file-image"));
+    let url_image = serde_json::json!({
+        "type":"image", "source":{"type":"url","url":"https://invalid.invalid/image"}
+    });
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .json(&serde_json::json!({
+            "model":"text-only", "max_tokens":1, "messages":[{"role":"user","content":[url_image]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
+    assert!(captured.contains("[image omitted]"));
+    assert!(!captured.contains("invalid.invalid"));
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_keeps_anthropic_request_validation() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    let duplicate_model = r#"{"model":"text-only","model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}]}]}"#;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(duplicate_model)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "duplicate fields must survive image omission"
+    );
+    assert!(engine.messages.lock().unwrap().is_none());
+
+    let invalid_source = r#"{"model":"text-only","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"\uD800"}}]}]}"#;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(invalid_source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(engine.messages.lock().unwrap().is_none());
+
+    for image in [
+        serde_json::json!({"type":"image"}),
+        serde_json::json!({"type":"image", "source":{"type":"base64","media_type":"image/png"}}),
+        serde_json::json!({"type":"image", "source":{"type":"url","url":null}}),
+        serde_json::json!({"type":"image", "source":{"type":"url","url":"https://invalid.invalid/image","data":null}}),
+    ] {
+        for part in [
+            image.clone(),
+            serde_json::json!({"type":"tool_result","tool_use_id":"call_1","content":[image]}),
+        ] {
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/v1/messages"))
+                .json(&serde_json::json!({
+                    "model":"text-only", "max_tokens":1, "messages":[{"role":"user","content":[part]}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(engine.messages.lock().unwrap().is_none());
+        }
+    }
+    let invalid_extra = r#"{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"},"extra":"\uD800"}"#;
+    for model in ["text-only", "vision", "unknown"] {
+        for content in [
+            invalid_extra.to_string(),
+            format!(
+                r#"{{"type":"tool_result","tool_use_id":"call_1","content":[{invalid_extra}]}}"#
+            ),
+        ] {
+            let body = format!(
+                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":[{content}]}}]}}"#
+            );
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/v1/messages"))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{model}: invalid image field must be validated before omission"
+            );
+            assert!(engine.messages.lock().unwrap().is_none());
+        }
+    }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_keeps_responses_source_validation() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    for model in ["text-only", "vision", "unknown"] {
+        for image in [
+            serde_json::json!({"type":"input_image"}),
+            serde_json::json!({"type":"input_image","file_id":""}),
+            serde_json::json!({"type":"input_image","file_id":"  "}),
+            serde_json::json!({"type":"input_image","image_url":""}),
+            serde_json::json!({"type":"input_image","image_url":"relative.png"}),
+            serde_json::json!({"type":"input_image","image_url":"relative.png","file_id":"file-image"}),
+        ] {
+            for input in [
+                serde_json::json!([{"role":"user","content":[image]}]),
+                serde_json::json!([{"type":"message","role":"user","content":[image]}]),
+                serde_json::json!([{"type":"function_call_output","call_id":"call_1","output":[image]}]),
+            ] {
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/responses"))
+                    .json(&serde_json::json!({"model":model,"input":input}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{model}: image must name a source"
+                );
+                assert!(engine.messages.lock().unwrap().is_none());
+            }
+        }
+    }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_leaves_count_tokens_unchanged() {
+    let ImageOmissionService {
+        port,
+        engine: _,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    let url_image = serde_json::json!({
+        "type":"image", "source":{"type":"url","url":"https://invalid.invalid/image"}
+    });
+    for model in ["text-only", "vision", "unknown"] {
+        let response = client.post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
+            .json(&serde_json::json!({"model":model,"messages":[{"role":"user","content":[url_image]}]}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["input_tokens"],
+            86
+        );
+    }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
 }

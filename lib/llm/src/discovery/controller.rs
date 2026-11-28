@@ -51,6 +51,8 @@ pub(crate) struct DesiredInstance {
     pub(crate) projection_fingerprint: String,
     /// Digest of this worker's Qwen video prompt-expansion contract.
     pub(crate) video_contract: Option<String>,
+    /// The worker advertised a complete input-modality list without images.
+    pub(crate) excludes_images: bool,
 }
 
 impl DesiredInstance {
@@ -71,19 +73,39 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
-fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
-    match video_contract {
-        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
-        None => mdc_checksum.to_string(),
-    }
+/// Images are omitted only when every member excludes them; other modalities
+/// need not agree.
+fn cohort_excludes_images(members: &[DesiredInstance]) -> bool {
+    !members.is_empty() && members.iter().all(|member| member.excludes_images)
 }
 
-/// Splits a fingerprint back into the MDC checksum and video contract it carries.
-fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
-    match fingerprint.split_once("\0video_contract\0") {
-        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
-        None => (fingerprint, None),
+/// Active cohort contracts change materialization, not worker compatibility.
+fn cohort_fingerprint(
+    mdc_checksum: &str,
+    video_contract: Option<&str>,
+    excludes_images: bool,
+) -> String {
+    let mut fingerprint = mdc_checksum.to_string();
+    if let Some(contract) = video_contract {
+        fingerprint.push_str("\0video_contract\0");
+        fingerprint.push_str(contract);
+    }
+    if excludes_images {
+        fingerprint.push_str(EXCLUDES_IMAGES_FINGERPRINT);
+    }
+    fingerprint
+}
+
+const EXCLUDES_IMAGES_FINGERPRINT: &str = "\0excludes_images";
+
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, bool) {
+    let (base, excludes_images) = match fingerprint.strip_suffix(EXCLUDES_IMAGES_FINGERPRINT) {
+        Some(base) => (base, true),
+        None => (fingerprint, false),
+    };
+    match base.split_once("\0video_contract\0") {
+        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract), excludes_images),
+        None => (base, None, excludes_images),
     }
 }
 
@@ -96,6 +118,8 @@ pub(crate) struct GroupSpec {
     pub(crate) representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
+    /// Every cohort member excludes images.
+    pub(crate) excludes_images: bool,
 }
 
 #[async_trait]
@@ -198,6 +222,8 @@ struct RetainedPipeline {
     /// pending, so it is the only record of what the retained workers must publish.
     /// `None` means it was built without exact video routing.
     contract: Option<String>,
+    /// Whether the retained pipeline was built to omit images.
+    excludes_images: bool,
 }
 
 struct DesiredGroup {
@@ -432,6 +458,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && existing.excludes_images == instance.excludes_images
                 && super::image_edits::advertised_limit(&existing.card)
                     == super::image_edits::advertised_limit(&instance.card)
             {
@@ -607,8 +634,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint = cohort_fingerprint(
+            &mdc_checksum,
+            cohort_video_contract(&members).as_deref(),
+            cohort_excludes_images(&members),
+        );
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -621,13 +651,22 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .1
                 .map(str::to_string),
         };
+        let committed_excludes_images = match &group.retained {
+            Some(retained) => retained.excludes_images,
+            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default()).2,
+        };
         if fingerprint_changed {
             retained_commit = retained_commit.and_then(|committed_members| {
-                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
+                let (previous_checksum, _, _) = fingerprint_parts(status_checksum(&old_status)?);
                 if previous_checksum != mdc_checksum {
                     return None;
                 }
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_excludes_images,
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
@@ -640,6 +679,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.retained.get_or_insert_with(|| RetainedPipeline {
                     admission_tx: previous_tx,
                     contract: committed_contract,
+                    excludes_images: committed_excludes_images,
                 });
             } else {
                 group.admission_tx.send_replace(Vec::new());
@@ -662,7 +702,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // one keeps receiving requests expanded with the contract it dropped.
             let had_commit = retained_commit.is_some();
             retained_commit = retained_commit.and_then(|committed_members| {
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_excludes_images,
+                )
             });
             if had_commit && retained_commit.is_none() {
                 self.host.remove_group(key);
@@ -906,7 +951,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let video_contract = cohort_video_contract(&members);
-            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
+            let excludes_images = cohort_excludes_images(&members);
+            let fingerprint =
+                cohort_fingerprint(&mdc_checksum, video_contract.as_deref(), excludes_images);
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -918,6 +965,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 representative,
                 video_contract,
+                excludes_images,
             };
             group.status = GroupStatus::Building {
                 mdc_checksum: fingerprint,
@@ -988,9 +1036,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .cohorts
                 .get(&result.spec.mdc_checksum)
                 .is_some_and(|member_keys| {
+                    let members = self.members(member_keys);
                     cohort_fingerprint(
                         &result.spec.mdc_checksum,
-                        cohort_video_contract(&self.members(member_keys)).as_deref(),
+                        cohort_video_contract(&members).as_deref(),
+                        cohort_excludes_images(&members),
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
@@ -1248,17 +1298,18 @@ fn cancel_build(status: &GroupStatus) {
     }
 }
 
-/// The committed workers that may keep serving: those still present, provided they
-/// all still publish `contract`. `None` withdraws the commit.
+/// The committed workers that may keep serving under the pipeline's contracts.
+/// `None` withdraws the commit.
 fn surviving_commit(
     members: &[DesiredInstance],
     committed_members: &BTreeSet<String>,
     contract: Option<&str>,
+    excludes_images: bool,
 ) -> Option<BTreeSet<String>> {
     // Keep serving the committed workers that are still here rather than demanding
     // the whole membership, so dropping the last worker of a rolling upgrade does
     // not withdraw a healthy group.
-    let surviving = members
+    let mut surviving = members
         .iter()
         .filter(|member| committed_members.contains(&member.key))
         .collect::<Vec<_>>();
@@ -1274,6 +1325,12 @@ fn surviving_commit(
             .iter()
             .all(|member| member.video_contract.as_deref() == Some(contract))
     {
+        return None;
+    }
+    if excludes_images {
+        surviving.retain(|member| member.excludes_images);
+    }
+    if surviving.is_empty() {
         return None;
     }
     Some(
@@ -1486,6 +1543,7 @@ mod tests {
                 mdc_checksum: mdc_checksum.clone(),
                 projection_fingerprint: mdc_checksum,
                 video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+                excludes_images: crate::discovery::worker_set::card_excludes_images(&card),
                 card,
             }))
         }
@@ -1655,6 +1713,7 @@ mod tests {
             mdc_checksum: mdc_checksum.to_string(),
             projection_fingerprint: mdc_checksum.to_string(),
             video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+            excludes_images: crate::discovery::worker_set::card_excludes_images(&card),
             card,
         }
     }
@@ -1680,6 +1739,25 @@ mod tests {
         instance
     }
 
+    fn instance_with_modalities(
+        id: u64,
+        kv_cache_block_size: u32,
+        modalities: Option<serde_json::Value>,
+    ) -> DesiredInstance {
+        let mut desired = instance(id, "model");
+        let card = &mut desired.card;
+        card.kv_cache_block_size = kv_cache_block_size;
+        if let Some(value) = modalities {
+            card.runtime_config.runtime_data.insert(
+                crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES.into(),
+                value,
+            );
+        }
+        desired.excludes_images = crate::discovery::worker_set::card_excludes_images(card);
+        desired.mdc_checksum = card.mdcsum().to_string();
+        desired
+    }
+
     fn contract_digest(resize_mode: &str) -> String {
         instance_with_contract(0, "spec", resize_mode)
             .video_contract
@@ -1701,6 +1779,231 @@ mod tests {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
+    }
+
+    /// Starts and commits the next queued build, returning its spec.
+    async fn commit_next_build(
+        controller: &mut ModelDiscoveryController<FakeHost>,
+        host: &FakeHost,
+        starts: &mut mpsc::UnboundedReceiver<GroupSpec>,
+    ) -> GroupSpec {
+        controller.start_queued_builds();
+        let spec = starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(controller).await;
+        spec
+    }
+
+    /// A committed cohort whose only member, ID 1, is text-only.
+    async fn text_only_cohort() -> (
+        Arc<FakeHost>,
+        mpsc::UnboundedReceiver<GroupSpec>,
+        ModelDiscoveryController<FakeHost>,
+    ) {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        controller.apply_added(instance_with_modalities(
+            1,
+            16,
+            Some(serde_json::json!(["text"])),
+        ));
+        assert!(
+            commit_next_build(&mut controller, &host, &mut starts)
+                .await
+                .excludes_images
+        );
+        (host, starts, controller)
+    }
+
+    #[test]
+    fn excludes_images_fingerprint_is_independent_of_checksum_and_video() {
+        for video in [None, Some("video-digest")] {
+            for excludes_images in [false, true] {
+                let fingerprint = cohort_fingerprint("checksum", video, excludes_images);
+                assert_eq!(
+                    fingerprint_parts(&fingerprint),
+                    ("checksum", video, excludes_images)
+                );
+                if video.is_none() && !excludes_images {
+                    assert_eq!(fingerprint, "checksum");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_member_keeps_images_until_it_leaves() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (host, mut starts) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let text = instance_with_modalities(1, 16, Some(serde_json::json!(["text"])));
+            let legacy = instance_with_modalities(2, 16, None);
+            assert_eq!(text.mdc_checksum, legacy.mdc_checksum);
+            controller.apply_added(text);
+            controller.apply_added(legacy.clone());
+            let mixed = commit_next_build(&mut controller, &host, &mut starts).await;
+            assert!(!mixed.excludes_images);
+            assert_eq!(host.members(&group_key()).len(), 2);
+
+            // A different cohort does not displace the selected one.
+            let competing = instance_with_modalities(9, 32, Some(serde_json::json!(["image"])));
+            assert_ne!(competing.mdc_checksum, mixed.mdc_checksum);
+            controller.apply_added(competing);
+            assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+
+            controller.apply_removed(&legacy.key);
+            assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+            let known = commit_next_build(&mut controller, &host, &mut starts).await;
+            assert!(known.excludes_images);
+        })
+        .await
+        .expect("legacy modality cohort timed out");
+    }
+
+    #[tokio::test]
+    async fn image_capable_member_rebuilds_without_dropping_text_only_admissions() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (host, mut starts, mut controller) = text_only_cohort().await;
+            let vision =
+                instance_with_modalities(3, 16, Some(serde_json::json!(["text", "image"])));
+            controller.apply_added(vision.clone());
+            controller.start_queued_builds();
+            assert!(!starts.recv().await.unwrap().excludes_images);
+            assert_eq!(*host.admissions.lock().unwrap()[0].borrow(), vec![1]);
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(host.members(&group_key()).len(), 2);
+
+            // Republishing with another non-image modality keeps the same policy.
+            let admissions = host.admissions.lock().unwrap().last().unwrap().clone();
+            controller.apply_added(instance_with_modalities(
+                3,
+                16,
+                Some(serde_json::json!(["text", "image", "audio"])),
+            ));
+            assert_eq!(*admissions.borrow(), vec![1, 3]);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+
+            controller.apply_removed(&vision.key);
+            let text_only = commit_next_build(&mut controller, &host, &mut starts).await;
+            assert!(text_only.excludes_images);
+        })
+        .await
+        .expect("image-capable member lifecycle timed out");
+    }
+
+    #[tokio::test]
+    async fn non_image_modalities_do_not_rebuild_a_text_only_cohort() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (host, mut starts, mut controller) = text_only_cohort().await;
+            controller.apply_added(instance_with_modalities(
+                4,
+                16,
+                Some(serde_json::json!(["text", "audio"])),
+            ));
+            assert_eq!(host.members(&group_key()).len(), 2);
+            controller.apply_added(instance_with_modalities(
+                1,
+                16,
+                Some(serde_json::json!(["text", "video"])),
+            ));
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert_eq!(host.members(&group_key()).len(), 2);
+            assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        })
+        .await
+        .expect("non-image modality update timed out");
+    }
+
+    #[tokio::test]
+    async fn republishing_without_a_contract_withdraws_a_text_only_commit() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (host, mut starts, mut controller) = text_only_cohort().await;
+            // The pipeline omits images, so it must not keep serving this worker.
+            controller.apply_added(instance_with_modalities(1, 16, None));
+            assert!(host.members(&group_key()).is_empty());
+            let unknown = commit_next_build(&mut controller, &host, &mut starts).await;
+            assert!(!unknown.excludes_images);
+
+            controller.apply_added(instance_with_modalities(
+                1,
+                16,
+                Some(serde_json::json!(["text"])),
+            ));
+            let text_only = commit_next_build(&mut controller, &host, &mut starts).await;
+            assert!(text_only.excludes_images);
+        })
+        .await
+        .expect("contract withdrawal timed out");
+    }
+
+    #[tokio::test]
+    async fn republished_modality_keeps_safe_members_during_rebuilds() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (start_rebuild, fail_rebuild, modalities) in [
+                (false, false, None),
+                (true, false, Some(serde_json::json!(["image"]))),
+                (true, true, Some(serde_json::json!(["text", 1]))),
+            ] {
+                let (host, mut starts) = FakeHost::new();
+                let mut controller = ModelDiscoveryController::new(host.clone());
+                for id in [1, 2] {
+                    controller.apply_added(instance_with_modalities(
+                        id,
+                        16,
+                        Some(serde_json::json!(["text"])),
+                    ));
+                }
+                controller.start_queued_builds();
+                starts.recv().await.unwrap();
+                host.release.add_permits(1);
+                finish_build(&mut controller).await;
+                let admissions = host.admissions.lock().unwrap()[0].clone();
+                controller.apply_added(instance_with_modalities(
+                    1,
+                    16,
+                    Some(serde_json::json!(["text", "audio"])),
+                ));
+                assert_eq!(*admissions.borrow(), vec![1, 2]);
+                controller.start_queued_builds();
+                assert!(starts.try_recv().is_err());
+                if start_rebuild {
+                    host.failures
+                        .store(usize::from(fail_rebuild), Ordering::SeqCst);
+                    controller.apply_added(instance_with_modalities(3, 16, None));
+                    controller.start_queued_builds();
+                    assert!(!starts.recv().await.unwrap().excludes_images);
+                    if fail_rebuild {
+                        host.release.add_permits(1);
+                        finish_build(&mut controller).await;
+                    }
+                }
+                controller.apply_added(instance_with_modalities(1, 16, modalities));
+                assert_eq!(host.members(&group_key()).len(), 2);
+                assert_eq!(*admissions.borrow(), vec![2]);
+                assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+                let observation = host.inventory.snapshot().pop().unwrap().1;
+                assert_eq!(observation.committed, HashSet::from([2]));
+                if !start_rebuild || fail_rebuild {
+                    controller.start_queued_builds();
+                    assert!(!starts.recv().await.unwrap().excludes_images);
+                }
+                host.release.add_permits(1);
+                finish_build(&mut controller).await;
+                assert_eq!(
+                    host.members(&group_key()).len(),
+                    if start_rebuild { 3 } else { 2 }
+                );
+                assert!(admissions.has_changed().is_err());
+                let observation = host.inventory.snapshot().pop().unwrap().1;
+                assert!(observation.committed.contains(&1));
+                assert!(observation.committed.contains(&2));
+            }
+        })
+        .await
+        .expect("modality cohort lifecycle timed out");
     }
 
     #[tokio::test]
@@ -1757,7 +2060,8 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
+                false,
             )
         );
         host.release.add_permits(1);

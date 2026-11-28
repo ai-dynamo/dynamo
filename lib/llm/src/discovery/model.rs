@@ -16,6 +16,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::chat_input::ChatInputPolicy;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
@@ -91,6 +92,14 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+}
+
+/// A chat engine and the policies advertised by the same WorkerSet.
+pub(crate) struct ChatEngineSelection {
+    pub(crate) engine: OpenAIChatCompletionsStreamingEngine,
+    pub(crate) parsing_options: ParsingOptions,
+    pub(crate) input_policy: ChatInputPolicy,
+    pub(crate) omit_images: bool,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -898,7 +907,7 @@ impl Model {
         (
             OpenAIChatCompletionsStreamingEngine,
             ParsingOptions,
-            crate::chat_input::ChatInputPolicy,
+            ChatInputPolicy,
         ),
         ModelManagerError,
     > {
@@ -910,6 +919,50 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
+    /// Keep omission aligned with the selected deployment, including its media-processing peers.
+    pub(crate) fn get_chat_engine_with_image_policy(
+        &self,
+    ) -> Result<ChatEngineSelection, ModelManagerError> {
+        self.get_chat_engine_with_image_policy_for_capability(None)?
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+    }
+
+    pub(crate) fn get_chat_engine_with_image_policy_for_capability(
+        &self,
+        capability: Option<&str>,
+    ) -> Result<Option<ChatEngineSelection>, ModelManagerError> {
+        if let Some(capability) = capability
+            && !self.has_chat_engine_for_capability(capability)
+        {
+            return if self.has_chat_engine() {
+                Ok(None)
+            } else {
+                Err(self.engine_error(false))
+            };
+        }
+        self.select_worker_set_with_projection(
+            |ws| {
+                if capability.is_some_and(|capability| !ws.supports_runtime_capability(capability))
+                {
+                    return None;
+                }
+                ws.chat_engine
+                    .clone()
+                    .map(|engine| (engine, ws.parsing_options()))
+            },
+            WorkerSet::worker_count,
+            |(engine, parsing_options), selected| ChatEngineSelection {
+                engine,
+                parsing_options,
+                input_policy: selected.input_policy(),
+                omit_images: selected.allows_image_omission(),
+            },
+        )
+        .map(Some)
+        // A capable WorkerSet existed when the filter passed.
+        .ok_or_else(|| self.engine_error(capability.is_some() || self.has_chat_engine()))
+    }
+
     /// Select a chat engine from a WorkerSet that advertises `capability`.
     /// `Ok(None)` means chat WorkerSets exist but none advertises it.
     pub fn get_chat_engine_with_parsing_for_capability(
@@ -917,20 +970,9 @@ impl Model {
         capability: &str,
     ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
     {
-        if !self.has_chat_engine_for_capability(capability) {
-            return if self.has_chat_engine() {
-                Ok(None)
-            } else {
-                Err(self.engine_error(false))
-            };
-        }
-        self.select_worker_set_with(|ws| {
-            ws.supports_runtime_capability(capability)
-                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-                .flatten()
-        })
-        .map(Some)
-        .ok_or_else(|| self.engine_error(true))
+        Ok(self
+            .get_chat_engine_with_image_policy_for_capability(Some(capability))?
+            .map(|selection| (selection.engine, selection.parsing_options)))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -1038,6 +1080,20 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
     {
+        self.select_worker_set_with_projection(extract, count_workers, |value, _| value)
+    }
+
+    fn select_worker_set_with_projection<T, U, F, C, M>(
+        &self,
+        extract: F,
+        count_workers: C,
+        project: M,
+    ) -> Option<U>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+        M: Fn(T, &WorkerSet) -> U,
+    {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer.
@@ -1066,21 +1122,21 @@ impl Model {
             if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
-            return extract(ws);
+            return extract(ws).map(|value| project(value, ws));
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let eligible: Vec<(T, usize, &WorkerSet)> = snapshot
             .iter()
             .filter_map(|&ws| {
                 let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (val, count, ws))
             })
             .collect();
 
@@ -1089,15 +1145,18 @@ impl Model {
         }
 
         if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+            return eligible
+                .into_iter()
+                .next()
+                .map(|(val, _, ws)| project(val, ws));
         }
 
         // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
+        let total_weight: usize = eligible.iter().map(|(_, w, _)| w).sum();
         let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
+        for (val, weight, ws) in eligible {
             if pick < weight {
-                return Some(val);
+                return Some(project(val, ws));
             }
             pick -= weight;
         }
@@ -1421,7 +1480,6 @@ mod tests {
 
     #[test]
     fn chat_selection_keeps_engine_parsing_and_input_policy_atomic() {
-        use crate::chat_input::ChatInputPolicy;
         let model = Model::new("chat-policy".into());
         let make_set = |namespace: &str, native: bool| {
             let mut card = ModelDeploymentCard::default();
@@ -1521,6 +1579,11 @@ mod tests {
             Err(ModelManagerError::ModelNotFound(_))
         ));
 
+        assert!(matches!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY)),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
         model.add_worker_set("text".to_string(), chat_set("text", false));
         assert!(
             model
@@ -1529,6 +1592,12 @@ mod tests {
                 .is_none()
         );
 
+        assert!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY))
+                .unwrap()
+                .is_none()
+        );
         let mut idle = WorkerSet::new("idle".to_string(), "idle-sum".to_string(), {
             let mut card = ModelDeploymentCard::default();
             card.runtime_config
@@ -1545,6 +1614,11 @@ mod tests {
             Err(ModelManagerError::ModelUnavailable(_))
         ));
 
+        assert!(matches!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY)),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
         let flagged = chat_set("vllm", true);
         let flagged_engine = flagged.chat_engine.clone().unwrap();
         model.add_worker_set("vllm".to_string(), flagged);
@@ -1554,6 +1628,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
+            let selected = model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY))
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&selected.engine, &flagged_engine));
+            assert!(
+                !selected.omit_images,
+                "unknown modalities must preserve images"
+            );
         }
     }
 
@@ -1866,6 +1949,7 @@ mod tests {
                 generation: 1,
                 card: selected_card,
                 admitted_ids: admitted_rx,
+                excludes_images: false,
             },
         );
         model.add_worker_set("ns-a".to_string(), unadmitted);
@@ -2835,5 +2919,229 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    #[tokio::test]
+    async fn image_omission_follows_selected_deployment_and_pipeline_peers() {
+        use crate::discovery::{CommittedWorkerSetTarget, WorkerSetTarget};
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+        use crate::kv_router::{EncoderRouter, PrefillRouter};
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        use dynamo_runtime::distributed::DistributedConfig;
+        use dynamo_runtime::pipeline::network::Ingress;
+        use dynamo_runtime::{DistributedRuntime, Runtime};
+
+        let model = Model::new("test".into());
+        let text_engine = make_test_chat_engine();
+        let vision_engine = make_test_chat_engine();
+        let runtime = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let component = runtime
+            .namespace("text".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let (_activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let prefill = PrefillRouter::new(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            1,
+            None,
+            None,
+            None,
+            crate::session_affinity::SessionAffinityMode::Hard,
+            "test".to_string(),
+            "text".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let encoder = EncoderRouter::new("test".into(), "text".into());
+        let make_set = |namespace: &str, modalities: Option<Vec<&str>>, worker_type| {
+            let mut card = ModelDeploymentCard::with_name_only("test");
+            card.worker_type = Some(worker_type);
+            card.runtime_config.runtime_data.insert(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY.into(),
+                (namespace == "text").into(),
+            );
+            if let Some(modalities) = modalities {
+                card.runtime_config.runtime_data.insert(
+                    SUPPORTED_INPUT_MODALITIES.into(),
+                    serde_json::json!(modalities),
+                );
+            }
+            WorkerSet::new(namespace.into(), card.mdcsum().to_string(), card)
+        };
+        let mut text = make_set("text", Some(vec!["text"]), WorkerType::Aggregated);
+        let (text_workers, text_workers_rx) = watch::channel(vec![1]);
+        text.set_instance_watcher(text_workers_rx);
+        text.chat_engine = Some(text_engine.clone());
+        text.set_input_policy(ChatInputPolicy::Mistral);
+        text.prefill_router = Some(prefill.clone());
+        text.encoder_router = Some(encoder.clone());
+        model.add_worker_set("text".into(), Arc::new(text));
+        assert!(
+            model
+                .get_chat_engine_with_image_policy()
+                .unwrap()
+                .omit_images
+        );
+        let mut vision = make_set("vision", Some(vec!["image"]), WorkerType::Aggregated);
+        let (vision_workers, vision_workers_rx) = watch::channel(vec![2]);
+        vision.set_instance_watcher(vision_workers_rx);
+        vision.chat_engine = Some(vision_engine.clone());
+        model.add_worker_set("vision".into(), Arc::new(vision));
+        let selected = model
+            .get_chat_engine_with_image_policy_for_capability(Some(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&selected.engine, &text_engine));
+        assert!(selected.omit_images);
+        assert_eq!(selected.input_policy, ChatInputPolicy::Mistral);
+        for (text_ids, vision_ids, text_selected) in
+            [(vec![1], vec![], true), (vec![], vec![2], false)]
+        {
+            text_workers.send_replace(text_ids);
+            vision_workers.send_replace(vision_ids);
+            let selected = model.get_chat_engine_with_image_policy().unwrap();
+            let expected_engine = if text_selected {
+                &text_engine
+            } else {
+                &vision_engine
+            };
+            assert!(Arc::ptr_eq(&selected.engine, expected_engine));
+            assert_eq!(selected.omit_images, text_selected);
+            assert_eq!(
+                selected.input_policy == ChatInputPolicy::Mistral,
+                text_selected
+            );
+        }
+        text_workers.send_replace(vec![1]);
+        model.remove_worker_set("vision");
+
+        let mut inactive = make_set("text", Some(vec!["image"]), WorkerType::Aggregated);
+        inactive.chat_engine = Some(vision_engine.clone());
+        let (_workers_tx, workers_rx) = watch::channel(Vec::new());
+        inactive.set_instance_watcher(workers_rx);
+        model.add_worker_set("text:idle".into(), Arc::new(inactive));
+        assert!(
+            model
+                .get_chat_engine_with_image_policy()
+                .unwrap()
+                .omit_images
+        );
+
+        for (index, (role, modalities, omit_images)) in [
+            (WorkerType::Prefill, Some(vec!["text"]), true),
+            (WorkerType::Prefill, Some(vec!["image"]), false),
+            (WorkerType::Prefill, None, false),
+            (WorkerType::Encode, Some(vec!["text"]), true),
+            (WorkerType::Encode, Some(vec!["image"]), false),
+            (WorkerType::Encode, None, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let peer = make_set("text", modalities, role);
+            let endpoint = component.endpoint(format!("peer-{index}"));
+            let worker = endpoint
+                .endpoint_builder()
+                .handler(Ingress::for_engine(Arc::new(StubGenerateEngine)).unwrap())
+                .start_with_registration()
+                .await
+                .unwrap();
+            let worker_id = worker.instance().id();
+            let (_admitted_tx, admitted_ids) = watch::channel(vec![worker_id]);
+            let group = format!("peer-{index}");
+            let endpoint_id = endpoint.id();
+            let target = WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint,
+                group: group.clone(),
+                generation: 1,
+                card: Arc::new(peer.card().clone()),
+                admitted_ids,
+                excludes_images: omit_images,
+            });
+            model.add_worker_set("text:peer".into(), Arc::new(peer));
+            assert!(
+                model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images
+            );
+            match role {
+                WorkerType::Prefill => prefill.set_target(Some(target)),
+                WorkerType::Encode => encoder.set_target(Some(target)),
+                _ => unreachable!(),
+            }
+            // The current-thread runtime has not run asynchronous activation yet.
+            assert!(
+                !model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images,
+                "a pending {role:?} target must preserve images"
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let available = match role {
+                        WorkerType::Prefill => {
+                            prefill.available_worker_ids_for(&group, &endpoint_id)
+                        }
+                        WorkerType::Encode => {
+                            encoder.available_worker_ids_for(&group, &endpoint_id)
+                        }
+                        _ => unreachable!(),
+                    };
+                    if available.is_some_and(|ids| ids.contains(&worker_id)) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("committed peer target must become active");
+            assert_eq!(
+                model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images,
+                omit_images,
+                "the selected active {role:?} target determines image omission"
+            );
+            model.remove_worker_set("text:peer");
+            prefill.set_target(None);
+            encoder.set_target(None);
+        }
+    }
+
+    #[test]
+    fn input_modality_support_preserves_unknown_or_malformed_metadata() {
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        for (values, expected) in [
+            (None, false),
+            (Some(serde_json::json!([])), false),
+            (Some(serde_json::json!(["text"])), true),
+            (Some(serde_json::json!(["text", "audio"])), true),
+            (Some(serde_json::json!(["text", "image"])), false),
+            (Some(serde_json::json!(["text", "unknown"])), false),
+            (Some(serde_json::json!(["text", 7])), false),
+            (Some(serde_json::json!("text")), false),
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only("test");
+            if let Some(value) = values {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SUPPORTED_INPUT_MODALITIES.into(), value);
+            }
+            let set = WorkerSet::new("pipeline".into(), card.mdcsum().to_string(), card);
+            assert_eq!(set.allows_image_omission(), expected);
+        }
     }
 }

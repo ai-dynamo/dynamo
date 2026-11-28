@@ -26,6 +26,19 @@ image workloads, see [VLM Performance Optimization](vlm-performance-optimization
 Plain `http://` URLs and hosts that resolve to private or loopback addresses are
 refused by default. See [Media URL Policy](#media-url-policy).
 
+## Images Sent to Text-Only Deployments
+
+If a request with images reaches a deployment that doesn't accept images, Dynamo
+replaces each image with `[image omitted]` instead of failing, and the client isn't
+told. Currently this applies only to TensorRT-LLM workers served through the Dynamo
+sidecar. The decision is made per request, so if a model name is served by both a
+text-only and an image-capable deployment, only requests routed to the text-only
+one lose their images.
+
+To refuse image requests instead, set the frontend's `--reject-media` option. See
+[Media refusal for text-only models](../../reference/components/frontend-configuration.mdx#media-refusal-for-text-only-models)
+for the rules and endpoint coverage.
+
 ## Set up the backend
 
 The vLLM and TensorRT-LLM launchers below start the worker with

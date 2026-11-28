@@ -486,9 +486,19 @@ async fn handler_anthropic_messages(
             .into_marked_response(&mut inflight_guard));
         }
     }
+    let engine_selection = state
+        .manager()
+        .get_chat_completions_selection(resolved_model);
     let mut request = request.into_request(&headers).map_err(|error| {
         AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
     })?;
+    if engine_selection
+        .as_ref()
+        .is_ok_and(|(_, selected)| selected.omit_images)
+    {
+        let replaced_images = super::image_omission::omit_anthropic_images(&mut request.messages);
+        super::image_omission::log_image_omission(&canonical_model, replaced_images);
+    }
 
     validate_anthropic_messages(&request.messages).map_err(|error| {
         AnthropicHandlerError::from_request_validation(error)
@@ -553,6 +563,7 @@ async fn handler_anthropic_messages(
             headers,
             stream_handle,
             inflight_guard,
+            engine_selection,
         )
         .in_current_span(),
     )
@@ -577,6 +588,10 @@ async fn anthropic_messages(
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
     mut inflight_guard: InflightGuard,
+    engine_selection: Result<
+        (String, crate::discovery::ChatEngineSelection),
+        crate::discovery::ModelManagerError,
+    >,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -600,14 +615,9 @@ async fn anthropic_messages(
         strip_billing_preamble(&mut request.system);
     }
 
-    // Resolve an alias to its primary served name and rewrite the request so
-    // engine routing, metrics, and the response model all use the canonical
-    // primary (matching the OpenAI handlers). Non-aliases pass through.
-    let canonical = state.manager().resolve_canonical_name(&request.model);
-    if canonical != request.model {
-        request.model = canonical;
+    if let Ok((canonical, _)) = &engine_selection {
+        request.model.clone_from(canonical);
     }
-
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -617,33 +627,37 @@ async fn anthropic_messages(
     let (mut orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Looked up after the media refusal so a refused request gets the
-    // configured status, not this lookup's 404/503.
-    let (engine, parsing_options, input_policy) = state
-        .manager()
-        .get_chat_completions_engine_with_input_policy(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
-                ErrorClass::Unavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                super::openai::model_not_ready_message(&model),
-                ErrorType::Unavailable,
-            )
-            .into_marked_response(&mut inflight_guard),
-            _ => AnthropicHandlerError::new(
-                ErrorClass::NotFound,
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("Model '{}' not found", model),
-                ErrorType::NotFound,
-            )
-            .into_marked_response(&mut inflight_guard),
-        })?;
+    // Surface selection errors after media refusal to preserve its configured status.
+    let (
+        _,
+        crate::discovery::ChatEngineSelection {
+            engine,
+            parsing_options,
+            input_policy,
+            ..
+        },
+    ) = engine_selection.map_err(|e| match e {
+        // Registered but not ready to serve yet → retryable 503 (mapped to
+        // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+        // canonical, customer-facing message so both APIs report the same
+        // text. Anything else is a genuine missing model → 404.
+        crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
+            ErrorClass::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            super::openai::model_not_ready_message(&model),
+            ErrorType::Unavailable,
+        )
+        .into_marked_response(&mut inflight_guard),
+        _ => AnthropicHandlerError::new(
+            ErrorClass::NotFound,
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            format!("Model '{}' not found", model),
+            ErrorType::NotFound,
+        )
+        .into_marked_response(&mut inflight_guard),
+    })?;
 
     input_policy.prepare_anthropic(&mut orig_request);
 
@@ -1070,6 +1084,8 @@ async fn handler_count_tokens(
     if request.has_thread() {
         return Err(thread_unsupported_response());
     }
+    // Count the original input because the subsequent Messages request may
+    // select a deployment that processes its images.
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;
@@ -1632,6 +1648,76 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::parse_nvext;
+
+    #[tokio::test]
+    async fn anthropic_selection_keeps_canonical_model_after_alias_reassignment() {
+        let service = service_v2::HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let engine: crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine =
+            Arc::new(crate::engines::StreamingEngineAdapter::new(
+                crate::engines::make_echo_engine(),
+            ));
+        for model in ["original", "replacement"] {
+            state
+                .manager()
+                .add_chat_completions_model(model, model, engine.clone())
+                .unwrap();
+        }
+        assert!(state.manager().register_alias("alias", "original"));
+        let selection = state.manager().get_chat_completions_selection("alias");
+        state
+            .manager()
+            .unregister_alias_if_empty("alias", "original");
+        assert!(state.manager().register_alias("alias", "replacement"));
+        assert_eq!(
+            state.manager().resolve_canonical_name("alias"),
+            "replacement"
+        );
+
+        let request: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "max_tokens":16, "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let request = Context::new(request);
+        let guard = state.metrics_clone().create_inflight_guard(
+            "original",
+            Endpoint::AnthropicMessages,
+            false,
+            request.id(),
+        );
+        let (mut connection, stream) = create_connection_monitor(
+            request.context(),
+            None,
+            CancellationLabels {
+                model: "original".to_string(),
+                endpoint: Endpoint::AnthropicMessages.to_string(),
+                request_type: "unary".to_string(),
+            },
+        )
+        .await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            anthropic_messages(
+                state,
+                None,
+                request,
+                HeaderMap::new(),
+                stream,
+                guard,
+                selection,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        connection.disarm();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "original");
+    }
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({

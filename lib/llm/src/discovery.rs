@@ -6,7 +6,8 @@ mod model;
 pub(crate) mod readiness;
 pub use model::Model;
 pub(crate) use model::{
-    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+    ChatEngineSelection, GenerateEngineSelection, SystemOneExecutionSelection,
+    SystemOneSelectionError,
 };
 
 pub mod kv_source_membership;
@@ -33,7 +34,9 @@ mod allocator;
 
 mod worker_set;
 pub use worker_set::WorkerSet;
-pub(crate) use worker_set::{CommittedWorkerSetTarget, WorkerSetTarget, WorkerSetTargetId};
+pub(crate) use worker_set::{
+    CommittedWorkerSetTarget, RouterTargetState, WorkerSetTarget, WorkerSetTargetId,
+};
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
