@@ -112,7 +112,10 @@ Workers register their endpoints and are discovered through the discovery plane.
   network-reachable discovery store. Where you do use etcd, enable authentication —
   never anonymous access on a shared network. Dynamo's etcd client supports
   username/password (`ETCD_AUTH_USERNAME`/`ETCD_AUTH_PASSWORD`) and mutual TLS
-  (`ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`).
+  (`ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`, which hold PEM
+  contents). For a step-by-step setup, see etcd Authentication for
+  [local and bare-metal hosts](../../cli/installation/etcd-authentication.md) or
+  [Kubernetes](../../kubernetes/installation/etcd-authentication.md).
 
 **Why it matters:** an unauthenticated discovery plane lets any peer on the
 network enumerate workers and inject or alter routing metadata. See the

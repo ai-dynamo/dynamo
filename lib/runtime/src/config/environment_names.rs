@@ -267,13 +267,13 @@ pub mod etcd {
         /// Password for ETCD authentication
         pub const ETCD_AUTH_PASSWORD: &str = "ETCD_AUTH_PASSWORD";
 
-        /// Path to CA certificate for ETCD TLS
+        /// PEM contents of the CA certificate for ETCD TLS
         pub const ETCD_AUTH_CA: &str = "ETCD_AUTH_CA";
 
-        /// Path to client certificate for ETCD TLS
+        /// PEM contents of the client certificate for ETCD TLS
         pub const ETCD_AUTH_CLIENT_CERT: &str = "ETCD_AUTH_CLIENT_CERT";
 
-        /// Path to client key for ETCD TLS
+        /// PEM contents of the client private key for ETCD TLS
         pub const ETCD_AUTH_CLIENT_KEY: &str = "ETCD_AUTH_CLIENT_KEY";
     }
 }

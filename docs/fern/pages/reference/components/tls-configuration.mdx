@@ -346,6 +346,7 @@ plane is not covered):
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
 | NATS | Frontend/Worker ↔ NATS | Inference requests (when `--request-plane nats`), JetStream recovery, audit logs | `transports/nats` |
+| etcd | Every component ↔ etcd | Discovery data, model cards, and planner state | TLS with client certificates; see [CLI setup](../../cli/installation/etcd-authentication.md) or [Kubernetes setup](../../kubernetes/installation/etcd-authentication.md) |
 
 ## Design notes
 
