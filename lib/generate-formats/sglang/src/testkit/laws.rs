@@ -59,6 +59,7 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
                     vec(any::<u8>(), (p + n + 4) * row_bytes),
                     vec(any::<bool>(), n - 1),
                     0u32..4,
+                    any::<bool>(),
                 ),
                 (
                     budget(n, stop),
@@ -75,7 +76,7 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
         })
         .prop_map(
             |(
-                (prompt, prompt_lps, output, experts, cuts, cached),
+                (prompt, prompt_lps, output, experts, cuts, cached, rust_server),
                 ((max, engine_info), min, stream, logprob, start, top, routed),
                 topology,
                 (stop, row_bytes),
@@ -97,6 +98,7 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
                         experts,
                         cuts: ends,
                         cached_tokens: cached,
+                        rust_server,
                     },
                     request: RequestSpec {
                         input_ids: prompt,
@@ -243,6 +245,9 @@ impl Harness {
     /// Prefill/decode disaggregation returns what aggregated serving returns.
     pub fn disaggregated_equals_aggregated(&self) {
         self.law("P/D equals aggregated", scenarios(), |scenario| {
+            // Streaming P/D repeats prefill's prompt values on every chunk, while
+            // SGLang's Rust server sends them once: compare only its unary output.
+            prop_assume!(!(scenario.truth.rust_server && scenario.request.stream));
             let mut aggregated = scenario.clone();
             aggregated.topology = Topology::Aggregated;
             let mut disaggregated = scenario;
