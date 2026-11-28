@@ -3495,4 +3495,67 @@ mod tests {
         let other_primary = bind_server_udp(ephemeral, false).unwrap();
         assert_ne!(other_primary.local_addr().unwrap(), bound);
     }
+
+    #[tokio::test]
+    async fn graceful_shutdown_keeps_established_quic_responses_open() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::graceful_shutdown_keeps_established_quic_responses_open"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+
+        let wait = Duration::from_secs(5);
+        let runtime = crate::Runtime::from_current().unwrap();
+        let mut config = crate::distributed::DistributedConfig::process_local();
+        config.response_plane = Some(crate::pipeline::network::ResponsePlaneMode::Quic);
+        let drt = crate::DistributedRuntime::new(runtime, config)
+            .await
+            .unwrap();
+        let server = drt.quic_response_server().await.unwrap();
+
+        // Holds the drain open, as the frontend does while HTTP responses finish.
+        let drain = drt.register_graceful_task();
+
+        let context = PipelineContext::new(());
+        let (connection_info, provider) = server.register_response(context.context()).into_parts();
+        let pool = test_pool();
+        let mut sender = pool
+            .sender(context.context(), connection_info)
+            .await
+            .unwrap();
+        sender.send_prologue(None).await.unwrap();
+        let mut receiver = tokio::time::timeout(wait, provider)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        drt.shutdown();
+        tokio::time::timeout(wait, drt.child_token().cancelled())
+            .await
+            .unwrap();
+        assert!(
+            !server.shutdown.is_cancelled(),
+            "the QUIC server must stay open while the drain waits for responses"
+        );
+
+        sender
+            .send(Bytes::from_static(b"during-drain"))
+            .await
+            .expect("an established response must stay writable during the drain");
+        let item = tokio::time::timeout(wait, receiver.rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(item, Some(Bytes::from_static(b"during-drain")));
+
+        sender.finish().await.unwrap();
+        drop(drain);
+        tokio::time::timeout(wait, drt.primary_token().cancelled())
+            .await
+            .unwrap();
+    }
 }
