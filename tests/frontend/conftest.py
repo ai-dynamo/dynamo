@@ -227,6 +227,24 @@ def start_services_with_grpc(
 ########################################################
 
 
+def _worker_health_checks(
+    frontend_port: int, system_port: int, wait_for_frontend_model: bool
+) -> list:
+    """Readiness checks for a worker started behind the shared frontend.
+
+    The frontend lists a model only once its worker set is complete, so a lone
+    prefill or decode worker never appears on `/v1/models`. A worker started
+    before its disaggregated peer must pass `wait_for_frontend_model=False` and
+    is then gated on its own system `/health` alone.
+    """
+    checks = [(f"http://localhost:{system_port}/health", check_health_ready)]
+    if wait_for_frontend_model:
+        checks.insert(
+            0, (f"http://localhost:{frontend_port}/v1/models", models_available)
+        )
+    return checks
+
+
 class MockerWorkerProcess(ManagedProcess):
     """Shared mocker worker process for frontend tests.
 
@@ -243,6 +261,7 @@ class MockerWorkerProcess(ManagedProcess):
         worker_id: str = "mocker-worker",
         extra_args: list = None,
         extra_env: dict = None,
+        wait_for_frontend_model: bool = True,
     ):
         self.worker_id = worker_id
         self.frontend_port = frontend_port
@@ -272,10 +291,9 @@ class MockerWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", models_available),
-                (f"http://localhost:{system_port}/health", check_health_ready),
-            ],
+            health_check_urls=_worker_health_checks(
+                frontend_port, system_port, wait_for_frontend_model
+            ),
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
@@ -330,6 +348,7 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
         worker_id: str = "sample-worker",
         extra_args: list | None = None,
         extra_env: dict | None = None,
+        wait_for_frontend_model: bool = True,
     ):
         self.worker_id = worker_id
         self.frontend_port = frontend_port
@@ -361,10 +380,9 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", models_available),
-                (f"http://localhost:{system_port}/health", check_health_ready),
-            ],
+            health_check_urls=_worker_health_checks(
+                frontend_port, system_port, wait_for_frontend_model
+            ),
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,
