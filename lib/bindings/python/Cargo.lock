@@ -2174,7 +2174,7 @@ dependencies = [
  "clap",
  "dynamo-kv-hints",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-rl",
  "dynamo-runtime",
  "futures",
@@ -2426,7 +2426,7 @@ dependencies = [
  "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-router-policies",
@@ -2625,7 +2625,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-structural-tag",
  "futures",
  "num-traits",
@@ -2681,9 +2681,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "10.0.1"
+version = "10.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f53c5d0072e9d22fd046ff157d1ac14aa36534491d6fad07e314c8255d37873b"
+checksum = "b5b09675775fb8bcc5a4dc03ae5cd44724693ec00121309351000eb72d66668a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2758,15 +2758,17 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "10.4.1"
+version = "10.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4966b8af6e83e8a320406a394fdb14cbb7450d3c76d4a3fd723bf804fb4351a9"
+checksum = "0f79afa8712cfe4e51bc196a48ef8481738fc425d9dcaa9c705540dbb39d8363"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "chrono",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-tokenizers",
  "either",
+ "memchr",
  "minijinja",
  "minijinja-contrib",
  "serde",
@@ -2955,7 +2957,7 @@ dependencies = [
  "dynamo-error",
  "dynamo-http-server",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "serde",
  "serde_json",
@@ -3045,9 +3047,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "4.3.0"
+version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e739aa01c02ecd4c2fdea59eb4b3367bd5da6e35f82c1cd36854ce886f543b62"
+checksum = "3a733cf7d77e9ce3c12e38b514ef50ffdcb68f0e7c54b2ea6d384a88338e8b14"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3129,7 +3131,7 @@ dependencies = [
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "serde",
  "serde_json",

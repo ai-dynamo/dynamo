@@ -1204,4 +1204,53 @@ mod tests {
         assert_eq!(segments[1].text, "hello world");
         assert!(!segments[1].allow_special);
     }
+
+    #[test]
+    fn hf_jinja_supports_developer_role_and_compact_sorted_tojson() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
+
+        let template_json = serde_json::json!({
+            "chat_template": concat!(
+                "{%- for m in messages -%}",
+                "{%- if m.role == \"system\" -%}<|message_system|>{{ m.content }}<|end_message|>",
+                "{%- elif m.role == \"user\" -%}<|message_user|>{{ m.content }}<|end_message|>",
+                "{%- else -%}{{ raise_exception(\"Unknown message role: \" + m.role) }}",
+                "{%- endif -%}",
+                "{%- endfor -%}",
+                "{%- if tools -%}",
+                "<|tools|>{{ tools | tojson(sort_keys=true, separators=(\",\", \":\")) }}",
+                "{%- endif -%}"
+            )
+        });
+        let config: ChatTemplate = serde_json::from_value(template_json).unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(config, ContextMixins::default(), false).unwrap();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "thinkingmachines/Inkling-2-Mini",
+            "messages": [
+                {"role": "developer", "content": "Follow schema."},
+                {"role": "user", "content": "Hi"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Find item",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render_prompt(&request).unwrap();
+        assert_eq!(
+            rendered.as_str(),
+            concat!(
+                "<|message_system|>Follow schema.<|end_message|><|message_user|>Hi<|end_message|>",
+                r#"<|tools|>[{"function":{"description":"Find item","name":"lookup","parameters":{"properties":{},"type":"object"}},"type":"function"}]"#
+            )
+        );
+    }
 }
