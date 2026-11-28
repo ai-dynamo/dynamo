@@ -97,6 +97,74 @@ fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Resul
     })
 }
 
+// Phi-3/3.5 chat tokens are `rstrip`: each match also takes the newline the chat
+// template writes after it. Splitting the prompt there used to encode that newline on
+// its own as `▁`, `\n` (#18817). TinyLlama shares Phi-3.5's Llama vocabulary.
+#[test]
+fn model_card_tokenizer_cache_matches_hf_after_rstrip_specials() -> anyhow::Result<()> {
+    temp_env::with_vars(CACHE_ENV, || -> anyhow::Result<()> {
+        let model_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let temp = tempfile::tempdir()?;
+        for entry in std::fs::read_dir(&model_dir)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), temp.path().join(entry.file_name()))?;
+        }
+        let path = temp.path().join("tokenizer.json");
+        let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        let added = json["added_tokens"].as_array_mut().unwrap();
+        for (id, content) in [
+            (32000, "<|assistant|>"),
+            (32001, "<|end|>"),
+            (32002, "<|user|>"),
+        ] {
+            added.push(serde_json::json!({
+                "id": id, "content": content, "single_word": false, "lstrip": false,
+                "rstrip": true, "normalized": false, "special": true
+            }));
+        }
+        std::fs::write(&path, serde_json::to_vec(&json)?)?;
+        let hf = HuggingFaceTokenizer::from_file(path.to_str().unwrap())?;
+
+        let one = "<|user|>\nWhat is 2 + 3?<|end|>\n<|assistant|>\n";
+        let three = format!("{one}5<|end|>\n<|user|>\nAnd 4 + 4?<|end|>\n<|assistant|>\n");
+        // 11 ids, as with Phi-3.5: no `▁`, `\n` after any chat token.
+        assert_eq!(hf.encode(one)?.token_ids().len(), 11);
+
+        for backend in [TokenizerBackend::Default, TokenizerBackend::Fastokens] {
+            for block_size in [16, 32] {
+                // A new block size is a new cache namespace, so each order starts cold.
+                let mut card = load_card(temp.path(), backend)?;
+                card.kv_cache_block_size = block_size;
+                let tokenizer = card.tokenizer()?;
+                let order = if block_size == 16 {
+                    [three.as_str(), one, three.as_str()]
+                } else {
+                    [one, three.as_str(), three.as_str()]
+                };
+                for input in order {
+                    assert_eq!(
+                        tokenizer.encode(input)?.token_ids(),
+                        hf.encode(input)?.token_ids(),
+                        "{backend:?} block_size={block_size} {input:?}"
+                    );
+                    let segments = [
+                        EncodeSegment::control("<|user|>\n"),
+                        EncodeSegment::ordinary("What is 2 + 3?"),
+                        EncodeSegment::control("<|end|>\n<|assistant|>\n"),
+                    ];
+                    assert_eq!(
+                        tokenizer.encode_segments(&segments)?.token_ids(),
+                        hf.encode_segments(&segments)?.token_ids(),
+                        "{backend:?} block_size={block_size} segments"
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 // The cache encodes long segments and the specials around them separately, so any
 // truncation or padding left in `tokenizer.json` would apply to each piece.
 #[test]
