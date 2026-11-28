@@ -714,7 +714,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false, revision=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -740,6 +740,7 @@ fn register_model<'p>(
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
     skip_model_assets: bool,
+    revision: Option<String>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -969,13 +970,14 @@ fn register_model<'p>(
             return Ok(());
         }
 
-        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // ModelExpress load paths pass ignore_weights=true because the engine already owns
-        // weight acquisition; other load paths keep the default full-fetch behavior.
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace,
+        // at `revision` when the engine pins one). ModelExpress load paths pass
+        // ignore_weights=true because the engine already owns weight acquisition; other load
+        // paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, ignore_weights)
+            LocalModel::fetch_at_revision(&source_path, revision.as_deref(), ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -1119,20 +1121,22 @@ fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runti
     Ok(primary)
 }
 
-/// Download a model from Hugging Face, returning its local path
+/// Download a model from Hugging Face, returning its local path. `revision` is a Hugging Face
+/// branch, tag, or commit; `None` is the repository's default branch.
 /// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
-#[pyo3(signature = (remote_name, ignore_weights=false))]
+#[pyo3(signature = (remote_name, ignore_weights=false, revision=None))]
 fn fetch_model<'p>(
     py: Python<'p>,
     remote_name: &str,
     ignore_weights: bool,
+    revision: Option<String>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
     let repo = remote_name.to_string();
     ensure_fetch_model_runtime().map_err(to_pyerr)?;
     crate::future_into_py_with_locals(py, locals, async move {
-        LocalModel::fetch(&repo, ignore_weights)
+        LocalModel::fetch_at_revision(&repo, revision.as_deref(), ignore_weights)
             .await
             // pyo3 converts PathBuf to pathlib.Path. The stub returns str.
             .map(std::path::PathBuf::into_os_string)

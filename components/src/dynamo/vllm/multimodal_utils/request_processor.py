@@ -384,9 +384,11 @@ class VllmMultimodalRequestProcessor:
         audio_loader: Optional[AudioLoader] = None,
         use_unified_vision_chunk: Optional[bool] = None,
         trust_remote_code: bool = False,
+        revision: Optional[str] = None,
     ) -> None:
         """Bind the engine client, loaders, and model-specific multimodal policy."""
         self.model = model
+        self.revision = revision
         self.engine_client = engine_client
         self.enable_multimodal = enable_multimodal
         self.enable_frontend_decoding = enable_frontend_decoding
@@ -677,7 +679,7 @@ class VllmMultimodalRequestProcessor:
         if not self.enable_multimodal or self._model_family is not ModelFamily.QWEN_VL:
             return
         self._qwen_grid_params = load_qwen_grid_params(
-            self.model, trust_remote_code=self.trust_remote_code
+            self.model, trust_remote_code=self.trust_remote_code, revision=self.revision
         )
         if self._qwen_grid_params is None and self.embedding_loader is None:
             raise RuntimeError(

@@ -61,6 +61,7 @@ def _load_image_processor(engine_args: AsyncEngineArgs):
     processor = AutoImageProcessor.from_pretrained(
         engine_args.model,
         trust_remote_code=engine_args.trust_remote_code,
+        revision=engine_args.revision,
         **processor_kwargs,
     )
     logger.info(
@@ -168,6 +169,7 @@ class EncodeWorkerHandler:
             self.model,
             enforce_eager=self.engine_args.enforce_eager,
             trust_remote_code=self.engine_args.trust_remote_code,
+            revision=self.engine_args.revision,
         )
         hidden_size = getattr(self.vision_model, "out_hidden_size", None)
         if hidden_size is None:

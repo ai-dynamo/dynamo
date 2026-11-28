@@ -209,10 +209,13 @@ def _encoder_kv_cache_memory_bytes() -> int:
 
 
 def load_vision_model(
-    model_id: str, enforce_eager: bool = False, trust_remote_code: bool = False
+    model_id: str,
+    enforce_eager: bool = False,
+    trust_remote_code: bool = False,
+    revision: Optional[str] = None,
 ) -> torch.nn.Module:
     """
-    Load a vision model from a HuggingFace model ID.
+    Load a vision model from a HuggingFace model ID, at `revision` when given.
     """
     if VLLM_ENCODER and resolve_model_family(model_id) is ModelFamily.QWEN_VL:
         # Disable to get ViT from the same process
@@ -228,6 +231,7 @@ def load_vision_model(
         with _maybe_skip_encoder_only_kernel_warmup():
             vllm_model = LLM(
                 model=model_id,
+                revision=revision,
                 enforce_eager=enforce_eager,
                 trust_remote_code=trust_remote_code,
                 # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
@@ -248,6 +252,7 @@ def load_vision_model(
         )
     return AutoModel.from_pretrained(
         model_id,
+        revision=revision,
         device_map="auto",
         torch_dtype=torch.float16,
         trust_remote_code=trust_remote_code,

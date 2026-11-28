@@ -44,6 +44,7 @@ def _make_prefill_handler():
         dyn_reasoning_parser=None,
         engine_args=SimpleNamespace(block_size=16, max_loras=4, model="/models/base"),
         use_kv_events=True,
+        model_revision=None,
     )
     handler.engine_client = SimpleNamespace(
         add_lora=AsyncMock(),
@@ -79,6 +80,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     monkeypatch,
 ):
     handler = _make_prefill_handler()
+    handler.config.model_revision = "v1.0"
     manager = SimpleNamespace(
         download_lora=AsyncMock(
             return_value={"status": "success", "local_path": "/cache/adapter"}
@@ -108,6 +110,8 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
     assert kwargs["ignore_weights"] is True
+    # The adapter card reads the base model's files at the revision the engine loads.
+    assert kwargs["revision"] == "v1.0"
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
     token_budget = json.loads(runtime_config.runtime_data["token_budget"])

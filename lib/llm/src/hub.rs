@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use hf_hub::Cache;
+use hf_hub::{Cache, Repo};
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
@@ -176,18 +176,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         );
     }
 
-    let mut config: MxClientConfig = MxClientConfig::default();
-    if provider == MxModelProvider::Ngc {
-        config.cache.local_path = get_model_express_cache_dir(provider);
-    }
-    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
-        config = config.with_endpoint(endpoint);
-    }
-    if is_no_shared_storage() {
-        config.cache.shared_storage = false;
-    }
-
-    let result = match MxClient::new(config).await {
+    let result = match MxClient::new(mx_client_config(provider)).await {
         Ok(mut client) => {
             tracing::info!("Successfully connected to ModelExpress server");
             match client
@@ -233,6 +222,20 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     }
 }
 
+fn mx_client_config(provider: MxModelProvider) -> MxClientConfig {
+    let mut config = MxClientConfig::default();
+    if provider == MxModelProvider::Ngc {
+        config.cache.local_path = get_model_express_cache_dir(provider);
+    }
+    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
+        config = config.with_endpoint(endpoint);
+    }
+    if is_no_shared_storage() {
+        config.cache.shared_storage = false;
+    }
+    config
+}
+
 async fn mx_download_direct(
     model_name: &str,
     provider: MxModelProvider,
@@ -240,6 +243,164 @@ async fn mx_download_direct(
 ) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir(provider);
     mx::download_model(model_name, provider, Some(cache_dir), ignore_weights).await
+}
+
+/// A full Hugging Face commit SHA: the name of a snapshot directory in the hub cache.
+fn is_commit_hash(revision: &str) -> bool {
+    revision.len() == 40
+        && revision
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The commit a Hugging Face hub-cache snapshot directory (`.../snapshots/<commit>`) holds, or
+/// `None` for any other directory.
+pub(crate) fn snapshot_commit(dir: &Path) -> Option<String> {
+    let commit = dir.file_name()?.to_str()?;
+    let parent = dir.parent()?.file_name()?;
+    (parent == "snapshots" && is_commit_hash(commit)).then(|| commit.to_string())
+}
+
+/// Revisions are Hugging Face branches, tags, or commits. One becomes a path below the
+/// repository's `refs/` cache directory, so it must stay inside it.
+fn check_revision_request(model_name: &str, revision: &str) -> anyhow::Result<()> {
+    if provider_for(model_name) != MxModelProvider::HuggingFace {
+        anyhow::bail!(
+            "revision '{revision}' applies only to Hugging Face models, not '{model_name}'"
+        );
+    }
+    let mut components = Path::new(revision).components().peekable();
+    if components.peek().is_none() || !components.all(|c| matches!(c, Component::Normal(_))) {
+        anyhow::bail!("invalid Hugging Face revision '{revision}'");
+    }
+    Ok(())
+}
+
+/// The cached snapshot of `model_name` at `revision`, if it holds the files needed to serve.
+/// A branch or tag resolves through the cache's `refs/`; a commit names its snapshot directly.
+/// Never falls back to another revision.
+fn get_cached_model_path_at_revision_in(
+    model_name: &str,
+    revision: &str,
+    ignore_weights: bool,
+    cache_dir: &Path,
+) -> Option<PathBuf> {
+    let repo_dir = cache_dir.join(Repo::model(model_name.to_string()).folder_name());
+    let commit = if is_commit_hash(revision) {
+        revision.to_string()
+    } else {
+        std::fs::read_to_string(repo_dir.join("refs").join(revision))
+            .ok()?
+            .trim()
+            .to_string()
+    };
+    if !is_commit_hash(&commit) {
+        return None;
+    }
+    cached_model_dir(
+        model_name,
+        repo_dir.join("snapshots").join(commit),
+        ignore_weights,
+    )
+}
+
+/// [`from_hf`] at a Hugging Face `revision` (branch, tag, or commit SHA) instead of the
+/// repository's default branch; `None` is [`from_hf`].
+///
+/// A cached snapshot of the revision is returned without network calls. Otherwise the
+/// revision is downloaded, through the ModelExpress server when one is reachable. The
+/// result is always the requested revision, never another cached one.
+pub async fn from_hf_at_revision(
+    name: impl AsRef<Path>,
+    revision: Option<&str>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    let Some(revision) = revision else {
+        return from_hf(name, ignore_weights).await;
+    };
+    // The hub names commits in lower case; accept a full SHA in either case.
+    let lower_case = revision.to_ascii_lowercase();
+    let revision = if is_commit_hash(&lower_case) {
+        lower_case.as_str()
+    } else {
+        revision
+    };
+    let model_name = name.as_ref().display().to_string();
+    check_revision_request(&model_name, revision)?;
+    let provider = MxModelProvider::HuggingFace;
+    let cache_dir = get_model_express_cache_dir(provider);
+
+    if let Some(cached_path) =
+        get_cached_model_path_at_revision_in(&model_name, revision, ignore_weights, &cache_dir)
+    {
+        return Ok(cached_path);
+    }
+
+    if is_offline_mode() {
+        tracing::warn!(
+            "Offline mode enabled but model '{model_name}' at revision '{revision}' not found in cache, attempting download anyway"
+        );
+    }
+
+    let server_path = match MxClient::new(mx_client_config(provider)).await {
+        Ok(mut client) => match client
+            .request_model_revision(&model_name, provider, ignore_weights, Some(revision))
+            .await
+        {
+            Ok(download) => {
+                let path = download.path.or_else(|| {
+                    let commit = download.resolved_revision.as_deref()?;
+                    get_cached_model_path_at_revision_in(
+                        &model_name,
+                        commit,
+                        ignore_weights,
+                        &cache_dir,
+                    )
+                });
+                if path.is_none() {
+                    tracing::warn!(
+                        "Server downloaded model '{model_name}' at revision '{revision}' but its local path is unknown. Falling back to direct download."
+                    );
+                }
+                path
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Server download failed for model '{model_name}' at revision '{revision}': {e}. Falling back to direct download."
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
+            None
+        }
+    };
+    if let Some(path) = server_path {
+        return Ok(path);
+    }
+
+    let download = mx::download_model_revision(
+        &model_name,
+        provider,
+        Some(cache_dir),
+        ignore_weights,
+        Some(revision),
+    )
+    .await
+    .inspect_err(|e| {
+        tracing::warn!(
+            "ModelExpress download failed for model '{model_name}' at revision '{revision}': {e}"
+        )
+    })?;
+    tracing::info!(
+        "ModelExpress download completed for model '{model_name}' at revision '{revision}' ({})",
+        download
+            .resolved_revision
+            .as_deref()
+            .unwrap_or("unresolved")
+    );
+    Ok(download.path)
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
@@ -576,5 +737,197 @@ mod tests {
             )
             .await;
         }
+    }
+
+    const MAIN_COMMIT: &str = "1111111111111111111111111111111111111111";
+    const PINNED_COMMIT: &str = "2222222222222222222222222222222222222222";
+
+    /// Add a snapshot of `model_name` at `commit` to an hf-hub cache, with `refs` pointing at
+    /// it, and return the snapshot directory.
+    fn build_hf_snapshot(
+        cache_root: &Path,
+        model_name: &str,
+        commit: &str,
+        refs: &[&str],
+        files: &[&str],
+    ) -> PathBuf {
+        let repo_dir = cache_root.join(format!("models--{}", model_name.replace('/', "--")));
+        let snapshot_dir = repo_dir.join("snapshots").join(commit);
+        fs::create_dir_all(&snapshot_dir).unwrap();
+        for reference in refs {
+            let ref_path = repo_dir.join("refs").join(reference);
+            fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+            fs::write(ref_path, commit).unwrap();
+        }
+        for f in files {
+            fs::write(snapshot_dir.join(f), "{}").unwrap();
+        }
+        snapshot_dir
+    }
+
+    const FULL_MODEL: &[&str] = &["config.json", "tokenizer.json", "model.safetensors"];
+
+    #[test]
+    fn cached_revision_reads_the_commit_snapshot_without_a_ref() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned";
+        let main = build_hf_snapshot(temp.path(), model, MAIN_COMMIT, &["main"], FULL_MODEL);
+        let pinned = build_hf_snapshot(temp.path(), model, PINNED_COMMIT, &[], FULL_MODEL);
+
+        let lookup =
+            |revision| get_cached_model_path_at_revision_in(model, revision, false, temp.path());
+        assert_eq!(lookup(PINNED_COMMIT).as_deref(), Some(pinned.as_path()));
+        assert_eq!(lookup(MAIN_COMMIT).as_deref(), Some(main.as_path()));
+        assert_eq!(lookup("main").as_deref(), Some(main.as_path()));
+    }
+
+    #[test]
+    fn cached_revision_follows_a_branch_or_tag_ref() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned";
+        build_hf_snapshot(temp.path(), model, MAIN_COMMIT, &["main"], FULL_MODEL);
+        let pinned = build_hf_snapshot(
+            temp.path(),
+            model,
+            PINNED_COMMIT,
+            &["release/v1"],
+            FULL_MODEL,
+        );
+
+        assert_eq!(
+            get_cached_model_path_at_revision_in(model, "release/v1", false, temp.path())
+                .as_deref(),
+            Some(pinned.as_path())
+        );
+    }
+
+    #[test]
+    fn cached_revision_never_falls_back_to_the_default_branch() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned";
+        build_hf_snapshot(temp.path(), model, MAIN_COMMIT, &["main"], FULL_MODEL);
+
+        for revision in [PINNED_COMMIT, "release/v1"] {
+            assert!(
+                get_cached_model_path_at_revision_in(model, revision, true, temp.path()).is_none(),
+                "{revision} is not cached, so the lookup must miss rather than return main"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_revision_still_requires_the_files_to_serve() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned";
+        build_hf_snapshot(
+            temp.path(),
+            model,
+            PINNED_COMMIT,
+            &[],
+            &["config.json", "tokenizer.json"],
+        );
+
+        assert!(
+            get_cached_model_path_at_revision_in(model, PINNED_COMMIT, false, temp.path())
+                .is_none()
+        );
+        assert!(
+            get_cached_model_path_at_revision_in(model, PINNED_COMMIT, true, temp.path()).is_some()
+        );
+    }
+
+    #[test]
+    fn snapshot_commit_reads_only_a_snapshot_directory_named_by_a_commit() {
+        let snapshots = Path::new("/cache/models--org--name/snapshots");
+        assert_eq!(
+            snapshot_commit(&snapshots.join(PINNED_COMMIT)).as_deref(),
+            Some(PINNED_COMMIT)
+        );
+        assert_eq!(snapshot_commit(&snapshots.join("main")), None);
+        let hex_commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            snapshot_commit(&snapshots.join(hex_commit)).as_deref(),
+            Some(hex_commit)
+        );
+        assert_eq!(
+            snapshot_commit(&snapshots.join(hex_commit.to_uppercase())),
+            None
+        );
+        assert_eq!(
+            snapshot_commit(&Path::new("/models/org--name").join(PINNED_COMMIT)),
+            None
+        );
+        assert_eq!(snapshot_commit(Path::new("/models/Qwen3-0.6B")), None);
+    }
+
+    #[test]
+    fn a_revision_must_be_a_hugging_face_ref_inside_the_cache() {
+        for revision in ["main", "release/v1", "refs/pr/1", PINNED_COMMIT] {
+            assert!(
+                check_revision_request("org/name", revision).is_ok(),
+                "{revision}"
+            );
+        }
+        for revision in ["", "../escape", "refs/../../escape", "/abs", "./main"] {
+            let err = check_revision_request("org/name", revision).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid Hugging Face revision"),
+                "{revision}: {err}"
+            );
+        }
+        let err = check_revision_request(NGC_TEST_MODEL, "v1").unwrap_err();
+        assert!(err.to_string().contains("only to Hugging Face"), "{err}");
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn from_hf_at_revision_accepts_a_commit_in_upper_case() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned-upper-case";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let pinned = build_hf_snapshot(temp.path(), model, commit, &[], FULL_MODEL);
+
+        temp_env::async_with_vars(
+            [
+                (env_model::huggingface::HF_HUB_CACHE, temp.path().to_str()),
+                (env_model::huggingface::HF_HUB_OFFLINE, Some("1")),
+                (env_model::huggingface::HF_HOME, None),
+                (env_model::model_express::MODEL_EXPRESS_CACHE_PATH, None),
+                (
+                    env_model::model_express::MODEL_EXPRESS_URL,
+                    Some("http://127.0.0.1:9"),
+                ),
+            ],
+            async {
+                let path = from_hf_at_revision(model, Some(&commit.to_uppercase()), false).await;
+                assert_eq!(path.ok().as_deref(), Some(pinned.as_path()));
+            },
+        )
+        .await;
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn from_hf_at_revision_serves_the_cached_commit_not_main() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned-cache-first";
+        let main = build_hf_snapshot(temp.path(), model, MAIN_COMMIT, &["main"], FULL_MODEL);
+        let pinned = build_hf_snapshot(temp.path(), model, PINNED_COMMIT, &[], FULL_MODEL);
+
+        temp_env::async_with_vars(
+            [
+                (env_model::huggingface::HF_HUB_CACHE, temp.path().to_str()),
+                (env_model::huggingface::HF_HUB_OFFLINE, None),
+                (env_model::huggingface::HF_HOME, None),
+                (env_model::model_express::MODEL_EXPRESS_CACHE_PATH, None),
+            ],
+            async {
+                let at_commit = from_hf_at_revision(model, Some(PINNED_COMMIT), false).await;
+                assert_eq!(at_commit.ok().as_deref(), Some(pinned.as_path()));
+                let default = from_hf_at_revision(model, None, false).await;
+                assert_eq!(default.ok().as_deref(), Some(main.as_path()));
+            },
+        )
+        .await;
     }
 }
