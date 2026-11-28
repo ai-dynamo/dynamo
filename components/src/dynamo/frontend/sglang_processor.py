@@ -1003,9 +1003,12 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
-        # Media expansion is backend-owned on this path, so only text-only
-        # requests have an exact frontend-visible prompt length.
-        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
+        # Media expansion is backend-owned on this path, so multimodal prompts
+        # have no exact frontend-visible length. Their unexpanded token count is
+        # still a lower bound, because placeholders only grow when expanded, so
+        # validating it rejects only overflows that are certain. Omitted
+        # max_tokens is never filled here.
+        if self.token_budget is not None:
             stop_conditions = dynamo_preproc.get("stop_conditions") or {}
             _validate_requested_token_budget(
                 len(tokens), stop_conditions.get("max_tokens"), self.token_budget

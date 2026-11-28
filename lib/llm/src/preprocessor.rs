@@ -2370,8 +2370,15 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Validate a preprocessed request when its frontend-visible prompt length
-    /// is exact, returning that length for other context-budget decisions.
+    /// Validate a preprocessed request against the engine-published token
+    /// budget, returning the exact prompt length (when the frontend can prove
+    /// it) for other context-budget decisions.
+    ///
+    /// When the length is not exact (media whose expansion the frontend cannot
+    /// compute), `token_ids` is still a lower bound: engines expand each media
+    /// placeholder in place and leave the text tokens unchanged. A request
+    /// already over budget at that length is over budget after expansion too,
+    /// so it is rejected here instead of after the stream is committed.
     fn validate_preprocessed_token_budget(
         request: &PreprocessedRequest,
         token_budget: Option<&TokenBudget>,
@@ -2380,21 +2387,20 @@ impl OpenAIPreprocessor {
             return Ok(None);
         }
 
+        let token_ids_len = request.token_ids.len();
         let exact_prompt_len = Self::exact_prompt_len(
             request
                 .mm_routing_info
                 .as_ref()
                 .map(|mm| mm.expanded_prompt_len),
             request.multi_modal_data.as_ref(),
-            request.token_ids.len(),
+            token_ids_len,
         );
-        if let Some(prompt_len) = exact_prompt_len {
-            Self::validate_requested_token_budget(
-                prompt_len,
-                request.stop_conditions.max_tokens,
-                token_budget,
-            )?;
-        }
+        Self::validate_requested_token_budget(
+            exact_prompt_len.unwrap_or(token_ids_len),
+            request.stop_conditions.max_tokens,
+            token_budget,
+        )?;
 
         Ok(exact_prompt_len)
     }
@@ -3822,7 +3828,9 @@ impl OpenAIPreprocessor {
         // effective prompt length/tokenization.
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
-        // the MM-expanded length when available, else defer to the backend.
+        // the MM-expanded length when available. Otherwise they are only a
+        // lower bound: certain overflows are still rejected, but the omitted
+        // cap is left to the backend.
         let exact_prompt_len =
             Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
         if preprocessed.stop_conditions.max_tokens.is_none()
@@ -16912,6 +16920,53 @@ mod tests {
             )
             .unwrap(),
             Some(3)
+        );
+
+        // Media without an exact expanded length still validates against the
+        // placeholder token count, which is a lower bound on the prompt.
+        let images = MultimodalDataMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/image.png").unwrap(),
+            )],
+        )]);
+        let mut image_request = text_request.clone();
+        image_request.multi_modal_data = Some(images.clone());
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&image_request, Some(&reject))
+                .is_err()
+        );
+        let mut full_image_prompt = preprocessed_budget_request(None);
+        full_image_prompt.token_ids = std::sync::Arc::new((0..10).collect());
+        full_image_prompt.multi_modal_data = Some(images.clone());
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &full_image_prompt,
+                Some(&reject),
+            )
+            .is_err()
+        );
+        // The lower bound only rejects requests that are certainly too long:
+        // a request that fits at placeholder length is left to the backend,
+        // and the length is still reported as inexact.
+        let mut fitting_image_request = preprocessed_budget_request(Some(7));
+        fitting_image_request.multi_modal_data = Some(images);
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &fitting_image_request,
+                Some(&reject),
+            )
+            .unwrap(),
+            None
+        );
+        // Delegated rejection dimensions stay delegated for inexact lengths.
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &image_request,
+                Some(&defer_total),
+            )
+            .unwrap(),
+            None
         );
 
         // Prompt embeddings do not expose their sequence length as token_ids.
