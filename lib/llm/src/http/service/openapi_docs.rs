@@ -503,6 +503,16 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
 
     // Add responses
     operation = operation.response("200", success_response(route));
+    if route.method() == axum::http::Method::POST
+        && route.openapi_kind() == Some(OpenApiRouteKind::Completions)
+    {
+        operation = operation.response(
+            "204",
+            ResponseBuilder::new()
+                .description("The pinned completion route is available. No generation is run.")
+                .build(),
+        );
+    }
 
     if route.method() == axum::http::Method::POST
         && matches!(
@@ -823,7 +833,10 @@ fn generate_description_for_path(path: &str) -> String {
         }
         "/v1/completions" => {
             "Creates a completion for a given prompt. Supports both streaming and non-streaming modes. \
-            Compatible with OpenAI's completions API."
+            Compatible with OpenAI's completions API. Dynamo also supports a `max_tokens: 0` \
+            readiness probe for a single non-streaming prompt pinned to an aggregated worker \
+            with `nvext.backend_instance_id`. It returns 204 without a response body when the \
+            route is available and 503 when it is unavailable."
                 .to_string()
         }
         "/v1/embeddings" => {
@@ -1043,6 +1056,19 @@ mod tests {
                 operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
                 format!("#/components/schemas/{request}")
             );
+            if routes[0].openapi_kind() == Some(OpenApiRouteKind::Completions) {
+                let probe_response = &operation["responses"]["204"];
+                assert!(probe_response["description"].is_string());
+                assert!(probe_response.get("content").is_none());
+                assert!(
+                    operation["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("max_tokens: 0")
+                );
+            } else {
+                assert!(operation["responses"].get("204").is_none());
+            }
             if let Some(stream) = stream {
                 assert_eq!(
                     operation["responses"]["200"]["content"]["text/event-stream"]["itemSchema"]["anyOf"]

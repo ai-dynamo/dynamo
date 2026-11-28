@@ -2499,6 +2499,18 @@ async fn kv_reaches_a_held_worker_only_through_a_caller_pin() {
         .override_discovered_instances_with_held(vec![READY, HELD], vec![HELD]);
     let budget = CleanupBudget::default();
 
+    // A zero-token HTTP probe takes the same query-only path for this exact worker.
+    let mut probe = request();
+    probe.routing = Some(
+        serde_json::from_value(serde_json::json!({
+            "backend_instance_id": HELD,
+        }))
+        .unwrap(),
+    );
+    let probe = Context::new(probe);
+    router.check_completion_route(&probe, HELD).await.unwrap();
+    assert!(router.check_completion_route(&probe, READY).await.is_err());
+
     for (field, phase) in [
         ("backend_instance_id", RequestPhase::Aggregated),
         ("decode_worker_id", RequestPhase::Decode),
@@ -6093,6 +6105,57 @@ async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost) {
         .await
         .unwrap();
     (runtime, host)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_completion_probe_checks_affinity_without_binding() {
+    const READY: u64 = 7;
+    const HELD: u64 = 8;
+    let (runtime, host) = affinity_mode_host("completion-probe-affinity").await;
+    host.inner
+        .client
+        .override_discovered_instances_with_held(vec![READY, HELD], vec![HELD]);
+
+    let session = SessionAffinityId::new("probe-session");
+    let probe = |worker_id| {
+        let mut content = request();
+        content.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "backend_instance_id": worker_id,
+            }))
+            .unwrap(),
+        );
+        let mut probe = Context::new(content);
+        probe.insert(SESSION_AFFINITY_CONTEXT_KEY, session.clone());
+        probe
+    };
+
+    let affinity = host.affinity.as_ref().unwrap();
+    host.check_completion_route(&probe(HELD), HELD)
+        .await
+        .unwrap();
+    assert!(affinity.query_target(&session, None).unwrap().is_none());
+
+    let target = AffinityTarget::new(READY, None);
+    let slot = affinity.acquire(&session, None).await.unwrap();
+    let lease = affinity.commit(slot, target).unwrap();
+    host.check_completion_route(&probe(READY), READY)
+        .await
+        .unwrap();
+    let error = host
+        .check_completion_route(&probe(HELD), HELD)
+        .await
+        .unwrap_err();
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert_eq!(affinity.query_target(&session, None).unwrap(), Some(target));
+    drop(lease);
+
+    runtime.shutdown();
 }
 
 #[tokio::test]

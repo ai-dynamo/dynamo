@@ -49,10 +49,50 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct PreprocessedRouting {
-    backend_engine:
-        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    routing_host: Arc<RoutingHost>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompletionRouteProbe {
+    preprocessor: Arc<OpenAIPreprocessor>,
+    routing_host: Arc<RoutingHost>,
+}
+
+impl CompletionRouteProbe {
+    pub(crate) fn new(
+        preprocessor: Arc<OpenAIPreprocessor>,
+        routing_host: Arc<RoutingHost>,
+    ) -> Self {
+        Self {
+            preprocessor,
+            routing_host,
+        }
+    }
+
+    pub(crate) async fn check(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+        worker_id: u64,
+    ) -> anyhow::Result<bool> {
+        let (preprocessed, _) = self
+            .preprocessor
+            .preprocess_completion_request(request.content(), None, None)
+            .await?;
+        let request = request.map(|_| preprocessed);
+        match self
+            .routing_host
+            .check_completion_route(&request, worker_id)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                tracing::debug!(worker_id, %error, "Completion route is not ready");
+                Ok(false)
+            }
+        }
+    }
 }
 
 pub struct PreparedEngine {
@@ -247,9 +287,8 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             .set_decode_routing_host(routing_host.clone())
             .context("install conditional-disagg decode RoutingHost")?;
     }
-    let backend_engine: ServiceEngine<_, _> = routing_host;
     Ok(PreprocessedRouting {
-        backend_engine,
+        routing_host,
         prefill_router,
         encoder_router,
     })
@@ -442,6 +481,13 @@ where
 }
 
 impl PreprocessedRouting {
+    pub(crate) fn completion_route_probe(
+        &self,
+        preprocessor: Arc<OpenAIPreprocessor>,
+    ) -> CompletionRouteProbe {
+        CompletionRouteProbe::new(preprocessor, self.routing_host.clone())
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
@@ -469,7 +515,7 @@ impl PreprocessedRouting {
             .into_operator_for::<BackendOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
-        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+        let backend = ServiceBackend::from_engine(self.routing_host.clone());
 
         let engine = frontend
             .link(preprocessor_op.forward_edge())?
@@ -507,7 +553,7 @@ impl PreprocessedRouting {
             .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
-        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+        let backend = ServiceBackend::from_engine(self.routing_host.clone());
 
         let engine = frontend
             .link(migration.forward_edge())?
