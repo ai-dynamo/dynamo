@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM monkey-patches applied at GMSWorker import.
+"""vLLM monkey-patches applied when a GMSWorker starts.
 
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+from types import ModuleType
 
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
@@ -88,8 +89,13 @@ def patch_memory_snapshot() -> None:
 # =============================================================================
 
 
-def patch_request_memory() -> None:
-    """Bypass free >= requested check (shadow shares GPU with active engine)."""
+def patch_request_memory(worker_module: ModuleType) -> None:
+    """Bypass free >= requested check (shadow shares GPU with active engine).
+
+    vLLM's worker modules bind ``request_memory`` when they are imported, so
+    the name is also replaced in ``worker_module``, which is already imported
+    by the time a worker starts.
+    """
     global _request_memory_patched
 
     if _request_memory_patched:
@@ -124,6 +130,7 @@ def patch_request_memory() -> None:
         return requested_memory
 
     worker_utils.request_memory = patched_request_memory
+    worker_module.request_memory = patched_request_memory
     _request_memory_patched = True
     logger.info("[GMS Patch] Patched request_memory for shadow mode")
 
@@ -200,7 +207,7 @@ def patch_register_kv_caches() -> None:
 # =============================================================================
 
 
-def apply_scratch_kv_patches() -> None:
+def apply_scratch_kv_patches(worker_module: ModuleType) -> None:
     """Apply scratch-KV monkey-patches. No-ops when scratch KV is disabled."""
     if not is_scratch_kv_enabled():
         return
@@ -209,5 +216,5 @@ def apply_scratch_kv_patches() -> None:
     # vLLM entry points. A broken installed NIXL module must fail startup rather
     # than leave a partially applied scratch configuration.
     patch_register_kv_caches()
-    patch_request_memory()
+    patch_request_memory(worker_module)
     logger.info("[GMS Patch] applied")

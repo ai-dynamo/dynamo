@@ -46,6 +46,8 @@ from gpu_memory_service.integrations.vllm.model_loader import (
     get_imported_weights_bytes,
     get_mx_load_context,
     has_pending_gms_write,
+    import_modelexpress,
+    mx_enabled,
     publish_pending_gms_write,
     register_gms_loader,
 )
@@ -57,21 +59,9 @@ from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logg
 
 logger = logging.getLogger(__name__)
 
-# Make gpu_memory_service INFO/DEBUG visible in the vLLM worker subprocess, where
-# vLLM's logging config would otherwise drop them.
-configure_gms_worker_logging()
-
-# Trigger model loader registration and utility patches on import
+# Only binds the "gms" load format name; reads no settings and changes nothing
+# for engines that do not select it.
 register_gms_loader()
-
-# Apply core utility patches (always needed for GMS)
-patch_empty_cache()
-patch_memory_snapshot()
-
-# Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
-apply_scratch_kv_patches()
-
-logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # Per-engine memory outside PyTorch's allocator: collectives and workspaces.
 # A fixed estimate, since device-wide free memory also moves with the shadow peer.
@@ -87,23 +77,6 @@ def kv_reuse_enabled() -> bool:
     dies, so sleep no longer returns KV memory to the device for this tag.
     """
     return os.getenv("DYN_GMS_PERSIST_KV", "0") not in ("0", "", "false", "False")
-
-
-# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
-# Pause/resume serving lifecycle is implemented in modelexpress.lifecycle, which
-# composes publish/unpublish_metadata + register_tensors + MxClient/NIXL
-# teardown into a single pause/resume pair.
-if os.environ.get("MX_ENABLED", "0") == "1":
-    try:
-        from modelexpress import configure_vllm_logging
-        from modelexpress.lifecycle import pause_serving, resume_serving
-
-        configure_vllm_logging()
-    except ImportError as e:
-        raise ImportError(
-            "MX_ENABLED=1 but modelexpress is not installed. "
-            "Install with: pip install modelexpress"
-        ) from e
 
 
 # Import the correct base Worker class for the active platform.
@@ -155,6 +128,24 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
+def _prepare_worker_process() -> None:
+    """Configure GMS logging and patch vLLM for this engine's settings.
+
+    Runs when a worker starts, not when this module is imported: a process may
+    import the module before the engine's environment is final, and a forked
+    child inherits whatever was decided in its parent. Every step is idempotent.
+    """
+    configure_gms_worker_logging()
+    if mx_enabled():
+        import_modelexpress("modelexpress").configure_vllm_logging()
+        # First used when the engine sleeps and wakes; an install without
+        # them must fail here.
+        import_modelexpress("modelexpress.lifecycle", "pause_serving", "resume_serving")
+    patch_empty_cache()
+    patch_memory_snapshot()
+    apply_scratch_kv_patches(sys.modules[_BaseWorker.__module__])
+
+
 class GMSWorker(_BaseWorker):
     """vLLM Worker subclass with GMS integration."""
 
@@ -165,6 +156,8 @@ class GMSWorker(_BaseWorker):
         so that MemorySnapshot.measure can query committed bytes.
         """
         from vllm.platforms import current_platform
+
+        _prepare_worker_process()
 
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().
@@ -399,7 +392,7 @@ class GMSWorker(_BaseWorker):
         # Pause MX serving before GMS unmap
         mx_ctx = get_mx_load_context()
         if mx_ctx is not None:
-            pause_serving(mx_ctx)
+            import_modelexpress("modelexpress.lifecycle").pause_serving(mx_ctx)
 
         for tag in ("weights", "kv_cache"):
             manager = get_gms_client_memory_manager(tag)
@@ -457,7 +450,9 @@ class GMSWorker(_BaseWorker):
             # Resume MX serving after GMS remap
             mx_ctx = get_mx_load_context()
             if mx_ctx is not None:
-                resume_serving(mx_ctx, self.model_runner.model)
+                import_modelexpress("modelexpress.lifecycle").resume_serving(
+                    mx_ctx, self.model_runner.model
+                )
 
         if "kv_cache" in tags:
             kv_cache_manager = get_gms_client_memory_manager("kv_cache")
