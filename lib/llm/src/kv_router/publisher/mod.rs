@@ -8,13 +8,11 @@ use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, KvCacheStoreData};
 #[cfg(test)]
-use dynamo_kv_events::event::{
-    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
-};
+use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoredBlockData, RouterEvent};
 use dynamo_kv_events::placement::{Placement, PlacementEvent};
-use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_events::residency::{KvCacheGroupKind, KvCacheGroupTag, StorageTier};
 #[cfg(test)]
 use dynamo_kv_events::residency::{ResetScope, ResidencyDomain};
 pub use dynamo_kv_events::zmq_wire::create_stored_blocks;
@@ -109,6 +107,8 @@ pub enum KvEventSourceConfig {
         /// stores on any tier. Otherwise stores are refcounted, because vLLM
         /// emits a remove per store.
         idempotent_stores: bool,
+        recurrent_groups: Option<Vec<u32>>,
+        recurrent_alignment_blocks: u32,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -174,6 +174,8 @@ impl KvEventSource {
                 liveness,
                 engine_owned_mm_identity,
                 idempotent_stores: _,
+                recurrent_groups,
+                recurrent_alignment_blocks,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -198,6 +200,8 @@ impl KvEventSource {
                             expected_rank,
                             liveness,
                             engine_owned_mm_identity,
+                            recurrent_groups,
+                            recurrent_alignment_blocks,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
@@ -432,6 +436,55 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
+        let recurrent_alignment_blocks = source_config
+            .as_ref()
+            .map(|config| match config {
+                KvEventSourceConfig::Zmq {
+                    recurrent_alignment_blocks,
+                    ..
+                } => *recurrent_alignment_blocks,
+            })
+            .unwrap_or(1);
+        // The source's normalizer joins the engine's recurrent groups; here it
+        // only matters whether the source publishes checkpoints at all.
+        let recurrent_events_enabled = matches!(
+            &source_config,
+            Some(KvEventSourceConfig::Zmq {
+                recurrent_groups: Some(_),
+                ..
+            })
+        );
+        if recurrent_events_enabled {
+            anyhow::ensure!(
+                enable_local_indexer,
+                "Recurrent KV events require the local recovery indexer"
+            );
+            // Announce the worker as hybrid before it holds any checkpoint: a
+            // tagged store that names none. Until then a router would credit
+            // its attention blocks as if no checkpoint were needed.
+            let mut announce = PlacementEvent::new(
+                Placement::local_gpu(worker_id, dp_rank),
+                KvCacheEvent {
+                    event_id: next_event_id.fetch_add(1, Ordering::SeqCst),
+                    dp_rank,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: None,
+                        blocks: Vec::new(),
+                    }),
+                },
+            );
+            announce.placement.kv_cache_group = Some(KvCacheGroupTag {
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
+                alignment_blocks: Some(recurrent_alignment_blocks),
+            });
+            tx.send(PublisherInput::Events(vec![announce]))
+                .map_err(|_| anyhow::anyhow!("publisher startup channel closed"))?;
+            // Flush the announcement even when event batching has a nonzero timeout.
+            let (reply, _receipt) = oneshot::channel();
+            tx.send(PublisherInput::Barrier(reply))
+                .map_err(|_| anyhow::anyhow!("publisher startup channel closed"))?;
+        }
         let worker_dedup_policy = if matches!(
             source_config,
             Some(KvEventSourceConfig::Zmq {
@@ -469,6 +522,13 @@ impl KvEventPublisher {
         };
 
         let cancellation_token_clone = cancellation_token.clone();
+        if let (Some(indexer), true) = (&local_indexer, recurrent_events_enabled) {
+            indexer.declare_recurrent_layout(
+                WorkerWithDpRank::new(worker_id, dp_rank),
+                true,
+                recurrent_alignment_blocks,
+            );
+        }
         let local_indexer_clone = local_indexer.clone();
 
         tracing::info!("Using event plane for KV event publishing");
@@ -503,13 +563,11 @@ impl KvEventPublisher {
                 {
                     Ok(endpoint) => Some(endpoint),
                     Err(error) => {
-                        tracing::error!(
-                            %error,
-                            worker_id,
-                            dp_rank,
-                            publisher_id,
-                            "KV recovery endpoint failed; advertising a live-only KV source"
-                        );
+                        if recurrent_events_enabled {
+                            tracing::error!(%error, worker_id, dp_rank, publisher_id, "Recurrent KV events require a recovery endpoint; source startup failed");
+                            return;
+                        }
+                        tracing::error!(%error, worker_id, dp_rank, publisher_id, "KV recovery endpoint failed; advertising a live-only KV source");
                         None
                     }
                 }

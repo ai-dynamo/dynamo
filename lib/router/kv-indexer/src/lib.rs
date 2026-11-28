@@ -63,6 +63,7 @@ mod config;
 pub mod cuckoo;
 pub mod host;
 mod identity;
+mod kv_cache_groups;
 mod kv_hints;
 mod kv_indexer;
 mod local;
@@ -148,6 +149,7 @@ pub use identity::{
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
     MAX_EXPLICIT_IDENTITY_VALUE_BYTES,
 };
+pub use kv_cache_groups::{CheckpointLayout, CheckpointReadView, KvCacheGroupResidency};
 pub use kv_hints::{
     CacheOwnerKvTransferKeys, KvTransferCandidateSource, KvTransferCandidates,
     KvTransferSourceInterval, label_key, topology_keys,

@@ -360,6 +360,9 @@ struct ActorSnapshot {
     physical_state: FinalPhysicalState,
 }
 
+// Events are nearly all of the channel traffic; boxing adds an allocation
+// and a free per event to the measured path.
+#[allow(clippy::large_enum_variant)]
 enum ActorCommand {
     Event(RouterEvent),
     Barrier(std::sync::mpsc::Sender<ActorSnapshot>),

@@ -66,6 +66,9 @@ struct QueryCorpus {
     specs: Box<[QuerySpec]>,
 }
 
+// Events dominate the corpus. Boxing them would cost the issuer threads an
+// extra free per issued event, which distorts the replay timing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum MooncakeOperationPayload {
     Query,
@@ -126,6 +129,8 @@ impl PreparedMooncakeCorpus {
     }
 }
 
+// Unboxed for the same reason as `MooncakeOperationPayload`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum DispatchPayload {
     Query { lane: usize },

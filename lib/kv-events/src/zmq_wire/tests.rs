@@ -10,7 +10,7 @@ use serde_bytes::ByteBuf;
 
 use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
-use crate::residency::StorageTier;
+use crate::residency::{KvCacheGroupKind, KvCacheGroupTag, StorageTier};
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
@@ -37,6 +37,7 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
     let expected =
         compute_block_hash_for_seq(&[1, a, a, a, a, 9, b, b], 4, BlockHashOptions::default());
     let placement = ZmqEventNormalizer::new(4)
+        .with_recurrent_groups(Some(vec![0, 1, 2]))
         .normalize(raw, 1, WorkerWithDpRank::new(7, 0))
         .unwrap();
     let KvCacheEventData::Stored(stored) = placement.event.data else {
@@ -808,7 +809,7 @@ fn test_deserialize_block_stored_sequence_preserves_block_mm_infos_and_metadata(
 
     let remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     assert!(normalizer.preprocess(event, worker).is_some());
@@ -876,7 +877,7 @@ fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
 }
 
 #[test]
-fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
+fn test_normalizer_keeps_map_serialized_mamba_kind() {
     #[derive(serde::Serialize)]
     struct MapBlockStoredEvent {
         #[serde(rename = "type")]
@@ -902,9 +903,320 @@ fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
         .expect("serialize raw event batch");
     let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
     let decoded = batch.events.pop().expect("batch should contain event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    // The engine has one recurrent group, so its store is a whole checkpoint.
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![1]));
 
     assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
+    let worker = WorkerWithDpRank::new(3, 0);
+    let kept = normalizer
+        .preprocess_with_reason(decoded, worker)
+        .expect("a complete recurrent checkpoint is kept");
+    let placement = normalizer
+        .normalize_preprocessed(kept, 7, worker)
+        .expect("converts")
+        .placement;
+    assert_eq!(
+        placement.kv_cache_group,
+        Some(KvCacheGroupTag {
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
+            alignment_blocks: Some(1),
+        })
+    );
+}
+
+fn recurrent_store(group_idx: u32, hashes: &[u64], medium: Option<&str>) -> RawKvEvent {
+    RawKvEvent::BlockStored {
+        block_hashes: hashes
+            .iter()
+            .map(|&hash| BlockHashValue::Unsigned(hash))
+            .collect(),
+        parent_block_hash: None,
+        token_ids: Vec::new(),
+        block_size: 2,
+        medium: medium.map(str::to_string),
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(group_idx),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    }
+}
+
+fn recurrent_removal(group_idx: u32, hashes: &[u64], medium: Option<&str>) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: hashes
+            .iter()
+            .map(|&hash| BlockHashValue::Unsigned(hash))
+            .collect(),
+        medium: medium.map(str::to_string),
+        group_idx: Some(group_idx),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    }
+}
+
+/// Hashes of the tagged event a recurrent group's event turns into, or the
+/// reason it was filtered.
+fn checkpoint_change(
+    normalizer: &mut ZmqEventNormalizer,
+    raw: RawKvEvent,
+    worker: WorkerWithDpRank,
+) -> Result<(bool, Vec<u64>, StorageTier), ZmqEventFilterReason> {
+    let raw = normalizer.preprocess_with_reason(raw, worker)?;
+    let event = normalizer
+        .normalize_preprocessed(raw, 1, worker)
+        .expect("converts");
+    assert_eq!(
+        event.placement.kv_cache_group,
+        Some(KvCacheGroupTag {
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
+            alignment_blocks: Some(1),
+        })
+    );
+    let tier = event.placement.tier;
+    Ok(match event.event.data {
+        KvCacheEventData::Stored(data) => (
+            true,
+            data.blocks.iter().map(|block| block.block_hash.0).collect(),
+            tier,
+        ),
+        KvCacheEventData::Removed(data) => (
+            false,
+            data.block_hashes.iter().map(|hash| hash.0).collect(),
+            tier,
+        ),
+        KvCacheEventData::Cleared => panic!("a group event is never a clear"),
+    })
+}
+
+/// The engine reports each recurrent group on its own. One event is published
+/// when the last group arrives and one when the first leaves; the others change
+/// no checkpoint and are filtered before they take an event id.
+#[test]
+fn recurrent_groups_are_joined_into_one_event_per_checkpoint() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
+    let unchanged = Err(ZmqEventFilterReason::CheckpointUnchanged);
+
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(0, &[11], None), worker),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(2, &[11], None), worker),
+        unchanged
+    );
+    // A repeated store of a group that is already resident completes nothing.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(2, &[11], None), worker),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(1, &[11], None), worker),
+        Ok((true, vec![11], StorageTier::Device))
+    );
+    // Complete already: nothing to publish again.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(0, &[11], None), worker),
+        unchanged
+    );
+
+    // The first group to leave ends the checkpoint; the rest change nothing.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_removal(1, &[11], None), worker),
+        Ok((false, vec![11], StorageTier::Device))
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_removal(0, &[11], None), worker),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_removal(1, &[11], None), worker),
+        unchanged
+    );
+    // Groups 0 and 1 come back; group 2 never left.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(0, &[11], None), worker),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(1, &[11], None), worker),
+        Ok((true, vec![11], StorageTier::Device))
+    );
+}
+
+/// One event of a group can name several hashes: only those whose checkpoint
+/// changes are published, and the rest of the event is not lost.
+#[test]
+fn recurrent_join_keeps_only_the_hashes_whose_checkpoint_changed() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![4, 9]));
+
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_store(4, &[11, 12, 13], None),
+            worker
+        ),
+        Err(ZmqEventFilterReason::CheckpointUnchanged)
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(9, &[12, 14], None), worker),
+        Ok((true, vec![12], StorageTier::Device))
+    );
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_store(9, &[11, 12, 13], None),
+            worker
+        ),
+        Ok((true, vec![11, 13], StorageTier::Device))
+    );
+    // 11 and 12 were complete, 14 never was, 99 is unknown.
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_removal(4, &[11, 12, 14, 99], None),
+            worker
+        ),
+        Ok((false, vec![11, 12], StorageTier::Device))
+    );
+    assert_eq!(normalizer.recurrent_presence.len(), 4);
+    for (group, hashes) in [(9, [11, 12, 13, 14]), (4, [11, 12, 13, 14])] {
+        let _ = checkpoint_change(
+            &mut normalizer,
+            recurrent_removal(group, &hashes, None),
+            worker,
+        );
+    }
+    assert!(
+        normalizer.recurrent_presence.is_empty(),
+        "a hash no group holds is forgotten"
+    );
+}
+
+/// A checkpoint is complete in a tier only when every group is resident in
+/// that tier, and workers and ranks do not complete each other's checkpoints.
+#[test]
+fn recurrent_join_is_per_tier_and_per_worker() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let other_rank = WorkerWithDpRank::new(3, 1);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1]));
+    let unchanged = Err(ZmqEventFilterReason::CheckpointUnchanged);
+
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(0, &[11], None), worker),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_store(1, &[11], Some("CPU")),
+            worker
+        ),
+        unchanged,
+        "one group on the device and one in host memory is not a checkpoint"
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(1, &[11], None), other_rank),
+        unchanged
+    );
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_store(0, &[11], Some("CPU")),
+            worker
+        ),
+        Ok((true, vec![11], StorageTier::HostPinned))
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(1, &[11], None), worker),
+        Ok((true, vec![11], StorageTier::Device))
+    );
+    // Leaving the device does not end the host-memory checkpoint.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_removal(0, &[11], None), worker),
+        Ok((false, vec![11], StorageTier::Device))
+    );
+    assert_eq!(
+        checkpoint_change(
+            &mut normalizer,
+            recurrent_removal(0, &[11], Some("CPU")),
+            worker
+        ),
+        Ok((false, vec![11], StorageTier::HostPinned))
+    );
+}
+
+/// A clear is published untagged and drops the worker's checkpoints
+/// downstream, so the groups must start over here as well. Otherwise the next
+/// store of a group that "was already there" would publish nothing, for good.
+#[test]
+fn all_blocks_cleared_restarts_the_recurrent_join_for_that_worker() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let other = WorkerWithDpRank::new(4, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1]));
+    for target in [worker, other] {
+        for group in [0, 1] {
+            let _ = checkpoint_change(&mut normalizer, recurrent_store(group, &[11], None), target);
+        }
+    }
+    assert!(
+        normalizer
+            .preprocess(RawKvEvent::AllBlocksCleared { ownership: None }, worker)
+            .is_some()
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(1, &[11], None), worker),
+        Err(ZmqEventFilterReason::CheckpointUnchanged),
+        "group 0 is gone with the clear"
+    );
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_store(0, &[11], None), worker),
+        Ok((true, vec![11], StorageTier::Device))
+    );
+    // The other worker kept its checkpoint.
+    assert_eq!(
+        checkpoint_change(&mut normalizer, recurrent_removal(0, &[11], None), other),
+        Ok((false, vec![11], StorageTier::Device))
+    );
+}
+
+#[test]
+fn test_normalizer_drops_sliding_window_kind() {
+    #[derive(serde::Serialize)]
+    struct MapBlockStoredEvent {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<u64>,
+        parent_block_hash: Option<u64>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: Option<&'static str>,
+    }
+
+    let event = MapBlockStoredEvent {
+        event_type: "BlockStored",
+        block_hashes: vec![11],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some("sliding_window"),
+    };
+    let encoded = rmp_serde::to_vec_named(&(0.0, vec![event], Some(0_i32)))
+        .expect("serialize raw event batch");
+    let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
+    let decoded = batch.events.pop().expect("batch should contain event");
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     assert_eq!(
         normalizer
             .preprocess_with_reason(decoded, WorkerWithDpRank::new(3, 0))
@@ -925,7 +1237,7 @@ fn test_normalizer_metadata_is_dp_rank_scoped() {
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid same-rank remove event");
     let different_rank_remove: RawKvEvent = from_slice(&block_removed_sequence(Some(3), None))
         .expect("valid different-rank remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     assert!(
         normalizer
@@ -954,7 +1266,7 @@ fn test_normalizer_does_not_learn_metadata_from_remove_events() {
     .expect("valid metadata remove event");
     let bare_remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid bare remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     assert!(normalizer.preprocess(metadata_remove, worker).is_some());
@@ -964,7 +1276,7 @@ fn test_normalizer_does_not_learn_metadata_from_remove_events() {
 #[test]
 fn test_normalizer_propagates_cache_namespace_from_parent() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let parent = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
@@ -1027,7 +1339,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
 #[test]
 fn test_normalizer_shares_cache_namespace_across_blocks() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let event = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1), BlockHashValue::Unsigned(2)],
         parent_block_hash: None,
@@ -1060,7 +1372,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
 #[test]
 fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let stored =
         |cache_namespace: Option<&str>, block_hashes, parent_block_hash| RawKvEvent::BlockStored {
             block_hashes,
@@ -1101,7 +1413,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
 #[test]
 fn test_normalizer_treats_empty_namespace_as_absent() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let parent = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
@@ -1149,7 +1461,71 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
 }
 
 #[test]
-fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
+fn test_mamba_events_do_not_touch_attention_cache_namespaces() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![1]));
+    // Attention store in a namespace, then a Mamba store and removal at the
+    // same positional hash: the attention namespace state must be unchanged.
+    let attention = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(21)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some("tenant-a".to_string()),
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(0),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::FullAttention),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    };
+    assert!(normalizer.preprocess(attention, worker).is_some());
+    let before = normalizer.cache_namespaces.clone();
+
+    let mamba_store = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(21)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some(String::new()),
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    };
+    let kept = normalizer.preprocess(mamba_store, worker).expect("kept");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = &kept
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(
+        cache_namespace, &None,
+        "empty namespace is still normalised"
+    );
+    assert_eq!(normalizer.cache_namespaces, before);
+
+    assert!(
+        normalizer
+            .preprocess(recurrent_removal(1, &[21], None), worker)
+            .is_some()
+    );
+    assert_eq!(normalizer.cache_namespaces, before);
+}
+
+#[test]
+fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
     let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,
         Some(0),
@@ -1158,7 +1534,43 @@ fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
     .expect("valid raw event");
     let remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(0), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0]));
+    let worker = WorkerWithDpRank::new(3, 0);
+    let tag = Some(KvCacheGroupTag {
+        kind: KvCacheGroupKind::RecurrentCheckpoint,
+        alignment_blocks: Some(1),
+    });
+
+    let stored = normalizer.preprocess(raw_event, worker).expect("kept");
+    let stored = normalizer
+        .normalize_preprocessed(stored, 1, worker)
+        .expect("converts");
+    assert_eq!(stored.placement.kv_cache_group, tag);
+    assert_eq!(
+        stored.into_router_event().unwrap().kv_cache_group,
+        tag,
+        "the tag must survive into the RouterEvent"
+    );
+
+    // The removal carries only group_idx; the kind was learned from the store.
+    let removed = normalizer.preprocess(remove, worker).expect("kept");
+    let removed = normalizer
+        .normalize_preprocessed(removed, 2, worker)
+        .expect("converts");
+    assert_eq!(removed.placement.kv_cache_group, tag);
+}
+
+#[test]
+fn test_normalizer_ignores_sliding_window_group_with_group_idx_zero() {
+    let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockStored,
+        Some(0),
+        "sliding_window",
+    ))
+    .expect("valid raw event");
+    let remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(0), None)).expect("valid remove event");
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(3, 0);
 
     assert!(normalizer.preprocess(raw_event, worker).is_none());
@@ -1366,7 +1778,7 @@ fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) 
 /// where it would trigger the block-size-mismatch warning.
 #[test]
 fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
@@ -1389,7 +1801,7 @@ fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
 /// reaches conversion and the existing warning fires.
 #[test]
 fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let undersized = gpu_block_stored(&[2], &[14, 15], 2);
@@ -1410,7 +1822,7 @@ fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
 /// filtered just because a different worker has published full blocks.
 #[test]
 fn partial_tail_filter_is_tracked_per_worker() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let proven = WorkerWithDpRank::new(7, 0);
     let unproven = WorkerWithDpRank::new(8, 0);
 
@@ -1430,17 +1842,22 @@ fn partial_tail_filter_is_tracked_per_worker() {
 /// main-attention block still has to reach conversion and warn.
 #[test]
 fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
+    // A sliding-window group is still filtered at ingress (recurrent groups
+    // are kept and tagged since the presence table), so it must not prove
+    // the worker's block size.
     let mut full_non_main = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
     if let RawKvEvent::BlockStored {
         kv_cache_spec_kind,
+        kv_cache_spec_sliding_window,
         group_idx,
         ..
     } = &mut full_non_main
     {
-        *kv_cache_spec_kind = Some(KvCacheSpecKind::Mamba);
+        *kv_cache_spec_kind = Some(KvCacheSpecKind::SlidingWindow);
+        *kv_cache_spec_sliding_window = Some(16);
         *group_idx = Some(1);
     }
     assert_eq!(
@@ -1462,7 +1879,7 @@ fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
 /// that comes back with a different block size is not silently filtered.
 #[test]
 fn all_blocks_cleared_resets_partial_tail_filter_history() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
@@ -1677,7 +2094,8 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
     ];
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
         for (medium, locality) in rejected {
-            let mut normalizer = ZmqEventNormalizer::new(2);
+            let mut normalizer =
+                ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
             let raw = raw_placement_event(event_kind, medium, Some(locality));
             assert_eq!(
                 normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
@@ -1689,7 +2107,7 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
 
     // LOCAL / absent locality still pass preprocess (STORAGE takes the bypass).
     for locality in [Some(Locality::Local), None] {
-        let mut normalizer = ZmqEventNormalizer::new(2);
+        let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
         let raw = raw_placement_event(TestEventKind::BlockStored, Some("STORAGE"), locality);
         assert!(
             normalizer.preprocess_with_reason(raw, worker).is_ok(),
@@ -1710,7 +2128,8 @@ fn test_preprocess_rejects_unknown_medium() {
 
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
         for medium in ["FS", "OBJ", "XYZ"] {
-            let mut normalizer = ZmqEventNormalizer::new(2);
+            let mut normalizer =
+                ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
             let raw = raw_placement_event(event_kind, Some(medium), Some(Locality::Local));
             assert_eq!(
                 normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
@@ -1723,7 +2142,7 @@ fn test_preprocess_rejects_unknown_medium() {
     // Recognized media are never rejected as unknown: GPU/CPU stay on the
     // normalizer path and STORAGE takes the lower-tier bypass.
     for medium in ["GPU", "CPU", "STORAGE"] {
-        let mut normalizer = ZmqEventNormalizer::new(2);
+        let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
         let raw = raw_placement_event(
             TestEventKind::BlockStored,
             Some(medium),
@@ -1842,7 +2261,7 @@ fn namespaced_block_stored(
 #[test]
 fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
     assert!(normalizer.preprocess(salted_gpu, worker).is_some());
@@ -1894,7 +2313,7 @@ fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
 #[test]
 fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
     assert!(normalizer.preprocess(salted_gpu, worker).is_some());
@@ -1924,6 +2343,58 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// A removal names only its group. The declared group list classifies it as
+/// recurrent even before any store taught the group's kind, so it never
+/// reaches the attention index; with no checkpoint to end, it is filtered.
+#[test]
+fn declared_mamba_group_zero_removal_before_first_store_is_not_an_attention_removal() {
+    let remove: RawKvEvent = from_slice(&block_removed_sequence(Some(0), None)).unwrap();
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
+    assert_eq!(
+        normalizer.preprocess_with_reason(remove, worker).err(),
+        Some(ZmqEventFilterReason::CheckpointUnchanged)
+    );
+}
+
+#[test]
+fn default_mode_filters_recurrent_groups_on_every_medium() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    for medium in ["GPU", "STORAGE"] {
+        let mut normalizer = ZmqEventNormalizer::new(4);
+        for (payload, reason) in [
+            (
+                serde_json::json!({"type":"BlockStored", "block_hashes":[11], "token_ids":[], "block_size":4, "medium":medium, "group_idx":0, "kv_cache_spec_kind":"mamba"}),
+                ZmqEventFilterReason::NonMainAttentionKind,
+            ),
+            (
+                serde_json::json!({"type":"BlockRemoved", "block_hashes":[11], "medium":medium, "group_idx":0}),
+                ZmqEventFilterReason::NonMainAttentionGroup,
+            ),
+        ] {
+            let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap();
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                reason,
+                "{medium}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_checkpoint_keeps_its_allocated_event_id_as_a_noop() {
+    let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&serde_json::json!({"type":"BlockStored", "block_hashes":[11], "parent_block_hash":11, "token_ids":[], "block_size":4, "group_idx":0, "kv_cache_spec_kind":"mamba"})).unwrap()).unwrap();
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0]));
+    let event = normalizer
+        .normalize(raw, 77, WorkerWithDpRank::new(7, 0))
+        .unwrap();
+    assert_eq!(event.event.event_id, 77);
+    assert!(
+        matches!(&event.event.data, KvCacheEventData::Removed(data) if data.block_hashes.is_empty())
+    );
 }
 
 /// vLLM's CPU offload tier publishes a HostPinned placeholder with the same hash,

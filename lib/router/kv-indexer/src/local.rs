@@ -12,8 +12,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    GetWorkersRequest, KvEventSender, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
-    KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
+    GetWorkersRequest, KvCacheGroupResidency, KvEventSender, KvIndexer, KvIndexerInterface,
+    KvIndexerMetrics, KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
     record_unsupported_residency_event,
 };
 use crate::prelude::*;
@@ -268,6 +268,7 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Lazily-created exact lower-tier indexes partitioned by storage tier.
     lower_tier_indexers: LowerTierRegistry,
+    group_residency: Arc<KvCacheGroupResidency>,
     /// Recent-event buffer, cached recovery snapshot, and single-flight dump state.
     /// Never held across `.await`.
     recovery: Arc<parking_lot::Mutex<RecoveryState>>,
@@ -304,12 +305,27 @@ impl LocalKvIndexer {
             indexer,
             metrics,
             lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
+            group_residency: Arc::new(KvCacheGroupResidency::new()),
             recovery: Arc::new(parking_lot::Mutex::new(RecoveryState::new(max_buffer_size))),
             #[cfg(test)]
             dump_build_count: AtomicUsize::new(0),
             #[cfg(test)]
             dump_build_delay: Mutex::new(None),
         }
+    }
+
+    /// See [`KvCacheGroupResidency::declare_layout`].
+    pub fn declare_recurrent_layout(
+        &self,
+        worker: WorkerWithDpRank,
+        recurrent: bool,
+        alignment_blocks: u32,
+    ) {
+        self.group_residency.declare_layout(
+            ResidencyOwner::worker(worker),
+            recurrent,
+            alignment_blocks,
+        );
     }
 
     #[cfg(test)]
@@ -552,6 +568,7 @@ impl LocalKvIndexer {
         let last_event_id = build.base_event_id;
         let indexer = self.indexer.clone();
         let lower_tier_indexers = self.lower_tier_indexers.clone();
+        let group_residency = self.group_residency.clone();
         #[cfg(test)]
         let build_delay = *self.dump_build_delay.lock().unwrap();
         #[cfg(test)]
@@ -564,7 +581,7 @@ impl LocalKvIndexer {
                 tokio::time::sleep(delay).await;
             }
 
-            let dump = Self::dump_all_tiers(&indexer, &lower_tier_indexers).await;
+            let dump = Self::dump_all_tiers(&indexer, &lower_tier_indexers, &group_residency).await;
             build.finish(dump)
         });
         build_task.await.unwrap_or_else(|error| {
@@ -579,6 +596,7 @@ impl LocalKvIndexer {
     async fn dump_all_tiers(
         indexer: &KvIndexer,
         lower_tier_indexers: &LowerTierRegistry,
+        group_residency: &KvCacheGroupResidency,
     ) -> Result<Vec<RouterEvent>, KvRouterError> {
         let lower_tiers: Vec<_> = {
             let indexers = lower_tier_indexers.lock().unwrap();
@@ -606,6 +624,7 @@ impl LocalKvIndexer {
                 event
             }));
         }
+        events.extend(group_residency.dump_events());
         Ok(events)
     }
 
@@ -654,6 +673,10 @@ impl LocalKvIndexer {
     }
 
     async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
+        if self.group_residency.apply(event) {
+            return Ok(());
+        }
+        self.group_residency.clear_event(event);
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -729,6 +752,7 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
+        self.group_residency.remove_worker(worker);
         for indexer in self.all_lower_tier_indexers() {
             indexer.remove_worker(worker).await;
         }
@@ -736,6 +760,8 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
+        self.group_residency
+            .remove_worker_rank(WorkerWithDpRank::new(worker, dp_rank));
         for indexer in self.all_lower_tier_indexers() {
             KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker, dp_rank).await;
         }
@@ -747,7 +773,12 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        Self::dump_all_tiers(&self.indexer, &self.lower_tier_indexers).await
+        Self::dump_all_tiers(
+            &self.indexer,
+            &self.lower_tier_indexers,
+            &self.group_residency,
+        )
+        .await
     }
 
     async fn process_routing_decision_for_request(
@@ -791,6 +822,62 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
+
+    #[tokio::test]
+    async fn recurrent_dump_round_trip_preserves_checkpoints_and_owner_scoped_clear() {
+        use crate::KvCacheGroupResidency;
+        use crate::prelude::{KvCacheGroupKind, KvCacheGroupTag, ResidencyOwner};
+        let worker = WorkerWithDpRank::new(7, 0);
+        let other = WorkerWithDpRank::new(8, 0);
+        let local = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+        // A declared worker that holds no checkpoint must come back as hybrid.
+        local.declare_recurrent_layout(other, true, 1);
+        local.declare_recurrent_layout(worker, true, 1);
+        let mut event = lower_tier_store_event(7, 0, 1, 0, 0, 333, StorageTier::HostPinned)
+            .with_kv_cache_group(KvCacheGroupTag {
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
+                alignment_blocks: Some(1),
+            });
+        local.apply_event_with_buffer(event.clone()).await.unwrap();
+        event.residency_domain =
+            crate::prelude::WireResidencyDomain::KnownTagged(ResidencyDomain::CacheOwner);
+        event.state_source = Some(cache_owner_id());
+        event.event.event_id = 2;
+        local.apply_event_with_buffer(event).await.unwrap();
+        let restored = KvCacheGroupResidency::new();
+        for event in local.dump_events().await.unwrap() {
+            restored.apply(&event);
+        }
+        assert!(restored.is_hybrid(other));
+        let worker_owner = ResidencyOwner::worker(worker);
+        let cache_owner = ResidencyOwner::cache_owner(cache_owner_id());
+        let owners = |table: &KvCacheGroupResidency| {
+            let mut view = table.read_view();
+            view.track_owner(worker_owner);
+            view.track_owner(cache_owner);
+            view.owners_at(ExternalSequenceBlockHash(333), StorageTier::HostPinned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owners(&restored), vec![worker_owner, cache_owner]);
+        let clear = RouterEvent::with_cache_owner(
+            0,
+            KvCacheEvent {
+                event_id: 3,
+                dp_rank: 0,
+                data: KvCacheEventData::Cleared,
+            },
+            StorageTier::Device,
+            cache_owner_id(),
+        );
+        restored.clear_event(&clear);
+        assert_eq!(owners(&restored), vec![worker_owner]);
+        assert!(restored.is_hybrid(other));
+    }
 
     fn cache_owner_id() -> CacheOwnerId {
         CacheOwnerId::new(

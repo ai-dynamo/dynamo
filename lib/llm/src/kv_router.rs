@@ -362,6 +362,59 @@ async fn reconcile_approximate_lru_snapshot(
     Ok(())
 }
 
+fn reconcile_recurrent_layouts(indexer: &Indexer, workers: &HashMap<WorkerId, ModelRuntimeConfig>) {
+    for (&worker_id, config) in workers {
+        let Some(layout) = config.runtime_data.get("kv_cache_group_layout_v1") else {
+            continue;
+        };
+        let Some(groups) = layout
+            .get("recurrent_groups")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        let Some(groups) = groups
+            .iter()
+            .map(|group| group.as_u64().and_then(|value| u32::try_from(value).ok()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let Ok(ranks) = config.data_parallel_rank_range() else {
+            continue;
+        };
+        // The worker joins its recurrent groups and publishes one event per
+        // complete checkpoint, so the group list only says whether it has any.
+        for rank in ranks {
+            indexer.declare_recurrent_layout(
+                WorkerWithDpRank::new(worker_id, rank),
+                !groups.is_empty(),
+                layout
+                    .get("alignment_blocks")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(1),
+            );
+        }
+    }
+}
+
+fn start_recurrent_layout_reconciler(
+    indexer: Indexer,
+    mut workers: RuntimeConfigWatch,
+    cancellation: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            reconcile_recurrent_layouts(&indexer, &workers.borrow_and_update());
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = workers.changed() => if changed.is_err() { break; },
+            }
+        }
+    });
+}
+
 fn start_approximate_lru_reconciler(
     indexer: Indexer,
     mut workers: RuntimeConfigWatch,
@@ -934,6 +987,11 @@ impl KvRouter {
             let indexer = runtime_ingress.indexer().clone();
             (runtime_ingress.clone(), Some(runtime_ingress), indexer)
         };
+        start_recurrent_layout_reconciler(
+            indexer.clone(),
+            workers_with_configs.clone(),
+            cancellation_token.clone(),
+        );
         let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
         let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
         let effective_policy = if matches!(indexer, Indexer::None) {
