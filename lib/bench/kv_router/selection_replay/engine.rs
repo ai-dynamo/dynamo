@@ -38,12 +38,13 @@ use dynamo_scheduler::host::{
 };
 use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin, BusyThresholds,
-    SchedulerBookingDescriptor,
+    DecodeProgressUpdate, SchedulerBookingDescriptor,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
 
 use super::corpus::Corpus;
+use super::decode_progress::{ProgressMode, ProgressProbe};
 use super::host::BenchHost;
 use super::kv_cache::{CacheStats, KvCaches, PromptBlocks};
 
@@ -114,6 +115,7 @@ pub struct RunConfig {
     pub issuer_cpus: Vec<usize>,
     pub engine_issuers: usize,
     pub prep_threads: usize,
+    pub decode_progress: Option<ProgressMode>,
     pub perf_ctl_fifo: Option<PathBuf>,
     pub perf_ack_fifo: Option<PathBuf>,
 }
@@ -180,6 +182,21 @@ pub struct RunResult {
     /// window request's answer if later. Saturation: from the first window request
     /// issued to the last answered, booked or not.
     pub window_wall_ns: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_progress: Option<ProgressResult>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProgressResult {
+    pub mode: ProgressMode,
+    pub tokens_per_update: u32,
+    pub synthetic_output_cap: u32,
+    /// Successful update submissions during the entire replay, including warmup.
+    pub updates: u64,
+    pub reads: u64,
+    pub available_reads: u64,
+    /// Window bookings' request indices and chosen ranks, in corpus order.
+    pub placement_digest: String,
 }
 
 /// The run's event and cache counters: a reading, or what they gained between two.
@@ -191,14 +208,26 @@ pub struct Counters {
     /// it fell behind.
     pub index_events_applied: BTreeMap<String, u64>,
     pub cache: CacheStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_ns: Option<u64>,
+    /// Elapsed wall time in the CPU sample interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_wall_ns: Option<u64>,
 }
 
 impl Counters {
     fn read(shared: &Shared) -> Self {
+        let cpu_sample = if shared.progress.is_some() && matches!(shared.mode, Mode::Fixed { .. }) {
+            process_cpu_time_ns().map(|cpu| (cpu, shared.clock.now_ns()))
+        } else {
+            None
+        };
         Self {
             events_issued: shared.events_issued.load(Ordering::Relaxed),
             index_events_applied: shared.host.index_events_applied(),
             cache: shared.caches.stats(),
+            process_cpu_ns: cpu_sample.map(|(cpu, _)| cpu),
+            process_cpu_wall_ns: cpu_sample.map(|(_, wall)| wall),
         }
     }
 
@@ -209,8 +238,32 @@ impl Counters {
             *applied -= earlier.index_events_applied.get(outcome).unwrap_or(&0);
         }
         self.cache = self.cache.since(&earlier.cache);
+        self.process_cpu_ns = self
+            .process_cpu_ns
+            .zip(earlier.process_cpu_ns)
+            .map(|(end, start)| end.saturating_sub(start));
+        self.process_cpu_wall_ns = self
+            .process_cpu_wall_ns
+            .zip(earlier.process_cpu_wall_ns)
+            .map(|(end, start)| end.saturating_sub(start));
         self
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cpu_time_ns() -> Option<u64> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // On success clock_gettime initializes the entire timespec.
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let time = unsafe { time.assume_init() };
+    Some(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cpu_time_ns() -> Option<u64> {
+    None
 }
 
 const UNSET: u64 = u64::MAX;
@@ -274,6 +327,7 @@ struct Held {
 struct Shared {
     corpus: Arc<Corpus>,
     host: Arc<BenchHost>,
+    progress: Option<Arc<ProgressProbe>>,
     handle: tokio::runtime::Handle,
     clock: BenchmarkClock,
     mode: Mode,
@@ -367,13 +421,34 @@ pub fn run(corpus: &Arc<Corpus>, config: &RunConfig) -> Result<RunResult> {
         .worker_threads(config.runtime_threads)
         .enable_all()
         .build()?;
-    let host = runtime.block_on(BenchHost::start(
-        &config.router,
-        config.busy,
-        &corpus.params,
-    ))?;
+    let progress = config
+        .decode_progress
+        .map(|mode| Arc::new(ProgressProbe::new(mode, corpus)));
+    let host = match &progress {
+        Some(probe) => {
+            ensure!(
+                config
+                    .router
+                    .explicit_worker_selection_policy_types()?
+                    .is_empty()
+                    && !config.busy.is_configured(),
+                "the decode-progress probe requires default worker selection and no busy thresholds"
+            );
+            runtime.block_on(BenchHost::start_with_picker(
+                &config.router,
+                config.busy,
+                &corpus.params,
+                Some(probe.factory(corpus)),
+            ))?
+        }
+        None => runtime.block_on(BenchHost::start(
+            &config.router,
+            config.busy,
+            &corpus.params,
+        ))?,
+    };
     let host = Arc::new(host);
-    let result = replay(corpus, &host, runtime.handle(), config);
+    let result = replay(corpus, &host, runtime.handle(), config, progress);
     runtime.block_on(host.shutdown());
     result
 }
@@ -383,6 +458,7 @@ fn replay(
     host: &Arc<BenchHost>,
     handle: &tokio::runtime::Handle,
     config: &RunConfig,
+    progress: Option<Arc<ProgressProbe>>,
 ) -> Result<RunResult> {
     let params = &corpus.params;
     let engine_issuers = config.engine_issuers.max(1);
@@ -409,6 +485,7 @@ fn replay(
     let shared = Arc::new(Shared {
         corpus: Arc::clone(corpus),
         host: Arc::clone(host),
+        progress,
         handle: handle.clone(),
         start_ns: clock.now_ns() + 50_000_000,
         clock,
@@ -451,6 +528,7 @@ fn replay(
         .unzip();
 
     let mut engine_lags = Vec::new();
+    let mut progress_updates = 0;
     let mut request_lags = Vec::new();
     let mut harness_wait_ns = 0;
     let mut samples = Vec::new();
@@ -518,7 +596,9 @@ fn replay(
 
         (request_lags, harness_wait_ns) = requests.join().expect("request issuer panicked")?;
         for issuer in engines {
-            engine_lags.extend(issuer.join().expect("engine issuer panicked")?);
+            let (lags, updates) = issuer.join().expect("engine issuer panicked")?;
+            engine_lags.extend(lags);
+            progress_updates += updates;
         }
         let deadline = Instant::now() + DRAIN_TIMEOUT;
         while shared.outstanding.load(Ordering::Acquire) > 0
@@ -535,7 +615,7 @@ fn replay(
         Ok(())
     })?;
 
-    Ok(analyze(
+    let mut result = analyze(
         &shared,
         config,
         request_lags,
@@ -543,7 +623,30 @@ fn replay(
         harness_wait_ns,
         samples,
         window,
-    ))
+    );
+    if let Some(probe) = &shared.progress {
+        let mut placements = blake3::Hasher::new();
+        for (index, (request, slot)) in corpus.requests.iter().zip(&shared.slots).enumerate() {
+            if shared.in_window(request.arrival_us)
+                && let Some(booking) = slot.booking.get()
+            {
+                placements.update(&(index as u64).to_le_bytes());
+                placements.update(&booking.worker.worker_id.to_le_bytes());
+                placements.update(&booking.worker.dp_rank.to_le_bytes());
+            }
+        }
+        let (reads, available_reads) = probe.reads();
+        result.decode_progress = Some(ProgressResult {
+            mode: probe.mode,
+            tokens_per_update: corpus.params.block_size,
+            synthetic_output_cap: probe.output_limit,
+            updates: progress_updates,
+            reads,
+            available_reads,
+            placement_digest: placements.finalize().to_hex().to_string(),
+        });
+    }
+    Ok(result)
 }
 
 /// A request's prompt tokens and their block hashes, prepared off the router's CPUs.
@@ -709,7 +812,7 @@ fn issue_engine(
     issuer: usize,
     issuers: usize,
     admissions: Receiver<(usize, bool)>,
-) -> Vec<u64> {
+) -> (Vec<u64>, u64) {
     let block_size = u64::from(shared.corpus.params.block_size);
     let output_block_due = |index: usize, k: u32| {
         let request = &shared.corpus.requests[index];
@@ -727,6 +830,7 @@ fn issue_engine(
         issuers,
         admissions,
         requests: (0..requests.len()).map(|_| Lifecycle::default()).collect(),
+        progress_updates: 0,
     };
     let mut timeline = BinaryHeap::new();
     for index in requests {
@@ -749,7 +853,7 @@ fn issue_engine(
             break;
         }
         let Some(lag) = engine.wait_until(at) else {
-            return lags;
+            return (lags, engine.progress_updates);
         };
         if shared.in_window(at) {
             lags.extend(lag);
@@ -763,7 +867,7 @@ fn issue_engine(
     }
     shared.issuer_next_us[issuer].store(UNSET, Ordering::Release);
     engine.finish();
-    lags
+    (lags, engine.progress_updates)
 }
 
 /// One engine issuer's requests. Admission tasks only report bookings here, so all
@@ -776,6 +880,7 @@ struct Engine<'a> {
     admissions: Receiver<(usize, bool)>,
     /// By request / issuers.
     requests: Vec<Lifecycle>,
+    progress_updates: u64,
 }
 
 impl Engine<'_> {
@@ -805,12 +910,48 @@ impl Engine<'_> {
         match action {
             Action::FirstOutput => {
                 prefill_cache(shared, index);
-                let task_shared = Arc::clone(shared);
-                lifecycle.marks = Some(spawn_lifecycle_task(shared, async move {
-                    mark_prefill_complete(&task_shared, index).await;
-                }));
+                if shared.progress.is_some() {
+                    // The probe's issuer owns both the prefill mark and later output updates.
+                    if mark_prefill_complete(shared, index)
+                        .now_or_never()
+                        .is_none()
+                    {
+                        shared.fail(format!("prefill mark {index} did not finish immediately"));
+                    }
+                } else {
+                    let task_shared = Arc::clone(shared);
+                    lifecycle.marks = Some(spawn_lifecycle_task(shared, async move {
+                        mark_prefill_complete(&task_shared, index).await;
+                    }));
+                }
             }
-            Action::OutputBlock(k) => output_block(shared, index, k),
+            Action::OutputBlock(k) => {
+                output_block(shared, index, k);
+                if let Some(probe) = &shared.progress
+                    && probe.mode.collects()
+                {
+                    let booking = shared.slots[index].booking.get().expect("booked");
+                    let generated = (k as usize + 1) * shared.corpus.params.block_size as usize;
+                    let progress = DecodeProgressUpdate::observed(probe.output_limit, generated);
+                    // Progress-only booking updates run synchronously in the native slot tracker.
+                    // Keeping them on the issuer applies observations in the request's trace order.
+                    match shared
+                        .host
+                        .partition
+                        .scheduler()
+                        .update_output_if_booking(booking, 0, None, Some(progress))
+                        .now_or_never()
+                    {
+                        Some(Ok(())) => self.progress_updates += 1,
+                        Some(Err(error)) => {
+                            shared.fail(format!("progress update {index}: {error}"))
+                        }
+                        None => shared.fail(format!(
+                            "progress update {index} did not finish immediately"
+                        )),
+                    }
+                }
+            }
             Action::Completion => {
                 release_cache(shared, index);
                 let marks = lifecycle.marks.take();
@@ -972,7 +1113,8 @@ fn sample(shared: &Shared, mut perf: PerfControl) -> Result<(Vec<Sample>, Option
             }
             Mode::Saturation { .. } => shared.virtual_us.load(Ordering::Acquire),
         };
-        if at_open.is_none() && shared.in_window(trace_us) {
+        let clock_started = !matches!(shared.mode, Mode::Fixed { .. }) || now >= shared.start_ns;
+        if at_open.is_none() && clock_started && shared.in_window(trace_us) {
             perf.send("enable")?;
             at_open = Some(Counters::read(shared));
         }
@@ -1317,5 +1459,6 @@ fn analyze(
         mean_cached_blocks: cached_sum as f64 / compared.max(1) as f64,
         mean_cached_blocks_error: error_sum as f64 / compared.max(1) as f64,
         window_wall_ns,
+        decode_progress: None,
     }
 }
