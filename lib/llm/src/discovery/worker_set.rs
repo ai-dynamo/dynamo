@@ -275,6 +275,9 @@ pub struct WorkerSet {
     allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
     allocator_trim_wrapped: bool,
 
+    /// `chat_engine` came from a Python chat-engine factory, which parses its
+    /// own output.
+    pub(crate) chat_engine_parses_output: bool,
     input_policy: ChatInputPolicy,
 
     /// Smallest `max_logprobs` published by the set's admitted workers. The
@@ -315,6 +318,7 @@ impl WorkerSet {
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            chat_engine_parses_output: false,
             input_policy: ChatInputPolicy::default(),
             max_logprobs,
         }
@@ -511,6 +515,7 @@ impl WorkerSet {
                 .card
                 .runtime_config
                 .exclude_tools_when_tool_choice_none,
+            output_parsed_by_chat_processor: self.chat_engine_parses_output,
             ..crate::protocols::openai::ParsingOptions::new(
                 self.card.runtime_config.tool_call_parser.clone(),
                 self.card.runtime_config.reasoning_parser.clone(),
@@ -672,6 +677,7 @@ impl WorkerSet {
                 .map(CancellationToken::child_token),
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            chat_engine_parses_output: self.chat_engine_parses_output,
             // An adapter renders through the base model's chat engine and tokenizer.
             input_policy: self.input_policy.clone(),
             // An adapter runs on the base set's engines, so it has their limit.

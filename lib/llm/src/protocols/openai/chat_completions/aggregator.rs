@@ -744,11 +744,18 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
-        let selected_unified_family = super::unified_parser::selected_batch_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        );
-        if selected_unified_family.is_none() {
+        // A Python chat processor already split calls from content; parsing its text
+        // again would turn echoed delimiter markup into calls the model never made.
+        let reparse_text = !parsing_options.output_parsed_by_chat_processor;
+        let selected_unified_family = if reparse_text {
+            super::unified_parser::selected_batch_family(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+            )
+        } else {
+            None
+        };
+        if reparse_text && selected_unified_family.is_none() {
             let version = super::tool_parser_v2::selected_version().map_err(|error| {
                 DynamoError::builder()
                     .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
@@ -860,7 +867,10 @@ impl DeltaAggregator {
             }
         }
 
-        if selected_unified_family.is_none() && parsing_options.tool_call_parser.is_some() {
+        if reparse_text
+            && selected_unified_family.is_none()
+            && parsing_options.tool_call_parser.is_some()
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -3945,6 +3955,91 @@ mod tests {
         );
         assert_eq!(tool_calls[0].function.name, "get_weather");
         assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"SF\"}");
+    }
+
+    /// The SGLang chat processor keeps delimiter markup spelled from sub-word
+    /// tokens (an echo of input text) as content. Unary aggregation must not
+    /// parse that content again into a call, on the unified or the legacy path.
+    #[tokio::test]
+    async fn chat_processor_content_is_not_parsed_again_into_tool_calls() {
+        const CHILD: &str = "DYNAMO_CHAT_PROCESSOR_ECHO_CHILD";
+        let Some(version) = std::env::var_os(CHILD) else {
+            // auto selects the unified hermes family; 1 forces the legacy parser.
+            for version in ["auto", "1"] {
+                let output = crate::test_utils::isolated_command(
+                    "protocols::openai::chat_completions::aggregator::tests::chat_processor_content_is_not_parsed_again_into_tool_calls",
+                )
+                .env(CHILD, version)
+                .env(
+                    dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                    version,
+                )
+                .output()
+                .unwrap();
+                crate::test_utils::assert_isolated_success(&output);
+            }
+            return;
+        };
+        assert_eq!(
+            super::super::unified_parser::selected_batch_family(Some("hermes"), None).is_some(),
+            version == "auto"
+        );
+
+        let echoed = concat!(
+            "Here is the file:\n",
+            "<tool_call>\n",
+            "{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n",
+            "</tool_call>\n",
+            "line 3"
+        );
+        let deltas = vec![
+            create_test_delta(
+                0,
+                "Here is the file:\n<tool_call>\n",
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+                None,
+                None,
+            ),
+            create_test_delta(
+                0,
+                &echoed["Here is the file:\n<tool_call>\n".len()..],
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            ),
+        ];
+
+        let mut options = ParsingOptions::new(Some("hermes".to_string()), None);
+        options.output_parsed_by_chat_processor = true;
+        let response = DeltaAggregator::apply(stream::iter(deltas.clone()), options)
+            .await
+            .unwrap();
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(echoed.to_string()))
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+
+        let response = DeltaAggregator::apply(
+            stream::iter(deltas),
+            ParsingOptions::new(Some("hermes".to_string()), None),
+        )
+        .await
+        .unwrap();
+        let tool_calls = response.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("raw hermes text is parsed without the flag");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 
     #[tokio::test]
