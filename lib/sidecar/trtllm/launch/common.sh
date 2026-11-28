@@ -16,9 +16,10 @@
 
 # `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
 # from a custom index. Both packages are pinned to BSR module commit
-# 768a93c7b44e, the same revision the vendored protos in `proto/` were generated
-# from (see `proto/README.md`), so the engine and the sidecar speak the same
-# contract revision.
+# 768a93c7b44e for the baseline aggregate/disaggregate launchers. These packages
+# predate the encoder-handoff proposal vendored in `proto/` (see
+# `proto/README.md`). The EPD launchers require a matching encoder-handoff engine
+# build and check its bundled bindings; these baseline pins do not provide EPD.
 #
 # The protobuf package is pinned by *gencode* version as well: buf publishes one
 # build per protoc release, and a gencode newer than the runtime in the
@@ -40,7 +41,8 @@ TRTLLM_OPENENGINE_PROTOBUF_PYI_VERSION="36.2.0.1.20260730172104+768a93c7b44e"
 # site-packages is read-only, and install them yourself.
 trtllm_ensure_openengine_bindings() {
     local python="$1"
-    if "$python" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
+    if "$python" -c "from tensorrt_llm.grpc.openengine.bindings import openengine_pb2" >/dev/null 2>&1 \
+        || "$python" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
         return 0
     fi
     if [[ -n "${TRTLLM_SKIP_BINDINGS_INSTALL:-}" ]]; then

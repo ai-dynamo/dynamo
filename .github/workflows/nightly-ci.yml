@@ -1527,16 +1527,21 @@ jobs:
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
+      env:
+        DYNAMO_RUST_TEST_DIR: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests.
       # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
       # so we can generate multiple formats without re-running the tests.
       run: |
         cargo llvm-cov --locked --all-targets --no-report
+        if [[ "$DYNAMO_RUST_TEST_DIR" == '.' ]]; then
+          cargo llvm-cov --locked -p dynamo-sidecar-testkit --features integration --test trtllm_encoder --no-report
+        fi
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
         grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
-        SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
+        SAFE_DIR=$(echo "$DYNAMO_RUST_TEST_DIR" | sed 's|^\.$|root|' | tr '/' '-')
         echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
     - name: Upload Rust Coverage Data
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

@@ -29,6 +29,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fractions import Fraction
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import psutil
@@ -507,6 +508,115 @@ class ChatPayload(BasePayload):
             f"Expected {self.expected_num_choices} choices, "
             f"got {len(choices)}: {result}"
         )
+
+
+@dataclass
+class EncoderImagePayload(ChatPayload):
+    """Image output, usage parity and one dispatch per configured EPD stage."""
+
+    color: str = field(default="green", kw_only=True)
+    split: bool = field(default=False, kw_only=True)
+    baseline_path: Path | None = field(default=None, kw_only=True)
+    is_baseline: bool = field(default=False, kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _before: tuple[float, ...] = field(default=(), init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._env = env
+
+    def _stage_counts(self, *, require_present: bool) -> tuple[float, ...]:
+        name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        counts = []
+        for index in range(1, 4 if self.split else 3):
+            port = self._env[f"DYN_SYSTEM_PORT{index}"]
+            response = requests.get(f"http://{self.host}:{port}/metrics", timeout=5)
+            response.raise_for_status()
+            samples = find_metric_samples(
+                response.text, name, {prometheus_names.labels.ENDPOINT: "generate"}
+            )
+            if require_present and not samples:
+                raise ValueError(f"Missing {name} on port {port}")
+            counts.append(sum(samples))
+        return tuple(counts)
+
+    def before_request(self) -> None:
+        if not self.is_baseline:
+            self._before = self._stage_counts(require_present=False)
+
+    def process_response(self, response: Any) -> str:
+        if self.baseline_path is None:
+            raise ValueError("Missing aggregate baseline path")
+        observation = self._validate_observation(response, self.baseline_path)
+        content = self.response_handler(response)
+        self.validate(response, content)
+        if self.is_baseline:
+            self.baseline_path.write_text(json.dumps(observation))
+        return content
+
+    def _validate_observation(
+        self, response: Any, baseline_path: Path
+    ) -> dict[str, Any]:
+        result = response.json()
+        usage = result["usage"]
+        if type(usage["prompt_tokens"]) is not int or usage["prompt_tokens"] <= 64:
+            raise ValueError(f"Expected expanded prompt usage: {usage!r}")
+        if (
+            type(usage["completion_tokens"]) is not int
+            or usage["completion_tokens"] <= 0
+        ):
+            raise ValueError(f"Expected positive completion usage: {usage!r}")
+        if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
+            raise ValueError(f"Inconsistent token usage: {usage!r}")
+        if (usage.get("prompt_tokens_details") or {}).get("cached_tokens") not in (
+            None,
+            0,
+        ):
+            raise ValueError(f"Expected uncached image request: {usage!r}")
+        if result["choices"][0].get("finish_reason") != "stop":
+            raise ValueError(f"Unexpected EPD finish reason: {result['choices'][0]!r}")
+        observation = {
+            "request": {k: v for k, v in self.body.items() if k != "model"},
+            "color": self.color,
+            "usage": {"prompt_tokens": usage["prompt_tokens"]},
+        }
+        if not self.is_baseline:
+            if observation != json.loads(baseline_path.read_text()):
+                raise ValueError(
+                    f"EPD response differs from aggregate baseline: {observation!r}"
+                )
+            after = self._stage_counts(require_present=True)
+            if len(self._before) != len(after) or any(
+                end - start != 1 for start, end in zip(self._before, after)
+            ):
+                raise ValueError(
+                    f"Expected one request per stage: {self._before!r} -> {after!r}"
+                )
+            if self.split:
+                workers = (result.get("nvext") or {}).get("worker_id")
+                if (
+                    not isinstance(workers, dict)
+                    or type(workers.get("prefill_worker_id")) is not int
+                    or type(workers.get("decode_worker_id")) is not int
+                    or workers["prefill_worker_id"] == workers["decode_worker_id"]
+                ):
+                    raise ValueError(
+                        f"Expected distinct prefill and decode workers: {workers!r}"
+                    )
+        return observation
+
+    def validate(self, response: Any, content: str) -> None:
+        # Only generated-content failures may retry; stage and usage failures are final.
+        super().validate(response, content)
+        choice = response.json()["choices"][0]
+        answer = choice["message"].get("content")
+        if (
+            not isinstance(answer, str)
+            or answer.strip().rstrip(".").lower() != self.color
+        ):
+            raise AssertionError(choice)
 
 
 @dataclass
@@ -1825,8 +1935,7 @@ class ClearKVBlocksPayload(ChatPayload):
         prompt_tokens = (usage or {}).get("prompt_tokens")
         if usage is None or prompt_tokens is None or prompt_tokens <= 0:
             raise AssertionError(
-                f"{phase}: response carried no prompt-token usage evidence: "
-                f"{usage!r}"
+                f"{phase}: response carried no prompt-token usage evidence: {usage!r}"
             )
         details = usage.get("prompt_tokens_details")
         if not isinstance(details, dict) or "cached_tokens" not in details:
@@ -1871,8 +1980,7 @@ class ClearKVBlocksPayload(ChatPayload):
             )
 
         clear_url = (
-            f"http://{self.host}:{self.system_ports[0]}"
-            "/engine/control/clear_kv_blocks"
+            f"http://{self.host}:{self.system_ports[0]}/engine/control/clear_kv_blocks"
         )
         response = requests.post(clear_url, json={}, timeout=self.timeout)
         response.raise_for_status()
@@ -2021,8 +2129,7 @@ class ElasticEPScalePayload(ChatPayload):
         if self._scaled:
             return
         scale_url = (
-            f"http://{self.host}:{self.system_ports[0]}"
-            "/engine/control/scale_elastic_ep"
+            f"http://{self.host}:{self.system_ports[0]}/engine/control/scale_elastic_ep"
         )
         logger.info(
             "Scaling elastic EP to data_parallel_size=%s via %s",
@@ -3653,16 +3760,14 @@ class TRTLLMMetricsPayload(MetricsPayload):
                 # stats arrive from the engine. Any rank reporting a positive
                 # block count proves the polling thread published.
                 name=f"{total_blocks} (positive on some rank)",
-                pattern=lambda name: (
-                    rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
-                ),
+                pattern=lambda name: rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)",
                 validator=lambda value: any(float(v) > 0 for v in value),
                 error_msg=lambda name, value: (
                     f"{name}: every rank reported a non-positive block count "
                     f"(values: {value}). The stats polling thread never "
                     f"published iteration stats."
                 ),
-                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                success_msg=lambda name, value: f"SUCCESS: {name} (values: {value})",
                 multiline=True,
             ),
             MetricCheck(
@@ -3685,7 +3790,7 @@ class TRTLLMMetricsPayload(MetricsPayload):
                     f"(values: {value}). The engine's request metrics are not "
                     f"reaching the collector."
                 ),
-                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                success_msg=lambda name, value: f"SUCCESS: {name} (values: {value})",
                 multiline=True,
             ),
         ]
@@ -3932,10 +4037,9 @@ class AudioSpeechPayload(BasePayload):
         frame_count = len(frames) // (sample_width * channels)
 
         if self.expected_sample_rate is not None:
-            assert sample_rate == self.expected_sample_rate, (
-                f"Expected {self.expected_sample_rate} Hz audio, "
-                f"got {sample_rate} Hz"
-            )
+            assert (
+                sample_rate == self.expected_sample_rate
+            ), f"Expected {self.expected_sample_rate} Hz audio, got {sample_rate} Hz"
 
         duration_s = frame_count / sample_rate if sample_rate else 0.0
         assert duration_s >= self.min_duration_s, (

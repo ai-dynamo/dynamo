@@ -1177,3 +1177,64 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
         );
     }
 }
+
+#[test]
+fn encode_and_consume_preserve_context_media_identity_and_opaque_bytes() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".into(),
+        vec![Some("caller-owned".into())],
+    )]));
+    let encoded =
+        build_encode_request(source.clone(), "encode", "model", image_limits(4096)).unwrap();
+    assert_eq!(encoded.media.len(), 1);
+    assert_eq!(encoded.media[0].uuid, "caller-owned");
+    let tokens = pb::TokenIds {
+        ids: source.token_ids.to_vec(),
+    };
+    assert_eq!(
+        encoded.input,
+        Some(pb::encode_request::Input::TokenIds(tokens.clone()))
+    );
+    source.encoder_result = Some(json!({"opaque_state":"AP8A"}));
+    for mode in [AGG, PREFILL] {
+        let consumed = build_generate_request(
+            source.clone(),
+            "consumer",
+            "model",
+            image_limits(4096),
+            mode,
+        )
+        .unwrap();
+        assert_eq!(
+            consumed.input,
+            Some(pb::generate_request::Input::TokenIds(tokens.clone()))
+        );
+        assert_eq!(encoded.media, consumed.media);
+        assert_eq!(consumed.encoded_media.unwrap().opaque_state, [0, 255, 0]);
+    }
+    assert!(build_encode_request(request(), "encode", "model", image_limits(4096)).is_err());
+    assert!(build_encode_request(source, "encode", "model", image_limits(4096)).is_err());
+}
+
+#[test]
+fn decode_with_kv_does_not_reconsume_the_encoder_reference() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.encoder_result = Some(json!({"opaque_state":"AQID"}));
+    source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+        prompt_tokens_details: None,
+    });
+    let wire = build_generate_request(
+        source,
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .unwrap();
+    assert!(wire.encoded_media.is_none());
+    assert_eq!(wire.kv.unwrap().session, Some(fake_session()));
+}

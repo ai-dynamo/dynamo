@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from copy import deepcopy
 from unittest.mock import Mock
 
 import pytest
@@ -18,6 +19,7 @@ from tests.utils.engine_process import (
 )
 from tests.utils.multimodal import (
     UuidPassthroughChatPayload,
+    make_encoder_image_payloads,
     make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
     make_sidecar_media_payload,
@@ -191,3 +193,65 @@ def test_sidecar_usage_and_cache_failures_are_not_content_retries(
     if invalid != "media_usage":
         assert payload._observed[0] == (256, 0, 0.0)
         assert len(payload._observed) == (3 if invalid == "probe_worker" else 1)
+
+
+@pytest.mark.parametrize("invalid", ["usage", "stages", "worker", "finish"])
+def test_epd_empty_caption_does_not_hide_invalid_execution(
+    tmp_path, monkeypatch, invalid
+) -> None:
+    payload = make_encoder_image_payloads(split=True)[0]
+    payload.baseline_path = tmp_path / "baseline.json"
+    baseline = deepcopy(payload)
+    baseline.is_baseline = True
+    process = object.__new__(EngineProcess)
+    process.check_response(baseline, _sidecar_image_response("green", 0, 0.0))
+    metrics = Mock(side_effect=[(0, 0, 0), (2 if invalid == "stages" else 1, 1, 1)])
+    monkeypatch.setattr(payload, "_stage_counts", metrics)
+    payload.before_request()
+    response = _sidecar_image_response("", 0, 0.0)
+    response.json.return_value["nvext"]["worker_id"] = {
+        "prefill_worker_id": 1,
+        "decode_worker_id": 1 if invalid == "worker" else 2,
+    }
+    if invalid == "usage":
+        response.json.return_value["usage"]["total_tokens"] = 1
+    elif invalid == "finish":
+        response.json.return_value["choices"][0]["finish_reason"] = None
+    with pytest.raises(EngineResponseError) as failure:
+        process.check_response(payload, response)
+    assert not isinstance(failure.value, ResponseValidationError)
+    assert metrics.call_count == (1 if invalid in ("usage", "finish") else 2)
+
+
+@pytest.mark.parametrize("answer", ["", "blue, not green"])
+def test_epd_content_retry_checks_stages_once_and_preserves_baseline(
+    tmp_path, monkeypatch, answer
+) -> None:
+    payload = make_encoder_image_payloads(split=True)[0]
+    payload.baseline_path = tmp_path / "baseline.json"
+    baseline = deepcopy(payload)
+    baseline.is_baseline = True
+    process = object.__new__(EngineProcess)
+    with pytest.raises(ResponseValidationError):
+        process.check_response(baseline, _sidecar_image_response("", 0, 0.0))
+    assert not payload.baseline_path.exists()
+    process.check_response(baseline, _sidecar_image_response("green", 0, 0.0))
+    original = payload.baseline_path.read_bytes()
+    metrics = Mock(side_effect=[(0, 0, 0), (1, 1, 1), (1, 1, 1), (2, 2, 2)])
+    monkeypatch.setattr(payload, "_stage_counts", metrics)
+    response = _sidecar_image_response(answer, 0, 0.0)
+    response.json.return_value["usage"].update(completion_tokens=2, total_tokens=258)
+    response.json.return_value["nvext"]["worker_id"] = {
+        "prefill_worker_id": 1,
+        "decode_worker_id": 2,
+    }
+    payload.before_request()
+    with pytest.raises(ResponseValidationError):
+        process.check_response(payload, response)
+    assert metrics.call_count == 2
+    payload.before_request()
+    response.json.return_value["choices"][0]["message"]["content"] = "Green."
+    response.json.return_value["usage"].update(completion_tokens=3, total_tokens=259)
+    process.check_response(payload, response)
+    assert metrics.call_count == 4
+    assert payload.baseline_path.read_bytes() == original

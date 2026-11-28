@@ -29,9 +29,11 @@ from tests.utils.engine_metrics import (
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.multimodal import (
+    make_encoder_image_payloads,
     make_sidecar_image_identity_payload,
     make_sidecar_media_payload,
 )
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
@@ -44,7 +46,11 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
 )
-from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
+from tests.utils.payloads import (
+    EncoderImagePayload,
+    KvTransferPayload,
+    OmittedMaxTokensChatPayload,
+)
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -74,8 +80,8 @@ def _sglang_reports_node_listeners() -> bool:
     return False
 
 
-def _trtllm_serves_openengine() -> bool:
-    """Is the installed TensorRT-LLM new enough to serve `openengine.v1`?
+def _trtllm_serves_openengine(module: str = "servicer") -> bool:
+    """Does the installed TensorRT-LLM provide the requested OpenEngine handler?
 
     `lib/sidecar/trtllm` speaks OpenEngine, which the servicer provides from
     release 1.3.0rc27 onward. `container/context.yaml` pins that release, so
@@ -94,7 +100,7 @@ def _trtllm_serves_openengine() -> bool:
     if not locations:
         return False
     return any(
-        (pathlib.Path(root) / "grpc" / "openengine" / "servicer.py").is_file()
+        (pathlib.Path(root) / "grpc" / "openengine" / f"{module}.py").is_file()
         for root in locations
     )
 
@@ -441,6 +447,46 @@ sidecar_configs = {
             ),
         ],
     ),
+    **{
+        f"trtllm_image_{topology}": SidecarConfig(
+            name=f"trtllm_image_{topology}",
+            directory=trtllm_sidecar_dir,
+            script_name=f"disagg_multimodal_{topology}.sh",
+            timeout=1200,
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.gpu_1,
+                pytest.mark.nightly,
+                pytest.mark.multimodal,
+                pytest.mark.skipif(
+                    not _trtllm_serves_openengine("encoding"),
+                    reason="the selected TRT-LLM runtime has no native OpenEngine "
+                    "Encoder service; EPD needs the upstream encoder changes",
+                ),
+                pytest.mark.model(
+                    _MEDIA_MODELS["vision"][0], revision=_MEDIA_MODELS["vision"][1]
+                ),
+                pytest.mark.requested_trtllm_kv_tokens(2048),
+                pytest.mark.timeout(2400),
+            ],
+            model=_MEDIA_MODELS["vision"][0],
+            model_revision=_MEDIA_MODELS["vision"][1],
+            runtime_transports=("file", "tcp", "zmq"),
+            gpu_env=_on_first_gpu("ENCODER_GPU", "PD_GPU", "PREFILL_GPU", "DECODE_GPU"),
+            health_check_workers=True,
+            health_check_worker_count=3 if topology == "e_p_d" else 2,
+            env={
+                **TRTLLM_MULTI_ENGINE_ENV,
+                "MODEL_REVISION": _MEDIA_MODELS["vision"][1],
+                "EPD_MODE": topology,
+                "TRTLLM_CONTEXT_LENGTH": "2048",
+                "DYN_REQUEST_PLANE": "tcp",
+                "DYN_EVENT_PLANE": "zmq",
+            },
+            request_payloads=make_encoder_image_payloads(split=topology == "e_p_d"),
+        )
+        for topology in ("e_pd", "e_p_d")
+    },
     # Migration coverage only; KV-routing payloads run for vLLM and SGLang.
     "trtllm_kv_router": SidecarConfig(
         name="trtllm_kv_router",
@@ -793,6 +839,35 @@ def sidecar_config_test(
     config = sidecar_configs[request.param]
     if "TRTLLM_TEST_MEDIA" in config.env:
         config = _prepare_media_config(config, request, tmp_path, dynamo_dynamic_ports)
+    elif config.name in ("trtllm_image_e_pd", "trtllm_image_e_p_d"):
+        common_options = {
+            "max_batch_size": 1,
+            "max_num_tokens": 2048,
+            "multimodal_config": {"encoder_cache_max_bytes": 0},
+        }
+        encoder_options = tmp_path / "native-encoder.json"
+        encoder_options.write_text(json.dumps(common_options))
+        options = tmp_path / "native-epd.json"
+        options.write_text(
+            json.dumps(
+                {
+                    **common_options,
+                    "kv_cache_config": {
+                        "max_tokens": 2048,
+                        "free_gpu_memory_fraction": 0.10,
+                        "enable_block_reuse": False,
+                    },
+                }
+            )
+        )
+        config = replace(
+            config,
+            env={
+                **config.env,
+                "EPD_ENCODER_ARGS": str(encoder_options),
+                "EPD_ENGINE_ARGS": str(options),
+            },
+        )
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -849,13 +924,46 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    tmp_path,
+    monkeypatch,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-    run_serve_deployment(
-        sidecar_config_test,
-        request,
-        ports=dynamo_dynamic_ports,
-    )
+    config = sidecar_config_test
+    if isinstance(config.request_payloads[0], EncoderImagePayload):
+        payloads = [
+            replace(payload, baseline_path=tmp_path / f"{payload.color}-baseline.json")
+            for payload in config.request_payloads
+        ]
+        model_path = snapshot_download(
+            config.model, revision=config.model_revision, local_files_only=True
+        )
+        baseline = replace(
+            config,
+            name=config.name + "_baseline",
+            script_name="agg.sh",
+            model=model_path,
+            health_check_worker_count=1,
+            env={**config.env, "AGG_ENGINE_ARGS": config.env["EPD_ENGINE_ARGS"]},
+            request_payloads=[
+                replace(payload, is_baseline=True) for payload in payloads
+            ],
+        )
+        with monkeypatch.context() as baseline_env:
+            baseline_env.setenv("MODEL", model_path)
+            baseline_env.setenv("DYN_NAMESPACE", f"baseline-{generate_random_suffix()}")
+            baseline_env.setenv(
+                "DYN_TEST_OUTPUT_PATH",
+                str(pathlib.Path(resolve_test_output_path(".")) / "baseline"),
+            )
+            for name in (
+                "TRTLLM_OPENENGINE_ENCODER_TRANSFER",
+                "TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION",
+                "TRTLLM_OPENENGINE_ENCODER_ENDPOINT",
+            ):
+                baseline_env.delenv(name, raising=False)
+            run_serve_deployment(baseline, request, ports=dynamo_dynamic_ports)
+        config = replace(config, request_payloads=payloads)
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

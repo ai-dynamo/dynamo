@@ -180,7 +180,17 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0)
+        self.spawn_with_args::<F>(endpoint, mode, deadline, &[])
+    }
+
+    pub fn spawn_with_args<F: ProcessFixture>(
+        &self,
+        endpoint: &str,
+        mode: DisaggregationMode,
+        deadline: u64,
+        extra: &[&str],
+    ) -> Process {
+        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, extra)
     }
 
     pub fn spawn_with_grace<F: ProcessFixture>(
@@ -189,7 +199,7 @@ impl Environment {
         mode: DisaggregationMode,
         grace_secs: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs, &[])
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -198,7 +208,7 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0)
+        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0, &[])
     }
 }
 
@@ -318,6 +328,7 @@ impl Process {
         deadline: u64,
         from_env: bool,
         grace_secs: u64,
+        extra: &[&str],
     ) -> Self {
         use std::os::unix::process::CommandExt;
         let role = match mode {
@@ -332,6 +343,7 @@ impl Process {
         let stdout = env.root.path().join(format!("{role}-{index}.stdout"));
         let stderr = env.root.path().join(format!("{role}-{index}.stderr"));
         let mut command = F::command(&env.model);
+        command.args(extra);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("DYN_")

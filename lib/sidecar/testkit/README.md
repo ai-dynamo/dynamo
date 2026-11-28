@@ -132,4 +132,5 @@ The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar 
 ```sh
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration
 cargo test --locked -p dynamo-sidecar-testkit --test router_sidecar_mocker_integration
+cargo test --locked -p dynamo-sidecar-testkit --features integration --test trtllm_encoder
 ```

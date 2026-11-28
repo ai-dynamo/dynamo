@@ -463,6 +463,9 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run encoder sidecar integration tests
+      if: matrix.dir == '.'
+      run: cargo test --locked -p dynamo-sidecar-testkit --features integration --test trtllm_encoder
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.

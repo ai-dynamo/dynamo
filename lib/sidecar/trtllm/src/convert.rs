@@ -10,6 +10,7 @@
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
+//! Image encoder output is consumed by an aggregated or prefill worker.
 //! See [`crate::disagg`] for the codec.
 
 use std::collections::{BTreeSet, HashSet};
@@ -24,6 +25,7 @@ use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
+use crate::encoder_handoff;
 use crate::proto as pb;
 
 /// A chunk's delta token IDs, the selected-token logprob sequence, and the
@@ -49,9 +51,13 @@ pub(crate) fn build_generate_request_with_routing(
     mode: DisaggregationMode,
     allow_dp_rank: bool,
 ) -> Result<pb::GenerateRequest, DynamoError> {
+    if mode.is_encode() {
+        return Err(client::invalid_argument("encode workers must use Encode"));
+    }
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
     let media = media(&mut request, limits, mode)?;
+    let encoded_media = encoded_media(&request, mode, request_has_media)?;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -61,10 +67,9 @@ pub(crate) fn build_generate_request_with_routing(
     // prove the request impossible nor prove it servable, so checking it would
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
-    let max_tokens = if mode.is_prefill() {
-        Some(1)
-    } else {
-        max_tokens(&request, limits, request_has_media)?
+    let max_tokens = match mode {
+        DisaggregationMode::Prefill => Some(1),
+        _ => max_tokens(&request, limits, request_has_media)?,
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -83,7 +88,6 @@ pub(crate) fn build_generate_request_with_routing(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
-    let conditions = stop_conditions(&request);
     let guided = guided_decoding(&request)?;
     let session_id = request
         .agent_context
@@ -105,6 +109,8 @@ pub(crate) fn build_generate_request_with_routing(
     let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
+    let top_k = normalize_top_k(sampling.top_k)?;
+    let seed = normalize_seed(sampling.seed)?;
     let stop = &request.stop_conditions;
     let output = &request.output_options;
 
@@ -117,12 +123,12 @@ pub(crate) fn build_generate_request_with_routing(
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
             top_p: sampling.top_p.map(f64::from),
-            top_k: normalize_top_k(sampling.top_k)?,
+            top_k,
             min_p: sampling.min_p.map(f64::from),
             frequency_penalty: sampling.frequency_penalty.map(f64::from),
             presence_penalty: sampling.presence_penalty.map(f64::from),
             repetition_penalty: sampling.repetition_penalty.map(f64::from),
-            seed: normalize_seed(sampling.seed)?,
+            seed,
             num_sequences: Some(1),
         }),
         stopping: Some(pb::StoppingOptions {
@@ -134,7 +140,7 @@ pub(crate) fn build_generate_request_with_routing(
             // `Stop` instead of `PrefillReady`, and leave the frontend treating
             // a request that never met its minimum as complete.
             min_tokens: stop.min_tokens,
-            conditions,
+            conditions: stop_conditions(&request),
             ignore_eos: stop.ignore_eos,
             // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
             // the output. A visible token equal to `end_id` finishes as END_ID
@@ -158,6 +164,7 @@ pub(crate) fn build_generate_request_with_routing(
         }),
         guided,
         media,
+        encoded_media,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
@@ -404,6 +411,8 @@ fn media(
         .map_or(0, Vec::len);
     if image_count > 0
         && matches!(mode, DisaggregationMode::Aggregated)
+        // Encoder references bind the media envelope, including caller UUIDs.
+        && request.encoder_result.is_none()
         && limits.is_some_and(|limits| limits.supports_image_routing)
         && request
             .mm_routing_info
@@ -777,11 +786,6 @@ fn validate_request(
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request.encoder_result.is_some() {
-        return Err(client::invalid_argument(
-            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
@@ -1313,6 +1317,59 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         }
         _ => client::engine_error(message),
     }
+}
+
+fn encoded_media(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+    request_has_media: bool,
+) -> Result<Option<pb::EncodedMediaRef>, DynamoError> {
+    let Some(result) = request.encoder_result.as_ref() else {
+        return Ok(None);
+    };
+    if mode.is_decode() && request.prefill_result.is_some() {
+        return Ok(None);
+    }
+    if !matches!(
+        mode,
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill
+    ) || !request_has_media
+    {
+        return Err(client::invalid_argument(
+            "encoder_result requires media and an aggregated or prefill worker",
+        ));
+    }
+    encoder_handoff::from_result(result).map(Some)
+}
+
+pub(crate) fn build_encode_request(
+    mut request: PreprocessedRequest,
+    request_id: &str,
+    model: &str,
+    limits: Option<ModelLimits>,
+) -> Result<pb::EncodeRequest, DynamoError> {
+    validate_request(&request, DisaggregationMode::Encode, false)?;
+    if request.encoder_result.is_some() {
+        return Err(client::invalid_argument(
+            "encode cannot consume encoder_result",
+        ));
+    }
+    let input = request_input(&mut request, limits)?;
+    let media = media(&mut request, limits, DisaggregationMode::Encode)?;
+    if media.is_empty() {
+        return Err(client::invalid_argument("encode requires media"));
+    }
+    Ok(pb::EncodeRequest {
+        request_id: request_id.into(),
+        model: model.into(),
+        input: Some(match input {
+            pb::generate_request::Input::Prompt(prompt) => {
+                pb::encode_request::Input::Prompt(prompt)
+            }
+            pb::generate_request::Input::TokenIds(ids) => pb::encode_request::Input::TokenIds(ids),
+        }),
+        media,
+    })
 }
 
 #[cfg(test)]

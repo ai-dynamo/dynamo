@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::{
     self as pb,
     control_server::{Control, ControlServer},
+    encoder_server::{Encoder, EncoderServer},
     inference_server::{Inference, InferenceServer},
 };
 use futures::stream::BoxStream;
@@ -34,18 +35,90 @@ pub struct Fixture {
     server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     pub discovery: Arc<Discovery>,
+    pub encoder: Arc<EncoderControls>,
     health: tonic_health::server::HealthReporter,
 }
 
 #[derive(Default)]
 pub struct Discovery {
     pub calls: AtomicUsize,
+    pub server_info_calls: AtomicUsize,
+    pub server_info_hold_after: AtomicUsize,
+    pub server_info_hold: AtomicBool,
+    pub server_info_blocked: AtomicUsize,
+    pub load_calls: AtomicUsize,
+    pub kv_source_calls: AtomicUsize,
+    pub server_info: Mutex<Option<pb::ServerInfo>>,
+    pub server_info_sequence: Mutex<VecDeque<pb::ServerInfo>>,
     pub unavailable: AtomicBool,
     pub hold: AtomicBool,
     pub model_info: Mutex<Option<pb::ModelInfo>>,
     pub omit_context_length: AtomicBool,
     pub error: Mutex<Option<tonic::Code>>,
     release: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+pub struct EncoderControls {
+    pub encode: Controller<EncodeAdapter>,
+    pub release: Controller<ReleaseAdapter>,
+    pub response: Mutex<Option<pb::EncodeResponse>>,
+    pub aborts: Mutex<Vec<pb::AbortRequest>>,
+    release_sequence: AtomicUsize,
+}
+
+pub struct EncodeAdapter;
+
+impl Protocol for EncodeAdapter {
+    type Request = pb::EncodeRequest;
+    type Response = pb::EncodeResponse;
+    type Error = Status;
+
+    fn request_id(request: &Self::Request) -> &str {
+        &request.request_id
+    }
+    fn record_tokens(_: &Self::Response, _: &mut Vec<u32>) -> bool {
+        false
+    }
+    fn is_terminal(_: &Self::Response) -> bool {
+        true
+    }
+    fn injected_error(message: &'static str) -> Status {
+        Adapter::injected_error(message)
+    }
+    fn invalid_argument_error(message: &'static str) -> Status {
+        Adapter::invalid_argument_error(message)
+    }
+}
+
+#[derive(Clone)]
+pub struct ReleaseRequest {
+    key: String,
+    pub native: pb::ReleaseEncodedMediaRequest,
+}
+
+pub struct ReleaseAdapter;
+
+impl Protocol for ReleaseAdapter {
+    type Request = ReleaseRequest;
+    type Response = pb::ReleaseEncodedMediaResponse;
+    type Error = Status;
+
+    fn request_id(request: &Self::Request) -> &str {
+        &request.key
+    }
+    fn record_tokens(_: &Self::Response, _: &mut Vec<u32>) -> bool {
+        false
+    }
+    fn is_terminal(_: &Self::Response) -> bool {
+        true
+    }
+    fn injected_error(message: &'static str) -> Status {
+        Adapter::injected_error(message)
+    }
+    fn invalid_argument_error(message: &'static str) -> Status {
+        Adapter::invalid_argument_error(message)
+    }
 }
 
 impl Fixture {
@@ -65,10 +138,14 @@ impl Fixture {
     }
 
     pub fn engine_with_context_length(&self, context_length: u32) -> TrtllmSidecarEngine {
-        self.make_engine(Some(context_length))
+        self.make_engine(Some(context_length), &[])
     }
 
-    fn make_engine(&self, context_length: Option<u32>) -> TrtllmSidecarEngine {
+    pub fn engine_with_args(&self, extra: &[&str]) -> TrtllmSidecarEngine {
+        self.make_engine(None, extra)
+    }
+
+    fn make_engine(&self, context_length: Option<u32>, extra: &[&str]) -> TrtllmSidecarEngine {
         let mut args = vec![
             "dynamo-trtllm-sidecar".into(),
             "--grpc-endpoint".into(),
@@ -87,6 +164,7 @@ impl Fixture {
         if let Some(context_length) = context_length {
             args.extend(["--context-length".into(), context_length.to_string()]);
         }
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
         TrtllmSidecarEngine::from_args(args).unwrap().0
     }
 
@@ -116,7 +194,7 @@ impl SidecarFixture for Fixture {
                     DisaggregationMode::Aggregated => ServerMode::Aggregated,
                     DisaggregationMode::Prefill => ServerMode::Prefill,
                     DisaggregationMode::Decode => ServerMode::Decode,
-                    DisaggregationMode::Encode => panic!("Mocker does not support encode mode"),
+                    DisaggregationMode::Encode => ServerMode::Aggregated,
                 },
                 ..Default::default()
             },
@@ -124,6 +202,7 @@ impl SidecarFixture for Fixture {
         )
         .unwrap();
         let scripted = Arc::new(Mutex::new(HashMap::new()));
+        let encoder = Arc::new(EncoderControls::default());
         let controlled = ControlledInference {
             scripted: scripted.clone(),
             inner: service.clone(),
@@ -133,6 +212,11 @@ impl SidecarFixture for Fixture {
         let control_service = ControlledControl {
             inner: service.clone(),
             discovery: discovery.clone(),
+            encoder: encoder.clone(),
+            is_encoder: config.disaggregation_mode.is_encode(),
+        };
+        let encoder_service = ControlledEncoder {
+            encoder: encoder.clone(),
         };
         let (health, health_service) = tonic_health::server::health_reporter();
         health
@@ -143,6 +227,7 @@ impl SidecarFixture for Fixture {
                 .add_service(health_service)
                 .add_service(InferenceServer::new(controlled))
                 .add_service(ControlServer::new(control_service))
+                .add_service(EncoderServer::new(encoder_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown.await;
                 })
@@ -157,12 +242,13 @@ impl SidecarFixture for Fixture {
             server,
             scripted,
             discovery,
+            encoder,
             health,
         }
     }
 
     async fn engine(&self) -> Self::Engine {
-        self.make_engine(None)
+        self.make_engine(None, &[])
     }
 
     fn eof_error() -> BackendError {
@@ -192,10 +278,19 @@ impl SidecarFixture for Fixture {
 struct ControlledControl {
     inner: TrtllmMockerService,
     discovery: Arc<Discovery>,
+    encoder: Arc<EncoderControls>,
+    is_encoder: bool,
 }
 
 #[tonic::async_trait]
 impl Control for ControlledControl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_model_info(
         &self,
         request: Request<pb::GetModelInfoRequest>,
@@ -227,12 +322,48 @@ impl Control for ControlledControl {
         &self,
         request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        self.inner.get_server_info(request).await
+        let call = self
+            .discovery
+            .server_info_calls
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        let hold_after = self.discovery.server_info_hold_after.load(Ordering::SeqCst);
+        if self.discovery.server_info_hold.load(Ordering::SeqCst)
+            || (hold_after > 0 && call > hold_after)
+        {
+            self.discovery
+                .server_info_blocked
+                .fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        if let Some(info) = self
+            .discovery
+            .server_info_sequence
+            .lock()
+            .unwrap()
+            .pop_front()
+        {
+            return Ok(Response::new(info));
+        }
+        if let Some(info) = self.discovery.server_info.lock().unwrap().clone() {
+            return Ok(Response::new(info));
+        }
+        let mut response = self.inner.get_server_info(request).await?;
+        if self.is_encoder {
+            response.get_mut().engine_role = pb::EngineRole::Encoder as i32;
+            response.get_mut().schema_release =
+                include_str!("../../../trtllm/proto/REVISION").trim().into();
+        }
+        Ok(response)
     }
     async fn get_load(
         &self,
         request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
+        self.discovery.load_calls.fetch_add(1, Ordering::SeqCst);
+        if self.is_encoder {
+            return Err(Status::unimplemented("encoder has no KV load"));
+        }
         self.inner.get_load(request).await
     }
     async fn health(
@@ -241,10 +372,16 @@ impl Control for ControlledControl {
     ) -> Result<Response<pb::HealthResponse>, Status> {
         self.inner.health(request).await
     }
+
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        self.encoder
+            .aborts
+            .lock()
+            .unwrap()
+            .push(request.get_ref().clone());
         self.inner.abort(request).await
     }
     async fn load_lora(
@@ -269,6 +406,12 @@ impl Control for ControlledControl {
         &self,
         request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        self.discovery
+            .kv_source_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self.is_encoder {
+            return Err(Status::invalid_argument("encoder has no KV events"));
+        }
         self.inner.get_kv_event_sources(request).await
     }
     type SubscribeKvEventsStream = <TrtllmMockerService as Control>::SubscribeKvEventsStream;
@@ -382,6 +525,53 @@ impl WireFixture for Fixture {
 
     async fn scheduler_active(&self) {
         wait_scheduler_active(self, self.service.metrics_receiver()).await;
+    }
+}
+
+#[derive(Clone)]
+struct ControlledEncoder {
+    encoder: Arc<EncoderControls>,
+}
+
+#[tonic::async_trait]
+impl Encoder for ControlledEncoder {
+    async fn encode(
+        &self,
+        request: Request<pb::EncodeRequest>,
+    ) -> Result<Response<pb::EncodeResponse>, Status> {
+        let opened = self.encoder.encode.open(request.get_ref()).await?;
+        let response = self
+            .encoder
+            .response
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| pb::EncodeResponse {
+                request_id: request.get_ref().request_id.clone(),
+                encoded_media: Some(pb::EncodedMediaRef {
+                    opaque_state: vec![1, 2, 3],
+                }),
+            });
+        Ok(Response::new(opened.finish(response)))
+    }
+
+    async fn release_encoded_media(
+        &self,
+        request: Request<pb::ReleaseEncodedMediaRequest>,
+    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
+        let key = self
+            .encoder
+            .release_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string();
+        let request = ReleaseRequest {
+            key,
+            native: request.into_inner(),
+        };
+        let opened = self.encoder.release.open(&request).await?;
+        Ok(Response::new(
+            opened.finish(pb::ReleaseEncodedMediaResponse {}),
+        ))
     }
 }
 

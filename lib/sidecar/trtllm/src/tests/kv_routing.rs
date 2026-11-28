@@ -326,8 +326,8 @@ async fn discovery_keeps_events_load_and_dp_targeting_independent() {
 
 /// Drives `monitor` until `observed` holds; the monitor must not finish first.
 /// The timeout only bounds a failure.
-async fn drive_monitor_until(
-    monitor: &mut (impl Future<Output = dynamo_backend_common::DynamoError> + Unpin),
+async fn drive_monitor_until<T: std::fmt::Debug>(
+    monitor: &mut (impl Future<Output = T> + Unpin),
     what: &str,
     observed: impl Fn() -> bool,
 ) {
@@ -426,12 +426,10 @@ async fn follower_shutdown_cancels_initial_reconnect() {
     use tokio_util::sync::CancellationToken;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
     let args = crate::args::Args::try_parse_from([
         "sidecar",
         "--grpc-endpoint",
-        &format!("http://{address}"),
+        &format!("http://{}", listener.local_addr().unwrap()),
         "--model-path",
         "model-source",
     ])
@@ -453,18 +451,28 @@ async fn follower_shutdown_cancels_initial_reconnect() {
         source_owners: Default::default(),
     };
     let cancel = CancellationToken::new();
-    let shutdown = cancel.clone();
-    let relay = crate::headless::relay(drt, args, node, cancel);
-    let signal = async move {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        shutdown.cancel();
-    };
-    tokio::time::timeout(Duration::from_secs(1), async {
-        let (result, ()) = tokio::join!(relay, signal);
-        result.expect("clean cancellation");
+    let relay = crate::headless::relay(
+        drt,
+        args,
+        node,
+        cancel.clone(),
+        RoutingSupervision::default(),
+    );
+    tokio::pin!(relay);
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            connection = listener.accept() => connection.unwrap(),
+            result = &mut relay => panic!("relay ended before reconnect: {result:?}"),
+        }
     })
     .await
-    .expect("follower must stop promptly");
+    .expect("follower never attempted reconnect");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), relay)
+        .await
+        .expect("follower must stop promptly")
+        .expect("clean cancellation");
+    drop(socket);
 }
 
 #[tokio::test]

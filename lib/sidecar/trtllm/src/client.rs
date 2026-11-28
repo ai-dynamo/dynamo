@@ -28,6 +28,7 @@ pub(crate) use dynamo_sidecar_common::{
 
 use crate::proto as pb;
 use crate::proto::control_client::ControlClient;
+use crate::proto::encoder_client::EncoderClient;
 use crate::proto::inference_client::InferenceClient;
 
 /// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
@@ -35,6 +36,8 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const ENCODER_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+const ENCODER_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Media modalities confirmed by both OpenEngine capability signals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,6 +132,13 @@ impl TrtllmClient {
     fn inference(&self) -> InferenceClient<Channel> {
         InferenceClient::new(self.pool.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+    }
+
+    fn encoder(&self) -> EncoderClient<Channel> {
+        EncoderClient::new(self.pool.next_channel())
+            // Leave room for the request ID and protobuf envelope, not image payloads.
+            .max_decoding_message_size(crate::encoder_handoff::MAX_ENCODER_HANDOFF_BYTES * 2)
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
@@ -399,10 +409,59 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::RequestId(request_id))
+            .await
+    }
+
+    pub(crate) async fn encode(
+        &self,
+        request: pb::EncodeRequest,
+    ) -> Result<pb::EncodeResponse, DynamoError> {
+        self.encoder()
+            .encode(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| stream_status_to_dynamo("Encode", status))
+    }
+
+    pub(crate) async fn release_encoder_handoff(
+        &self,
+        handoff: pb::EncodedMediaRef,
+    ) -> Result<(), DynamoError> {
+        let deadline = Instant::now() + ENCODER_RELEASE_TIMEOUT;
+        let mut attempt = 0;
+        loop {
+            let response = timeout_at(
+                deadline,
+                self.encoder()
+                    .release_encoded_media(pb::ReleaseEncodedMediaRequest {
+                        encoded_media: Some(handoff.clone()),
+                    }),
+            )
+            .await
+            .map_err(|_| connection_timeout("ReleaseEncodedMedia timed out"))?;
+            match response {
+                Ok(_) => return Ok(()),
+                Err(status)
+                    if attempt < 2
+                        && (matches!(
+                            status.code(),
+                            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                        ) || dynamo_sidecar_common::is_broken_stream(&status)) =>
+                {
+                    attempt += 1;
+                    sleep_until((Instant::now() + ENCODER_RELEASE_RETRY_DELAY).min(deadline)).await;
+                }
+                Err(status) => return Err(stream_status_to_dynamo("ReleaseEncodedMedia", status)),
+            }
+        }
+    }
+
+    async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {
         let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control().abort(pb::AbortRequest {
-                target: Some(pb::abort_request::Target::RequestId(request_id)),
+                target: Some(target),
             }),
         )
         .await

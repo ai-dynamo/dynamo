@@ -806,6 +806,13 @@ impl pb::control_server::Control for TrtllmMockerService {
     // KV events stay UNIMPLEMENTED on purpose: the real TensorRT-LLM OpenEngine
     // server does not implement them, and a mocker that did would let a test
     // pass here and fail against a real engine.
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
