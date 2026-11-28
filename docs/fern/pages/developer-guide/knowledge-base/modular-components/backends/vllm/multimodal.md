@@ -64,12 +64,16 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > [Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx).
 
 > [!NOTE]
-> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
-> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. Two settings change this:
+> Which media URLs are accepted depends on the component that loads the media:
 >
-> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
->   internal hosts.
+> - By default, the worker validates URLs against a default-deny policy. `https://` and
+>   `data:` sources pass; plain `http://` and hostnames that resolve to private or
+>   loopback addresses are refused. `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads
+>   the media, allows `http://` and internal hosts.
+> - With `--frontend-decoding`, the Dynamo frontend fetches the media. `https://`,
+>   `http://`, and `data:` URLs to public hostnames pass. IP-address hosts, explicit
+>   ports, and hostnames that are blocked or resolve to private or loopback addresses
+>   are refused. `DYN_MM_ALLOW_INTERNAL=1`, set on the worker, allows them.
 > - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
 >   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
 >   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
