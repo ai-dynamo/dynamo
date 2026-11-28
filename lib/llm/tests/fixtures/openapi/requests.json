@@ -11,6 +11,10 @@
     "gap": "Reason schema_valid intentionally differs from valid. Records a known mismatch rather than claiming conformance."
   },
   "cases": [
+    {"name": "chat-null-vllm-xargs", "endpoint": "chat", "valid": true, "body": {"model": "test", "messages": [], "vllm_xargs": null}},
+    {"name": "completion-null-vllm-xargs", "endpoint": "completion", "valid": true, "body": {"model": "test", "prompt": "hello", "vllm_xargs": null}},
+    {"name": "chat-vllm-xargs", "endpoint": "chat", "valid": true, "body": {"model": "test", "messages": [], "vllm_xargs": {"flag": true, "label": "x", "steps": 4, "tags": ["a", 2, false]}}},
+    {"name": "completion-vllm-xargs", "endpoint": "completion", "valid": true, "body": {"model": "test", "prompt": "hello", "vllm_xargs": {"flag": true, "label": "x", "steps": 4, "tags": ["a", 2, false]}}},
     {"name": "minimal-chat", "endpoint": "chat", "valid": true, "body": {"model": "test", "messages": [{"role": "user", "content": "hello"}]}},
     {"name": "missing-model", "endpoint": "chat", "valid": false, "body": {"messages": []}},
     {"name": "developer-null-name-empty-content", "endpoint": "chat", "valid": true, "body": {"model": "test", "messages": [{"role": "developer", "content": [], "name": null}]}},
