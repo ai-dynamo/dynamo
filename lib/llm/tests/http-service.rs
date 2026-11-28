@@ -2883,6 +2883,159 @@ async fn test_batch_preflight_error_kills_sibling_prompts() {
     task.await.unwrap().unwrap();
 }
 
+/// Completions engine that stamps every chunk with its own context id, the way
+/// the preprocessor's delta generator does, and records the ids it was given.
+#[derive(Default)]
+struct BatchIdEngine {
+    context_ids: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for BatchIdEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (mut request, context) = request.transfer(());
+        let ctx = context.context();
+        self.context_ids.lock().unwrap().push(ctx.id().to_string());
+
+        // As the preprocessor does: non-streaming requests always get usage.
+        let stream_flag = request.inner.stream.unwrap_or(false);
+        request.enable_usage_for_nonstreaming(stream_flag);
+        let generator = request.response_generator(ctx.id().to_string());
+
+        let mut chunks = vec![
+            generator.create_choice(0, Some("a".to_string()), None, None),
+            generator.create_choice(
+                0,
+                Some("b".to_string()),
+                Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                None,
+            ),
+        ];
+        if generator.is_usage_enabled() {
+            chunks.push(generator.create_usage_chunk());
+        }
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter(
+                chunks.into_iter().map(Annotated::from_data),
+            )),
+            ctx,
+        ))
+    }
+}
+
+/// A batched completion is one response, so it carries one id. Each prompt
+/// runs under its own `{request_id}-{idx}` context, and before the fix the
+/// streamed content chunks leaked that per-prompt id while only the usage
+/// chunk carried `cmpl-{request_id}`.
+#[tokio::test]
+async fn test_batch_completion_uses_one_response_id() {
+    const MODEL: &str = "batch-id-model";
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    let engine = Arc::new(BatchIdEngine::default());
+    state
+        .manager()
+        .add_completions_model(MODEL, card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let prompts = ["one", "two", "three"];
+    let expected_id = || {
+        let ids = std::mem::take(&mut *engine.context_ids.lock().unwrap());
+        assert_eq!(ids.len(), prompts.len());
+        let (request_id, _) = ids[0].rsplit_once('-').expect("per-prompt context id");
+        format!("cmpl-{request_id}")
+    };
+
+    for include_usage in [false, true] {
+        let mut body = serde_json::json!({
+            "model": MODEL,
+            "stream": true,
+            "prompt": prompts,
+        });
+        if include_usage {
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
+        let text = client
+            .post(format!("http://localhost:{port}/v1/completions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        let chunks: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let content_chunks = chunks
+            .iter()
+            .filter(|chunk| !chunk["choices"].as_array().unwrap().is_empty())
+            .count();
+        assert_eq!(content_chunks, 2 * prompts.len(), "body: {text}");
+        let usage_chunks = chunks
+            .iter()
+            .filter(|chunk| chunk["choices"].as_array().unwrap().is_empty())
+            .count();
+        assert_eq!(usage_chunks, usize::from(include_usage), "body: {text}");
+
+        let expected = expected_id();
+        for chunk in &chunks {
+            assert_eq!(
+                chunk["id"], expected,
+                "include_usage={include_usage}: every chunk must carry the request id; body: {text}"
+            );
+        }
+    }
+
+    // The non-streaming fold already reports one id; keep it equal to the
+    // streamed one.
+    let response: serde_json::Value = client
+        .post(format!("http://localhost:{port}/v1/completions"))
+        .json(&serde_json::json!({"model": MODEL, "prompt": prompts}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["choices"].as_array().unwrap().len(), prompts.len());
+    assert_eq!(response["id"], expected_id());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn test_audio_speech_streams_worker_chunks() {
     let engine = Arc::new(ChunkedAudioEngine::default());
