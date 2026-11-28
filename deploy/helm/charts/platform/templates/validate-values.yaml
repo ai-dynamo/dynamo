@@ -125,6 +125,31 @@ Volcano:
   (index .Values.global "kai-scheduler")
   (index .Values.global "kai-scheduler").install
 }}
+{{- if $kaiInstalled }}
+  {{- /* The operator treats a missing, null or empty name as "kai-scheduler"; match it so those are not rejected.
+       Only those count as unset: `default` would also turn false or 0 into "kai-scheduler",
+       while operator-config.yaml renders them as "false" or "0". */ -}}
+  {{- $kaiSchedulerNameValue := dig "kai-scheduler" "schedulerName" "" (.Values.global | default dict) }}
+  {{- $kaiSchedulerName := "kai-scheduler" }}
+  {{- if not (or (kindIs "invalid" $kaiSchedulerNameValue) (eq (toString $kaiSchedulerNameValue) "")) }}
+    {{- $kaiSchedulerName = toString $kaiSchedulerNameValue }}
+  {{- end }}
+  {{- if ne $kaiSchedulerName "kai-scheduler" }}
+    {{- fail (printf `
+CONFIGURATION ERROR: global.kai-scheduler.schedulerName %q requires an externally managed KAI-compatible scheduler.
+The bundled KAI Scheduler (global.kai-scheduler.install: true) always runs as "kai-scheduler",
+so pods that select %q would never be scheduled.
+
+Either keep the default name with the bundled scheduler, or install the custom scheduler yourself and set:
+
+global:
+  kai-scheduler:
+    install: false
+    enabled: true
+    schedulerName: %s
+` $kaiSchedulerName $kaiSchedulerName $kaiSchedulerName) }}
+  {{- end }}
+{{- end }}
 {{- if and $groveInstalled $kaiInstalled }}
   {{- $kaiValues := default (dict) (index .Values "kai-scheduler") }}
   {{- $schedulerValues := default (dict) (index $kaiValues "scheduler") }}
