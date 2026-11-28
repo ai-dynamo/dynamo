@@ -1596,6 +1596,7 @@ mod tests {
         }
     }
 
+    /// Terminal events include an explicit null or the matched stop string, exactly once.
     #[tokio::test]
     async fn test_stream_stop_sequence_metadata() {
         // `matched` is the backend's `nvext.stop_reason`; `None` sends no nvext.
