@@ -1157,6 +1157,12 @@ shared:
   - runtime
   - backend-sglang
   - sidecar
+- glob: lib/sidecar/testkit/tests/sglang_sidecar_mocker.rs
+  owners:
+  - runtime
+  - performance
+  - backend-sglang
+  - sidecar
 - glob: lib/sidecar/testkit/tests/support/lpx.rs
   owners:
   - runtime

@@ -48,4 +48,5 @@ tonic-v14 = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+# Only this crate may dev-depend on the mocker, never the reverse: crate staging cannot publish a mutual dev-dependency.
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }

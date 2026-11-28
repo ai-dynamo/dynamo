@@ -14,7 +14,7 @@ and Mockers do not depend on testkit. Backend fixtures live in `tests/support/`
 and are local to the integration suite, rather than a public fixture API.
 
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
-The two CPU files separate direct engine calls from child-process startup,
+The CPU files separate direct engine calls from child-process startup,
 discovery and shutdown, making each setup easier to follow and run independently.
 
 ## Integration tests
@@ -70,6 +70,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream; SGLang with one sidecar per node: Abort only on the owning listener, by that dispatch's own rid, for gRPC and native requests, and engine loss naming the lost listener's DP rank | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery and changed-role startup; vLLM withdrawal and process exit on engine loss; SGLang with one sidecar per node: the prefill rank and port through a real PrefillRouter under round-robin over two nodes (with a pinned rank), and withdrawal and process exit when one listener is lost | CPU, ordinary pre-merge Cargo tests |
+| `sglang_sidecar_mocker.rs` | SGLang sidecar against the SGLang Mocker over gRPC: incremental tokens, logprobs and usage; prefill-to-decode handoff; abort releasing Mocker work; isolated cancellation and shutdown reaching gRPC streams; stored and evicted KV block relay | CPU, ordinary pre-merge Cargo tests |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
