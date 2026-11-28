@@ -6,7 +6,7 @@
 use std::{future::Future, sync::Arc};
 
 use dynamo_runtime::{
-    error::{DynamoError, ErrorClass},
+    error::{DynamoError, ErrorClass, ErrorType},
     pipeline::{AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -282,9 +282,11 @@ fn cancel_prefill_on_decode_error(error: &anyhow::Error, prefill_context: &dyn A
     }
 }
 
-/// Cancel only an explicit decode admission refusal, which has no receiver
-/// waiting for staged KV. Ambiguous transport errors retain the existing
-/// independent-prefill transfer cleanup behavior.
+/// Cancel only when no decode worker took the request, so no receiver waits for
+/// the staged KV: an explicit decode admission refusal, or `WorkerUnavailable`
+/// (no decode worker in the prefill worker's KV-transfer domain, or the addressed
+/// worker does not serve the endpoint). Ambiguous transport errors retain the
+/// existing independent-prefill transfer cleanup behavior.
 fn cancel_prefill_on_decode_rejection(
     error: &(dyn std::error::Error + 'static),
     prefill_context: &dyn AsyncEngineContext,
@@ -292,10 +294,11 @@ fn cancel_prefill_on_decode_rejection(
     let mut current = Some(error);
     while let Some(cause) = current {
         if let Some(error) = cause.downcast_ref::<DynamoError>()
-            && error.class() == ErrorClass::CapacityExhausted
+            && (error.class() == ErrorClass::CapacityExhausted
+                || error.error_type() == ErrorType::WorkerUnavailable)
         {
             tracing::debug!(request_id = %prefill_context.id(), %error,
-                "Cancelling remote prefill after decode admission rejection");
+                "Cancelling remote prefill: no decode worker took the request");
             prefill_context.stop_generating();
             return true;
         }
@@ -849,6 +852,9 @@ mod tests {
                 ErrorType::ResourceExhausted,
                 ErrorType::CapacityExhausted,
                 ErrorType::Backend(BackendError::WorkerOverloaded),
+                // No decode worker took the request: none in the prefill worker's
+                // KV-transfer domain, or the addressed one has no handler for it.
+                ErrorType::WorkerUnavailable,
             ] {
                 assert_dispatch_rejection_cancels_prefill(
                     output,
@@ -871,6 +877,9 @@ mod tests {
                 ErrorType::ResourceExhausted,
                 ErrorType::CapacityExhausted,
                 ErrorType::Backend(BackendError::WorkerOverloaded),
+                // No decode worker took the request: none in the prefill worker's
+                // KV-transfer domain, or the addressed one has no handler for it.
+                ErrorType::WorkerUnavailable,
             ] {
                 assert_stream_rejection_cancels_prefill(output, error_type).await;
             }

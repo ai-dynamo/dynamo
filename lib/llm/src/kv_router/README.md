@@ -124,6 +124,9 @@ hops.
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's
   `routing_constraints`.
+- If the decode leg finds no worker in the prefill worker's required KV-transfer domain, the
+  decode `RoutingHost` reports a migratable `WorkerUnavailable` instead of an internal error,
+  and the hop cancels a prefill still running in the background (bootstrap handoff).
 - Rewrites the decode request's `router_config_override`. `assume_kv_reuse` and
   `track_prefill_tokens` set decode's load accounting. Decode's overlap credit is fixed when the
   selection policy is built, from the worker role and whether conditional disaggregation is
