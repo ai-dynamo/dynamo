@@ -84,9 +84,6 @@ const (
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
-	// Sidecar image
-	SidecarImage = "bitnami/kubectl:latest"
-
 	// Volume names
 	VolumeNameProfilingOutput            = "profiling-output"
 	VolumeNameProfilingConfig            = "profiling-config"
@@ -1552,6 +1549,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
+	// Image configuration applies only to new Jobs; existing Pod templates are immutable.
+	outputCopierImage := profilingJobOutputCopierImage(existingJob, r.Config.DGDR.EffectiveOutputCopierImage())
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
@@ -1674,7 +1674,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		sidecarContainer := corev1.Container{
 			Name:    ContainerNameOutputCopier,
-			Image:   SidecarImage,
+			Image:   outputCopierImage,
 			Command: []string{"/bin/sh", "-c"},
 			Args:    []string{scriptBuf.String()},
 			VolumeMounts: []corev1.VolumeMount{{
@@ -1799,6 +1799,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	dgdr.Status.ProfilingJobName = job.Name
 
 	return modified, nil
+}
+
+// profilingJobOutputCopierImage preserves the image in a non-nil Job's immutable Pod template.
+func profilingJobOutputCopierImage(job *batchv1.Job, configuredImage string) string {
+	if index := findContainerIndex(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier); index >= 0 {
+		return job.Spec.Template.Spec.Containers[index].Image
+	}
+	return configuredImage
 }
 
 // marshalDGDRSpec produces the JSON string passed to the profiler via --config.

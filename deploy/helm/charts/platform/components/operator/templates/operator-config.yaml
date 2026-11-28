@@ -23,6 +23,10 @@ data:
   config.yaml: |
     apiVersion: operator.config.dynamo.nvidia.com/v1alpha1
     kind: OperatorConfiguration
+    {{- with .Values.dgdr.outputCopierImage }}
+    dgdr:
+      outputCopierImage: {{ . | quote }}
+    {{- end }}
     server:
       metrics:
         bindAddress: "0.0.0.0"

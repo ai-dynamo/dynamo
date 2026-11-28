@@ -78,6 +78,10 @@ type OperatorConfiguration struct {
 	// +required
 	GPU GPUConfiguration `json:"gpu"`
 
+	// DGDR configures profiling Jobs created for v1beta1 deployment requests.
+	// +optional
+	DGDR DGDRConfiguration `json:"dgdr,omitempty"`
+
 	// Logging configuration
 	// +required
 	Logging LoggingConfiguration `json:"logging"`
@@ -89,6 +93,28 @@ type OperatorConfiguration struct {
 	// LPX scheduler integration and model-registry configuration.
 	// +required
 	LPX LPXConfiguration `json:"lpx"`
+}
+
+// DefaultDGDROutputCopierImage is used when no output-copier image is configured.
+const DefaultDGDROutputCopierImage = "bitnami/kubectl:latest"
+
+// DGDRConfiguration holds operator-wide profiling Job settings.
+type DGDRConfiguration struct {
+	// OutputCopierImage is a complete image reference for the output-copier sidecar.
+	// Empty uses the bundled kubectl image. The image must provide
+	// /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.
+	// Per-request profiling Job container image overrides take precedence.
+	// Existing Jobs keep their image.
+	// +optional
+	OutputCopierImage string `json:"outputCopierImage,omitempty"`
+}
+
+// EffectiveOutputCopierImage resolves an omitted image to the bundled default.
+func (c DGDRConfiguration) EffectiveOutputCopierImage() string {
+	if c.OutputCopierImage != "" {
+		return c.OutputCopierImage
+	}
+	return DefaultDGDROutputCopierImage
 }
 
 // ServerConfiguration holds server bind addresses and ports.

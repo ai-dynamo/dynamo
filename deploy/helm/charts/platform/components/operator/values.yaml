@@ -55,6 +55,10 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
+dgdr:
+  # -- Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator default; per-DGDR image overrides take precedence. See "DGDR Output-Copier Image" in the platform chart README for image requirements.
+  outputCopierImage: ""
+
 # Environment variables to pass to operator Deployment.
 env: []
 

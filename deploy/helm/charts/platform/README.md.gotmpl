@@ -935,6 +935,42 @@ rejects custom `webhook.namespaceSelector` values.
 
 {{ template "chart.valuesSection" . }}
 
+### DGDR Output-Copier Image
+
+The v1beta1 DGDR profiling Job's `output-copier` sidecar relays profiler status and writes
+results to a ConfigMap. Configure it with `dynamo-operator.dgdr.outputCopierImage`.
+Omitting the value or setting it to `""` keeps the default `bitnami/kubectl:latest`.
+To use a private registry or another kubectl image, set a complete image reference:
+
+```yaml
+dynamo-operator:
+  dgdr:
+    outputCopierImage: registry.example.com/tools/kubectl:approved
+```
+
+Replace the example reference with your image's repository and tag or digest. Copy the full
+manifest list and preserve its bytes to keep a multi-architecture digest; otherwise use the digest
+reported by your registry. With the [standalone operator chart](components/operator/README.md#installation),
+use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
+
+Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash),
+`kubectl`, and `date`, `grep`, `awk`, `tr`, `sed`, `cat`, and `sleep`, all usable by the
+non-root UID/GID 1000 the container runs as. Choose a kubectl version compatible with your
+Kubernetes API server.
+
+For authenticated registries, create pull Secrets in the DGDR namespace and reference them through
+`spec.overrides.profilingJob.template.spec.imagePullSecrets`. The chart's `imagePullSecrets` apply
+only to the operator Pod. See the [profiler guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md).
+
+A per-request `spec.overrides.profilingJob.template.spec.containers` entry named `output-copier`
+takes precedence. Only `image` and `resources` are merged for that container; other fields remain
+controller-owned.
+
+The profiling Job is created when profiling starts, and an existing Job keeps its image. To use a
+new image after profiling has started, create a new DGDR or delete and recreate the existing DGDR.
+This setting applies to v1beta1 profiling Jobs only. DGDR v1beta2 Runs use the operator image for
+their publisher, so they need no separate image.
+
 ### LPX Integration
 
 LPX is experimental and may change incompatibly. Enable it with `dynamo-operator.lpx.enabled=true`.

@@ -18,3 +18,14 @@ deployment gate verifies both of the following:
 - The matching Grove CRDs are installed, and the controller Deployment completed its rollout.
 
 Upgrade the Grove controller and its CRDs together before applying the Dynamo operator chart.
+
+## Installation
+
+After satisfying the Grove prerequisite above, install from the repository root:
+
+```bash
+helm upgrade --install dynamo-operator ./deploy/helm/charts/platform/components/operator \
+  --namespace dynamo-system --create-namespace \
+  --set discoveryBackend=kubernetes \
+  --set global.grove.enabled=true
+```
