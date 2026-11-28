@@ -95,10 +95,10 @@ def _is_failed_open(exc: BaseException) -> bool:
 
 
 def _unsupported_video_input(url: str, cause: BaseException) -> HttpStatusError:
-    """Client input that is not a video."""
+    """Client input that is not a decodable video."""
     # Operators still need the decoder's own text. Clients see this exact
     # sentence: errors.rs allowlists it as the public message.
-    logger.warning("Rejecting non-video input supplied as video: %s", cause)
+    logger.warning("Rejecting undecodable video input: %s", cause)
     return HttpStatusError(415, "Unsupported video media", url)
 
 
@@ -250,8 +250,9 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        Bytes with no codec and no container are a client error. A probed
-        codec, or a known container, stays a missing-decoder error.
+        Bytes a working OpenCV video backend cannot open are a client error,
+        as are bytes with no codec and no container. Without a backend, a
+        probed codec or a known container stays a missing-decoder error.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -288,21 +289,21 @@ class VideoLoader:
         except (OSError, SystemError, ValueError) as exc:
             if not _attributable_to_cv2(exc, media_io):
                 raise
-            # A failed open is "this is not a video" even when a backend exists.
-            # A known container still gets install guidance below.
-            if _is_non_video(content, codec) and (
-                _is_failed_open(exc) or _cv2_lacks_video_backend()
-            ):
+            if _cv2_lacks_video_backend():
+                # A known container still gets install guidance.
+                if _is_non_video(content, codec):
+                    raise _unsupported_video_input(source_url, exc) from exc
+                raise video_decoder_missing(
+                    "vllm",
+                    "opencv-python-headless",
+                    "cv2",
+                    codec,
+                    cause=str(exc),
+                ) from exc
+            # A working backend could not open the bytes, whatever they claim to be.
+            if _is_failed_open(exc):
                 raise _unsupported_video_input(source_url, exc) from exc
-            if not _cv2_lacks_video_backend():
-                raise
-            raise video_decoder_missing(
-                "vllm",
-                "opencv-python-headless",
-                "cv2",
-                codec,
-                cause=str(exc),
-            ) from exc
+            raise
 
     def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
         num_frames = getattr(media_io, "num_frames", self._num_frames)
