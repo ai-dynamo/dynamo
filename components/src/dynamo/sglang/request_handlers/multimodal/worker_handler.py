@@ -16,7 +16,7 @@ from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferReque
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -24,6 +24,7 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_utils import request_cache_salt
 from dynamo.sglang.thinking_budget import (
     apply_thinking_budget,
     thinking_budget_requested,
@@ -631,6 +632,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             bootstrap_port=bootstrap_info["bootstrap_port"],
             bootstrap_room=bootstrap_info["bootstrap_room"],
             **_build_decode_mm_items(request, bootstrap_info["bootstrap_room"]),
+            **cache_salt_kwargs(self.engine, request_cache_salt(request_data)),
             external_trace_header=trace_header,
             rid=context.trace_id if context else None,
         )
@@ -701,6 +703,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                     request_data,
                     thinking_budget_requested=thinking_budget_requested(request_data),
                 )
+            )
+            gen_params.update(
+                cache_salt_kwargs(self.engine, request_cache_salt(request_data))
             )
             if image_mm_items:
                 gen_params["image_data"] = image_mm_items
@@ -1014,6 +1019,9 @@ class MultimodalPrefillWorkerHandler(
                         request_data,
                         thinking_budget_requested=has_thinking_budget,
                     )
+                )
+                gen_params.update(
+                    cache_salt_kwargs(self.engine, request_cache_salt(request_data))
                 )
 
                 if image_mm_items:

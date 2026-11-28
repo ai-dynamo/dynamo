@@ -65,6 +65,7 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     read_jinja_chat_template,
+    request_cache_salt,
     request_id_from_context,
     resolve_chat_template,
     worker_warmup,
@@ -645,6 +646,11 @@ def _build_dynamo_preproc(
             routing = {**nvext_routing, **routing}
     else:
         routing = nvext_routing
+    cache_salt = request_cache_salt(request)
+    if cache_salt is not None:
+        # The router and worker must use the same public namespace. Build a new
+        # dict so the caller's routing hints are not mutated.
+        routing = {**(routing or {}), "cache_salt": cache_salt}
 
     # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
     # become int; the HTTP layer has already validated the keys and values.
@@ -712,6 +718,8 @@ def _build_dynamo_preproc(
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
     }
+    if cache_salt is not None:
+        nvext_passthrough["cache_salt"] = cache_salt
     if nvext_passthrough:
         preproc["extra_args"] = {"nvext": nvext_passthrough}
 

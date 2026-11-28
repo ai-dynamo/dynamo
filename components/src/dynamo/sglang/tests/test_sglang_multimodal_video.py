@@ -36,6 +36,7 @@ from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     MultimodalWorkerHandler,
     _build_mm_items,
 )
+from dynamo.sglang.request_utils import request_cache_salt
 
 pytestmark = [
     pytest.mark.unit,
@@ -974,3 +975,102 @@ async def test_multimodal_decode_preserves_position_metadata_without_embeddings(
         assert "feature" not in item
         assert isinstance(item["hash"], int)
     assert image["hash"] != video["hash"]
+
+
+def test_encode_forwarding_keeps_cache_salt():
+    """The encode worker re-serializes the frontend request for the PD worker."""
+    raw_request = {
+        "token_ids": [1, 2, 3],
+        "stop_conditions": {},
+        "sampling_options": {},
+        "routing": {"cache_salt": "tenant-a", "backend_instance_id": 7},
+        "extra_args": {"nvext": {"cache_salt": "tenant-a"}},
+    }
+    forwarded = SglangMultimodalRequest(
+        request=PreprocessedRequest.model_validate(raw_request)
+    )
+    received = SglangMultimodalRequest.model_validate_json(forwarded.model_dump_json())
+
+    assert request_cache_salt(received.request.model_dump()) == "tenant-a"
+
+
+def _cache_salt_preprocessed_request(salted: bool) -> PreprocessedRequest:
+    salt_fields = (
+        {
+            "routing": {"cache_salt": "tenant-a"},
+            "extra_args": {"nvext": {"cache_salt": "tenant-a"}},
+        }
+        if salted
+        else {}
+    )
+    return PreprocessedRequest(
+        token_ids=[1, 2, 3],
+        stop_conditions=StopConditions(max_tokens=1),
+        sampling_options=SamplingOptions(),
+        **salt_fields,
+    )
+
+
+def _recording_engine():
+    async def output():
+        yield {"output_ids": [7], "meta_info": {"finish_reason": {"type": "stop"}}}
+
+    return SimpleNamespace(async_generate=AsyncMock(return_value=output()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("salted", [True, False], ids=["salted", "unsalted"])
+@pytest.mark.parametrize("mode", ["aggregated", "decode", "prefill"])
+async def test_multimodal_engine_submission_carries_cache_salt(
+    monkeypatch, mode, salted
+):
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], None, None
+
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+    engine = _recording_engine()
+    request = SglangMultimodalRequest(request=_cache_salt_preprocessed_request(salted))
+
+    if mode == "prefill":
+        handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+        handler.bootstrap_host = "prefill-host"
+        handler.bootstrap_port = 1234
+        handler.embeddings_processor = SimpleNamespace(
+            release_embeddings=lambda _: None
+        )
+        handler.enable_trace = False
+        handler.engine = engine
+        handler.config = SimpleNamespace(server_args=SimpleNamespace())
+        await handler._start_prefill_generation(
+            DisaggSglangMultimodalRequest(
+                request=request, sampling_params={"max_new_tokens": 1}
+            ),
+            17,
+        )
+    else:
+        handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+        handler.config = SimpleNamespace(server_args=SimpleNamespace())
+        handler.enable_trace = False
+        handler.engine = engine
+        handler.embeddings_processor = SimpleNamespace(
+            release_embeddings=lambda _: None
+        )
+        handler._get_bootstrap_from_prefill = AsyncMock(
+            return_value={
+                "bootstrap_host": "prefill.invalid",
+                "bootstrap_port": 1,
+                "bootstrap_room": 42,
+            }
+        )
+        generate = (
+            handler._generate_aggregated
+            if mode == "aggregated"
+            else handler._generate_disaggregated
+        )
+        assert [item async for item in generate(request, lambda: None)]
+
+    kwargs = engine.async_generate.call_args.kwargs
+    if salted:
+        assert kwargs["cache_salt"] == "tenant-a"
+    else:
+        assert "cache_salt" not in kwargs

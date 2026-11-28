@@ -119,6 +119,16 @@ def random_call_id() -> str:
     return f"call_{uuid.uuid4().int & _MASK_64_BITS:016x}"
 
 
+def request_cache_salt(request: dict[str, Any]) -> str | None:
+    """Match the public precedence of Rust's ``request_cache_salt``."""
+    nvext = request.get("nvext")
+    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
+    if isinstance(salt, str) and salt:
+        return salt
+    salt = request.get("cache_salt")
+    return salt if isinstance(salt, str) and salt else None
+
+
 def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
     """Return whether a request opted into a response nvext field."""
     nvext = request.get("nvext")
