@@ -638,7 +638,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
         codec: str | None = None
         try:
-            codec = probe_video_codec(content)
+            codec = await asyncio.to_thread(probe_video_codec, content)
             if not should_use_nvdec(codec):
                 # Not going to hardware. SGLang's software path needs
                 # torchcodec or decord, which the codec-compliant image strips
