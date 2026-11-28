@@ -161,27 +161,3 @@ def _precompute_transition_cdfs(G: nx.DiGraph) -> nx.DiGraph:
         ]
 
     return G
-
-
-def _validate_graph(G: nx.DiGraph) -> bool:
-    for node in G.nodes():
-        # Skip nodes without parents or children
-        if G.in_degree(node) == 0 or G.out_degree(node) == 0:
-            continue
-
-        # Get incoming edge weight (should only be one parent)
-        parent = list(G.predecessors(node))[0]
-        in_weight = G[parent][node]["weight"]
-
-        # Sum outgoing edge weights
-        out_weights = [G[node][child]["weight"] for child in G.successors(node)]
-        out_weights += [G.nodes[node]["to_leaf"], G.nodes[node]["end"]]
-
-        # Compare weights (using np.isclose for float comparison)
-        if not in_weight == sum(out_weights):
-            raise ValueError(
-                f"Weight mismatch at node {node}: "
-                f"incoming weight {in_weight} != sum of outgoing weights {sum(out_weights)}"
-            )
-
-    return True
