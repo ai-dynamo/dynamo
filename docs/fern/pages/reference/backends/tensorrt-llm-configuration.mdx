@@ -143,7 +143,9 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 ## KV cache and events
 
 <ParamField path="--kv-block-size" type="integer" default="32">
-  Size of a single KV cache block in tokens. Larger blocks improve memory-copy efficiency but reduce cache granularity and reuse flexibility.
+  Fallback KV cache block size in tokens. Dynamo does not pass this value to TensorRT-LLM. To change the engine's block size, set `kv_cache_config.tokens_per_block` with `--extra-engine-args` or `--override-engine-args`.
+
+  When TensorRT-LLM reports its KV cache capacity, Dynamo uses the reported block size for model registration (KV routing), KV events, and request handling, and ignores this value. Dynamo uses this value only when the engine reports no KV cache capacity, and for workers in `--disaggregation-mode encode`. In those cases, set it to the engine's block size.
 
   Environment variable: `DYN_TRTLLM_KV_BLOCK_SIZE`
 </ParamField>
