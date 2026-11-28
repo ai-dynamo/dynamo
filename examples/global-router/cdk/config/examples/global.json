@@ -1,0 +1,36 @@
+{
+  "account": "111111111111",
+  "stackName": "example-global",
+  "config": {
+    "name": "gr",
+    "namespace": "global",
+    "cluster": {
+      "name": "example-us-east-2",
+      "region": "us-east-2",
+      "securityGroupId": "sg-00000000000000000",
+      "kubectlServiceToken": "arn:aws:lambda:us-east-2:111111111111:function:example-kubectl",
+      "oidcProviderArn": "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/EXAMPLE"
+    },
+    "frontendImage": "example.invalid/global-frontend:tested-revision",
+    "discoveryImage": "example.invalid/global-discovery-service:tested-revision",
+    "frontendReplicas": 2,
+    "discoveryReplicas": 2,
+    "stores": {
+      "homeRegion": "us-east-2",
+      "replicaRegions": [
+        "us-west-2"
+      ],
+      "affinityTableName": "example-global-affinity",
+      "discoveryTableName": "example-global-discovery"
+    },
+    "affinityScope": "example-global-router",
+    "discoveryMode": "registrations",
+    "ingress": {
+      "sourceCidrs": [
+        "10.44.0.0/16",
+        "10.45.0.0/16"
+      ]
+    },
+    "affinityTimeoutMs": 1000
+  }
+}

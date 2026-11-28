@@ -1,0 +1,45 @@
+{
+  "listen": "0.0.0.0:8080",
+  "freshness": {
+    "catalog_max_age_ms": 60000,
+    "readiness_max_age_ms": 60000,
+    "capacity_max_age_ms": 30000,
+    "load_max_age_ms": 30000,
+    "kv_usage_max_age_ms": 30000,
+    "kv_overlap_max_age_ms": 30000
+  },
+  "overlap_max_age_ms": 30000,
+  "kv_aware_token_id_completions": true,
+  "pools": [
+    {
+      "site_id": "aws-ohio",
+      "namespace": "dynamo",
+      "dgd_name": "mocker-ohio-1",
+      "region": "us-east-2",
+      "availability_zone": "us-east-2a",
+      "cluster": "mocker-ohio-cluster",
+      "runtime_namespace": "dynamo-mocker-ohio-1-example",
+      "model": "Qwen/Qwen3-32B",
+      "private_frontend_base_url": "http://frontend-ohio.example.invalid:8000",
+      "relay_grpc_url": "http://relay-ohio.example.invalid:50051",
+      "stats_grpc_url": "http://relay-ohio.example.invalid:50052",
+      "subscriber_id": "global-router-ohio-mocker-ohio-1",
+      "stats_only_aggregated": false
+    },
+    {
+      "site_id": "aws-west",
+      "namespace": "dynamo",
+      "dgd_name": "mocker-west-1",
+      "region": "us-west-2",
+      "availability_zone": "us-west-2a",
+      "cluster": "mocker-west-cluster",
+      "runtime_namespace": "dynamo-mocker-west-1-example",
+      "model": "Qwen/Qwen3-32B",
+      "private_frontend_base_url": "http://frontend-west.example.invalid:8000",
+      "relay_grpc_url": "http://relay-west.example.invalid:50051",
+      "stats_grpc_url": "http://relay-west.example.invalid:50052",
+      "subscriber_id": "global-router-ohio-mocker-west-1",
+      "stats_only_aggregated": false
+    }
+  ]
+}

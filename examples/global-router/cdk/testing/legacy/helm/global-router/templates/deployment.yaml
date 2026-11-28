@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-router
+  labels:
+    app.kubernetes.io/name: global-router
+spec:
+  replicas: {{ .Values.router.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: global-router
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app.kubernetes.io/name: global-router
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: global-router
+        image: {{ required "router.image is required" .Values.router.image | quote }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - /etc/global-router/config.json
+        env:
+        - name: RUST_LOG
+          value: warn,dynamo_llm::global_view=info
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 12
+        resources:
+{{ toYaml .Values.router.resources | indent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /etc/global-router
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: global-router-config

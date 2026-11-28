@@ -1,0 +1,158 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { readFileSync } from "node:fs";
+import {
+  App,
+  Stack,
+  CliCredentialsStackSynthesizer,
+  LegacyStackSynthesizer,
+  RemovalPolicy,
+  aws_s3 as s3,
+  CfnOutput,
+  Tags,
+} from "aws-cdk-lib";
+import { CfnAccessEntry } from "aws-cdk-lib/aws-eks";
+import { DynamoMockerCpuStack } from "../testing/legacy/dynamo-mocker-cpu-stack";
+import {
+  FleetConfig,
+  FleetPeeringsStack,
+  FleetRoutesStack,
+  validateFleet,
+} from "../lib/foundation/fleet-network";
+import { DeploymentConfig } from "../testing/legacy/config";
+
+const app = new App();
+const configPath = app.node.tryGetContext("fleetConfigPath");
+if (typeof configPath !== "string" || !configPath.endsWith(".local.json"))
+  throw new Error("Select a private fleetConfigPath ending in .local.json");
+const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+  prefix: string;
+  accountId: string;
+  sshSourceCidr: string;
+  deployments: Record<string, DeploymentConfig>;
+  network?: FleetConfig;
+};
+if (
+  !/^[a-z](?:[a-z0-9-]{0,14}[a-z0-9])?$/.test(config.prefix) ||
+  !/^\d{12}$/.test(config.accountId)
+)
+  throw new Error(
+    "Use a DNS-safe fleet prefix and a twelve-digit AWS account ID",
+  );
+for (const deployment of Object.values(config.deployments)) {
+  if (
+    !deployment.clusterConfig.clusterName.startsWith(config.prefix + "-") ||
+    !deployment.clusterConfig.bastionConfig.iamRoleName.startsWith(
+      config.prefix + "-",
+    )
+  )
+    throw new Error(
+      "Every cluster and admin role must belong to the selected fleet prefix",
+    );
+}
+const member = app.node.tryGetContext("member") as string;
+const c = config.deployments[member];
+if (!c || !c.clusterConfig.clusterName.startsWith(config.prefix + "-"))
+  throw new Error("Choose a configured prefixed member");
+const mode = app.node.tryGetContext("mode");
+const region = c.clusterConfig.region;
+const bucket = `${config.prefix}-global-router-assets-${config.accountId}-${region}`;
+const base = {
+  env: { account: config.accountId, region },
+  terminationProtection: true,
+};
+const credentials = new CliCredentialsStackSynthesizer({
+  fileAssetsBucketName: bucket,
+});
+if (mode === "assets") {
+  const stack = new Stack(app, "Assets", {
+    ...base,
+    stackName: `${config.prefix}-global-router-${member}-assets`,
+    synthesizer: new LegacyStackSynthesizer(),
+  });
+  new s3.Bucket(stack, "Assets", {
+    bucketName: bucket,
+    blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    enforceSSL: true,
+    encryption: s3.BucketEncryption.S3_MANAGED,
+    versioned: true,
+    removalPolicy: RemovalPolicy.RETAIN,
+  });
+} else if (mode === "foundation") {
+  const stack = new DynamoMockerCpuStack(app, "CpuFleet", {
+    ...base,
+    stackName: `${c.clusterConfig.clusterName}-cdk`,
+    synthesizer: credentials,
+    config: c,
+    adminAccess: {
+      mode: "ssm", launchTemplateName: `${config.prefix}-global-router-${member}-admin`,
+      describeClusterArns: Object.values(config.deployments).map(v =>
+        `arn:aws:eks:${v.clusterConfig.region}:${config.accountId}:cluster/${v.clusterConfig.clusterName}`),
+    },
+  });
+  const cluster = stack.cluster;
+  new CfnOutput(stack, "KubectlServiceToken", {
+    value: cluster.kubectlProvider!.serviceToken,
+  });
+  new CfnOutput(stack, "ClusterSecurityGroup", {
+    value: cluster.clusterSecurityGroupId,
+  });
+  new CfnOutput(stack, "VpcId", { value: stack.vpc.vpcId });
+  new CfnOutput(stack, "PrivateRouteTables", {
+    value: stack.privateRouteTableIds.join(","),
+  });
+  Tags.of(stack).add("Fleet", config.prefix);
+} else if (mode === "admin") {
+  const ohio = config.deployments.ohio;
+  if (!ohio)
+    throw new Error(
+      "Temporary fleet administration requires a configured Ohio admin host",
+    );
+  const stack = new Stack(app, "FleetAdmin", {
+    ...base,
+    stackName: `${config.prefix}-global-router-${member}-admin`,
+    synthesizer: credentials,
+  });
+  new CfnAccessEntry(stack, "FleetAdminAccess", {
+    clusterName: c.clusterConfig.clusterName,
+    principalArn: `arn:aws:iam::${config.accountId}:role/${ohio.clusterConfig.bastionConfig.iamRoleName}`,
+    accessPolicies: [
+      {
+        policyArn:
+          "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+        accessScope: { type: "cluster" },
+      },
+    ],
+  });
+} else if (mode === "peerings" || mode === "routes") {
+  if (!config.network)
+    throw new Error("Collect new fleet metadata before networking");
+  validateFleet(config.network);
+  const m = config.network.members.find((v) => v.id === member);
+  if (!m || !m.clusterName.startsWith(config.prefix + "-"))
+    throw new Error("Invalid prefixed network member");
+  const props = {
+    ...base,
+    stackName: `${config.prefix}-global-router-${member}-${mode}`,
+    synthesizer: credentials,
+    fleet: config.network,
+    member: m,
+  };
+  if (mode === "peerings") new FleetPeeringsStack(app, "Peerings", props);
+  else new FleetRoutesStack(app, "Routes", props);
+} else throw new Error("Choose mode=assets/foundation/admin/peerings/routes");
