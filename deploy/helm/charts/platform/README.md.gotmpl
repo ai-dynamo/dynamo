@@ -200,17 +200,21 @@ this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 or the runtime default when that Pod does not set it. The snapshot compatibility hash therefore
 no longer includes `DYN_RESPONSE_PLANE`.
 
-**Affected:** Checkpointed worker, prefill, and decode components whose checkpoint target
-container sets `DYN_RESPONSE_PLANE`. Components that do not set it keep the same hash.
+**Affected:** Checkpointed worker, prefill, and decode components whose checkpoint target container
+or init containers set `DYN_RESPONSE_PLANE`. Their hash changes unless the variable is still part
+of it: with ordered environment variables, the hash keeps `DYN_RESPONSE_PLANE` when the
+container's command, arguments, or another hashed environment value refers to it. Components that
+do not set it keep the same hash.
 
-**Action:** For a service that restores an existing PodSnapshot through `checkpointRef`, capture
-a new PodSnapshot with the upgraded operator and set `checkpointRef` to it. Automatic checkpoints
-need no action.
+**Action:** For a service that restores an existing PodSnapshot through `checkpointRef`, check the
+restore after the upgrade. If it fails the hash check, capture a new PodSnapshot with the upgraded
+operator and set `checkpointRef` to it. Automatic checkpoints need no action.
 
-**Existing deployments:** For an automatic checkpoint, the new hash gives a new checkpoint ID, so
-the operator captures the worker again. Until that checkpoint is Ready, `startupPolicy` decides
-whether workers start cold or wait. A `checkpointRef` PodSnapshot captured before the upgrade fails
-the hash check with `referenced PodSnapshot ... compatibility hash ... does not match expected hash`.
+**Existing deployments:** When the hash changes, an automatic checkpoint gets a new checkpoint ID,
+so the operator captures the worker again. Until that checkpoint is Ready, `startupPolicy` decides
+whether workers start cold or wait. In the same case, a `checkpointRef` PodSnapshot captured
+before the upgrade fails the hash check with `referenced PodSnapshot ... compatibility hash ...
+does not match expected hash`.
 
 #### Dependency compatibility
 
