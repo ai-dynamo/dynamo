@@ -35,6 +35,7 @@ from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
+    build_ais_perf_model_deployment,
     build_ais_perf_model_spec,
 )
 from dynamo.profiler.utils.dgd_materialization import (
@@ -530,6 +531,17 @@ async def run_profile(
             if not ops.dry_run
             else None
         )
+        ais_perf_model_deployment = (
+            build_ais_perf_model_deployment(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                resolved_backend=resolved_backend,
+                system=system,
+            )
+            if not ops.dry_run
+            else None
+        )
         final_config = assemble_final_config(
             dgdr,
             ops,
@@ -539,6 +551,7 @@ async def run_profile(
             aic_spec=aic_spec,
             ais_perf_model=ais_perf_model,
             resolved_backend=resolved_backend,
+            ais_perf_model_deployment=ais_perf_model_deployment,
         )
 
         final_config = materialize_dgd(

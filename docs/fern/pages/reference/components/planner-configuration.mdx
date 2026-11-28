@@ -285,6 +285,22 @@ common forward-pass query API. The prediction path is the same for built-in and
 external inputs, including mixed steps. If it cannot estimate the resulting shape, Planner skips scaling decisions that
 depend on that estimate.
 
+<ParamField path="ais_perf_model_deployment" type="object" default="null">
+  Identity of the selected deployment, by worker type. The profiler writes it onto the
+  Planner ConfigMap for each worker type whose `ais_perf_model` config takes identity
+  fields from a source: `from` or a `dataset_profiles` entry. You do not normally set
+  this by hand. Each entry holds only `model`, `system`, `backend`, `worker_type`, `tp`,
+  `pp`, `attention_dp`, `moe_tp_size`, `moe_ep_size`, and `cp_size`; another key is an
+  error.
+
+  When the Planner reads the source, it compares these fields of the resolved config with
+  the entry. A `pp`, `moe_tp_size`, `moe_ep_size`, or `cp_size` that either side leaves
+  out counts as 1, and a value of `unknown` in a state snapshot is not compared. A
+  difference is an error, for example
+  `ais_perf_model entry for decode: tp=4 from its source conflicts with selected deployment tp=2`.
+  Without this field, the Planner does not compare the source.
+</ParamField>
+
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
 </ParamField>
@@ -1144,7 +1160,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
 - At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`. The only exception is retune-only mode: `retune` set with both `enable_load_scaling` and `enable_throughput_scaling` explicitly `false` (see [Retune](#retune-experimental)).
-- When `ais_perf_model` is set, it must have an entry for every worker type of the mode: `prefill` and `decode` for `disagg`, the matching worker type for `prefill`/`decode`, or `aggregated` for `agg`. One config without `worker_type` covers every worker type. The retired `aic_perf_model` input is rejected. Unknown keys written in the config are rejected when the config is loaded. For a config without `from` that the mode uses, wrong values and a missing `systems_paths` directory or state snapshot are rejected then too, as for the deprecated `roles` form. For a config with `from`, the file it names is read, and its values and keys are checked, when the Planner first uses the config.
+- When `ais_perf_model` is set, it must have an entry for every worker type of the mode: `prefill` and `decode` for `disagg`, the matching worker type for `prefill`/`decode`, or `aggregated` for `agg`. One config without `worker_type` covers every worker type. The retired `aic_perf_model` input is rejected. Unknown keys written in the config are rejected when the config is loaded. For a config without `from` that the mode uses, wrong values and a missing `systems_paths` directory or state snapshot are rejected then too, as for the deprecated `roles` form. For a config with `from`, the file it names is read, and its values and keys are checked, when the Planner first uses the config. At that time, the identity fields the source gives must match `ais_perf_model_deployment` when it has an entry for the worker type.
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 - `retune` has its own cross-field rules, listed with its fields in [Retune](#retune-experimental). A live Planner rejects a `retune` with executor `local`; executor `dgdr` adds the [configuration rules](../../kubernetes/auto-deployment/planner-live-retune.md#deployment-rules) of live retune.

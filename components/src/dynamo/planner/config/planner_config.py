@@ -180,6 +180,53 @@ def ais_perf_model_role_config(
         raise ValueError(f"invalid AIS config for {worker_type}: {error}") from error
 
 
+# The keys of a perf model config that say which deployment it describes.
+AIS_IDENTITY_FIELDS = (
+    "model",
+    "system",
+    "backend",
+    "worker_type",
+    "tp",
+    "pp",
+    "attention_dp",
+    "moe_tp_size",
+    "moe_ep_size",
+    "cp_size",
+)
+# Of these, the ones that mean 1 where a config has no value for them.
+_AIS_ONE_WHEN_UNSET = ("pp", "moe_tp_size", "moe_ep_size", "cp_size")
+
+
+def check_ais_identity(
+    where: str,
+    stated: Mapping[str, Any],
+    selected: Mapping[str, Any],
+    *,
+    origin: str = "",
+) -> None:
+    """Raise ``ValueError`` when ``stated`` describes another deployment than ``selected``.
+
+    Only the identity fields ``stated`` has are compared. A field ``selected``
+    has no value for is compared as 1 when it means 1 unset, and is not
+    compared otherwise. ``where`` starts the message and ``origin`` follows
+    the stated value, as in ``<where>tp=2<origin> conflicts with ...``.
+    """
+    for field in AIS_IDENTITY_FIELDS:
+        if field not in stated:
+            continue
+        value, chosen = stated[field], selected.get(field)
+        if field in _AIS_ONE_WHEN_UNSET:
+            value = 1 if value is None else value
+            chosen = 1 if chosen is None else chosen
+        elif chosen is None:
+            continue
+        if value != chosen:
+            raise ValueError(
+                f"{where}{field}={value!r}{origin} "
+                f"conflicts with selected deployment {field}={chosen!r}"
+            )
+
+
 class AISPerfModelSpec(BaseModel):
     """Role-indexed AISimulate canonical configurations.
 
@@ -1819,6 +1866,33 @@ class PlannerConfig(BaseModel):
             "`roles` and `dataset_profiles` is deprecated."
         ),
     )
+    ais_perf_model_deployment: Optional[
+        dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
+    ] = Field(
+        default=None,
+        description=(
+            "Written by the profiler: the identity of the selected deployment "
+            "(model, system, backend, worker_type and parallel layout) for each "
+            "worker type whose ais_perf_model config takes identity fields from "
+            "a source (`from` or a dataset profile). When the Planner reads the "
+            "source, a field the source gives that differs from this identity "
+            "is an error. Without it the source is not compared."
+        ),
+    )
+
+    @field_validator("ais_perf_model_deployment")
+    @classmethod
+    def only_identity_fields(
+        cls, value: Optional[dict[str, dict[str, Any]]]
+    ) -> Optional[dict[str, dict[str, Any]]]:
+        for worker_type, identity in (value or {}).items():
+            unknown = sorted(set(identity) - set(AIS_IDENTITY_FIELDS))
+            if unknown:
+                raise ValueError(
+                    f"ais_perf_model_deployment.{worker_type}: keys that are not "
+                    f"identity fields: {', '.join(unknown)}"
+                )
+        return value
 
     @field_validator("ais_perf_model", mode="before")
     @classmethod

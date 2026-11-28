@@ -667,12 +667,14 @@ service.
   `ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2`.
 
   For a config with `from`, the profiler compares only the keys the config writes itself.
-  It does not read the file, dataset, or state snapshot that `from` names, so the fields
-  that come from there are not compared, and the Planner does not compare them with the
-  deployment either. The profiler logs one warning that names these fields for each
-  worker type, for example
-  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size, moe_ep_size and cp_size. The Planner takes them from the source without a comparison.`
-  Make sure that the source describes the selected deployment.
+  It does not read the file, dataset, or state snapshot that `from` names, so it does not
+  compare the fields that come from there. It logs one warning that names these fields
+  for each worker type, for example
+  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size, moe_ep_size and cp_size. The Planner compares them when it reads the source.`
+  The profiler writes the selected deployment of those worker types into the Planner
+  config as `ais_perf_model_deployment`. When the Planner reads the source, a field that
+  differs from the selected deployment is an error, for example
+  `ais_perf_model entry for decode: tp=4 from its source conflicts with selected deployment tp=2`.
 
   Constructs each model through
   `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an

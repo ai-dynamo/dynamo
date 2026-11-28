@@ -24,6 +24,7 @@ from dynamo.profiler.utils.dgd_generation import (
     _build_planner_config,
     _inject_mocker_ais_args,
     build_aic_interpolation_spec,
+    build_ais_perf_model_deployment,
     build_ais_perf_model_spec,
     enable_vllm_benchmark_mode,
     generate_mocker_config,
@@ -932,9 +933,67 @@ def test_fields_taken_from_a_source_are_named_in_one_warning(
     assert _generation_warnings(caplog) == [
         "ais_perf_model: the profiler does not read the source a config takes keys "
         "from, so it did not compare these fields with the selected deployment: "
-        f"{not_compared}. The Planner takes them from the source without a "
-        "comparison."
+        f"{not_compared}. The Planner compares them when it reads the source."
     ]
+
+
+@pytest.mark.parametrize(
+    "mode,written,carried",
+    [
+        pytest.param(
+            "disagg",
+            {"from": _TEMPLATE},
+            ["prefill", "decode"],
+            id="one-config-for-two-worker-types",
+        ),
+        pytest.param(
+            "disagg",
+            [
+                {"worker_type": "prefill", "from": _TEMPLATE, "pp": 1},
+                {**_COMPLETE, "worker_type": "decode", "tp": 2},
+            ],
+            ["prefill"],
+            id="list-with-one-from-entry",
+        ),
+        pytest.param(
+            "disagg",
+            {
+                "roles": {"prefill": {**_COMPLETE, "tp": 2}},
+                "dataset_profiles": {"decode": _DATASET_PROFILE},
+            },
+            ["decode"],
+            id="old-roles-and-dataset-profile",
+        ),
+        pytest.param("decode", {**_COMPLETE, "tp": 2}, [], id="config-without-from"),
+    ],
+)
+def test_planner_config_carries_the_deployment_a_source_is_compared_with(
+    mode, written, carried
+):
+    dgdr = _dgdr(planner=_written_planner(mode, written))
+    pick = PickedParallelConfig(tp=2)
+    selected = dict(
+        best_prefill_pick=pick,
+        best_decode_pick=pick,
+        resolved_backend="vllm",
+        system="h200_sxm",
+    )
+
+    result = _build_planner_config(
+        dgdr,
+        pick,
+        pick,
+        ais_perf_model=build_ais_perf_model_spec(dgdr, **selected),
+        ais_perf_model_deployment=build_ais_perf_model_deployment(dgdr, **selected),
+    )
+
+    # The Planner reads its config from the JSON the ConfigMap holds.
+    reloaded = PlannerConfig.model_validate_json(result.model_dump_json())
+    expected = {
+        role: {**_COMPLETE, "worker_type": role, "tp": 2, "attention_dp": 1}
+        for role in carried
+    }
+    assert reloaded.ais_perf_model_deployment == (expected or None)
 
 
 @pytest.mark.parametrize(
