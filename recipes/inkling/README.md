@@ -368,7 +368,7 @@ the reason:
 | --- | --- | --- |
 | `min_p`, `logit_bias` | 400 | Unsupported with speculative decoding, and these profiles run MTP 8. Remove `--speculative-config` to use them, at a throughput cost. |
 | `logprobs`, `top_logprobs` | 400 | Not implemented on the Dynamo vLLM chat processor. |
-| `previous_response_id` (501), `GET /v1/responses/{id}` (404) | — | The Responses API is stateless here. `store: true` is echoed back but nothing is persisted, so reuse the response from the original `POST`. |
+| `previous_response_id` (400), `GET /v1/responses/{id}` (404) | — | The Responses API is stateless here. `store: true` is echoed back but nothing is persisted, so reuse the response from the original `POST`. |
 
 ### SGLang B200 profile
 
