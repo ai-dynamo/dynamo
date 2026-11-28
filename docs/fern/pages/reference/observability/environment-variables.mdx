@@ -279,7 +279,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
   Seconds to wait for a canary health-check response before marking the endpoint unhealthy. On
   workers that publish forward-pass metrics, each completed engine forward pass restarts the wait,
-  up to 10 minutes in total. See
+  up to 10 minutes in total, or up to this timeout if it is longer than 10 minutes. See
   [Active Canary Configuration](health-checks.mdx#active-canary-configuration).
 </ParamField>
 

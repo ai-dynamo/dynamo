@@ -14,9 +14,12 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-/// Longest a canary waits for its response, however many forward passes the
-/// engine completes meanwhile. It bounds a stall after the forward pass, where
-/// passes continue but nothing is answered. Longer than any expected prefill.
+/// Lower bound on the total cap for a canary's wait, however many forward passes
+/// the engine completes meanwhile. The canary can still end sooner on a response
+/// or when the request timeout passes without a forward pass. The cap is the
+/// larger of this and the request timeout, so a longer request timeout is never
+/// cut short. It bounds a stall after the forward pass, where passes continue but
+/// nothing is answered. Longer than any expected prefill.
 const CANARY_MAX_WAIT: Duration = Duration::from_secs(600);
 
 /// Configuration for health check behavior
