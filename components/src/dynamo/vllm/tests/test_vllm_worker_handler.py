@@ -3046,15 +3046,15 @@ class TestEmbeddingWorkerHandlerChatInput:
         ("case", "expected_status"),
         [
             ("text_only_model", None),
-            ("unsupported_modality", 400),
+            ("unsupported_modality", None),
             ("media_not_loadable", 422),
         ],
     )
     async def test_vllm_rejection_is_a_client_error(self, case, expected_status):
         """vLLM's rejection is a client error, not a 500. Typed vLLM client
-        errors keep their status through the shared mapper, as on the other
-        vLLM paths, so a media URL that can't be loaded is a 422; other
-        validation failures are InvalidArgument with vLLM's message."""
+        errors use the shared mapper: a media URL that can't be loaded is
+        a private 422; validation failures are public InvalidArgument errors
+        with vLLM's message."""
         from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 
         error = {
@@ -3107,7 +3107,7 @@ class TestEmbeddingWorkerHandlerChatInput:
 
         handler.engine_client.encode = rejecting_encode
 
-        with pytest.raises(HttpError) as exc_info:
+        with pytest.raises(mod.InvalidArgument) as exc_info:
             await self._generate(
                 handler,
                 {
@@ -3115,7 +3115,6 @@ class TestEmbeddingWorkerHandlerChatInput:
                     "messages": [{"role": "query", "content": "hello"}],
                 },
             )
-        assert exc_info.value.code == 400
         assert str(error) in str(exc_info.value)
         assert exc_info.value.__cause__ is error
 
