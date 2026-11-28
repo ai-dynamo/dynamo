@@ -24,7 +24,7 @@ kubectl apply -f agg.yaml
 </Accordion>
 <Accordion title="agg_embed.yaml · Aggregated embedding serving">
 This Kubernetes template uses `Qwen/Qwen3-Embedding-0.6B` for the single-GPU CI profile; the
-[local CLI example](../../cli-templates/sglang.mdx) defaults to `Qwen/Qwen3-Embedding-4B`.
+[local CLI example](../../examples/embeddings.mdx) defaults to `Qwen/Qwen3-Embedding-4B`.
 
 <Code src="../../../../../../examples/backends/sglang/deploy/agg_embed.yaml" title="agg_embed.yaml" language="yaml" maxLines={0} />
 
@@ -64,4 +64,4 @@ curl http://localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
 
 All templates live in
 [`examples/backends/sglang/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy).
-For local launch commands, see [SGLang Local Deployment Examples](../../cli-templates/sglang.mdx).
+For local launch commands, see the [Examples catalog](../../examples/overview.mdx).

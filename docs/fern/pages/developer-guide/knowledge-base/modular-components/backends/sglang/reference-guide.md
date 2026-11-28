@@ -226,7 +226,7 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## See Also
 
-- **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
+- **[Examples](../../../../../recipes/examples/overview.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
 - **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
@@ -264,8 +264,8 @@ Manual drain requires the TCP response plane. Other response planes return 409.
 
 ### Drain and resume a worker
 
-Start discovery services and the frontend as described in the
-[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+Start discovery services and the frontend as described in the SGLang `agg.sh` script on the
+[Aggregated Serving](../../../../../recipes/examples/aggregated.mdx) example page.
 For a standalone aggregated worker, enable its system listener before startup:
 
 ```bash

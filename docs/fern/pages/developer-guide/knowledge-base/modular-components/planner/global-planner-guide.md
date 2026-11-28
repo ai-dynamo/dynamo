@@ -141,10 +141,10 @@ Read the diagram left to right for request traffic: clients call the control `Fr
 ## Prerequisites
 
 - Dynamo Kubernetes Platform installed. See [Kubernetes Quickstart](../../../../kubernetes/getting-started/quickstart.mdx).
-- Prometheus deployed and scraping router metrics. The global planner examples assume cluster Prometheus is available.
+- Prometheus deployed and scraping router metrics through a PodMonitor. The global planner examples assume cluster Prometheus is available.
 - Backend images available for your chosen framework (`vllm`, `sglang`, or `trtllm`).
 - Secrets for model access, such as a Hugging Face token secret.
-- A storage strategy for model weights if your workers should share a model cache PVC.
+- A storage strategy for model weights if your workers should share a model cache PVC. The [example manifests](https://github.com/ai-dynamo/dynamo/tree/main/examples/global_planner) use a ReadWriteMany StorageClass for the shared model cache PVC.
 
 For SLA throughput-based scaling, each pool needs either native AIC support, optional bootstrap profiling data, or enough live FPM observations to warm the fallback model. See [Profiler Guide](../profiler/profiler-guide.md).
 
@@ -203,7 +203,7 @@ What to keep from each profiling result:
 - Planner settings such as `prefill_engine_num_gpu` or `decode_engine_num_gpu`.
 - Any backend-specific flags that differ across pools.
 
-See [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) and [Profiler Guide](../profiler/profiler-guide.md) for DGDR details.
+See [DGDR Templates](../../../../recipes/examples/dgdr.mdx) and [Profiler Guide](../profiler/profiler-guide.md) for DGDR details.
 
 ## Step 2: Create The Control DGD
 
@@ -240,7 +240,29 @@ The values passed to `managed_namespaces` are the pool planners' **Dynamo namesp
 
 **Management modes**: When `managed_namespaces` is set (explicit mode), only the listed Dynamo namespaces are authorized to send scale requests, and only their corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
 
+For example, a DGD named `gp-ctrl` in the Kubernetes namespace `my-ns` registers under the Dynamo namespace `my-ns-gp-ctrl`. This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-<dgd-name>` path.
+
 If you want the central executor to reject scale requests that exceed a total GPU budget, set `max_total_gpus` in the config. See [examples/global_planner/global-planner-gpu-budget.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml).
+
+`GlobalPlanner` takes a single `--config` argument: an inline JSON string or a path to a JSON or YAML file. For example:
+
+```yaml
+# /etc/global-planner/config.yaml
+max_total_gpus: 16
+min_total_gpus: 16
+intent_cache_ttl_seconds: 360
+managed_namespaces:
+  - my-ns-gp-prefill-0
+  - my-ns-gp-decode-0
+```
+
+| Field | Description |
+|-------|-------------|
+| `max_total_gpus` | Reject requests that would exceed N total GPUs across all managed DGDs. `0` = no GPU scaling allowed, `-1` (default) = unlimited |
+| `min_total_gpus` | Deny scale-down requests that would drop below N total GPUs unless they can be paired with a pending scale-up. `-1` (default) disables the floor |
+| `intent_cache_ttl_seconds` | Keep scale intents eligible for pairing for N seconds. Defaults to `360`, which covers two default throughput-scaling ticks |
+| `managed_namespaces` | Only accept scale requests from listed Dynamo namespaces (default: accept all). See the management modes above |
+| `no_operation` | Log scale requests without executing them (useful for dry-run testing) |
 
 ## Step 3: Create One DGD Per Pool
 
@@ -277,6 +299,8 @@ Use:
 
 - `mode: "prefill"` for prefill-only pools
 - `mode: "decode"` for decode-only pools
+
+To leave GPU limits to `GlobalPlanner`, keep the pool's `max_gpu_budget` at `-1` (unlimited); set it to cap that pool alone.
 
 The worker and planner settings for each pool come from the pool-specific profiling result you created in Step 1.
 
@@ -382,6 +406,31 @@ envsubst < examples/global_planner/global-planner-vllm-test.yaml | \
 
 The single user-facing endpoint is the `Frontend` in the control DGD, not the pool DGDs.
 
+The other [example manifests](https://github.com/ai-dynamo/dynamo/tree/main/examples/global_planner) use the same `envsubst` flow with these variables:
+
+```bash
+# Multi-model GPU budget: two independent model DGDs and one control DGD
+export MODEL_A=meta-llama/Llama-3.1-8B-Instruct
+export MODEL_B=Qwen/Qwen3-8B
+export MAX_TOTAL_GPUS=8
+envsubst < examples/global_planner/global-planner-gpu-budget.yaml | \
+  kubectl apply -n ${K8S_NAMESPACE} -f -
+
+# Mocker workers, no GPUs; needs only K8S_NAMESPACE and DYNAMO_IMAGE
+envsubst < examples/global_planner/global-planner-mocker-test.yaml | \
+  kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+In the GPU budget pattern, each model DGD has its own `Frontend`, so no `GlobalRouter` is needed. Each DGD's local planner delegates scaling with `environment: "global-planner"`, and `GlobalPlanner` rejects any scale request that would push total GPUs above `max_total_gpus`.
+
+`global-planner-vllm-test-xpu-dra.yaml` targets Intel XPU clusters with [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/). Set `DYNAMO_VLLM_IMAGE` to a vLLM image built for XPU and `MODEL_NAME=Qwen/Qwen3-0.6B`. It needs the Intel XPU GPU driver and the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes), as described in [Deploy on Intel GPUs with DRA](../../../../kubernetes/model-deployment/deploy-on-intel-gpus.mdx). Compared with the GPU manifest, it uses a DRA `ResourceClaimTemplate` instead of `resources.limits.gpu`, sets `VLLM_TARGET_DEVICE=xpu`, and uses TP1 for both prefill pools because the DRA template requests one XPU per worker.
+
+To remove an example, delete the same rendered manifest:
+
+```bash
+envsubst < examples/global_planner/<manifest>.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
+```
+
 ## Step 6: Validate The Stack
 
 Validate the deployment from outside in:
@@ -391,6 +440,15 @@ Validate the deployment from outside in:
 - Confirm pool-local planners are producing scale requests.
 - Confirm `GlobalPlanner` logs show accepted scale operations.
 - Confirm the target DGDs' replica counts change as expected.
+
+```bash
+kubectl get dgd -n ${K8S_NAMESPACE}
+kubectl get pods -n ${K8S_NAMESPACE}
+
+# Watch GlobalPlanner logs for scale requests
+kubectl logs -n ${K8S_NAMESPACE} \
+  -l nvidia.com/dynamo-component=GlobalPlanner -f
+```
 
 If you use Prometheus and Grafana, also inspect:
 
@@ -421,7 +479,7 @@ This keeps profiling and pool selection simple while still giving you one public
 
 - [Planner README](overview.md) — Planner overview and quick start
 - [Planner Guide](planner-guide.md) — Planner configuration reference
-- [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR examples for generating per-pool configs
+- [DGDR Templates](../../../../recipes/examples/dgdr.mdx) — DGDR examples for generating per-pool configs
 - [Profiler Guide](../profiler/profiler-guide.md) — Pre-deployment profiling workflow
 - [Global Planner README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_planner/README.md) — Centralized scale execution
 - [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md) — Cross-pool request routing

@@ -96,8 +96,7 @@ fi
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
-rsync -a --include='*/' --include='backends/*/deploy/**' --exclude='*' --prune-empty-dirs \
-  "$REPO_ROOT/examples/" "$WT/examples/"
+rsync -a --exclude='__pycache__/' "$REPO_ROOT/examples/" "$WT/examples/"
 
 cp "$SRC/index.yml" "$WT/fern/versions/dev.yml"
 cp "$SRC/fern.config.json" "$WT/fern/fern.config.json"

@@ -66,7 +66,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     - A LoRA adapter compatible with your base model
     - For `s3://` sources: AWS credentials in a Kubernetes Secret
 
-    Full manifests and MinIO setup: [Kubernetes LoRA deployment example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora).
+    Full manifests and MinIO setup: [Kubernetes LoRA Adapter Walkthrough](lora-adapter-walkthrough.md).
   </Step>
 
   <Step title="Deploy a LoRA-enabled worker">
@@ -285,7 +285,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     ./setup_minio.sh
     ```
 
-    See the [local LoRA example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora) for the full workflow.
+    See the [local LoRA Adapter Walkthrough](../../cli/operations/lora-adapter-walkthrough.md) for the full workflow.
   </Step>
 
   <Step title="Deploy a LoRA-enabled worker">
@@ -365,7 +365,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     ./setup_minio.sh
     ```
 
-    See the [SGLang LoRA example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/lora) for the scripts and configurable environment variables.
+    See [Text LoRA with SGLang](../../cli/operations/lora-adapter-walkthrough.md#text-lora-with-sglang) for the scripts and configurable environment variables.
   </Step>
 
   <Step title="Launch aggregated serving">
