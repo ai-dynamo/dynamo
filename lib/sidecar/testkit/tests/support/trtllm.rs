@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -35,6 +36,7 @@ pub struct Fixture {
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     pub discovery: Arc<Discovery>,
     health: tonic_health::server::HealthReporter,
+    liveness_started: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -49,6 +51,11 @@ pub struct Discovery {
 }
 
 impl Fixture {
+    pub async fn end_liveness_watch(&mut self) {
+        bounded("liveness Watch opened", self.liveness_started.notified()).await;
+        self.health.clear_service_status("liveness").await;
+    }
+
     /// Sets what `Watch` reports for TensorRT-LLM's `liveness` health.
     pub async fn set_liveness_serving(&self, is_serving: bool) {
         let status = if is_serving {
@@ -134,13 +141,20 @@ impl SidecarFixture for Fixture {
             inner: service.clone(),
             discovery: discovery.clone(),
         };
-        let (health, health_service) = tonic_health::server::health_reporter();
+        let health = tonic_health::server::HealthReporter::new();
+        let liveness_started = Arc::new(tokio::sync::Notify::new());
+        let health_service = ControlledHealth {
+            inner: tonic_health::server::HealthService::from_health_reporter(health.clone()),
+            liveness_started: Arc::clone(&liveness_started),
+        };
         health
             .set_service_status("liveness", tonic_health::ServingStatus::Serving)
             .await;
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
-                .add_service(health_service)
+                .add_service(tonic_health::pb::health_server::HealthServer::new(
+                    health_service,
+                ))
                 .add_service(InferenceServer::new(controlled))
                 .add_service(ControlServer::new(control_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
@@ -158,6 +172,7 @@ impl SidecarFixture for Fixture {
             scripted,
             discovery,
             health,
+            liveness_started,
         }
     }
 
@@ -186,6 +201,35 @@ impl SidecarFixture for Fixture {
 
     async fn shutdown(&mut self) {
         self.server.shutdown().await.unwrap();
+    }
+}
+
+struct ControlledHealth {
+    inner: tonic_health::server::HealthService,
+    liveness_started: Arc<tokio::sync::Notify>,
+}
+
+#[tonic::async_trait]
+impl tonic_health::pb::health_server::Health for ControlledHealth {
+    type WatchStream = tonic_health::server::WatchStream;
+
+    async fn check(
+        &self,
+        request: Request<tonic_health::pb::HealthCheckRequest>,
+    ) -> Result<Response<tonic_health::pb::HealthCheckResponse>, Status> {
+        self.inner.check(request).await
+    }
+
+    async fn watch(
+        &self,
+        request: Request<tonic_health::pb::HealthCheckRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let liveness = request.get_ref().service == "liveness";
+        let response = self.inner.watch(request).await?;
+        if liveness {
+            self.liveness_started.notify_one();
+        }
+        Ok(response)
     }
 }
 
