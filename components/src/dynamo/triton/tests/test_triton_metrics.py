@@ -41,25 +41,71 @@ def _metrics_config(*, metrics):
     )
 
 
+# Triton's exposition shape: a counter without a _total suffix, a gauge, and
+# a histogram with le buckets.
+_TRITON_METRICS_TEXT = """\
+# HELP nv_inference_count Number of inferences performed
+# TYPE nv_inference_count counter
+nv_inference_count{model="m",version="1"} 7
+# HELP nv_gpu_utilization GPU utilization rate [0.0 - 1.0)
+# TYPE nv_gpu_utilization gauge
+nv_gpu_utilization{gpu_uuid="GPU-0"} 0.5
+# HELP nv_inference_first_response_histogram_ms Duration from request to first response in milliseconds
+# TYPE nv_inference_first_response_histogram_ms histogram
+nv_inference_first_response_histogram_ms_count{model="m",version="1"} 2
+nv_inference_first_response_histogram_ms_sum{model="m",version="1"} 30
+nv_inference_first_response_histogram_ms_bucket{model="m",version="1",le="10"} 1
+nv_inference_first_response_histogram_ms_bucket{model="m",version="1",le="+Inf"} 2
+"""
+
+
 def test_bridge_returns_metrics_then_stops_after_close():
     """
     Verify normal operation and shutdown behavior of the bridge.
 
     While the bridge is active, collect() must return Triton's raw metrics
-    text unchanged. After close() is called, collect() must return an empty
-    string, and Triton's metrics() method must not be called again.
+    text unchanged, and collect_typed() must return the same metrics as typed
+    families for the OTLP export. After close() is called, collect() must
+    return an empty string, collect_typed() an empty list, and Triton's
+    metrics() method must not be called again.
     """
     server = MagicMock(name="server")
-    server.metrics.return_value = "# HELP nv_c\nnv_c 7\n"
+    server.metrics.return_value = _TRITON_METRICS_TEXT
     bridge = metrics.TritonMetricsBridge(server)
 
     # Active state: metrics text is passed through unchanged.
-    assert bridge.collect() == "# HELP nv_c\nnv_c 7\n"
+    assert bridge.collect() == _TRITON_METRICS_TEXT
 
-    # Closed state: no more calls to Triton; collect() returns empty string.
+    # Active state: the same text, typed. Families keep their /metrics names.
+    families = {family[0]: family for family in bridge.collect_typed()}
+    assert {name: family[2] for name, family in families.items()} == {
+        "nv_inference_count": "counter",
+        "nv_gpu_utilization": "gauge",
+        "nv_inference_first_response_histogram_ms": "histogram",
+    }
+    # The parser renders counter samples with _total; the OTLP export names a
+    # counter by its family name, so it still exports as nv_inference_count.
+    assert families["nv_inference_count"][4] == [
+        ("nv_inference_count_total", [("model", "m"), ("version", "1")], 7.0, None)
+    ]
+    assert families["nv_gpu_utilization"][4] == [
+        ("nv_gpu_utilization", [("gpu_uuid", "GPU-0")], 0.5, None)
+    ]
+    histogram_samples = {
+        (sample[0], dict(sample[1]).get("le")): sample[2]
+        for sample in families["nv_inference_first_response_histogram_ms"][4]
+    }
+    assert histogram_samples == {
+        ("nv_inference_first_response_histogram_ms_count", None): 2.0,
+        ("nv_inference_first_response_histogram_ms_sum", None): 30.0,
+        ("nv_inference_first_response_histogram_ms_bucket", "10"): 1.0,
+        ("nv_inference_first_response_histogram_ms_bucket", "+Inf"): 2.0,
+    }
+
     bridge.close()
     assert bridge.collect() == ""
-    server.metrics.assert_called_once()
+    assert bridge.collect_typed() == []
+    assert server.metrics.call_count == 2
 
 
 def test_bridge_raises_error_when_triton_fails():
@@ -77,9 +123,11 @@ def test_bridge_raises_error_when_triton_fails():
         bridge.collect()
 
 
-def test_metrics_bridge_close_waits_for_inflight_to_finish():
+@pytest.mark.parametrize("typed", [False, True], ids=["expfmt", "typed"])
+def test_metrics_bridge_close_waits_for_inflight_to_finish(typed):
     """
-    Verify that close() is safe to call concurrently with collect().
+    Verify that close() is safe to call concurrently with collect() and with
+    collect_typed().
 
     If a metrics scrape is already in progress when close() is called,
     close() must block until that scrape finishes. This prevents a race
@@ -97,11 +145,12 @@ def test_metrics_bridge_close_waits_for_inflight_to_finish():
     server.metrics.side_effect = blocking_metrics
     bridge = metrics.TritonMetricsBridge(server)
 
-    scrape_result: list[str] = []
+    collect = bridge.collect_typed if typed else bridge.collect
+    scrape_result: list = []
     close_done = threading.Event()
 
     # Simulate two things happening at once: a metrics read, and a shutdown.
-    scrape = threading.Thread(target=lambda: scrape_result.append(bridge.collect()))
+    scrape = threading.Thread(target=lambda: scrape_result.append(collect()))
     closer = threading.Thread(target=lambda: (bridge.close(), close_done.set()))
 
     scrape.start()
@@ -118,7 +167,13 @@ def test_metrics_bridge_close_waits_for_inflight_to_finish():
         scrape.join(timeout=5)
         closer.join(timeout=5)
 
-    assert scrape_result == ["nv_a 1\n"]  # scrape completed successfully
+    # scrape completed successfully
+    if typed:
+        assert scrape_result == [
+            [("nv_a", "", "unknown", "", [("nv_a", [], 1.0, None)])]
+        ]
+    else:
+        assert scrape_result == ["nv_a 1\n"]
     assert close_done.is_set()  # close() only finished after the scrape
     assert bridge.collect() == ""  # bridge is now inactive
 
@@ -129,7 +184,8 @@ def test_register_creates_metrics_only_endpoint():
 
     Registration must create exactly one dedicated endpoint reserved for
     metrics only (it should never serve regular traffic), and must attach
-    exactly one Prometheus-format callback (the bridge's collect() method).
+    exactly one Prometheus-format callback (the bridge's collect() method)
+    and exactly one typed callback for the OTLP export (collect_typed()).
     """
     server = MagicMock(name="server")
     endpoint = MagicMock(name="endpoint")
@@ -147,9 +203,11 @@ def test_register_creates_metrics_only_endpoint():
     )
     endpoint.serve_endpoint.assert_not_called()
 
-    # Confirm exactly one metrics callback is registered.
     endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once_with(
         bridge.collect
+    )
+    endpoint.metrics.register_prometheus_typed_callback.assert_called_once_with(
+        bridge.collect_typed
     )
 
 
@@ -213,6 +271,9 @@ def test_init_worker_enables_or_skips_metrics(monkeypatch, metrics_enabled):
         runtime.endpoint.assert_called_once_with(endpoint_name)
         endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once_with(
             worker_state.metrics_bridge.collect
+        )
+        endpoint.metrics.register_prometheus_typed_callback.assert_called_once_with(
+            worker_state.metrics_bridge.collect_typed
         )
     else:
         assert worker_state.metrics_bridge is None  # no bridge object created

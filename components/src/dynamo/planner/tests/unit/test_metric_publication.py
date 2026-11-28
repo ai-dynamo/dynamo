@@ -14,12 +14,17 @@ Covers:
   must be written once at planner startup with the configured SLA
   values so Grafana dashboards can compare observed/estimated latency
   against the operator-defined target.
+- OTLP export: a live planner with metrics on adds its ``dynamo_planner_*``
+  families to the runtime's typed collection at startup and removes them
+  at shutdown.
 """
 
 import os
-from unittest.mock import MagicMock, Mock, patch
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from prometheus_client import CollectorRegistry, Gauge
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import NativePlannerBase
@@ -344,6 +349,7 @@ def _make_planner_with_port(
     ttft_ms: float = 500.0,
     itl_ms: float = 50.0,
     prometheus_enabled: bool = True,
+    runtime=None,
 ) -> NativePlannerBase:
     """Build a NativePlannerBase with prometheus_port set at config time.
 
@@ -372,6 +378,9 @@ def _make_planner_with_port(
             no_operation=True,
             metric_pulling_prometheus_endpoint="http://localhost:9090",
             metric_reporting_prometheus_port=port,
+            # 0 disables the dashboard and control API so _async_init binds no ports
+            live_dashboard_port=0,
+            control_api_port=0,
             load_predictor="constant",
             environment="kubernetes",
             namespace="test-namespace",
@@ -385,7 +394,7 @@ def _make_planner_with_port(
             load_metric_samples=10,
             load_min_observations=5,
         )
-        planner = NativePlannerBase(None, config, _make_environment(config))
+        planner = NativePlannerBase(runtime, config, _make_environment(config))
     return planner
 
 
@@ -564,3 +573,74 @@ class TestPublishPowerBudgetMetrics:
         pm.power_projected_watts.set.assert_not_called()
         assert mock_logger.warning.call_count == 1
         assert planner._power_projected_zero_warned is True
+
+
+class TestPlannerMetricsOtlpExport:
+    """The planner's own port serves its metrics to scrapers. A live planner
+    also adds the dynamo_planner_* families to the runtime's typed (OTLP)
+    collection while it runs."""
+
+    @staticmethod
+    @contextmanager
+    def _metrics_only_startup(planner: NativePlannerBase):
+        """Stub the startup steps unrelated to metrics, and back the planner
+        with real gauges so the callback returns what prometheus_client
+        produces. python_* stands in for the default collectors."""
+        registry = CollectorRegistry()
+        Gauge(f"{PREFIX}_num_prefill_replicas", "replicas", registry=registry).set(3)
+        Gauge("python_gc_test", "not a planner metric", registry=registry).set(1)
+        planner.environment.initialize = AsyncMock()
+        planner.environment.shutdown = AsyncMock()
+        with (
+            patch("dynamo.planner.core.base.REGISTRY", registry),
+            patch.object(planner, "_validate_min_endpoint_budgets_at_startup"),
+            patch.object(planner, "_bootstrap_engine_plugins_if_needed", AsyncMock()),
+            patch.object(planner, "_start_legacy_retune_check"),
+        ):
+            yield
+
+    async def test_live_planner_exports_planner_families_until_shutdown(self):
+        runtime = MagicMock(name="runtime")
+        planner = _make_planner_with_port(runtime=runtime)
+        endpoint = runtime.endpoint.return_value
+
+        with self._metrics_only_startup(planner):
+            await planner._async_init()
+
+            runtime.endpoint.assert_called_once_with("test-namespace.Planner._metrics")
+            endpoint.serve_endpoint.assert_not_called()
+            register = endpoint.metrics.register_prometheus_typed_callback
+            register.assert_called_once()
+            collect_typed = register.call_args.args[0]
+            assert collect_typed() == [
+                (
+                    f"{PREFIX}_num_prefill_replicas",
+                    "replicas",
+                    "gauge",
+                    "",
+                    [(f"{PREFIX}_num_prefill_replicas", [], 3.0, None)],
+                )
+            ]
+
+            await planner._shutdown_runtime()
+            assert collect_typed() == []
+
+    @pytest.mark.parametrize(
+        "has_runtime, prometheus_enabled",
+        [(False, True), (True, False)],
+        ids=["offline-no-runtime", "metrics-port-0"],
+    )
+    async def test_nothing_attached_without_runtime_or_metrics(
+        self, has_runtime, prometheus_enabled
+    ):
+        runtime = MagicMock(name="runtime") if has_runtime else None
+        planner = _make_planner_with_port(
+            runtime=runtime, prometheus_enabled=prometheus_enabled
+        )
+
+        with self._metrics_only_startup(planner):
+            await planner._async_init()
+            await planner._shutdown_runtime()
+
+        if runtime is not None:
+            runtime.endpoint.assert_not_called()

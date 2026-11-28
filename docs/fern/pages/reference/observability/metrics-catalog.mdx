@@ -46,7 +46,7 @@ Metrics defined in Python, such as the planner metrics, also expose a `_created`
 | `trtllm_*` metrics that Dynamo computes | TensorRT-LLM workers | `/metrics` on `DYN_SYSTEM_PORT` |
 | Imitation `vllm:*`, `sglang:*`, and `trtllm_*` metrics | Mocker (`python -m dynamo.mocker`) | `/metrics` on `DYN_SYSTEM_PORT` |
 | `dynamo_quic_response_*` | Every process, with `--response-plane quic` or `DYN_RESPONSE_PLANE=quic` | `/metrics` on `DYN_SYSTEM_PORT`; `/metrics` on `DYN_HTTP_PORT` for the frontend |
-| `dynamo_planner_*` | Planner (`python -m dynamo.planner`) | `/metrics` on the planner's own port; see [Planner Metrics](#planner-metrics) |
+| `dynamo_planner_*` | Planner (`python -m dynamo.planner`) | `/metrics` on the planner's own port, and the [OTLP export](otlp-metrics-export.mdx) when it is enabled; see [Planner Metrics](#planner-metrics) |
 | `dynamo_kvindexer_*`, `dynamo_kvrouter_*` | Standalone KV indexer (`python -m dynamo.indexer`) | `/metrics` on `--port` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
 | `dynamo_global_frontend_*` | Global Frontend (`global-frontend`), which forwards each request to a pool frontend | `/metrics` on `--port` (default 8000) |
@@ -610,7 +610,7 @@ With the QUIC response plane (`--response-plane quic` or `DYN_RESPONSE_PLANE=qui
 
 ## Planner Metrics
 
-Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `metric_reporting_prometheus_port`. It defaults to the `PLANNER_PROMETHEUS_PORT` environment variable, or to `0`, which disables the server, when that variable is unset. The Kubernetes operator sets the port to `9085`. Planner metrics carry no automatic labels. See [Planner Configuration](../components/planner-configuration.mdx).
+Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `metric_reporting_prometheus_port`. It defaults to the `PLANNER_PROMETHEUS_PORT` environment variable, or to `0`, which disables the server, when that variable is unset. The Kubernetes operator sets the port to `9085`. With [OTLP export](otlp-metrics-export.mdx) enabled, a planner that runs with a Dynamo runtime and a non-zero port also exports the same families over OTLP. Planner metrics carry no automatic labels. See [Planner Configuration](../components/planner-configuration.mdx).
 
 ### Replicas, Traffic, and SLA
 
